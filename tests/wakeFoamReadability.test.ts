@@ -167,7 +167,10 @@ function steadyWake(U: number, reach: number) {
       const mask = sm(GATE_LOW, GATE_TOP, cov);
       const t = sm(WAKE_LACE.freshLow, WAKE_LACE.freshHigh, fresh);
       const maskFresh = mask * cov; // the wake mask's mean at this coverage (a porous body of mean ≈ 1 at saturation)
-      const edge = Math.min(0.97, WAKE_LACE.edgeAged + (WAKE_LACE.edgeFresh - WAKE_LACE.edgeAged) * t + (1 - sm(0.1, 0.7, maskFresh)) * 0.22);
+      const lacy = Math.min(0.97, WAKE_LACE.edgeAged + (WAKE_LACE.edgeFresh - WAKE_LACE.edgeAged) * t + (1 - sm(0.1, 0.7, maskFresh)) * 0.22);
+      // W9 the churn core: dense AND fresh foam is churned water, its edge falls to edgeBoil (flowfoam wakeWhiteNode)
+      const boilCore = sm(WAKE_LACE.boilLow, WAKE_LACE.boilHigh, cov) * t;
+      const edge = lacy + (WAKE_LACE.edgeBoil - lacy) * boilCore;
       const white = (1 - Math.sqrt(edge)) * (WAKE_LACE.fleckGain + (1 - WAKE_LACE.fleckGain) * t) * sm(0.01, 0.08, cov); // resolved lace share
       cells.push({ a, y, cov, white, boil: B });
     });
@@ -212,6 +215,9 @@ describe('W8 the wake we leave reads as water with shape, not a white blanket', 
     const whiteMax = (a: number): number => Math.max(...w.wedge.filter((c) => c.a === a).map((c) => c.white));
     // there IS a dense white churn behind the drives (the user wants the planing wash to read) …
     expect(Math.max(whiteMax(10), whiteMax(15), whiteMax(20))).toBeGreaterThan(0.5);
+    // W9 (docs/wake/w9-at-speed-disturbance.md §5): the dense fresh core right behind the drives is CHURNED WATER, not lace
+    // (USER: 'at high speed the hull and engines barely disturb the water') — the W8 lace law capped it at 1 − √0.22 ≈ 0.53
+    expect(whiteMax(10)).toBeGreaterThan(0.75);
     for (const a of [10, 15, 20]) expect(w.widthBeams(a, (c) => c.white > 0.5)).toBeLessThanOrEqual(3);
     // … which has broken up by 40 m (coordinator: dense 15–30 m, lace by 40–60 m — not a 100 m white stripe) …
     for (const a of [40, 50, 60]) expect(whiteMax(a)).toBeLessThan(0.5);

@@ -18,6 +18,8 @@
  *             vessel slots (flowfoam simFoam vessel mode)
  *   SPRAY     bow sheet (`createBowSprayFleet`), rooster tail (`createRoosterTail({ maxJets })`) and prop bubbles
  *             (`createPropBubbles`): one pool each, emitter slots by camera distance within the pool's turnover
+ *   W9        the planing hull's whitewater (`foam/hullSpray`): spray-root sheets, transom boil and hollow-closure hump
+ *             per boat from her pose + the shared hull + her record (`planingContact`)
  * The spray reads the camera for PRIORITY only; nothing here feeds a force (§V8a: the wake is visual-only until §T.170,
  * so §V108 — a hull never reads its own same-tick wake — holds trivially).
  */
@@ -35,7 +37,9 @@ import { WAKE_MAX_VESSELS, type VesselWakeInput, type WakeSim } from './wakeSim'
 import type { HydroSample } from './wakeSolverMath';
 import { ChineContactHistory, type ChineSheetEmitter } from './chineContact';
 import { appendageSample, strutsFromJets, type AppendageInput } from './appendages';
-import { hollowSamples } from './transomHollow';
+import { hollowSamples, humpSamples } from './transomHollow';
+import { createHullSpray, type HullSprayEmitter } from '../foam/hullSpray';
+import { createPlaningContact, planingContact, planingSprayEmitters, type PlaningContact } from './planingContact';
 
 /**
  * W8 round 3 (impacts): time over which a hull's wake LOAD may rise (s). A landing's contact load arrives on one tick,
@@ -105,6 +109,8 @@ export interface VesselFxTick {
   bow: number;
   rooster: number;
   bubbles: number;
+  /** W9 granted hull whitewater clumps/s */
+  hullSpray: number;
 }
 
 export function createVesselFx(d: VesselFxDeps) {
@@ -113,8 +119,10 @@ export function createVesselFx(d: VesselFxDeps) {
   // W8 round 3: 16384 per pool — small streak sprites, the plume's weight is their count (roosterTail ROOSTER_SPRITE_DENSITY)
   const rooster = createRoosterTail({ maxJets: 2 * VESSEL_FX_JETS, count: 16384 });
   const bubbles = createPropBubbles({ maxJets: VESSEL_FX_JETS });
-  /** bow sheet, rooster drops, prop bubbles, rooster mist (§T.199: the mist pool appended last) */
-  const meshes = [bow.mesh, rooster.meshes[0], bubbles.mesh, rooster.meshes[1]];
+  // W9: every boat's spray-root sheet, transom boil and closure hump (3 emitters per boat in the domain)
+  const hullSpray = createHullSpray({ slots: 3 * WAKE_MAX_VESSELS });
+  /** bow sheet, rooster drops, prop bubbles, rooster mist (§T.199: the mist pool appended last), W9 hull whitewater */
+  const meshes = [bow.mesh, rooster.meshes[0], bubbles.mesh, rooster.meshes[1], hullSpray.mesh];
   d.scene.add(...meshes);
   for (const m of meshes) d.reflection?.excludeFromReflection(m);
 
@@ -125,6 +133,9 @@ export function createVesselFx(d: VesselFxDeps) {
   const struts: AppendageInput[] = [];
   const strutSamples: HydroSample[] = [];
   const rivalSamples: HydroSample[][] = [];
+  /** W9 the rooster hump lifts: the hero's and each rival's (reused) */
+  const heroLifts: HydroSample[] = [];
+  const rivalLifts: HydroSample[][] = [];
   const heroLoad = { load: 0 };
   const fxStruts: AppendageInput[] = [];
   const extras: RoosterExtraSource[] = [];
@@ -134,6 +145,10 @@ export function createVesselFx(d: VesselFxDeps) {
   const emitters: BowFleetEmitter[] = [];
   const sheets: ChineSheetEmitter[] = [];
   const contact = new ChineContactHistory();
+  /** W9 per-boat planing contact scratch (hero first, then rivals by order) and the whitewater emitters */
+  const planing: PlaningContact[] = [];
+  const hullEmitters: HullSprayEmitter[] = [];
+  const hullEmitterPool: HullSprayEmitter[] = [];
   const ids: number[] = [];
   let tick = 0;
   const order: number[] = [];
@@ -145,6 +160,7 @@ export function createVesselFx(d: VesselFxDeps) {
     if (d.sunDirection) {
       const v = d.sunDirection();
       rooster.setSun(v.x, v.y, v.z);
+      hullSpray.setSun(v.x, v.y, v.z);
       return;
     }
     if (light === undefined) {
@@ -158,9 +174,10 @@ export function createVesselFx(d: VesselFxDeps) {
       const p = light.position;
       const t = light.target.position;
       rooster.setSun(p.x - t.x, p.y - t.y, p.z - t.z);
+      hullSpray.setSun(p.x - t.x, p.y - t.y, p.z - t.z);
     }
   };
-  const last: VesselFxTick = { rivals: 0, wakeVessels: 0, culled: 0, overflowed: 0, sources: 0, bow: 0, rooster: 0, bubbles: 0 };
+  const last: VesselFxTick = { rivals: 0, wakeVessels: 0, culled: 0, overflowed: 0, sources: 0, bow: 0, rooster: 0, bubbles: 0, hullSpray: 0 };
 
   return {
     meshes,
@@ -169,7 +186,11 @@ export function createVesselFx(d: VesselFxDeps) {
     /** this tick's rival wake inputs and every jet (hero first) — debug/tests */
     others,
     /** §T.199 the emitters (debug readback / tests) */
-    pools: { bow, rooster, bubbles },
+    pools: { bow, rooster, bubbles, hullSpray },
+    /** W9 this tick's hull whitewater emitters (debug readback / tests) */
+    hullEmitters,
+    /** W9 this tick's planing contacts, hero first (debug readback / tests) */
+    planing,
     jets,
     last,
 
@@ -200,6 +221,9 @@ export function createVesselFx(d: VesselFxDeps) {
       pushStruts(heroFx.jets, heroSamples);
       // W8 round 5: the transom hollow as a virtual hull extension (wake/transomHollow.ts) — once HullWater publishes it
       hollowSamples(heroFx.hollow, heroSamples);
+      // W9: the closure's rooster hump (signed jet-type samples)
+      heroLifts.length = 0;
+      humpSamples(heroFx.hollow, Math.hypot(hero.state.velocity[0], hero.state.velocity[2]), heroLifts);
       const hx = hero.state.position[0];
       const hz = hero.state.position[2];
 
@@ -230,6 +254,16 @@ export function createVesselFx(d: VesselFxDeps) {
       for (const j of heroFx.jets) jets.push(j);
       const hv = hero.state.velocity;
       sheets.push(contact.update(0, tick, heroFx.bow, hv[0], hv[2], dt));
+      // W9: the shared hull (§V110 every boat is the deep-V) — the hero's strips, applied to each boat's own pose
+      const hull = hero.hw.mesh;
+      hullEmitters.length = 0;
+      let planed = 0;
+      const planeBoat = (pose: Parameters<typeof planingContact>[1], fx: BoatFx): void => {
+        const c = planingContact(hull, pose, fx.bow, fx.jets, (planing[planed] ??= createPlaningContact()));
+        planed++;
+        planingSprayEmitters(c, fx.bow, fx.jets, fx.hollow, hullEmitterPool, hullEmitters);
+      };
+      planeBoat(hero.state, heroFx);
       for (const k of order) {
         const e = effects[k];
         const p = e.pose;
@@ -238,16 +272,21 @@ export function createVesselFx(d: VesselFxDeps) {
         for (const sm of e.wake) rs.push(sm);
         pushStruts(e.fx.jets, rs);
         if (e.fx.hollow) hollowSamples(e.fx.hollow, rs);
-        others.push({ samples: rs, jets: e.fx.jets, x: p.position[0], z: p.position[2], vx: p.velocity[0], vz: p.velocity[2] });
+        const rl = (rivalLifts[others.length] ??= []);
+        rl.length = 0;
+        if (e.fx.hollow) humpSamples(e.fx.hollow, Math.hypot(p.velocity[0], p.velocity[2]), rl);
+        others.push({ samples: rs, jets: e.fx.jets, lifts: rl, x: p.position[0], z: p.position[2], vx: p.velocity[0], vz: p.velocity[2] });
         for (const j of e.fx.jets) jets.push(j);
         sheets.push(contact.update(ids[k], e.tick, e.fx.bow, p.velocity[0], p.velocity[2], dt));
+        if (others.length < WAKE_MAX_VESSELS) planeBoat(p, e.fx);
       }
+      planing.length = planed;
 
       emitters.push(...sheets);
       d.flowFoam.setPropWash(jets);
       d.flowFoam.setChineSheets?.(sheets);
       const sim = d.flowFoam.wakeSim;
-      sim?.tick(hero.state, heroSamples, hero.bowAhead, dt, heroFx.jets, others);
+      sim?.tick(hero.state, heroSamples, hero.bowAhead, dt, heroFx.jets, others, heroLifts);
 
       last.rivals = others.length;
       last.wakeVessels = sim ? sim.vesselCount : 0;
@@ -269,6 +308,7 @@ export function createVesselFx(d: VesselFxDeps) {
       extras.sort((a, b) => (a.x - viewer.x) ** 2 + (a.z - viewer.z) ** 2 - ((b.x - viewer.x) ** 2 + (b.z - viewer.z) ** 2));
       last.rooster = visible ? rooster.update(renderer, jets, viewer, extras) : 0;
       last.bubbles = visible ? bubbles.update(renderer, jets, viewer) : 0;
+      last.hullSpray = visible ? hullSpray.update(renderer, hullEmitters, viewer) : 0;
       return last;
     },
 
@@ -285,6 +325,7 @@ export function createVesselFx(d: VesselFxDeps) {
       bow.dispose();
       rooster.dispose();
       bubbles.dispose();
+      hullSpray.dispose();
     },
   };
 }

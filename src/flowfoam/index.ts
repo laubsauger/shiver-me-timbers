@@ -125,7 +125,7 @@ export const FLEET_WAKE_CHURN = 0;
  * sparse surfacing flecks at `fleckGain` — the bubbles popping on a boil or an old lane. (The wake mask itself carries no
  * usable texture at saturation: measured, a gate on it drew flat white sheets.) LOOK CALIBRATION against the chase/top-down shots (dense 15–30 m, lace by 40–60 m at planing).
  */
-export const WAKE_LACE = { freshLow: 0.25, freshHigh: 0.92, edgeFresh: 0.22, edgeAged: 0.72, fleckGain: 0.9, drift: 0.07 } as const;
+export const WAKE_LACE = { freshLow: 0.25, freshHigh: 0.92, edgeFresh: 0.22, edgeAged: 0.72, fleckGain: 0.9, drift: 0.07, boilLow: 0.55, boilHigh: 0.9, edgeBoil: 0.03 } as const;
 /** W8 vessel mode: the near window's centre trails the hull by this many seconds of her speed … */
 export const NEAR_ASTERN_SECONDS = 1.2;
 /** W8 round 3 LOOK: churned-core relief height scale (m of fbm value) and its finite-difference step (m) */
@@ -692,7 +692,15 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
           // @band-limited-elsewhere: a VALUE gate on freshness (a ratio of two channels of one filtered sample, no period)
           const t = smoothstep(uLaceFresh.x, uLaceFresh.y, fresh);
           // the lane's thin margins break up first: the edge rises where the wake mask is not dense
-          const edge = mix(uLaceEdge.y, uLaceEdge.x, t).add(smoothstep(0.1, 0.7, maskFresh).oneMinus().mul(0.22)).add(c.mul(0.3)).min(0.97);
+          // @band-limited-elsewhere: a VALUE gate on the wake mask's filtered sample (no spatial period); the gate below widens with fwidth
+          const lacyEdge = mix(uLaceEdge.y, uLaceEdge.x, t).add(smoothstep(0.1, 0.7, maskFresh).oneMinus().mul(0.22)).add(c.mul(0.3)).min(0.97);
+          // W9 THE CHURN CORE (docs/wake/w9-at-speed-disturbance.md): where the lane is DENSE and fresh — the drives' boil
+          // and the planing core's first τ_A (≈ 13 m at 25 m/s) — the white is the churned water itself, not lace
+          // (measured before: coverage 0.9 and freshness 0.9 across ±2 m at 6–10 m astern drew as dark water with lace
+          // lines, 28 % white once unresolved). The edge falls to edgeBoil there; aged or thin foam keeps its lace.
+          // @band-limited-elsewhere: a VALUE gate on the filtered coverage sample and freshness (no spatial period)
+          const boil = smoothstep(WAKE_LACE.boilLow, WAKE_LACE.boilHigh, coverage).mul(t);
+          const edge = mix(lacyEdge, float(WAKE_LACE.edgeBoil), boil);
           const knee = fwidth(ridge).mul(1.5).max(0.04);
           const gate = smoothstep(edge, edge.add(knee), ridge);
           // past the lace cell's pixel scale the gate resolves to its own mean: P(r² > e) = 1 − √e for a ~uniform ridge r

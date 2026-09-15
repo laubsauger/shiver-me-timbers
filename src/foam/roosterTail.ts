@@ -227,6 +227,47 @@ export const STRUT_SHEET_ONSET = 1;
 /** W8 round 3 LOOK: share of the nose flux that leaves as airborne sheet (the rest climbs and falls back along the strut) */
 export const STRUT_SHEET_SHARE = 0.4;
 
+/**
+ * W8 the drop-plume radiance node (header of ROOSTER_AMBIENT): HG forward scattering of the key light toward `uSun`, the
+ * sky's fill and the boat LEDs through the same phase function. W9: shared by every water-drop pool (rooster tail, the
+ * hull's whitewater, `hullSpray.ts`), so a sheet and a plume beside it light alike; `scatter` sets the multiply-scattered
+ * share, the forward-lobe cap and optional key/ambient gains (defaults: the rooster's, gains 1).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- a vec3 uniform node; gains: numbers or float uniform nodes
+export function dropRadianceNode(uSun: any, scatter: { multiple: number; cap: number; keyGain?: any; ambientGain?: any } = { multiple: ROOSTER_MULTIPLE_SCATTER, cap: ROOSTER_PHASE_CAP }): (light: typeof particleLighting) => unknown {
+  const M = scatter.multiple;
+  const CAP = scatter.cap;
+  return (light: typeof particleLighting): unknown => {
+    const view = positionWorld.sub(cameraPosition).normalize();
+    const c = view.dot(uSun).clamp(-1, 1);
+    const g = ROOSTER_PHASE_G;
+    const hg = float(1 - g * g).div(float(1 + g * g).sub(c.mul(2 * g)).max(1e-3).pow(1.5));
+    const lobe = hg.min(CAP).mul(1 - M).add(M);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+    let radiance: any = light.key.mul(lobe).mul(scatter.keyGain ?? 1).add(light.ambient.mul(ROOSTER_AMBIENT).mul(scatter.ambientGain ?? 1));
+    // W8 round 3: BOAT LEDs light the spray (the page's pool, `ocean/boatLightPool`, the same uniform arrays the water
+    // reads — no texture, no sampler, §V40). Each LED is a point source at its boat: irradiance ∝ colour/(1 + d²/R²)
+    // (inverse square past the lamp's own size R), scattered with the same drop phase function toward the camera, so
+    // spray between the camera and a boat glows that boat's colour. Absent pool (raft/pirate, day builds): no node.
+    const pool = activeBoatLightPool();
+    if (pool) {
+      const { positions, colors } = pool.nodes;
+      const led = vec3(0).toVar();
+      Loop(pool.max, ({ i }: { i: any }) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+        const pp = positions.element(i);
+        const toDrop = positionWorld.sub(pp.xyz.add(vec3(0, ROOSTER_LED_HEIGHT, 0)));
+        const d2 = toDrop.dot(toDrop);
+        const cl = view.dot(toDrop.div(d2.max(1e-4).sqrt())).clamp(-1, 1);
+        const hgL = float(1 - g * g).div(float(1 + g * g).sub(cl.mul(2 * g)).max(1e-3).pow(1.5)).min(CAP);
+        const lobeL = hgL.mul(1 - M).add(M);
+        led.addAssign(colors.element(i).xyz.mul(lobeL).div(d2.div(ROOSTER_LED_RADIUS * ROOSTER_LED_RADIUS).add(1)));
+      });
+      radiance = radiance.add(led.mul(ROOSTER_LED_GAIN));
+    }
+    return foamTintNode().mul(radiance);
+  };
+}
+
 export interface RoosterTailOptions {
   /** jet slots (default ROOSTER_MAX_JETS; §T.195 the fleet wants 8 boats × 3 drives) — literal shader bound */
   maxJets?: number;
@@ -247,36 +288,7 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
   let killY = -1e6;
   let mistLife = sprayParams.bowLife;
   const uSun = uniform(new THREE.Vector3(0.3, 0.8, 0.5).normalize());
-  /** HG forward scattering (header) — the sprite's own world position against the camera */
-  const litTint = (light: typeof particleLighting): unknown => {
-    const view = positionWorld.sub(cameraPosition).normalize();
-    const c = view.dot(uSun).clamp(-1, 1);
-    const g = ROOSTER_PHASE_G;
-    const hg = float(1 - g * g).div(float(1 + g * g).sub(c.mul(2 * g)).max(1e-3).pow(1.5));
-    const lobe = hg.min(ROOSTER_PHASE_CAP).mul(1 - ROOSTER_MULTIPLE_SCATTER).add(ROOSTER_MULTIPLE_SCATTER);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
-    let radiance: any = light.key.mul(lobe).add(light.ambient.mul(ROOSTER_AMBIENT));
-    // W8 round 3: BOAT LEDs light the spray (the page's pool, `ocean/boatLightPool`, the same uniform arrays the water
-    // reads — no texture, no sampler, §V40). Each LED is a point source at its boat: irradiance ∝ colour/(1 + d²/R²)
-    // (inverse square past the lamp's own size R), scattered with the same drop phase function toward the camera, so
-    // spray between the camera and a boat glows that boat's colour. Absent pool (raft/pirate, day builds): no node.
-    const pool = activeBoatLightPool();
-    if (pool) {
-      const { positions, colors } = pool.nodes;
-      const led = vec3(0).toVar();
-      Loop(pool.max, ({ i }: { i: any }) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-        const pp = positions.element(i);
-        const toDrop = positionWorld.sub(pp.xyz.add(vec3(0, ROOSTER_LED_HEIGHT, 0)));
-        const d2 = toDrop.dot(toDrop);
-        const cl = view.dot(toDrop.div(d2.max(1e-4).sqrt())).clamp(-1, 1);
-        const hgL = float(1 - g * g).div(float(1 + g * g).sub(cl.mul(2 * g)).max(1e-3).pow(1.5)).min(ROOSTER_PHASE_CAP);
-        const lobeL = hgL.mul(1 - ROOSTER_MULTIPLE_SCATTER).add(ROOSTER_MULTIPLE_SCATTER);
-        led.addAssign(colors.element(i).xyz.mul(lobeL).div(d2.div(ROOSTER_LED_RADIUS * ROOSTER_LED_RADIUS).add(1)));
-      });
-      radiance = radiance.add(led.mul(ROOSTER_LED_GAIN));
-    }
-    return foamTintNode().mul(radiance);
-  };
+  const litTint = dropRadianceNode(uSun);
   // W8 round 4 (docs/wake/w8-foam-readability.md §14): the plume is MANY tiny drops, each a physical motion-blur streak
   // (≈ 1.5 cm wide, |v| × 1/200 s long), faint one by one, plus a soft low-opacity mist volume that carries the
   // silhouette. Both die where they fall back into the water.

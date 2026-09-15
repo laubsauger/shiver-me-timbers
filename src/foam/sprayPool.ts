@@ -19,6 +19,7 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  atan,
   cameraPosition,
   cameraProjectionMatrix,
   cameraViewMatrix,
@@ -113,6 +114,15 @@ export interface SprayPoolOptions {
    * Construction-time; absent = the pre-W8 graph.
    */
   mistStructure?: boolean;
+  /**
+   * W9 WHITEWATER CLUMPS (`hullSpray.ts`, docs/wake/w9-at-speed-disturbance.md): the soft disc's rim torn into a few
+   * lobes with a hashed phase per particle (no two clumps share an outline), so a dense sheet reads as torn water
+   * rather than stacked balls. Like the droplet pools it is dense AT its source: born at 60 % of full size (sizeMax)
+   * with a 2 % birth fade. Construction-time; absent = the pre-W9 graph node for node.
+   */
+  clumps?: boolean;
+  /** W9 clumps: opacity × (1 − age)^this (uniform value; default 1.4, the pre-W8 law) — a whitewater trail thins astern */
+  clumpAgeFalloff?: () => number;
 }
 
 
@@ -153,6 +163,8 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const uFadeFar = uniform(sprayParams.fadeFar);
   const uKillY = uniform(options.killBelow?.() ?? -1e6);
   const uClumpTime = uniform(0);
+  /** W9 clumps' age falloff (`clumpAgeFalloff`), read by the quad cull and the opacity law */
+  const uClumpFalloff = uniform(options.clumpAgeFalloff?.() ?? 1.4);
   const uSizeScale = uniform(
     Number.isFinite(options.sizeScale?.() ?? 1) ? Math.max(0, options.sizeScale?.() ?? 1) : 1,
   );
@@ -237,9 +249,15 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const coverage = trueSize && drawnSize ? trueSize.div(drawnSize).pow(2) : null;
   const size = drawnSize
     ? drawnSize
-    : (options.droplets ? mix(uSizeMax.mul(0.6), uSizeMax, ageN) : mix(uSizeMin, uSizeMax, ageN)).mul(uSizeScale).mul(sizeMul);
-  const hidden = ageN.greaterThanEqual(1).or(distFade.lessThan(0.01));
+    : (options.droplets || options.clumps ? mix(uSizeMax.mul(0.6), uSizeMax, ageN) : mix(uSizeMin, uSizeMax, ageN)).mul(uSizeScale).mul(sizeMul);
+  // W9 clumps: a clump whose age law has faded it below 1 % draws no quad (dense packs: overdraw of invisible sprites)
+  const hidden = options.clumps
+    ? ageN.greaterThanEqual(1).or(distFade.lessThan(0.01)).or(ageN.oneMinus().pow(uClumpFalloff.max(0.5)).lessThan(0.01))
+    : ageN.greaterThanEqual(1).or(distFade.lessThan(0.01));
   material.scaleNode = select(hidden, float(0), size);
+  // W9 clumps REST ON the water: the quad is drawn half its size up, so a clump born at the surface is not cut in half by
+  // the ocean's depth (a camera-facing quad centred on the waterline reads as foam sunk into the sea)
+  if (options.clumps) material.positionNode = el.xyz.add(vec3(0, size.mul(0.5), 0));
 
   // motion streak: squash the radial falloff ACROSS the screen-space velocity
   // so fast droplets read as short dashes of mist, not bouncy balls. The
@@ -269,10 +287,23 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     // dots; the plume's grain is the COUNT of these. @band-limited-elsewhere: per-sprite shape, no world period
     shape = r2.oneMinus().max(0).pow(1.5);
   }
+  if (options.clumps) {
+    // W9: 3 × 5 lobes around the rim, phase hashed per particle; the rim radius swings 1 → 0.55.
+    // @band-limited-elsewhere: an angular pattern of ≤ 5 lobes per SPRITE (no world period); a clump sprite is ≥ ~6 px
+    // across wherever it is drawn (hullSpray's sizes against its fade distance), so the lobes are resolved
+    const seed = float(instanceIndex).add(1).mul(PHI).fract();
+    const ang = atan(q.y, q.x);
+    const lobes = ang.mul(3).add(seed.mul(41.3)).sin().mul(ang.mul(5).sub(seed.mul(23.9)).sin()).mul(0.5).add(0.5);
+    const rim = float(1).sub(lobes.mul(0.45));
+    // foam is OPAQUE: a flat core with a soft rim (the mist law's pow(softness) reads as smoke once clumps overlap)
+    shape = rim.sub(r2).div(rim).max(0).pow(0.6);
+  }
 
   // birth fade-in kills the pop of a sprite appearing at full size/alpha
-  const born = smoothstep(float(0), float(options.droplets ? 0.02 : 0.12), ageN);
-  const decayN = ageN.oneMinus().pow(options.droplets ? Math.max(1, options.dropletAgeFalloff ?? 1.4) : 1.4);
+  const born = smoothstep(float(0), float(options.droplets || options.clumps ? 0.02 : 0.12), ageN);
+  const decayN = options.clumps
+    ? ageN.oneMinus().pow(uClumpFalloff.max(0.5))
+    : ageN.oneMinus().pow(options.droplets ? Math.max(1, options.dropletAgeFalloff ?? 1.4) : 1.4);
   // W8: a drop at the lens fades out (SprayPoolOptions.dropletNearFade); pre-W8 pools keep 1
   // round 3: depth to the LENS PLANE (view-space −z), not a sphere around the eye — a hard-mounted close camera still sees
   // the plume a metre or two away; only drops at the glass fade.
@@ -281,9 +312,14 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     ? smoothstep(float(options.dropletNearFade[0]), float(Math.max(options.dropletNearFade[0] + 0.1, options.dropletNearFade[1])), viewDepth)
     : null;
   // warm-white, shared with sea foam (§T.195: a pool may bring its own, e.g. the prop wash's aerated turquoise)
-  material.colorNode = (options.colorNode
+  const tint = options.colorNode
     ? options.colorNode(particleLighting)
-    : foamTintNode().mul(particleLighting.ambient.add(particleLighting.key))) as typeof material.colorNode;
+    : foamTintNode().mul(particleLighting.ambient.add(particleLighting.key));
+  // W9 clumps: each clump's own brightness (0.45–1.25, hashed per particle) — torn whitewater is lit face by face, so a
+  // dense sheet keeps its texture instead of averaging to one flat tone
+  // @band-limited-elsewhere: fract of the particle INDEX (a seed), not a spatial coordinate
+  const clumpShade = options.clumps ? hash2(vec2(float(instanceIndex).add(1).mul(PHI).fract().mul(211.7), float(5.3))).mul(0.8).add(0.45) : null;
+  material.colorNode = (clumpShade ? (tint as { mul(v: unknown): unknown }).mul(clumpShade) : tint) as typeof material.colorNode;
   const faded0 = shape.mul(born).mul(decayN).mul(distFade);
   const faded1 = coverage ? faded0.mul(coverage) : faded0;
   // @band-limited-elsewhere: a per-sprite density factor of its world position (metre-scale, sampled once per sprite)
@@ -335,6 +371,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
       uLife.value = Math.max(fin(options.life?.() ?? sprayParams.life, 1), 1e-3);
       if (options.killBelow) uKillY.value = fin(options.killBelow(), -1e6);
       if (options.mistStructure) uClumpTime.value += SIM_DT * 0.6;
+      if (options.clumpAgeFalloff) uClumpFalloff.value = fin(options.clumpAgeFalloff(), 1.4);
       // clamped < 1 so the shortest-lived slot keeps a positive lifetime
       uLifeVar.value = Math.min(0.9, Math.max(0, fin(sprayParams.lifeVariation, 0)));
       uGravity.value = fin(options.gravity?.() ?? sprayParams.gravity, 0);

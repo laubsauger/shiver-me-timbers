@@ -46,6 +46,8 @@ export const WAKE_MAX_VESSELS = 8;
 export interface VesselWakeInput {
   readonly samples: readonly HydroSample[];
   readonly jets: readonly PropWashInput[];
+  /** W9 signed jet-type samples (the transom's rooster hump, `transomHollow.humpSamples`); absent = none */
+  readonly lifts?: readonly HydroSample[];
   /** plan position and velocity of that step (m, m/s) */
   readonly x: number;
   readonly z: number;
@@ -164,6 +166,7 @@ export class WakeSim {
     dt: number,
     jets: readonly PropWashInput[] = [],
     others: readonly VesselWakeInput[] = [],
+    lifts: readonly HydroSample[] = [],
   ): void {
     const { solver } = this;
     const fwd = rotateVec(pose.quaternion as [number, number, number, number], [0, 0, 1]);
@@ -187,6 +190,7 @@ export class WakeSim {
       const q = propJetSample(j, this.jetScratch);
       if (q) this.sources.pushJet(q.x, q.z, q.fy, q.footprint, q.depth);
     }
+    for (const q of lifts) this.sources.pushJet(q.x, q.z, q.fy, q.footprint, q.depth);
     const v = pose.velocity;
     this.recordVessel(0, pose.position[0], pose.position[2], v ? v[0] : 0, v ? v[2] : 0, samples, 1);
     this.vesselCount = 1;
@@ -194,7 +198,7 @@ export class WakeSim {
     this.vesselsCulled = counts.culled;
     this.vesselsOverflowed = counts.overflowed;
     solver.setSources(this.sources);
-    if (this.near && this.nearSources) this.tickNear(pose, fwd, samples, bowAhead, dt, jets, others);
+    if (this.near && this.nearSources) this.tickNear(pose, fwd, samples, bowAhead, dt, jets, others, lifts);
     if (Number.isFinite(dt) && dt > 0) this.pendingDt += dt;
     this.dirty = true;
   }
@@ -214,6 +218,7 @@ export class WakeSim {
     dt: number,
     jets: readonly PropWashInput[],
     others: readonly VesselWakeInput[],
+    lifts: readonly HydroSample[],
   ): void {
     const near = this.near!;
     const buf = this.nearSources!;
@@ -263,6 +268,7 @@ export class WakeSim {
       const q = propJetSample(j, this.jetScratch);
       if (q) buf.pushJet(q.x, q.z, q.fy, q.footprint, q.depth);
     }
+    for (const q of lifts) buf.pushJet(q.x, q.z, q.fy, q.footprint, q.depth);
     this.pushOthers(pose.position[0], pose.position[2], others, near, buf, false);
     near.setSources(buf);
   }
@@ -304,7 +310,7 @@ export class WakeSim {
         counts.culled++;
         continue;
       }
-      if (sources.count + sources.jetCount + o.samples.length + o.jets.length > sources.capacity) {
+      if (sources.count + sources.jetCount + o.samples.length + o.jets.length + (o.lifts?.length ?? 0) > sources.capacity) {
         counts.overflowed++;
         continue;
       }
@@ -316,6 +322,7 @@ export class WakeSim {
         const q = propJetSample(j, this.jetScratch);
         if (q) sources.pushJet(q.x, q.z, q.fy * weight, q.footprint, q.depth);
       }
+      if (o.lifts) for (const q of o.lifts) sources.pushJet(q.x, q.z, q.fy * weight, q.footprint, q.depth);
       if (record) {
         this.recordVessel(this.vesselCount, o.x, o.z, o.vx, o.vz, o.samples, weight);
         this.vesselCount++;
