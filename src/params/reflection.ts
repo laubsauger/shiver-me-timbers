@@ -89,6 +89,11 @@ export interface ReflectionParams {
    * (0, the pre-B125 mirror). Live, exact identity at 0: the A/B lever for the "boat floats on her reflection" check.
    */
   surfaceClip: number;
+  /**
+   * B125 at speed: reflect from the FRAGMENT's own drawn height, not from where the eye ray crosses the rest plane (1),
+   * or the plane lookup (0, exact). One secant step on the pass's depth (mirrorMath.localMirrorLookup). Live.
+   */
+  localMirror: number;
   /** build the mip chain for the blur, 0|1 (reload). 0 pins blur* to 0. */
   generateMipmaps: number;
   /** add the mirrored cloud quad to the reflection pass, 0|1 (reload) */
@@ -156,6 +161,7 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurFootprintGain: 1.0,
     blurMax: 4.0,
     surfaceClip: 1,
+    localMirror: 1,
     generateMipmaps: 1,
     cloudsInReflection: 1,
   },
@@ -181,6 +187,7 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurFootprintGain: { min: 0, max: 4, step: 0.05 },
     blurMax: { min: 0, max: 8, step: 0.1 },
     surfaceClip: { min: 0, max: 1, step: 1 },
+    localMirror: { min: 0, max: 1, step: 1 },
     generateMipmaps: { min: 0, max: 1, step: 1 },
     cloudsInReflection: { min: 0, max: 1, step: 1 },
   },

@@ -128,3 +128,70 @@ shortened (`z-03-high.png`).
 
 Perf: GPU `renderer.info.render.timestamp` median on R1 with both levers on vs off: 298/299 vs 300/308 (two
 rounds). That is inside the noise. The number is headless and relative only.
+
+## B125 at speed: the mirror did show the underwater slice (the first verdict was wrong there)
+
+The side views at rest did not cover the user's original sighting: a boat making a wake, seen from ahead at 45°. A
+frozen R1 duel at 20, 25 and 30 m/s on the working sea (and at 25 m/s on calm), hero and rival, cameras abeam, 45°
+off the bow, and the W9 front-3/4. Each hull is painted by whether it is under the DRAWN sea just outside her side at
+that station: the CPU cascades plus the GPU wake elevation the ocean vertex adds. Magenta means under water and below
+y = 0, cyan under water but above y = 0, green dry. Then each term is isolated on the same frame. Pixel counts are in
+`u-counts.txt` and `v-counts.txt`.
+
+- Mirror only (transmission off): large cyan areas. Working sea at 25 m/s: 15–27k px in the plane mirror, and 5–9k px
+  still with `surfaceClip` on. So at speed the MIRROR is the main source.
+- Transmission only (reflection off): the magenta legs and hull. `refractionSnell` removes most of it (4.2k → 0.4–1k).
+
+### Measured heights (25 m/s, frozen; `sSide.log`)
+
+Along the hero's hull, relative to the drawn sea at that station:
+
+- the chine stands 0.02–0.45 m above the drawn water, least near the transom
+- the drawn water at the boats is +0.11–0.13 m of swell (working) or +0.03 m (calm), plus her own mound of +0.09–0.14 m
+  at the chine and up to +0.30 m under the keel
+- no trough anywhere under or beside the hull
+- the transom hollow does not reach forward under her (+0.06 m at the transom)
+
+So the drawn water at her contact stands about 0.2 m above the mirror plane.
+
+### Why the strip
+
+The ocean reads the pass at its own screen texel. That is the reflection from where the eye ray crosses the REST
+plane, not from the fragment. Her image starts 2η below her contact. The upper half of that band is always sky (the
+oblique clip). The lower half is her submerged slice. `surfaceClip` turned that slice into sky too, so the whole
+strip read as sky: the "flying" boats in the user's after frame.
+
+Other candidates, ruled out by measurement:
+
+- a wake trough under the hull: none exists
+- the transom hollow reaching forward: it doesn't
+- `surfaceClip` alone: it only swaps the slice for sky, as above
+
+### Fix: reflect from the water that is drawn (`reflectionParams.localMirror`, live, exact at 0)
+
+`reflectionShading`: the reflected ray leaves the FRAGMENT, at `max(drawn height, plane)`. One secant step against
+the pass's depth finds how far along it the scene is. The step is seeded by the plane texel's own point, or 0.75 m when
+that texel is empty. The final lookup is re-projected through the virtual camera's view-projection
+(`planarReflection` copies it after each mirror render). A lookup that leaves the pass keeps the plane texel.
+`surfaceClip` then runs on the texel actually used. `mirrorMath.localMirrorLookup` is the tested CPU twin.
+
+Water in a trough starts from the plane, because the pass holds nothing under its clip. The first build without that
+rule opened a sky strip under a boat at rest. Cost: two more reads of the pass depth (unfilterable, +0 bindings, same
+call site) and three matrix products per water fragment.
+
+### After (all `surfaceClip 1, refractionSnell 1, localMirror 1`)
+
+- working 25 m/s, abeam (`v4-working25-heroSide.png`): the reflection meets the hull. Cyan 27.4k → 5.5k px, a thin
+  sliver right at the contact.
+- working 25 m/s, 45° ahead (`v4-working25-heroF45.png`): cyan 16.4k → 2.8k.
+- working 20 m/s, swell trough at the boats (`v4-working20-*`): cyan 5.2k → 0.15k.
+- 30 m/s and calm: `u4-working30-*`, `u4-calm25-*`, and the W9 front-3/4 in `u4-working25-heroF34.png`.
+- At rest (`w-rest.png`): no strip. With the lens 25 cm over raised water, the cowl reflection is taller, which a mirror
+  at the local height does.
+- Galleon at 48 m (`w-gal.png`): she meets her reflection. It is a live sea, not a frozen A/B. The 22 m "before" has the
+  lens under a wave.
+
+Still open: the thin cyan sliver. It is her hull under her own mound, and it shows where the mound at the hull stands
+above the water under the reflecting fragment. Dropping it needs the wake elevation at the texel's own XZ in the
+ocean's fragment stage. That costs a sampler, and the stage is at 15/16 (§V.40). Perf of this step was not measurable
+headless: two on/off rounds gave 488/488 and 518/410.

@@ -178,6 +178,7 @@ export function createPlanarReflection(
   // without refreshing projectionMatrixInverse, so both are taken here, after the render that used them.
   const mirrorProjectionInverse = new THREE.Matrix4();
   const mirrorWorld = new THREE.Matrix4();
+  const mirrorViewProjection = new THREE.Matrix4();
   base.updateBefore = (frame: unknown): unknown => {
     if (!passEnabled) return undefined;
     const { scene, renderer, camera } = (frame ?? {}) as {
@@ -199,6 +200,7 @@ export function createPlanarReflection(
         const virtual = base.getVirtualCamera(camera);
         mirrorProjectionInverse.copy(virtual.projectionMatrix).invert();
         mirrorWorld.copy(virtual.matrixWorld);
+        mirrorViewProjection.multiplyMatrices(virtual.projectionMatrix, virtual.matrixWorldInverse);
       }
       return result;
     } finally {
@@ -223,6 +225,8 @@ export function createPlanarReflection(
     depthNode: node.getDepthNode(),
     projectionInverse: mirrorProjectionInverse,
     world: mirrorWorld,
+    viewProjection: mirrorViewProjection,
+    planeY,
   });
 
   let cloudMirror: CloudMirror | null = null;

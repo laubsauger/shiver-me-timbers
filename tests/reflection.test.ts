@@ -27,6 +27,7 @@ import {
   clampResolutionScale,
   createMirrorPose,
   eyeIsAbovePlane,
+  localMirrorLookup,
   MIRROR_WATERLINE_BAND_MAX_M,
   hiddenObjectMask,
   mainCameraMask,
@@ -345,5 +346,53 @@ describe('B125 nothing under the local water is mirrored', () => {
     expect(aboveSurfaceKeep(Number.NaN, 0.2)).toBe(1);
     // next to a silhouette the footprint is metres (a far-plane neighbour): the fade must not follow it
     expect(aboveSurfaceKeep(0.2 + MIRROR_WATERLINE_BAND_MAX_M, 0.2, 40)).toBe(1);
+  });
+});
+
+/**
+ * B125 at speed (user: both boats "flying", a bright sky strip between hull and reflection). Measured at 25 m/s on the
+ * working sea: the drawn water at a planing hull's chine stands ~0.2 m over the rest plane (swell 0.11–0.13 + her mound
+ * 0.09–0.14). A plane mirror read at the fragment's texel starts her image 2η below her contact.
+ */
+describe('B125 the reflection leaves the drawn water, not the rest plane', () => {
+  const eye = { x: 0, y: 1.0, z: 0 }; // a low side lens 25 m off
+  const WALL_Z = 25; // her topside, dry above the local water, submerged below
+  const virtualEye = { x: eye.x, y: -eye.y, z: eye.z }; // the pass mirrors the eye in y = 0
+  /** what the plane-0 pass drew in the direction of `p`: her wall where the oblique clip kept it (y ≥ 0), else nothing */
+  const seen = (p: { x: number; y: number; z: number }) => {
+    const s = (WALL_Z - virtualEye.z) / (p.z - virtualEye.z);
+    const y = virtualEye.y + (p.y - virtualEye.y) * s;
+    return s > 0 && y >= 0 && y <= 1.2 ? { x: 0, y, z: WALL_Z } : null;
+  };
+
+  it('water raised 0.2 m a metre off her side reflects her topside at her waterline, not sky', () => {
+    const eta = 0.2;
+    const surface = { x: 0, y: eta, z: 24 };
+    // the plane texel is empty there: the old lookup showed sky in the strip
+    const planeCrossing = { x: 0, y: 0, z: (surface.z * eye.y) / (eye.y - eta) };
+    expect(seen({ x: 0, y: -planeCrossing.y, z: planeCrossing.z })).toBeNull();
+    const { rayPoint } = localMirrorLookup(eye, surface, null, seen);
+    // the true reflected ray from the fragment meets the wall this high
+    const slope = (eye.y - eta) / surface.z;
+    const trueY = eta + slope * (WALL_Z - surface.z);
+    expect(rayPoint.z).toBeCloseTo(WALL_Z, 1);
+    expect(Math.abs(rayPoint.y - trueY)).toBeLessThan(0.01);
+    expect(rayPoint.y - eta).toBeLessThan(0.05); // she meets her image at the contact
+  });
+
+  it('water in a trough reflects as the plane does: the pass has nothing under its clip to reach for', () => {
+    const plane = seen({ x: 0, y: (eye.y / 20) * 5, z: 25 });
+    const onPlane = localMirrorLookup(eye, { x: 0, y: 0, z: 20 }, plane, seen);
+    const inTrough = localMirrorLookup(eye, { x: 0, y: -0.3, z: 20 }, plane, seen);
+    expect(inTrough.rayPoint.y).toBeCloseTo(onPlane.rayPoint.y, 9);
+    expect(inTrough.rayPoint.y).toBeGreaterThanOrEqual(0);
+  });
+
+  it('is the plane lookup for water on the plane', () => {
+    const surface = { x: 0, y: 0, z: 20 };
+    const plane = seen({ x: 0, y: 0 + (eye.y / 20) * 5, z: 25 }); // the wall point the plane texel drew
+    expect(plane).not.toBeNull();
+    const { rayPoint } = localMirrorLookup(eye, surface, plane, seen);
+    expect(Math.abs(rayPoint.y - (plane as { y: number }).y)).toBeLessThan(1e-6);
   });
 });

@@ -176,3 +176,44 @@ export function aboveSurfaceKeep(pointY: number, surfaceY: number, footprint = 0
   const t = Math.min(1, Math.max(0, (pointY - surfaceY + w) / (2 * w)));
   return t * t * (3 - 2 * t);
 }
+
+// ── B125 (at speed): the mirror is ONE plane, the sea at a hull is not ─────
+/** metres along the reflected ray a lookup starts from when its own texel is empty (a hull a stride behind the water) */
+export const LOCAL_MIRROR_SEED_M = 0.75;
+
+type V3 = { x: number; y: number; z: number };
+
+/**
+ * Where a water fragment's reflection really comes from, CPU twin of the secant in reflectionShading.ts.
+ *
+ * The pass mirrors the world about the rest plane, and the ocean read it at its own screen texel: that is the
+ * reflection from where the eye ray crosses THE PLANE, not from the fragment. Measured at 25 m/s (working sea) the
+ * drawn water at a planing hull's chine stands 0.13 m (swell) + 0.09–0.14 m (her mound) above that plane, so her image
+ * started 2η ≈ 0.4 m below her contact. The strip between was sky (the oblique clip, and B125's surface clip) or her
+ * submerged slice: the "hovercraft" in both low side and front-45° frames.
+ *
+ * The right ray leaves the FRAGMENT: `surface + r·t`, r = the eye ray reflected in the flat normal. One secant step
+ * against the pass's own depth finds t: seed from the texel the plane lookup saw (projected on the ray), or
+ * {@link LOCAL_MIRROR_SEED_M} when that texel is empty; project the ray point into the pass, take the real point the
+ * pass drew there, project it back onto the ray, and look up again. `seen(point)` stands in for "project into the pass
+ * and read the depth": the real point drawn at that texel, or null for an empty texel.
+ */
+export function localMirrorLookup(
+  eye: V3,
+  surface: V3,
+  seedPoint: V3 | null,
+  seen: (rayPoint: V3) => V3 | null,
+  planeY = 0,
+): { t: number; rayPoint: V3 } {
+  // a trough keeps the plane: the pass holds nothing under its clip plane
+  surface = { x: surface.x, y: Math.max(surface.y, planeY), z: surface.z };
+  const dx = surface.x - eye.x, dy = surface.y - eye.y, dz = surface.z - eye.z;
+  const l = Math.hypot(dx, dy, dz) || 1;
+  const r = { x: dx / l, y: -dy / l, z: dz / l };
+  const along = (p: V3): number => (p.x - surface.x) * r.x + (p.y - surface.y) * r.y + (p.z - surface.z) * r.z;
+  const at = (t: number): V3 => ({ x: surface.x + r.x * t, y: surface.y + r.y * t, z: surface.z + r.z * t });
+  const t0 = seedPoint ? Math.max(0.05, along(seedPoint)) : LOCAL_MIRROR_SEED_M;
+  const hit = seen(at(t0));
+  const t1 = hit ? Math.max(0.05, along(hit)) : t0;
+  return { t: t1, rayPoint: at(t1) };
+}

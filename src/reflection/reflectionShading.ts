@@ -16,11 +16,11 @@
  */
 import * as THREE from 'three/webgpu';
 import {
-  cameraViewMatrix, color, float, fwidth, getViewPosition, log2, mix, reflect, screenSize, screenUV,
-  select, smoothstep, uniform, vec2, vec3, vec4,
+  cameraPosition, cameraViewMatrix, color, float, fwidth, getViewPosition, log2, mix, normalize, reflect, screenSize,
+  screenUV, select, smoothstep, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { reflectionParams as rp } from '../params/reflection';
-import { MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M } from './mirrorMath';
+import { LOCAL_MIRROR_SEED_M, MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M } from './mirrorMath';
 
 /**
  * TSL nodes only line up structurally at runtime; the codebase types local
@@ -107,6 +107,10 @@ export interface MirrorPassGeometry {
   depthNode: TslNode;
   projectionInverse: THREE.Matrix4;
   world: THREE.Matrix4;
+  /** projection × world-inverse of the same virtual camera: a world point → its texel in the pass */
+  viewProjection: THREE.Matrix4;
+  /** world height of the pass's mirror (and oblique clip) plane */
+  planeY: number;
 }
 
 export function createReflectionShading(
@@ -135,6 +139,20 @@ export function createReflectionShading(
   const uMirrorProjInv = uniform(pass.projectionInverse);
   const uMirrorWorld = uniform(pass.world);
   const uSurfaceClip = uniform(rp.surfaceClip);
+  const uMirrorViewProj = uniform(pass.viewProjection);
+  const uLocalMirror = uniform(rp.localMirror);
+  /** the pass's depth at a texel, and the real world point it drew there */
+  const passPoint = (at: TslNode): { depth: TslNode; point: TslNode } => {
+    const q = at.clamp(0, 1);
+    const depth = pass.depthNode.sample(q).r;
+    return { depth, point: uMirrorWorld.mul(vec4(getViewPosition(q, depth, uMirrorProjInv), 1)).xyz };
+  };
+  /** a world point's texel in the pass (target uv: y down, and the pass's own X flip comes with its matrices) */
+  const passUv = (world: TslNode): TslNode => {
+    const c = uMirrorViewProj.mul(vec4(world, 1));
+    const ndc = c.xy.div(c.w.max(1e-4));
+    return vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5));
+  };
 
   const shade = (input: ReflectionShadeInput): TslNode => {
     const { skyColor, normalWorld, viewDirection, chop, camDist, footprint, surfacePosition } = input;
@@ -160,7 +178,30 @@ export function createReflectionShading(
     // flipX is NOT decoration: the virtual camera's basis comes out with its
     // right vector negated (see mirrorMath.mirrorCameraPose), so the render
     // target is horizontally mirrored relative to the screen.
-    const uv = screenUV.flipX().add(offset);
+    const planeUv = screenUV.flipX();
+
+    // ── B125 AT SPEED: REFLECT FROM THE WATER THAT IS DRAWN ────────────────
+    // The plane texel is the reflection from where the eye ray crosses the REST plane. At a planing hull the drawn sea
+    // stands 0.2–0.3 m above it (swell + her mound), so her image began 2η below her contact and the strip between was
+    // sky or her submerged slice. The true ray leaves this fragment: surface + r·t. One secant step on the pass's depth
+    // finds t (mirrorMath.localMirrorLookup is the tested CPU twin); a lookup that leaves the pass keeps the plane texel.
+    // A TROUGH keeps the plane: the pass holds nothing under its clip plane, so a ray from below it would find her dry
+    // topside between the trough and the plane missing (a sky strip at rest). Raised water is the defect; lowered water
+    // reflects as the plane mirror did.
+    const origin = vec3(surfacePosition.x, surfacePosition.y.max(pass.planeY), surfacePosition.z);
+    const eyeRay = normalize(origin.sub(cameraPosition));
+    const rDir = vec3(eyeRay.x, eyeRay.y.negate(), eyeRay.z);
+    const seed = passPoint(planeUv);
+    const tSeed = select(
+      seed.depth.lessThan(EMPTY_DEPTH), seed.point.sub(origin).dot(rDir).max(0.05), float(LOCAL_MIRROR_SEED_M),
+    );
+    const hit = passPoint(passUv(origin.add(rDir.mul(tSeed))));
+    const tHit = select(hit.depth.lessThan(EMPTY_DEPTH), hit.point.sub(origin).dot(rDir).max(0.05), tSeed);
+    const localUv = passUv(origin.add(rDir.mul(tHit)));
+    const localInPass = localUv.x.greaterThanEqual(0).and(localUv.x.lessThanEqual(1))
+      .and(localUv.y.greaterThanEqual(0)).and(localUv.y.lessThanEqual(1));
+    const useLocal = uLocalMirror.mul(localInPass.select(float(1), float(0)));
+    const uv = mix(planeUv, localUv, useLocal).add(offset);
 
     // Distance + steepness blur. Mip level, not a multi-tap kernel: the
     // reflection is already at ≤ half res (§V26) and the ocean covers most of
@@ -237,10 +278,9 @@ export function createReflectionShading(
     // frame yet mirrored below her. Rebuild the real world point behind this texel from the pass's own depth and
     // (oblique) projection, and drop it when it lies below this fragment's water: no ray reflected UP from here can see
     // it, so the sky stays. mirrorMath.aboveSurfaceKeep is the tested CPU twin. One depth textureLoad, same texel.
-    const rt = uv.clamp(0, 1);
-    const behindDepth = pass.depthNode.sample(rt).r;
-    const behind = uMirrorWorld.mul(vec4(getViewPosition(rt, behindDepth, uMirrorProjInv), 1));
-    const belowBy = behind.y.sub(surfacePosition.y);
+    const behindTexel = passPoint(uv);
+    const behindDepth = behindTexel.depth;
+    const belowBy = behindTexel.point.y.sub(surfacePosition.y);
     const band = fwidth(belowBy).clamp(MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M);
     const keepAbove = smoothstep(band.negate(), band, belowBy);
     // an empty texel (the cleared depth, which the oblique far plane rebuilds to a meaningless point) has nothing to drop
@@ -282,6 +322,7 @@ export function createReflectionShading(
       uBlurMax.value = Math.max(0, finite(rp.blurMax, 4));
       uBlurSlope.value = Math.max(0, finite(rp.blurSlope, 0));
       uSurfaceClip.value = THREE.MathUtils.clamp(finite(rp.surfaceClip, 1), 0, 1);
+      uLocalMirror.value = THREE.MathUtils.clamp(finite(rp.localMirror, 1), 0, 1);
       (uFootprint.value as THREE.Vector2).set(
         Math.max(1e-3, finite(rp.blurFootprintRef, 0.12)),
         Math.max(0, finite(rp.blurFootprintGain, 1)),
