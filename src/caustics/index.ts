@@ -115,6 +115,7 @@ export class Caustics {
    * shoaling-only sea, exactly as they did before.
    */
   private fetchField: FetchField | null = null;
+  private wakeElevation: ((worldXZ: TslNode) => TslNode) | null = null;
 
   constructor(sim: OceanSimulation, opts: CausticsOptions = {}) {
     this.sim = sim;
@@ -148,6 +149,15 @@ export class Caustics {
     return slot?.shadowNode;
   }
 
+  /**
+   * B125 — the wake elevation the ocean draws, by world XZ (flowfoam `wakeHeightNode`). Floating receivers built AFTER
+   * this measure their depth below the drawn sea, so the hull under her own mound is shaded as hull under water (in the
+   * refraction and in the mirror). +1 texture +1 sampler on those materials (§V.40, shipBindingBudget).
+   */
+  attachWakeElevation(node: ((worldXZ: TslNode) => TslNode) | null): void {
+    this.wakeElevation = node;
+  }
+
   /** hull drying memory ("where the water lapped") — one per ship */
   attachHullWetline(opts: HullWetlineOptions): HullWetline {
     const w = new HullWetline(opts);
@@ -166,6 +176,7 @@ export class Caustics {
         lighting: this.lighting,
         wetline: this.wetline,
         wetlineSpan: this.wetlineSpan,
+        wakeElevation: this.wakeElevation ?? undefined,
       },
       { ...r, shadow: r.shadow ?? this.sharedShadow() },
     );

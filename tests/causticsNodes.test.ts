@@ -399,3 +399,35 @@ describe('§V.72 receiver shoaling', () => {
     expect(shoaled).not.toBe(raw);
   });
 });
+
+/**
+ * B125 contact-line sliver: at 25 m/s the drawn sea at a planing hull stands +0.09–0.14 m (her mound) above the
+ * cascades, and the hull between the two was shaded (and mirrored) as dry topside at her waterline. A FLOATING receiver
+ * must measure depth below the sea that is drawn (wake elevation included), so that slice is absorbed like hull under
+ * water; a fixed structure (no ship frame) must not start binding the wake texture.
+ */
+describe('B125 floating receivers answer to the drawn sea', () => {
+  /** does `node`'s graph reach `target` (object identity), walking TSL child nodes */
+  const reaches = (node: unknown, target: unknown, seen = new Set<unknown>()): boolean => {
+    if (node === target) return true;
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    for (const v of Object.values(node as Record<string, unknown>)) {
+      if (Array.isArray(v)) { if (v.some((c) => reaches(c, target, seen))) return true; }
+      else if (v && typeof v === 'object' && (v as { isNode?: boolean }).isNode && reaches(v, target, seen)) return true;
+    }
+    return false;
+  };
+
+  it('a hull measures depth below cascades + wake; a pier does not see the wake at all', () => {
+    const water = createCaustics(sim);
+    setActiveCaustics(water);
+    const wake = float(0.12);
+    water.attachWakeElevation(() => wake);
+    const hull = waterLighting({ worldPos: positionWorld, normal: normalWorld, shipLocalPos: vec3(0, 0, 0) });
+    const pier = waterLighting({ worldPos: positionWorld, normal: normalWorld });
+    expect(reaches(hull.depth, wake)).toBe(true);
+    expect(reaches(pier.depth, wake)).toBe(false);
+    setActiveCaustics(undefined);
+  });
+});

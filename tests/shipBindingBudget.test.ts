@@ -45,6 +45,7 @@ import waterLightingSource from '../src/caustics/waterLighting.ts?raw';
 import causticsNodeSource from '../src/caustics/causticsNode.ts?raw';
 import deckMaterialNodeSource from '../src/deckwater/deckMaterialNode.ts?raw';
 import uncoloredShadowSource from '../src/sky/uncoloredShadowNode.ts?raw';
+import causticsIndexSource from '../src/caustics/index.ts?raw';
 
 /**
  * Metal caps samplers per function at 16, so on Apple silicon
@@ -97,6 +98,18 @@ const LEDGER: readonly LedgerEntry[] = [
     // createOutputTexture sets LinearFilter on both → all four are filterable
     fragmentSamplers: 1 + 3,
     why: 'sampleCascadeLayer(c.derivatives)×3 = 1 array, texture(c.displacement)×3 = 3',
+  },
+  {
+    file: 'src/caustics/index.ts',
+    source: causticsIndexSource,
+    // ZERO sites here: the texture() lives in flowfoam (`wakeHeightNode`, acc.elevTexture). It is handed in through
+    // `attachWakeElevation` and bound on every FLOATING receiver (one with a ship frame) built after it.
+    sites: 0,
+    // B125: the drawn wake elevation — a floating hull's depth is measured below the sea that is DRAWN around it (her
+    // mound, bow wave, hollow). StorageTexture, LinearFilter → filterable.
+    fragmentTextures: 1,
+    fragmentSamplers: 1,
+    why: 'attachWakeElevation → flowFoam.wakeHeightNode (acc.elevTexture), floating receivers only (B125)',
   },
   {
     file: 'src/deckwater/deckMaterialNode.ts',
@@ -182,17 +195,20 @@ describe('§V.40 ship material binding budget', () => {
     }
   });
 
-  it('budgets the DECK wood material at 9 of 16 samplers', () => {
+  it('budgets the DECK wood material at 10 of 16 samplers', () => {
     // Measured, not assumed — this number is the whole point of the file.
     //   1  deck heightfield          (woodMaterial)
     //   1  hull wetline              (waterLighting)
+    //   1  drawn wake elevation      (B125, via Caustics.attachWakeElevation)
     //   1  ocean derivatives ARRAY   (causticsNode, all three cascades)
     //   3  ocean displacement        (causticsNode, one per cascade)
     //   2  deck water state + tier   (deckMaterialNode)
     //   1  sun shadow map, depth     (three's lighting, kept to one by
     //                                 uncoloredShadowNode)
-    expect(sum((e) => e.fragmentSamplers)).toBe(9);
-    expect(sum((e) => e.fragmentTextures)).toBe(9);
+    expect(sum((e) => e.fragmentSamplers)).toBe(10);
+    expect(sum((e) => e.fragmentTextures)).toBe(10);
+    // the wake elevation is wired, not merely budgeted (the site itself lives in flowfoam)
+    expect(causticsIndexSource).toContain('attachWakeElevation');
     expect(sum((e) => e.fragmentSamplers)).toBeLessThanOrEqual(SAMPLER_CEILING);
   });
 

@@ -195,3 +195,46 @@ Still open: the thin cyan sliver. It is her hull under her own mound, and it sho
 above the water under the reflecting fragment. Dropping it needs the wake elevation at the texel's own XZ in the
 ocean's fragment stage. That costs a sampler, and the stage is at 15/16 (§V.40). Perf of this step was not measurable
 headless: two on/off rounds gave 488/488 and 518/410.
+
+## B125 contact-line sliver: the hull under her own mound
+
+After `localMirror`, a thin band of hull under the drawn sea still reached the reflection. That hull lies between the
+cascades and her own wake mound (+0.09–0.14 m at the chine). The ocean cannot see it from its side without the wake
+elevation at the texel's own XZ, which would spend its last fragment sampler (15/16).
+
+### Where the data lives instead (the ocean slot stays free)
+
+The hull materials already compute their depth below the sea (`waterLighting`: absorption, caustics, wetness), and
+they have sampler room (deck wood 9/16). `Caustics.attachWakeElevation(flowFoam.wakeHeightNode)` is wired in
+`seaScene` and `main` right after `setActiveCaustics`. Every FLOATING receiver (one with a ship frame) now measures
+depth below the DRAWN sea: cascades plus wake elevation (mound, bow wave, hollow). Fixed structures are unchanged and
+bind nothing new. Cost: +1 texture +1 sampler on floating-receiver materials, 10/16 on the deck (`shipBindingBudget`).
+The ocean ledger is unchanged.
+
+### Removing it from the mirror was tried and dropped
+
+The first build discarded floating fragments under the drawn sea during the mirror pass, gated by a flag the pass
+raised. Measured on frozen R1 frames, the submerged-hull pixels in the mirror fell:
+
+| view | before | after |
+| --- | --- | --- |
+| 30 m/s, 45° ahead | 2629 px | 131 px (the direct-view floor) |
+| calm 25, 45° ahead | 749 px | 24 px |
+| working 25, abeam | 1574 px | 1001 px (the rest is the paint's own error behind the transom) |
+
+But the close crop at 25 m/s, 45° ahead (`k2-w25-F45-crop.png`) showed a bright strip reopened at her contact. The
+rays reflected there are blocked by her mound. With the hull gone they fell through to the analytic sky. The mound's
+water is what those rays really end in, and the water-dimmed hull behind it is a closer stand-in than sky, so the
+discard was removed.
+
+### What ships
+
+The sliver stays in the mirror and in the refraction. It is shaded as hull under water (the absorption for its depth
+below the drawn sea), so the reflection meets the hull with no gap. The refraction and the reflection now darken the
+same slice. Wetness and caustics near the waterline follow the drawn sea too.
+
+Frames:
+
+- `k3-*`: working 25/30 and calm 25; abeam, hero 45° ahead, rival 45° ahead
+- `x3-*`: at rest, galleon, raft
+- crops at the contact: `k2-w25-side-crop.png`, `k2-w25-F45-crop.png`

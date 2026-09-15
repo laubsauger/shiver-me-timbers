@@ -297,6 +297,12 @@ export interface WaterLightingContext {
   wetline?: HullWetline;
   /** vec2(sternZ, 1/(bowZ − sternZ)) — maps ship-local z onto the texture */
   wetlineSpan?: TslNode;
+  /**
+   * B125: the wake elevation the ocean's VERTEX stage adds (flowfoam `wakeHeightNode`), by world XZ. A floating
+   * receiver (one with `shipLocalPos`) measures its depth below THIS sea, the one that is drawn around it — her mound
+   * and bow wave included — not the cascades alone.
+   */
+  wakeElevation?: (worldXZ: TslNode) => TslNode;
 }
 
 /**
@@ -332,8 +338,18 @@ export function waterLightingNode(
   const normal = r.normal ?? vec3(0, 1, 0);
   const shadow = r.shadow ?? float(1);
 
+  // B125: a floating receiver answers to the DRAWN sea, wake elevation included (mound, bow wave, transom hollow). Measured
+  // at 25 m/s that is +0.09–0.14 m at a planing hull's chine and up to +0.3 m under her keel. Absorption, caustics and
+  // wetness belong to that waterline, and so does what the mirror shows: the slice of hull under her own mound is drawn
+  // (in the main view's refraction AND in the mirror) as hull seen THROUGH that water, absorbed, not as dry topside.
+  // Discarding it in the mirror pass instead was built and measured: the reflected rays there are blocked by the mound,
+  // and with the hull gone they fell through to the analytic sky, reopening a bright strip at her contact (front 45°,
+  // 25 m/s). Water-dimmed hull is the closer answer to "the ray ends in the crest".
+  const vessel = r.shipLocalPos !== undefined && r.depthBelowSurface === undefined && r.waterHeight === undefined;
+  const drawnWake = vessel && ctx.wakeElevation ? ctx.wakeElevation(worldXZ) : null;
+  const seaHeight = r.waterHeight ?? waterHeightNode(ctx.sim, worldXZ);
   const depth = r.depthBelowSurface
-    ?? (r.waterHeight ?? waterHeightNode(ctx.sim, worldXZ)).sub(r.worldPos.y);
+    ?? (drawnWake ? seaHeight.add(drawnWake) : seaHeight).sub(r.worldPos.y);
 
   // `normal` is handed through so the reflected branch can tell a deck from a
   // hull side. It was already computed here and simply not passed — which is
@@ -412,16 +428,18 @@ export function waterLightingNode(
     // will save a bad value, so clamping is the last thing that happens.
     .clamp(0, L.maxAddLight);
 
+  // every factor here is in [0,1] by construction: wet tint, absorption,
+  // caustic darkening and bounce tint. The albedo can be dimmed or
+  // coloured, never driven negative or above its own value.
+  const tint = mix(vec3(1, 1, 1), L.wetTint, wet)
+    .mul(absorb)
+    .mul(causticDarken)
+    .mul(bounceTint)
+    .clamp(0, 1);
+
   return {
     attenuation: absorb,
-    // every factor here is in [0,1] by construction: wet tint, absorption,
-    // caustic darkening and bounce tint. The albedo can be dimmed or
-    // coloured, never driven negative or above its own value.
-    tint: mix(vec3(1, 1, 1), L.wetTint, wet)
-      .mul(absorb)
-      .mul(causticDarken)
-      .mul(bounceTint)
-      .clamp(0, 1),
+    tint,
     addLight,
     roughnessScale: mix(float(1), L.wetRoughness, wet),
     reliefScale: mix(float(1), L.wetRelief, wet),

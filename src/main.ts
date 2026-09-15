@@ -300,6 +300,8 @@ async function boot(): Promise<void> {
   // visual failure is silent).
   const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
   setActiveCaustics(caustics);
+  // B125: floating receivers answer to the DRAWN sea (wake mound, bow wave, hollow) and drop out of the mirror under it
+  caustics.attachWakeElevation((xz) => flowFoam.wakeHeightNode(xz));
 
   // §T.33 islands: 5 at 1.2–3.1km sharing 3 materials. Built BEFORE the ocean
   // surface because its seabed field feeds the shallows tint, and TSL bakes

@@ -88,6 +88,8 @@ export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: Wea
   clouds.attachTo(app.scene);
   const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
   setActiveCaustics(caustics);
+  // B125: floating receivers answer to the DRAWN sea (wake mound, bow wave, hollow) and drop out of the mirror under it
+  caustics.attachWakeElevation((xz) => flowFoam.wakeHeightNode(xz));
   const archipelago = createArchipelago({ seed: state.seed, sites: opts.sites });
   app.scene.add(archipelago.group);
   const fetchField = createFetchField(archipelago.seabed);
