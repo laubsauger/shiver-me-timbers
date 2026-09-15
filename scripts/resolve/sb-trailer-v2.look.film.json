@@ -1,5 +1,5 @@
 {
- "_doc": "FILM finishing preset (CG → film, no VHS on the LOOK clip): keeps the per-time-of-day CDL grade and the VHS/letterbox entries of sb-trailer-v2.look.json; LOOK chain = 0.4 px CG soften → Film Look Creator (print core 'Cinematic' at 40 % = the print emulation, contrast 1.04 with a soft highlight rolloff 0.55 and a slight fade 0.035 = lifted but not grey blacks, low warm halation 0.08 on highlights only, subtle bloom 0.05, very subtle gate weave 0.02, no flicker / split tone / FLC vignette) (soft highlight rolloff 0.55) → highlight desaturation 0.93 → FLC 35 mm grain 0.30 (ResolveFX Film Grain has shadow/mid/highlight gains but reached only ~1/8 of the visible texture at opacity 0.55, too faint for H.264; FLC grain has no shadow weighting) → vignette ~7 % → minimal edge fringe. The bundled 'Rec709 Kodak 2383' LUTs expect Cineon-log input, so they are not used on these display-referred renders.",
+ "_doc": "FILM finishing preset (CG → film, no VHS on the LOOK clip): keeps the per-time-of-day CDL grade and the VHS/letterbox entries of sb-trailer-v2.look.json; LOOK chain = 0.4 px CG soften → Film Look Creator (print core 'Cinematic' at 40 % = the print emulation, contrast 1.04 with a soft highlight rolloff 0.55 and a slight fade 0.035 = lifted but not grey blacks, low warm halation 0.08 on highlights only, subtle bloom 0.05, very subtle gate weave 0.02, no flicker / split tone / FLC vignette) (soft highlight rolloff 0.55) → highlight desaturation 0.93 → FLC 35 mm grain 0.30 (ResolveFX Film Grain has shadow/mid/highlight gains but reached only ~1/8 of the visible texture at opacity 0.55, too faint for H.264; FLC grain has no shadow weighting) → vignette ~7 % → minimal edge fringe. The bundled 'Rec709 Kodak 2383' LUTs expect Cineon-log input, so they are not used on these display-referred renders. POP FIX 2026-09-15 (user: 'grey, lost pop'; measured frame-matched source → Resolve → +CDL → +FILM → H.264): input interpretation was fine (ungraded render within 1.6 levels of the source); the first FILM tune dimmed highlights (p99 240→220) and drained saturation 10-18 %; exports tagged transfer bt709 are shown lifted by macOS (render with GammaTag 'Gamma 2.2'). Retuned: print blend 0.25, contrast 1.08, exposure +0.2, rolloff 0.3, no fade, subtractive sat 1.28, master sat 1.07, highlight sat 0.97 → saturation -4/+7/+4 % vs source (sunset/dusk/night), highlights back to the CDL level, blacks at 0.",
  "grade": {
   "sunset": {
    "slope": [
@@ -69,13 +69,13 @@
    "name": "FilmPrint",
    "inputs": {
     "filmLookCore": "CoreLookCinematic",
-    "filmLookBlend": 0.4,
+    "filmLookBlend": 0.25,
     "colourBlend": 1.0,
     "effectsBlend": 1.0,
-    "colorContrast2": 1.04,
-    "colorHighlightRolloff": 0.55,
-    "colorFade": 0.035,
-    "colorPostSat": 1.0,
+    "colorContrast2": 1.08,
+    "colorHighlightRolloff": 0.3,
+    "colorFade": 0.0,
+    "colorPostSat": 1.28,
     "splitIsEnable": 0,
     "vignetteIsEnable": 0,
     "halationIsEnable": 1,
@@ -92,14 +92,16 @@
     "flickerIsEnable": 0,
     "gateWeaveIsEnable": 1,
     "gateWeaveAmount": 0.02,
-    "filmGateIsEnable": 0
+    "filmGateIsEnable": 0,
+    "colorExposure": 0.2
    }
   },
   {
    "tool": "ColorCorrector",
    "name": "HighlightDesat",
    "inputs": {
-    "Saturation4": 0.93
+    "Saturation4": 0.97,
+    "Saturation1": 1.07
    }
   },
   {
