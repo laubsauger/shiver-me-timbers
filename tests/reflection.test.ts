@@ -19,13 +19,15 @@
  *    what they should, the mirror pass silently becomes a second full frame.
  */
 import { describe, expect, it } from 'vitest';
-import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
+import { PerspectiveCamera, Quaternion, Vector2, Vector3 } from 'three';
 import {
   REFLECTION_HIDDEN_LAYER,
   REFLECTION_ONLY_LAYER,
+  aboveSurfaceKeep,
   clampResolutionScale,
   createMirrorPose,
   eyeIsAbovePlane,
+  MIRROR_WATERLINE_BAND_MAX_M,
   hiddenObjectMask,
   mainCameraMask,
   mirrorCameraPose,
@@ -270,5 +272,78 @@ describe('underwater gate (§V25 puts the camera below the surface on purpose)',
 
   it('treats a non-finite eye height as below (§V28 — never render on NaN)', () => {
     expect(eyeIsAbovePlane(NaN, 0)).toBe(false);
+  });
+});
+
+/**
+ * B125 — "boats float on their own reflection": the decisive frame showed a hull's underside mirrored below her. The
+ * pass is clipped at the rest PLANE by three's oblique near plane; the drawn sea stands above that plane at a hull on a
+ * crest or in her own mound, so the slice of hull between the plane and the real surface is under water in the frame
+ * yet above the clip. These pin the rule that drops it, against the pass's own geometry.
+ */
+describe('B125 nothing under the local water is mirrored', () => {
+  // a low side view onto a hull wall at z = 0, like the trailer's sunset side shots
+  const cam = new PerspectiveCamera(36, 16 / 9, 0.1, 8000);
+  cam.position.set(0, 1.5, 20);
+  cam.lookAt(0, 0.3, 0);
+  cam.updateMatrixWorld();
+  const project = (w: Vector3, out: Vector2): Vector2 => {
+    const p = w.clone().applyMatrix4(cam.matrixWorldInverse).applyMatrix4(cam.projectionMatrix);
+    return out.set(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+  };
+  const rayThrough = (uv: Vector2): Vector3 =>
+    new Vector3(uv.x * 2 - 1, 1 - uv.y * 2, 0.5).unproject(cam).sub(cam.position).normalize();
+  /** the real point the plane-0 pass drew at `uv` on a wall z = 0 spanning y ∈ [−1, 1.2] (the clip keeps y ≥ 0) */
+  const wallPass = (uv: Vector2): Vector3 | null => {
+    const d = rayThrough(uv);
+    const t = -cam.position.z / d.z;
+    const imageY = cam.position.y + d.y * t;
+    const y = -imageY;
+    return y < 0 || y > 1.2 ? null : new Vector3(cam.position.x + d.x * t, y, 0);
+  };
+  /** what a water fragment at `p` shows from the pass, after the rule: the kept real point, or null (sky) */
+  const shown = (p: Vector3): Vector3 | null => {
+    const q = wallPass(project(p, new Vector2()));
+    return q !== null && aboveSurfaceKeep(q.y, p.y) > 0.5 ? q : null;
+  };
+
+  it('water standing 0.4 m over the plane at the hull no longer mirrors the hull between the plane and itself', () => {
+    const surface = 0.4;
+    let droppedUnderside = 0;
+    let keptTopside = 0;
+    // sweep the water in front of the wall; every texel the pass returns is either under that water or above it
+    for (let z = 0.2; z < 12; z += 0.05) {
+      const p = new Vector3(0, surface, z);
+      const q = wallPass(project(p, new Vector2()));
+      if (q === null) continue;
+      if (q.y < surface - 0.1) {
+        expect(shown(p), `hull at ${q.y.toFixed(2)} m under water at ${surface} m`).toBeNull();
+        droppedUnderside++;
+      } else if (q.y > surface + 0.3) {
+        expect(shown(p)).not.toBeNull();
+        keptTopside++;
+      }
+    }
+    // both halves actually occurred: the defect was reachable and the topside still reflects
+    expect(droppedUnderside).toBeGreaterThan(0);
+    expect(keptTopside).toBeGreaterThan(0);
+  });
+
+  it('is the identity for water on the plane: everything the clip kept is above that water', () => {
+    for (let z = 0.2; z < 12; z += 0.25) {
+      const p = new Vector3(0, 0, z);
+      const q = wallPass(project(p, new Vector2()));
+      if (q === null) continue;
+      expect(aboveSurfaceKeep(q.y, p.y)).toBeGreaterThanOrEqual(0.5);
+    }
+  });
+
+  it('fades across the local waterline with a band, capped so a silhouette does not dim a whole reflection', () => {
+    expect(aboveSurfaceKeep(-0.3, 0.2)).toBe(0); // a lower unit under raised water
+    expect(aboveSurfaceKeep(0.9, 0.2)).toBe(1); // the topside above it
+    expect(aboveSurfaceKeep(0.2, 0.2)).toBeCloseTo(0.5, 6);
+    expect(aboveSurfaceKeep(Number.NaN, 0.2)).toBe(1);
+    // next to a silhouette the footprint is metres (a far-plane neighbour): the fade must not follow it
+    expect(aboveSurfaceKeep(0.2 + MIRROR_WATERLINE_BAND_MAX_M, 0.2, 40)).toBe(1);
   });
 });

@@ -16,10 +16,11 @@
  */
 import * as THREE from 'three/webgpu';
 import {
-  cameraViewMatrix, color, log2, mix, reflect, screenSize, screenUV,
-  smoothstep, uniform, vec2, vec3, vec4,
+  cameraViewMatrix, color, float, fwidth, getViewPosition, log2, mix, reflect, screenSize, screenUV,
+  select, smoothstep, uniform, vec2, vec3, vec4,
 } from 'three/tsl';
 import { reflectionParams as rp } from '../params/reflection';
+import { MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M } from './mirrorMath';
 
 /**
  * TSL nodes only line up structurally at runtime; the codebase types local
@@ -65,6 +66,11 @@ export interface ReflectionShadeInput {
   /** distance from the eye to the shaded point, metres */
   camDist: TslNode;
   /**
+   * World position of the DRAWN (displaced) water surface at this fragment. B125: mirror texels whose geometry lies
+   * below its height are under this water and are dropped (mirrorMath.aboveSurfaceKeep).
+   */
+  surfacePosition: TslNode;
+  /**
    * World metres covered by ONE PIXEL of this surface — the caller's own
    * `fwidth(worldXZ)`. Not derivable from `camDist`: at a grazing view the
    * footprint stretches by 1/sin(grazing) and runs to tens of metres, which is
@@ -87,12 +93,26 @@ export interface ReflectionShading {
 
 /** §V28: every divisor in the shader is floored, every uniform finite-guarded */
 const EPS = 1e-4;
+/** the mirror target's cleared depth: at or past this the pass drew nothing there */
+const EMPTY_DEPTH = 0.999999;
 const finite = (v: number, fallback: number): number =>
   Number.isFinite(v) ? v : fallback;
+
+/**
+ * What the shading needs from the mirror pass to rebuild the world point behind a texel (B125): the pass's depth and
+ * the virtual camera that drew it (matrices refreshed by planarReflection after every mirror render, bound by
+ * reference).
+ */
+export interface MirrorPassGeometry {
+  depthNode: TslNode;
+  projectionInverse: THREE.Matrix4;
+  world: THREE.Matrix4;
+}
 
 export function createReflectionShading(
   reflectionNode: TslNode,
   useMipmaps: boolean,
+  pass: MirrorPassGeometry,
 ): ReflectionShading {
   const uActive = uniform(0);
   const uStrength = uniform(rp.strength);
@@ -112,9 +132,12 @@ export function createReflectionShading(
   const uFootprint = uniform(
     new THREE.Vector2(rp.blurFootprintRef, rp.blurFootprintGain),
   );
+  const uMirrorProjInv = uniform(pass.projectionInverse);
+  const uMirrorWorld = uniform(pass.world);
+  const uSurfaceClip = uniform(rp.surfaceClip);
 
   const shade = (input: ReflectionShadeInput): TslNode => {
-    const { skyColor, normalWorld, viewDirection, chop, camDist, footprint } = input;
+    const { skyColor, normalWorld, viewDirection, chop, camDist, footprint, surfacePosition } = input;
 
     // Break-up: push the lookup around by the wave's own slope plus its
     // horizontal (choppy) displacement, so the mirrored scene shears on chop
@@ -207,6 +230,21 @@ export function createReflectionShading(
     // and every texel of every blurred mip near a silhouette — reads as a
     // dark fringe. Floored divisor per §V28.
     const coverage = sample.a.clamp(0, 1);
+
+    // ── B125: NOTHING UNDER THIS WATER IS MIRRORED ─────────────────────────
+    // The oblique clip removed what is under the rest PLANE; the drawn sea stands above it at a hull that rides a crest
+    // or sits in her own mound, and the slice of hull between plane and surface (her underside) is under water in the
+    // frame yet mirrored below her. Rebuild the real world point behind this texel from the pass's own depth and
+    // (oblique) projection, and drop it when it lies below this fragment's water: no ray reflected UP from here can see
+    // it, so the sky stays. mirrorMath.aboveSurfaceKeep is the tested CPU twin. One depth textureLoad, same texel.
+    const rt = uv.clamp(0, 1);
+    const behindDepth = pass.depthNode.sample(rt).r;
+    const behind = uMirrorWorld.mul(vec4(getViewPosition(rt, behindDepth, uMirrorProjInv), 1));
+    const belowBy = behind.y.sub(surfacePosition.y);
+    const band = fwidth(belowBy).clamp(MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M);
+    const keepAbove = smoothstep(band.negate(), band, belowBy);
+    // an empty texel (the cleared depth, which the oblique far plane rebuilds to a meaningless point) has nothing to drop
+    const aboveSurface = mix(float(1), select(behindDepth.lessThan(EMPTY_DEPTH), keepAbove, float(1)), uSurfaceClip);
     const reflected = sample.rgb.div(coverage.max(EPS)).mul(uTint);
 
     // Dissolve back into the analytic sky with distance: past `fadeEnd` the
@@ -215,7 +253,7 @@ export function createReflectionShading(
     // smoothstep(e0,e1,x) with e0 > e1 reads "1 below fadeStart, 0 above
     // fadeEnd" (§V23 — functional form, receiver-free).
     const nearFade = smoothstep(uFade.y, uFade.x, camDist);
-    const weight = uActive.mul(uStrength).mul(nearFade).mul(coverage).clamp(0, 1);
+    const weight = uActive.mul(uStrength).mul(nearFade).mul(coverage).mul(aboveSurface).clamp(0, 1);
     return mix(skyColor, reflected, weight);
   };
 
@@ -243,6 +281,7 @@ export function createReflectionShading(
       );
       uBlurMax.value = Math.max(0, finite(rp.blurMax, 4));
       uBlurSlope.value = Math.max(0, finite(rp.blurSlope, 0));
+      uSurfaceClip.value = THREE.MathUtils.clamp(finite(rp.surfaceClip, 1), 0, 1);
       (uFootprint.value as THREE.Vector2).set(
         Math.max(1e-3, finite(rp.blurFootprintRef, 0.12)),
         Math.max(0, finite(rp.blurFootprintGain, 1)),

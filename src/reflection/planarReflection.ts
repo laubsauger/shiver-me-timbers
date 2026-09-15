@@ -125,6 +125,9 @@ export function createPlanarReflection(
     // mip chain = the distance/steepness blur (§V26 "blur ok") for the price
     // of a mipmap generation on a quarter-size target
     generateMipmaps: useMipmaps,
+    // B125: the shading rebuilds the world point behind each texel to drop what lies under the drawn water. A Nearest
+    // depth texture: read by textureLoad, no sampler (§V.40 ledger)
+    depth: true,
   });
   const base = node.reflector as unknown as ReflectorBase;
 
@@ -170,11 +173,17 @@ export function createPlanarReflection(
   // leave the MAIN pass with no sky and a transparent clear colour.
   const inheritedUpdateBefore = base.updateBefore.bind(base);
   let passEnabled = true;
+  // B125: the virtual camera that drew the target, held in STABLE matrices the shading binds by reference. three
+  // clones one virtual camera per source camera and rewrites its projection (the oblique clip) inside the render
+  // without refreshing projectionMatrixInverse, so both are taken here, after the render that used them.
+  const mirrorProjectionInverse = new THREE.Matrix4();
+  const mirrorWorld = new THREE.Matrix4();
   base.updateBefore = (frame: unknown): unknown => {
     if (!passEnabled) return undefined;
-    const { scene, renderer } = (frame ?? {}) as {
+    const { scene, renderer, camera } = (frame ?? {}) as {
       scene?: THREE.Scene;
       renderer?: THREE.WebGPURenderer;
+      camera?: THREE.Camera;
     };
     const prevBackgroundNode = scene ? scene.backgroundNode : null;
     const prevBackground = scene ? scene.background : null;
@@ -185,7 +194,13 @@ export function createPlanarReflection(
     }
     renderer?.setClearAlpha(0);
     try {
-      return inheritedUpdateBefore(frame);
+      const result = inheritedUpdateBefore(frame);
+      if (camera) {
+        const virtual = base.getVirtualCamera(camera);
+        mirrorProjectionInverse.copy(virtual.projectionMatrix).invert();
+        mirrorWorld.copy(virtual.matrixWorld);
+      }
+      return result;
     } finally {
       if (scene) {
         scene.backgroundNode = prevBackgroundNode;
@@ -204,7 +219,11 @@ export function createPlanarReflection(
     shadowCam.layers.mask = shadowCameraMask(shadowCam.layers.mask);
   }
 
-  const shading = createReflectionShading(node, useMipmaps);
+  const shading = createReflectionShading(node, useMipmaps, {
+    depthNode: node.getDepthNode(),
+    projectionInverse: mirrorProjectionInverse,
+    world: mirrorWorld,
+  });
 
   let cloudMirror: CloudMirror | null = null;
   if (rp.cloudsInReflection === 1 && opts.clouds) {

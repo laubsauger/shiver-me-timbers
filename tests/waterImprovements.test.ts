@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { coverageWeightedAgeNode, foamSourceAgesNode } from '../src/flowfoam/foamAge';
 import { uniform } from 'three/tsl';
 import { contactFoamNode } from '../src/flowfoam/intersectionMask';
-import { refractionDepthNode } from '../src/ocean/surfaceRefraction';
+import { refractionDepthNode, snellLookupPoint } from '../src/ocean/surfaceRefraction';
 import { reflectionSkyVisibilityNode, unresolvedSlopeVarianceNode } from '../src/ocean/surfaceFiltering';
 import { breakupJitterAligned } from '../src/foam/foamMath';
 import { OceanSimulation } from '../src/ocean/oceanCascades';
@@ -337,5 +337,62 @@ describe('contact and shore age only affect their own coverage', () => {
     expect(scalar(unmeasured.lighting)).toBeCloseTo(0.02);
     expect(scalar(unmeasured.edge)).toBeCloseTo(0.92);
     expect(scalar(unmeasured.body)).toBeCloseTo(0.38);
+  });
+});
+
+/**
+ * B125 ("hovercraft" boats): with the reflection switched off, the outboard legs a metre under a boat at rest still
+ * hung below her, because the see-through lookup followed the STRAIGHT view ray. At a low lens that ray runs nearly
+ * flat under the surface and shows submerged geometry at its above-water size, right where her reflection lies.
+ */
+describe('B125 the see-through follows the refracted ray', () => {
+  const IOR = 1.333;
+  const eye = { x: 0, y: 0.25, z: 0 }; // the trailer's low lens, 25 cm over the water
+  const leg = { x: 0, y: -0.7, z: 4.5 }; // a lower unit 70 cm down, 4.5 m off
+  const unit = (v: { x: number; y: number; z: number }) => {
+    const l = Math.hypot(v.x, v.y, v.z);
+    return { x: v.x / l, y: v.y / l, z: v.z / l };
+  };
+  /** screen angle below the horizon, degrees, of a world point seen from the eye */
+  const below = (p: { x: number; y: number; z: number }) => (Math.atan2(eye.y - p.y, p.z - eye.z) * 180) / Math.PI;
+
+  it('the water pixel whose straight ray reached the leg now looks far deeper than the leg', () => {
+    const t = (eye.y - 0) / (eye.y - leg.y);
+    const surface = { x: 0, y: 0, z: eye.z + (leg.z - eye.z) * t };
+    const pathLen = Math.hypot(leg.z - surface.z, leg.y - surface.y);
+    const q = snellLookupPoint(surface, unit({ x: 0, y: -eye.y, z: surface.z }), pathLen, IOR);
+    // the old lookup was the leg itself; the refracted one is metres under it, where there is no boat
+    expect(q.y).toBeLessThan(leg.y - 1.5);
+  });
+
+  it("the leg's image moves up to the waterline instead of hanging under the hull", () => {
+    // the water point whose REFRACTED ray reaches the leg: walk the surface toward the boat until it passes through it
+    let apparent = Number.NaN;
+    for (let z = 0.3; z < leg.z; z += 0.001) {
+      const surface = { x: 0, y: 0, z };
+      const d = unit({ x: 0, y: -eye.y, z });
+      const q = snellLookupPoint(surface, d, 1, IOR);
+      const slope = (q.z - z) / (surface.y - q.y); // horizontal metres per metre of depth
+      if (Math.abs(z + slope * -leg.y - leg.z) < 0.01) { apparent = below(surface); break; }
+    }
+    const straight = below(leg);
+    const waterline = below({ x: 0, y: 0, z: leg.z });
+    expect(Number.isFinite(apparent)).toBe(true);
+    // straight: 12° under the horizon, 9° under the waterline. Refracted: within a degree of the waterline
+    expect(straight - waterline).toBeGreaterThan(8);
+    expect(apparent - waterline).toBeLessThan((straight - waterline) / 8);
+  });
+
+  it('is the straight ray looking straight down, and never bends past the critical angle', () => {
+    const q = snellLookupPoint({ x: 1, y: 0, z: 2 }, { x: 0, y: -1, z: 0 }, 3, IOR);
+    expect(q.x).toBeCloseTo(1, 9);
+    expect(q.z).toBeCloseTo(2, 9);
+    expect(q.y).toBeCloseTo(-3, 9);
+    for (const elevDeg of [0.5, 3, 10, 30, 60, 89]) {
+      const e = (elevDeg * Math.PI) / 180;
+      const p = snellLookupPoint({ x: 0, y: 0, z: 0 }, { x: 0, y: -Math.sin(e), z: Math.cos(e) }, 1, IOR);
+      expect(Math.hypot(p.x, p.y, p.z)).toBeCloseTo(1, 9); // unit ray: pathLen is a length along it
+      expect(Math.atan2(p.z, -p.y)).toBeLessThanOrEqual(Math.asin(1 / IOR) + 1e-9);
+    }
   });
 });

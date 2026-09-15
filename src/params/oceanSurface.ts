@@ -916,6 +916,12 @@ export const oceanSurfaceParams = registerParams(
      * of the pixel.
      */
     transmissionFloor: 0.45,
+    /**
+     * B125: look the see-through scene up along the REFRACTED ray (1) instead of the straight view ray (0, the old
+     * lookup, reproduced exactly). At a low lens the straight ray hung the submerged hull and outboard legs under the
+     * boat, where her reflection is; the refracted ray squashes them up to the waterline (surfaceRefraction.ts). Live.
+     */
+    refractionSnell: 1,
 
     // ── underside (§V.24/§V.25: camera below the waterline) ─────────────
     /** total-internal-reflection ceiling colour seen outside Snell's window */
@@ -1020,6 +1026,7 @@ export const oceanSurfaceParams = registerParams(
     normalFadeEnd: { min: 100, max: 20000, step: 50 },
     refractionStrength: { min: 0, max: 0.3, step: 0.005 },
     transmissionFloor: { min: 0, max: 0.9, step: 0.01 },
+    refractionSnell: { min: 0, max: 1, step: 1 },
     underWindowBrightness: { min: 0, max: 3, step: 0.01 },
     underWindowSoftness: { min: 0.01, max: 0.5, step: 0.01 },
   },

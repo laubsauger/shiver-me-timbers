@@ -84,6 +84,11 @@ export interface ReflectionParams {
   blurFootprintGain: number;
   /** ceiling on the mip level so the reflection never turns into a flat block */
   blurMax: number;
+  /**
+   * B125: drop mirror texels whose geometry lies UNDER the drawn water at the fragment reflecting it (1), or keep them
+   * (0, the pre-B125 mirror). Live, exact identity at 0: the A/B lever for the "boat floats on her reflection" check.
+   */
+  surfaceClip: number;
   /** build the mip chain for the blur, 0|1 (reload). 0 pins blur* to 0. */
   generateMipmaps: number;
   /** add the mirrored cloud quad to the reflection pass, 0|1 (reload) */
@@ -150,6 +155,7 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurFootprintRef: 0.12,
     blurFootprintGain: 1.0,
     blurMax: 4.0,
+    surfaceClip: 1,
     generateMipmaps: 1,
     cloudsInReflection: 1,
   },
@@ -174,6 +180,7 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurFootprintRef: { min: 0.01, max: 2, step: 0.01 },
     blurFootprintGain: { min: 0, max: 4, step: 0.05 },
     blurMax: { min: 0, max: 8, step: 0.1 },
+    surfaceClip: { min: 0, max: 1, step: 1 },
     generateMipmaps: { min: 0, max: 1, step: 1 },
     cloudsInReflection: { min: 0, max: 1, step: 1 },
   },

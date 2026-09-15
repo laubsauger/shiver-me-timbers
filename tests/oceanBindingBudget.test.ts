@@ -163,7 +163,10 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/ocean/surfaceMaterial.ts',
     source: surfaceMaterialSource,
-    sites: 5,
+    // B125: +1 CALL SITE, +0 BINDINGS. The Snell lookup reads the SAME shared
+    // viewport DepthTexture at the refracted UV (straight probe, Snell lookup,
+    // wave-bent lookup: 3 call sites, ONE texture).
+    sites: 6,
     // 3 displacement (sampleDisp, once per cascade — still three separate 2D
     // textures, see the vertex-stage note in the header) + ONE derivatives
     // ARRAY texture for all three cascades (sampleDeriv → sampleCascadeLayer,
@@ -180,7 +183,7 @@ const LEDGER: readonly LedgerEntry[] = [
     // vertex stage at all; see the header.
     vertexTextures: 3,
     vertexSamplers: 3,
-    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×2=1, viewportTexture()=1',
+    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×3=1, viewportTexture()=1',
   },
   {
     file: 'src/ocean/oceanTextures.ts',
@@ -365,14 +368,18 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/reflection/reflectionShading.ts',
     source: reflectionShadingSource,
-    sites: 1,
+    sites: 2,
     // reflectionNode.sample(uv) — .sample() clones the node but keeps the same
     // texture value, so the mip-level variant costs no extra binding.
-    fragmentTextures: 1,
+    // B125: pass.depthNode.sample(rt) — the mirror pass's DepthTexture, read at
+    // the same texel as the colour. Nearest/Nearest with no compare, so
+    // WGSLNodeBuilder.isUnfilterable routes it to textureLoad: +1 texture,
+    // +0 samplers.
+    fragmentTextures: 2,
     fragmentSamplers: 1,
     vertexTextures: 0,
     vertexSamplers: 0,
-    why: 'the mirror pass render target',
+    why: 'the mirror pass render target + its depth texture (unfilterable, B125)',
   },
   {
     file: 'src/reflection/planarReflection.ts',
@@ -462,7 +469,8 @@ describe('§V.40 ocean material binding budget', () => {
 
   it('is back OVER the default sampled-texture limit, so the raise is live', () => {
     const textures = sum((e) => e.fragmentTextures);
-    expect(textures).toBe(17);
+    // 18 since B125: the mirror pass's depth texture, a textureLoad with no sampler.
+    expect(textures).toBe(18);
     // It briefly fit the WebGPU DEFAULT exactly, at 16, between the array-
     // texture reclamation and the foam art texture. The art texture spent that
     // last one, as the note there predicted it would, so `requiredLimits` in

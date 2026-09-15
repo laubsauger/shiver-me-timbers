@@ -19,6 +19,7 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   cameraPosition,
+  cameraProjectionMatrix,
   cameraViewMatrix,
   color,
   dFdx,
@@ -32,6 +33,7 @@ import {
   mix,
   normalize,
   positionLocal,
+  positionWorld,
   pow,
   reflect,
   screenSize,
@@ -49,7 +51,7 @@ import {
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
 import { sampleCascadeLayer } from './oceanTextures';
-import { refractionDepthNode, refractionOffsetNode } from './surfaceRefraction';
+import { refractionDepthNode, refractionOffsetNode, snellLookupPointNode } from './surfaceRefraction';
 import { reflectionSkyVisibilityNode, unresolvedSlopeVarianceNode } from './surfaceFiltering';
 import { sparkleDiscMean } from './sparkleMath';
 import type { FoamSim } from '../foam';
@@ -436,6 +438,7 @@ export function buildOceanSurfaceMaterial(
   );
   const uRefractStrength = uniform(sp.refractionStrength);
   const uTransmitFloor = uniform(sp.transmissionFloor);
+  const uRefractSnell = uniform(sp.refractionSnell);
   const uCameraFar = uniform(5000); // synced from the live camera in update()
   // haze target colour: driven per frame from the scene fog / sky horizon
   // (see OceanSurface.update) — this literal is only the pre-first-frame value
@@ -1489,11 +1492,29 @@ export function buildOceanSurfaceMaterial(
     ).mul(uContactStrength).toVar();
     const probeThickness = straightDepth.sub(ownDepth).max(0).mul(uCameraFar);
     const refractRamp = smoothstep(float(0), uRefractDepthFull.max(0.05), probeThickness);
-    const refractedUV = screenUV.add(refractionOffsetNode(
+    // B125 SNELL LOOKUP (surfaceRefraction.snellLookupPoint): the straight ray at a low lens showed the submerged hull
+    // and legs hanging under the boat where her reflection is. The scene is looked up where the REFRACTED ray goes,
+    // as far along it as the straight ray travelled behind the surface (view-z thickness → ray length). Eye above the
+    // water only (the underside has its own Snell's window). A lookup that leaves the screen has nothing to show.
+    const eyeRay = surfacePos.sub(cameraPosition);
+    const eyeDist = eyeRay.length().max(1e-3);
+    const snellPath = probeThickness.mul(eyeDist.div(ownDepth.mul(uCameraFar).max(1e-3)));
+    const snellClip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(
+      snellLookupPointNode(surfacePos, eyeRay.div(eyeDist), snellPath, WATER_IOR), 1,
+    )));
+    const snellUV = snellClip.xy.div(snellClip.w.max(1e-4)).mul(vec2(0.5, -0.5)).add(0.5);
+    const snellOn = uRefractSnell.mul(viewDir.y.greaterThan(0).select(float(1), float(0)));
+    const snellOnScreen = snellUV.x.greaterThanEqual(0).and(snellUV.x.lessThanEqual(1))
+      .and(snellUV.y.greaterThanEqual(0)).and(snellUV.y.lessThanEqual(1));
+    const lookupUV = mix(screenUV, snellUV.clamp(0, 1), snellOn);
+    const lookupValid = snellOn.lessThan(0.5).or(snellOnScreen);
+    // at snellOn 0 this is the straight fetch again (same texel), so the old graph's values are reproduced exactly
+    const lookupDepth = linearDepth(viewportDepthTexture(lookupUV));
+    const refractedUV = lookupUV.add(refractionOffsetNode(
       normalWorld, cameraViewMatrix, screenSize, uRefractStrength,
     ).mul(refractRamp));
     const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
-    const refraction = refractionDepthNode(straightDepth, sceneDepthBehind, ownDepth);
+    const refraction = refractionDepthNode(lookupDepth, sceneDepthBehind, ownDepth);
     const thicknessMeters = refraction.depth.sub(ownDepth).max(0).mul(uCameraFar);
     // vec3, not a scalar: Beer–Lambert PER CHANNEL (see `uAbsorption`). Red is
     // gone by ~4 m while blue is still 90% alive, and that DIFFERENCE is what
@@ -1505,9 +1526,9 @@ export function buildOceanSurfaceMaterial(
       .mul(thicknessMeters)
       .negate()
       .exp()
-      .mul(refraction.visible.select(float(1), float(0)));
+      .mul(refraction.visible.and(lookupValid).select(float(1), float(0)));
     const sceneCol = viewportTexture(
-      refraction.useBent.select(refractedUV, screenUV),
+      refraction.useBent.select(refractedUV, lookupUV),
       null,
       sceneColorTexture,
     ).rgb;
@@ -1708,6 +1729,8 @@ export function buildOceanSurfaceMaterial(
           viewDirection: viewDir,
           chop: totalDisp.xz.length(),
           camDist,
+          // B125: the drawn surface (cascades + wake elevation), the height this facet mirrors in
+          surfacePosition: positionWorld,
           // §V.26 sub-pixel roughness: the mirror needs to know what one water
           // pixel actually COVERS. Same footprint every band-limit in this
           // file is measured against, so both owners agree by construction.
@@ -2722,6 +2745,7 @@ export function buildOceanSurfaceMaterial(
     );
     uRefractStrength.value = sp.refractionStrength;
     uTransmitFloor.value = sp.transmissionFloor;
+    uRefractSnell.value = Math.min(1, Math.max(0, Number.isFinite(sp.refractionSnell) ? sp.refractionSnell : 1));
     (uHaze.value as THREE.Vector2).set(sp.hazeStart, sp.hazeEnd);
     uHazeCurve.value = sp.hazeCurve;
     uHazeStrength.value = sp.hazeStrength;

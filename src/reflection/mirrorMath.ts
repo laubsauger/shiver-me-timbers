@@ -146,3 +146,33 @@ export function createMirrorPose(): MirrorPose {
 export function eyeIsAbovePlane(eyeY: number, planeY: number, margin = 0.05): boolean {
   return Number.isFinite(eyeY) && eyeY > planeY + margin;
 }
+
+// ── B125: the oblique clip knows the plane, not the surface ─────────────────
+
+/** metres: the narrowest fade at the reflected waterline (under a pixel's own footprint, see reflectionShading) */
+export const MIRROR_WATERLINE_BAND_M = 0.05;
+/**
+ * metres: the widest. The footprint is `fwidth` of a height rebuilt from the pass's depth, and next to a silhouette
+ * its neighbour is the far plane: uncapped, the fade spreads to metres and dims a reflection along its whole edge.
+ * A fade wider than a wavelet's height hides nothing that exists.
+ */
+export const MIRROR_WATERLINE_BAND_MAX_M = 0.25;
+
+/**
+ * Share of a mirror texel to keep, B125 ("boats float on their own reflection"; the decisive frame showed a hull's
+ * underside mirrored below her). CPU twin of the rule in reflectionShading.ts.
+ *
+ * The pass is clipped by three's oblique near plane at the rest plane, which removes everything below y = planeY and
+ * nothing else. The drawn sea is not that plane: where it stands above it at a hull (a crest she rides, the mound of
+ * her own displacement), the slice of hull between the plane and the real surface is UNDER water in the frame, yet it
+ * is above the clip and gets mirrored, as a band of dark underside between the boat and her reflection. A ray reflected
+ * UP from a surface cannot see geometry beneath that surface, so a texel whose real-world point `pointY` lies below the
+ * reflecting fragment's own height `surfaceY` is dropped (the fragment keeps its sky). Band-limited on the footprint
+ * of that height difference, clamped to [MIRROR_WATERLINE_BAND_M, MIRROR_WATERLINE_BAND_MAX_M].
+ */
+export function aboveSurfaceKeep(pointY: number, surfaceY: number, footprint = 0): number {
+  if (!Number.isFinite(pointY) || !Number.isFinite(surfaceY)) return 1;
+  const w = Math.min(Math.max(Number.isFinite(footprint) ? footprint : 0, MIRROR_WATERLINE_BAND_M), MIRROR_WATERLINE_BAND_MAX_M);
+  const t = Math.min(1, Math.max(0, (pointY - surfaceY + w) / (2 * w)));
+  return t * t * (3 - 2 * t);
+}
