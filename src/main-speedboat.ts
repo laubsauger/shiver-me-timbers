@@ -147,6 +147,7 @@ async function boot(): Promise<void> {
   const controls = createRaceControls({ player, camera, enabled: () => !camera.capturesInput() }); // §T.182
   const audio = createSpeedboatAudioSink({ // §T.183
     camera: app.camera, npcs, npcContact: (i) => npcs.contact(i), npcThrottle: (i) => npcs.throttle(i),
+    landmarks: world.colliders, // §T.212 gulls + bell near islands/furniture
   });
   installAudioUnlock(audio);
   const cineDrive = createCineBoot(query, waterAt); // trailer (docs/cine/speedboat-trailer-v1.md): ?cine grade BEFORE the post graph
