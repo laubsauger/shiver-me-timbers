@@ -180,11 +180,26 @@ export const GRAPHICS_FEATURE_IDS: readonly GraphicsFeatureId[] =
 
 export const SHADOW_MAP_SIZES: readonly number[] = [1024, 2048, 4096];
 
+/**
+ * MSAA counts the HDR scene pass may be built with.
+ *
+ * TWO IS ABSENT ON PURPOSE AND MUST STAY ABSENT. WebGPU guarantees only
+ * sampleCount 1 and 4 for a render attachment; 2 is rejected at texture
+ * creation on this machine, and the rejection does not stop the page — it
+ * renders an empty scene pass at a flattering frame rate. See
+ * `msaaSamples()` in core/postPipeline.ts for the captured error.
+ *
+ * 1 is absent for a duller reason: three treats 0 and 1 alike as "not
+ * multisampled", so offering both would put two labels on one image.
+ */
+export const MSAA_SAMPLES: readonly number[] = [0, 4];
+
 /** what applyGraphicsSettings needs — structurally, so no import cycle */
 export interface GraphicsApply {
   features: Record<GraphicsFeatureId, boolean>;
   shadowMapSize: number;
   foliageDensity: number;
+  msaaSamples: number;
 }
 
 /**
@@ -246,6 +261,12 @@ export function shadowMapSizeNeedsReload(size: number): boolean {
   return boot !== undefined && boot !== size;
 }
 
+/** same contract as shadowMapSize: the pass target is allocated once */
+export function msaaSamplesNeedsReload(samples: number): boolean {
+  const boot = bootValues.get(keyId('post', 'msaaSamples'));
+  return boot !== undefined && boot !== samples;
+}
+
 function captureBoot(): void {
   if (bootCaptured) return;
   bootCaptured = true;
@@ -256,6 +277,10 @@ function captureBoot(): void {
   const sky = getParamsEntry('sky');
   if (sky && 'shadowMapSize' in sky.params) {
     bootValues.set(keyId('sky', 'shadowMapSize'), sky.params.shadowMapSize);
+  }
+  const post = getParamsEntry('post');
+  if (post && 'msaaSamples' in post.params) {
+    bootValues.set(keyId('post', 'msaaSamples'), post.params.msaaSamples);
   }
 }
 
@@ -296,6 +321,10 @@ export function applyGraphicsSettings(g: GraphicsApply): void {
   }
   const sky = getParamsEntry('sky');
   if (sky && 'shadowMapSize' in sky.params) sky.params.shadowMapSize = g.shadowMapSize;
+  // construction-gated like shadowMapSize: postPipeline hands it to pass() and
+  // warns if it is written again afterwards
+  const post = getParamsEntry('post');
+  if (post && 'msaaSamples' in post.params) post.params.msaaSamples = g.msaaSamples;
   applyFoliageDensity(g.foliageDensity);
   captureBoot(); // after the write: this is the state the engine builds from
 }

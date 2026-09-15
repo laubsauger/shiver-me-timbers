@@ -11,7 +11,7 @@
  */
 import { skyParams } from '../params/sky';
 import { oceanParams } from '../params/ocean';
-import { GRAPHICS_FEATURE_IDS, SHADOW_MAP_SIZES } from './graphicsFeatures';
+import { GRAPHICS_FEATURE_IDS, MSAA_SAMPLES, SHADOW_MAP_SIZES } from './graphicsFeatures';
 import type { GraphicsFeatureId } from './graphicsFeatures';
 
 export type Quality = 'low' | 'medium' | 'high';
@@ -29,6 +29,17 @@ export interface GraphicsSettings {
   shadowMapSize: number;
   /** palm LOD distance multiplier, 0..1; 0 = no palms */
   foliageDensity: number;
+  /**
+   * MSAA samples on the HDR scene pass — 4 or 0 (2 is not allocatable on
+   * WebGPU; see MSAA_SAMPLES). Allocated at construction (reload), like
+   * shadowMapSize. SMAA runs at the end of the post chain regardless, so 0 is
+   * a softer edge rather than a raw jaggy one.
+   *
+   * MEASURED at 1080p, 8 boats, pack chase: 4 → 0 takes GPU busy from 32 ms to
+   * 15 ms and the frame from 27 fps to 42-53. It is the single largest knob in
+   * the renderer (docs/speedboat/perf-2026-09.md §4).
+   */
+  msaaSamples: number;
 }
 
 export interface AudioSettings {
@@ -393,6 +404,7 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
     features: features(['postBloom', 'postVibrance', 'postVignette']),
     shadowMapSize: 1024,
     foliageDensity: 0.35,
+    msaaSamples: 0,
   },
   medium: {
     resolutionScale: 1,
@@ -410,6 +422,7 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
     ]),
     shadowMapSize: 2048,
     foliageDensity: 0.75,
+    msaaSamples: 0,
   },
   high: {
     resolutionScale: 1,
@@ -419,6 +432,7 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
     ]),
     shadowMapSize: 4096,
     foliageDensity: 1,
+    msaaSamples: 4,
   },
 };
 
@@ -449,8 +463,15 @@ export const DEFAULT_SETTINGS: GameSettings = {
  * The cost is that audio levels and time of day reset with it. That is the
  * right trade while the alternative is a per-key migration table nobody will
  * keep current — but a bump is a user-visible reset, not a free action.
+ *
+ * v2 → v3: the tiers became REAL. `msaaSamples` is new, and low/medium now
+ * carry `resolutionScale`, reflection and spray budgets that a v2 save would
+ * have pinned to the old values forever (a persisted block beats a bundle
+ * edit). Without the bump, every existing player would have kept a 4× MSAA
+ * scene pass at the default tier — i.e. exactly the 30 fps this pass exists to
+ * fix — and no setting they could reach would have said why.
  */
-export const STORAGE_KEY = 'smt.settings.v2';
+export const STORAGE_KEY = 'smt.settings.v3';
 const QUALITIES: readonly Quality[] = ['low', 'medium', 'high'];
 
 /** minimal persistence surface so tests can inject a fake */
@@ -570,6 +591,18 @@ function asRecord(v: unknown): Record<string, unknown> {
   return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : {};
 }
 
+/**
+ * Snap to a sample count WebGPU will allocate. Not `clampNum`: 3 is inside the
+ * range and is not a sample count, and an illegal one fails at target creation
+ * — a black page one reload after the settings screen wrote it.
+ */
+function pickMsaa(v: unknown, fallback: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback;
+  let best = MSAA_SAMPLES[0];
+  for (const s of MSAA_SAMPLES) if (Math.abs(s - v) < Math.abs(best - v)) best = s;
+  return best;
+}
+
 /** snap to the nearest supported shadow map size — the GPU allocates one of these */
 function pickShadowMapSize(v: unknown, fallback: number): number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return fallback;
@@ -598,6 +631,7 @@ export function sanitizeSettings(raw: unknown): GameSettings {
       features: featureState,
       shadowMapSize: pickShadowMapSize(g.shadowMapSize, d.graphics.shadowMapSize),
       foliageDensity: clampNum(g.foliageDensity, 0, 1, d.graphics.foliageDensity),
+      msaaSamples: pickMsaa(g.msaaSamples, d.graphics.msaaSamples),
     },
     audio: {
       master: clampNum(a.master, 0, 1, d.audio.master),
@@ -668,6 +702,7 @@ export function presetIntact(g: GraphicsSettings): boolean {
   if (g.resolutionScale !== bundle.resolutionScale) return false;
   if (g.shadowMapSize !== bundle.shadowMapSize) return false;
   if (g.foliageDensity !== bundle.foliageDensity) return false;
+  if (g.msaaSamples !== bundle.msaaSamples) return false;
   return GRAPHICS_FEATURE_IDS.every((id) => g.features[id] === bundle.features[id]);
 }
 

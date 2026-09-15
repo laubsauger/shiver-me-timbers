@@ -144,6 +144,31 @@ function finite(v: number, fallback: number): number {
 /** scratch for `syncPassTarget` — mirrors PassNode's own `_size` */
 const _passSize = /*@__PURE__*/ new THREE.Vector2();
 
+/**
+ * Snap a requested MSAA count onto one WebGPU will actually allocate: 0 (no
+ * multisampling) or 4. NOT a clamp into a range — 2 is inside any sensible
+ * range and is NOT allocatable.
+ *
+ * MEASURED, not read off the spec. Asking for 2 on this machine (M3 Max,
+ * Chrome 152, Metal) produces:
+ *   The sample count (2) of the texture is not supported.
+ *    - While validating [TextureDescriptor "output-msaa"].
+ * …and then the failure CASCADES SILENTLY: the depth target fails the same
+ * way, `copyFramebufferToTexture` submits an invalid command buffer, binding
+ * 15 fails validation — and the page KEEPS RUNNING. It reported a perfectly
+ * steady 60 fps at 7 ms of GPU busy with 299 draw calls instead of 542,
+ * because the scene pass was not drawing at all. A "fast" frame that renders
+ * nothing is the worst possible failure here: every instrument agrees the
+ * change was a huge win (§Rule 8).
+ *
+ * WebGPU guarantees only sampleCount 1 and 4 for a render attachment, so 2 is
+ * not offered anywhere — not in the presets, not in MSAA_SAMPLES, not here.
+ */
+export function msaaSamples(requested: unknown): number {
+  const n = typeof requested === 'number' && Number.isFinite(requested) ? requested : 4;
+  return n >= 3 ? 4 : 0;
+}
+
 export function createPostPipeline(
   renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
@@ -164,9 +189,15 @@ export function createPostPipeline(
   // marching an unresolved buffer (§V.28). Those stages force samples: 0 and
   // pay for it in aliasing; that trade is documented at the param.
   const readsDepth = pp.aoEnabled || pp.dofEnabled;
-  const scenePass = readsDepth
-    ? pass(scene, camera, { samples: 0 })
-    : pass(scene, camera);
+  /**
+   * `pass()`'s own option is the ONLY place a sample count sticks: assigning
+   * `renderTarget.samples` later is overwritten by `PassNode.setup()` on the
+   * first render, which copies `renderer.samples` (antialias:true → 4).
+   * Clamped to a legal WebGPU count — a stray 3 would fail target creation at
+   * boot, on the frame after the settings screen wrote it.
+   */
+  const sceneSamples = readsDepth ? 0 : msaaSamples(pp.msaaSamples);
+  const scenePass = pass(scene, camera, { samples: sceneSamples });
   if (pp.aoEnabled) {
     // B124: one 8-bit receptivity target beside the colour, only while AO exists to use it (aoReceiver.ts)
     scenePass.setMRT(mrt({ output, [AO_RECEIVER_OUTPUT]: aoReceiverNode }));
@@ -184,7 +215,7 @@ export function createPostPipeline(
    * COUNT, i.e. it can invalidate the render pass rather than just look
    * wrong. So: name the gates, snapshot them, and say so once if they drift.
    */
-  const gates: ReadonlyArray<[string, boolean, () => boolean]> = [
+  const gates: ReadonlyArray<[string, boolean | number, () => boolean | number]> = [
     ['aoEnabled', pp.aoEnabled, () => pp.aoEnabled],
     ['dofEnabled', pp.dofEnabled, () => pp.dofEnabled],
     ['bloomEnabled', pp.bloomEnabled, () => pp.bloomEnabled],
@@ -193,6 +224,10 @@ export function createPostPipeline(
     ['vibranceEnabled', pp.vibranceEnabled, () => pp.vibranceEnabled],
     ['grainEnabled', pp.grainEnabled, () => pp.grainEnabled],
     ['smaaEnabled', pp.smaaEnabled, () => pp.smaaEnabled],
+    // not a boolean, but the same failure: the pass target's sample count is
+    // baked into every pipeline cache key, so a later write changes nothing
+    // until reload — and silently, which is the whole point of this block
+    ['msaaSamples', sceneSamples, () => msaaSamples(pp.msaaSamples)],
     ['grade.enabled', gradeParams.enabled, () => gradeParams.enabled],
   ];
   const drifted = new Set<string>();
@@ -439,7 +474,7 @@ export function createPostPipeline(
    * paid twice, the second time blocking. Mirror setup() first.
    */
   const syncPassTarget = (): void => {
-    scenePass.renderTarget.samples = readsDepth ? 0 : renderer.samples;
+    scenePass.renderTarget.samples = sceneSamples;
     scenePass.renderTarget.texture.type = renderer.getColorBufferType();
     // §T.124 — and the SIZE too, for the same reason and one worse one.
     // `PassNode`'s target is constructed 1×1 and only sized in its own

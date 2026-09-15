@@ -59,14 +59,17 @@ import { postParams } from '../src/params/post';
 import {
   GRAPHICS_FEATURES,
   GRAPHICS_FEATURE_IDS,
+  MSAA_SAMPLES,
   applyGraphicsSettings,
   featureNeedsReload,
   featureWired,
+  msaaSamplesNeedsReload,
   resetGraphicsBridge,
   setFeatureSink,
   shadowMapSizeNeedsReload,
   unwiredFeatures,
 } from '../src/ui/graphicsFeatures';
+import { msaaSamples } from '../src/core/postPipeline';
 import {
   createWindDial,
   driveClass,
@@ -296,7 +299,7 @@ function registerFakeSystems(): void {
   registerParams('island', { castShadows: true, lodPalmFull: 500, lodPalmCull: 1400 });
   registerParams('post', {
     enabled: false, aoEnabled: true, bloomEnabled: true,
-    vibranceEnabled: true, vignetteEnabled: true,
+    vibranceEnabled: true, vignetteEnabled: true, msaaSamples: 4,
   });
   // NOTE: no 'rain' entry — T37 has not landed, which is the unwired case
 }
@@ -311,7 +314,7 @@ describe('graphics switches reach the params key the system reads', () => {
   it('turns every wired feature off, then back on, through the registry', () => {
     const off = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) off[id] = false;
-    applyGraphicsSettings({ features: off as never, shadowMapSize: 2048, foliageDensity: 1 });
+    applyGraphicsSettings({ features: off as never, shadowMapSize: 2048, foliageDensity: 1, msaaSamples: 4 });
 
     for (const f of GRAPHICS_FEATURES) {
       const entry = getParamsEntry(f.system);
@@ -321,7 +324,7 @@ describe('graphics switches reach the params key the system reads', () => {
 
     const on = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) on[id] = true;
-    applyGraphicsSettings({ features: on as never, shadowMapSize: 2048, foliageDensity: 1 });
+    applyGraphicsSettings({ features: on as never, shadowMapSize: 2048, foliageDensity: 1, msaaSamples: 4 });
     expect(getParamsEntry('reflection')?.params.live).toBe(1); // numeric, not boolean
     expect(getParamsEntry('caustics')?.params.enabled).toBe(true);
     expect(getParamsEntry('post')?.params.enabled).toBe(true);
@@ -340,7 +343,7 @@ describe('graphics switches reach the params key the system reads', () => {
 
     const state = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) state[id] = false;
-    applyGraphicsSettings({ features: state as never, shadowMapSize: 2048, foliageDensity: 1 });
+    applyGraphicsSettings({ features: state as never, shadowMapSize: 2048, foliageDensity: 1, msaaSamples: 4 });
     expect(seen).toEqual([false]);
     off();
     expect(featureWired('rain')).toBe(false);
@@ -351,7 +354,7 @@ describe('graphics switches reach the params key the system reads', () => {
     const feats = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) feats[id] = true;
     const apply = (d: number) =>
-      applyGraphicsSettings({ features: feats as never, shadowMapSize: 2048, foliageDensity: d });
+      applyGraphicsSettings({ features: feats as never, shadowMapSize: 2048, foliageDensity: d, msaaSamples: 4 });
 
     apply(0.5);
     apply(0.5);
@@ -367,7 +370,7 @@ describe('graphics switches reach the params key the system reads', () => {
   it('flags construction-gated changes as needing a restart, and only those', () => {
     const feats = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) feats[id] = true;
-    applyGraphicsSettings({ features: feats as never, shadowMapSize: 2048, foliageDensity: 1 });
+    applyGraphicsSettings({ features: feats as never, shadowMapSize: 2048, foliageDensity: 1, msaaSamples: 4 });
 
     // caustics.enabled is read when the TSL graph is baked → restart
     expect(featureNeedsReload('caustics', true)).toBe(false); // matches boot
@@ -381,8 +384,59 @@ describe('graphics switches reach the params key the system reads', () => {
   it('writes the shadow map size the engine allocates from', () => {
     const feats = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) feats[id] = true;
-    applyGraphicsSettings({ features: feats as never, shadowMapSize: 4096, foliageDensity: 1 });
+    applyGraphicsSettings({ features: feats as never, shadowMapSize: 4096, foliageDensity: 1, msaaSamples: 4 });
     expect(getParamsEntry('sky')!.params.shadowMapSize).toBe(4096);
+  });
+
+  it('writes the MSAA sample count the scene pass is allocated from', () => {
+    const feats = {} as Record<string, boolean>;
+    for (const id of GRAPHICS_FEATURE_IDS) feats[id] = true;
+    applyGraphicsSettings({ features: feats as never, shadowMapSize: 2048, foliageDensity: 1, msaaSamples: 0 });
+    expect(getParamsEntry('post')!.params.msaaSamples).toBe(0);
+    // construction-gated exactly like shadowMapSize: it is baked into every
+    // pipeline cache key, so a change after boot must ASK for a restart rather
+    // than look applied
+    expect(msaaSamplesNeedsReload(0)).toBe(false);
+    expect(msaaSamplesNeedsReload(4)).toBe(true);
+  });
+});
+
+/**
+ * WHY THIS TEST EXISTS. Asking for sampleCount 2 is rejected by WebGPU at
+ * texture creation, and the rejection does not stop the page: measured on
+ * M3 Max / Chrome 152 / Metal, the scene pass simply stopped drawing and the
+ * frame read a steady 60 fps at 7 ms GPU with 299 draws instead of 542. Every
+ * instrument agreed it was a huge win. A preset, a slider or a persisted save
+ * must not be able to reach that value from any direction.
+ */
+describe('MSAA sample counts are the ones the GPU will actually allocate', () => {
+  it('offers only counts WebGPU guarantees for a render attachment', () => {
+    expect([...MSAA_SAMPLES]).toEqual([0, 4]);
+    expect(MSAA_SAMPLES).not.toContain(2);
+  });
+
+  it('snaps anything else onto a legal count rather than passing it through', () => {
+    expect(msaaSamples(2)).toBe(0); // the illegal rung, and the whole point
+    expect(msaaSamples(4)).toBe(4);
+    expect(msaaSamples(0)).toBe(0);
+    expect(msaaSamples(3)).toBe(4);
+    expect(msaaSamples(99)).toBe(4);
+    expect(msaaSamples(-1)).toBe(0);
+    expect(msaaSamples(NaN)).toBe(4); // unreadable → the safe, authored default
+    expect(msaaSamples(undefined)).toBe(4);
+  });
+
+  it('never persists an illegal count, whatever the save says', () => {
+    for (const bad of [2, 3, 1, 7, -4, NaN, 'four']) {
+      const s = sanitizeSettings({ graphics: { msaaSamples: bad } });
+      expect(MSAA_SAMPLES, `msaaSamples ${String(bad)} survived`).toContain(s.graphics.msaaSamples);
+    }
+  });
+
+  it('every quality bundle names a legal count', () => {
+    for (const q of ['low', 'medium', 'high'] as const) {
+      expect(MSAA_SAMPLES).toContain(QUALITY_BUNDLES[q].msaaSamples);
+    }
   });
 });
 
@@ -590,7 +644,7 @@ describe('restart prompts must reflect what the engine actually built with', () 
     const feats = {} as Record<string, boolean>;
     for (const id of GRAPHICS_FEATURE_IDS) feats[id] = true;
     feats.caustics = false; // what the save said
-    applyGraphicsSettings({ features: feats as never, shadowMapSize: 1024, foliageDensity: 1 });
+    applyGraphicsSettings({ features: feats as never, shadowMapSize: 1024, foliageDensity: 1, msaaSamples: 4 });
 
     expect(featureNeedsReload('caustics', false)).toBe(false); // this is the built state
     expect(featureNeedsReload('caustics', true)).toBe(true); // turning it back on is not

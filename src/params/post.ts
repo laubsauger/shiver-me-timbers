@@ -48,6 +48,27 @@ export const postParams = registerParams(
     // CONSTRUCTION gate (reload to change), like the rest of this block.
     smaaEnabled: true,
 
+    /**
+     * MSAA SAMPLE COUNT ON THE HDR SCENE PASS — 4 or 0 (2 is not allocatable,
+     * see `msaaSamples()` in core/postPipeline.ts). CONSTRUCTION gate:
+     * it is handed to `pass(scene, camera, { samples })`, because `PassNode
+     * .setup()` otherwise copies `renderer.samples` (antialias:true → 4) onto
+     * the target on the first render and overwrites anything assigned later.
+     *
+     * WHY THIS IS A KNOB AND NOT A CONSTANT. When post is on, post owns the
+     * output: the scene rasterises into this HDR target and SMAA reconstructs
+     * edges at the END of the chain, on the resolved image. The canvas's own
+     * MSAA is redundant in that configuration, and 4× on an rgba16float target
+     * is the most expensive single property of the frame on a tile-based GPU —
+     * it quadruples the tile memory traffic of the pass that is 75-83% of GPU
+     * busy (docs/speedboat/perf-2026-09.md §2).
+     *
+     * 4 is kept as the authored default so `?cine` and quality `high` shoot
+     * with true multisampled edges on the rigging and the thin course
+     * furniture. The speedboat's playable tiers lower it — see QUALITY_BUNDLES.
+     */
+    msaaSamples: 4,
+
     // --- AO ------------------------------------------------------------
     // OFF by default, and it is a real trade rather than a hedge:
     //  * GTAO reads the scene pass DEPTH, and a multisampled depth attachment
@@ -282,5 +303,9 @@ export const postParams = registerParams(
     vignetteStart: { min: 0, max: 1, step: 0.01 },
     vignetteEnd: { min: 0, max: 1, step: 0.01 },
     grainAmount: { min: 0, max: 0.05, step: 0.001 },
+    // 0 or 4 ONLY. A Tweakpane drag through 2 lands on a sample count this
+    // device rejects, so the value is snapped in postPipeline.msaaSamples()
+    // rather than trusted; step 4 keeps the slider off the illegal rung.
+    msaaSamples: { min: 0, max: 4, step: 4 },
   },
 );
