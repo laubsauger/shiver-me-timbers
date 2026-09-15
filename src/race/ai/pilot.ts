@@ -59,11 +59,9 @@ export const LINE_LEVELS = 5;
 const G = 9.81;
 const AVOID_R = 8;
 /**
- * THE OPENING CAUTION (s after green): the rolling start delivers the whole grid bunched onto one line, and for this long
- * the pilots keep AVOID_LAT beside and FOLLOW_GAP behind each other. Tower Reach, calm, without it: two columns merging
- * after the start gate touched and hooked a boat; two boats nose to tail through G1 (27 s after green) touched and hooked
- * the follower. Not for the whole race: on the synthetic 11-element course the same rules kept the pack from passing
- * (hothead 6 s slower than the veteran, catch-up no longer closing the pack — tests/raceAiPack).
+ * Seconds of clock AI.ROLL counts back from at green (it goes negative there and climbs to 0). §T.202 gated the opening
+ * caution's separation rules on it — a bunched grid touched and hooked boats without them — and §T.213 made both rules
+ * race-long (pass/follow), so nothing gates on it any more: it is the "since green" clock the buffer publishes.
  */
 const CAUTION_S = 40;
 /** lateral separation (m, CG to CG) a pilot keeps from a boat overlapping it along the line: two 2.5 m beams + yaw slack */

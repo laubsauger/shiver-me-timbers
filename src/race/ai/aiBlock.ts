@@ -64,7 +64,8 @@ export const AI = {
   WAKE_BRACE: 21,
   /**
    * rolling-start clock: > 0 = seconds of rolling start counted (ticks with a rolling-start speed cap in GO, since the pace
-   * boat began to move); < 0 = seconds of opening caution left after green (pilot.ts CAUTION_S); 0 on the grid and after.
+   * boat began to move); < 0 = seconds since green, counting up from −CAUTION_S (it gated the §T.202 opening caution;
+   * §T.213 made those rules race-long, so it is now a clock nothing decides on); 0 on the grid and after.
    * Was HINT (the sample-index hint), now derived from STATION.
    */
   ROLL: 22,
