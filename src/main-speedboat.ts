@@ -78,7 +78,10 @@ async function boot(): Promise<void> {
   }
   const settings = initGraphicsSettings(cineSettings(location.search)); // ?cine: the maximum tier, in memory only
   stage('renderer');
-  const app = await App.create(root);
+  // the canvas MSAA follows the same tier knob as the scene pass: with post on
+  // it is redundant (post composites through a quad), and with post off — the
+  // `low` tier — leaving it at 4× made low the SLOWEST tier of the three
+  const app = await App.create(root, { antialias: settings.get().graphics.msaaSamples > 0 });
   app.controls.enabled = false;
   stage('scene build');
   const state: SimState = createInitialState(2100);

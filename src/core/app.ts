@@ -49,7 +49,23 @@ export class App {
     window.addEventListener('resize', () => this.onResize(container));
   }
 
-  static async create(container: HTMLElement): Promise<App> {
+  /**
+   * `antialias` is the CANVAS's MSAA, which is a different buffer from the post
+   * chain's HDR scene pass (`postParams.msaaSamples`). Both default to on, and
+   * leaving the canvas one on unconditionally was a measured trap: with post
+   * OFF the canvas is the only target, so the quality tier that exists to buy
+   * frames back (`low`, which switches post off) was rendering 4× multisampled
+   * and came out SLOWER than `medium` — 30.6 fps against 59.1 at 1080p, GPU
+   * busy 29.1 against 14.1 (docs/speedboat/perf-2026-09.md §5).
+   *
+   * With post ON the canvas MSAA is redundant anyway: post owns the output and
+   * composites through a full-screen quad, so there is no geometry edge on the
+   * canvas for it to resolve — it is ~32 MB of bgra8 ×4 for nothing.
+   *
+   * Default stays `true` so the pirate and raft pages are bit-identical.
+   */
+  static async create(container: HTMLElement, options: { antialias?: boolean } = {}): Promise<App> {
+    const antialias = options.antialias ?? true;
     // The ocean material samples well past WebGPU's DEFAULT 16 sampled
     // textures per stage (3 cascades × displacement+derivatives, foam and its
     // reduced tiers, wake, seabed, shadow map, reflection, viewport colour +
@@ -90,7 +106,7 @@ export class App {
      * flag nobody remembers to set before the measurement they need it for.
      */
     const renderer = new THREE.WebGPURenderer({
-      antialias: true,
+      antialias,
       requiredLimits,
       // untyped-narrow (T2): real on WebGPURenderer's parameters at runtime,
       // not declared in three's .d.ts
