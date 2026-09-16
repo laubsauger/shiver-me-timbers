@@ -31,9 +31,14 @@ import { buildWorkerBundle, nodeSpawner } from './simWorkerNode';
 
 const SEEDS = [101, 102, 103, 104, 105, 106];
 const SEAS: SeaState[] = ['calm', 'working'];
-/** the design band, design doc §4: median P1–P8 gap ≤ 25 s over a race (3 laps); one lap of it here, and the width
- *  the measured policy holds (§T.213 sweep: median 14 s, worst 19 s over 48 races) */
-const SPREAD_BAND = 20;
+/**
+ * The design band, design doc §4: median P1–P8 gap ≤ 25 s over a race (3 laps). It is NOT a per-lap rate, and these races
+ * are one lap: spread is (grid stagger) + (the queue's own length) + (skill difference × laps) and only the last term
+ * repeats, so the same policy measures 11.5 s at one lap and 14.7 s at three (docs/speedboat/npc-ai.md §T.213 follow-up).
+ * So the bound here is the measured width of the 1-lap policy, not 25/3: §T.213 follow-up sweep, 24 seeds × two seas,
+ * median 11.5 / 11.6 s, worst 15.4 s.
+ */
+const SPREAD_BAND = 17;
 /** m of grid row spacing: the page's rolling start (race/params start.rowSpacing) */
 const GRID_GAP = 30;
 
@@ -98,12 +103,12 @@ describe('§T.213 the pack across seeds, real physics', () => {
     });
     // §T.213 acceptance: a crash in no more than 1 race in 10 (the sweep measures 2 in 48 over 24 seeds)
     expect(crashed, `${crashed} of ${runs.length} races had a crash`).toBeLessThanOrEqual(Math.floor(0.1 * runs.length));
-    // MISSED GATES ARE NOT ZERO HERE, and the bound says how far from zero (§T.213, docs/speedboat/npc-ai.md): on THIS
-    // course a boat at full catch-up risk, knocked 8–35 m off its line by traffic, crosses 0.3–6 m outside a 36 m chicane
-    // pole about once every five races (10 in 48 over 24 seeds). On Tower Reach — the course the page races, wider gates,
-    // the page's own corridors — the same policy missed nothing in 24 races. Zero here would be a bound this pilot does
-    // not meet, and pretending otherwise would hide the next regression, not catch it.
-    expect(missed, `${missed} missed gates over ${runs.length} races`).toBeLessThanOrEqual(6);
+    // MISSED GATES ARE NOT ZERO HERE, and the bound says how far from zero (§T.213, docs/speedboat/npc-ai.md). §T.213
+    // measured ~1 marginal miss per 5 races on the 36 m chicane; those went with the re-measured turning table of
+    // 2026-09-16, and the §T.213 follow-up sweep (24 seeds × two seas) now finds 2 in 48 — neither of them the chicane,
+    // both a boat 36–58 m off her line under full catch-up risk, recovering after a knock, crossing the LAST gate wide.
+    // Zero would be a bound this pilot does not meet, and pretending otherwise would hide the next regression.
+    expect(missed, `${missed} missed gates over ${runs.length} races`).toBeLessThanOrEqual(3);
   });
 
   it('the pack stays inside the design band and the archetypes are not one boat', () => {

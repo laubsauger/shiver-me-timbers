@@ -14,8 +14,8 @@
  *                       (a long sweep survives an interrupted shell)
  *
  * Prints one row per race, then per (course, sea) the §T.213 acceptance: 0 crashes in ≥ 95 % of races and never > 1,
- * every rival finished, no missed gates, and the median pack spread (the design band: P1–P8 ≤ 25 s over a 3-lap race,
- * design-doc §4 — 25/3 s per lap).
+ * every rival finished, no missed gates, and the median pack spread against the design band (P1–P8 ≤ 25 s over the race,
+ * design-doc §4 — NOT a per-lap rate: see `band` below and docs/speedboat/npc-ai.md).
  */
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -108,7 +108,11 @@ for (const course of courses) {
     const allFin = ok.every((r) => r.finished === r.racers.length);
     const missed = ok.reduce((a, r) => a + r.missed, 0);
     const spreads = ok.map((r) => r.packSpread);
-    const band = (25 / 3) * laps;
+    // THE DESIGN BAND IS THE WHOLE RACE, NOT A RATE (§T.213 follow-up, docs/speedboat/npc-ai.md): design doc §4 is
+    // "median P1–P8 ≤ 25 s over a 3-lap race". Spread is (grid stagger) + (queue length) + (skill difference × laps) and
+    // only the last term repeats, so 25/3 was never a per-lap criterion — measured, the same policy is 11.5 s at one lap
+    // and 14.7 s at three. A 1-lap sweep row is a diagnostic; the band is checked against the race the design names.
+    const band = 25;
     const pass = ok.length === rs.length && clean >= 0.95 * ok.length && worst <= 1 && allFin && missed === 0;
     if ((sea === 'calm' || sea === 'working') && !pass) failed = true;
     console.log(

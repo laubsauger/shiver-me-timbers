@@ -20,9 +20,9 @@
  *  risk     base + sector bias + catch-up (trailing ⇒ riskier LEVEL and tolerance — never more thrust: the throttle
  *           is the physics' own −0.3..1 and nothing here touches power) + recovery mood.
  *  mistakes seeded mulberry32 in the buffer: throttle fumble, missed wave read, over-speed into a corner.
- *  traffic  (§T.213) pass or follow: the boat in this lane ahead is passed on the side that fits the corridor room,
- *           PASS_LAT off ITS offset, closing no nearer than the gap until she is laterally clear; no side fits ⇒ follow at
- *           the gap. Overlapping boats keep AVOID_LAT apart, race-long. Avoidance from WORLD poses (closest approach over
+ *  traffic  (§T.213) pass or follow: the boat in this lane ahead is passed on the widest berth the corridor room has
+ *           (never below AVOID_LAT) off ITS offset, closing no nearer than the gap while she is still behind it; no side
+ *           has a hull's berth ⇒ follow at the gap. Overlapping boats keep AVOID_LAT apart, race-long. Avoidance from WORLD poses (closest approach over
  *           2 s < 8 m ⇒ lateral offset away, held 1.5 s); blocking: someone faster 4–35 m behind ⇒ offset to the inside of
  *           the next turn (× aggression). Offsets stay inside the corridor room the line was built with (clamped outright
  *           where a corridor binds) and never lead the boat's own cross-track by more than OFFSET_LEAD; blocking never
@@ -35,9 +35,11 @@
  *           it re-projects onto its racing line.
  *  wakes    (§T.207 wake field layouts, §T.213) the other boats' wake field is added to the wave read's surface (a wake
  *           crest lifts like a wave ramp). What a wake mostly does is ROLL her, so its slope across the path takes helm
- *           lock away instead of throttle (AI.WAKE_BRACE), and the lane + gap she keeps behind a boat grow as that boat
- *           slows (its pattern scales as F/ρU²): a beam's width behind a quick one, its whole Kelvin wedge behind one at
- *           hump speed.
+ *           lock away instead of throttle (AI.WAKE_BRACE), and how wide she goes by a boat grows as that boat slows (its
+ *           pattern scales as F/ρU²): a beam's width past a quick one, its whole Kelvin wedge past one at hump speed.
+ *           The GAP she holds behind it runs from FOLLOW_GAP on a straight to that wedge-scaled room as the line bends
+ *           (GAP_CORNER_S ahead) — a wake astern is a corner problem, and a gap held flat is the pack's spread; the
+ *           SPEED cap that matches her to a boat ahead is the hull's own lane (LANE_HALF), never its wake.
  *  trim     neutral at launch, bow down in corners and lifts, bow up on a fast straight, slewed; returned in
  *           `PilotOutput.trim`, the seam's unit trim (−1..1) for `unitTrimToRad`.
  */
@@ -135,6 +137,8 @@ const BRACE_RELEASE = 8;
 /** line curvature (1/m) over the next CORNER_S of travel above which the pilot counts it as cornering */
 const CORNER_K = 1 / 400;
 const CORNER_S = 2;
+/** s of travel the FOLLOWING GAP looks ahead over: the room behind a boat has to be open before the helm goes on */
+const GAP_CORNER_S = 3;
 const HEEL_CORNER = (10 * Math.PI) / 180;
 /** unit trim: bow down in a corner / rough water (measured flat water at −0.25: R −3 % at 18–30 m/s), bow up on a fast straight
  * (top speed 33.9 → 35.1 m/s at +0.3; +1.0 blows out to 29.7), slewed at TRIM_RATE /s */
@@ -518,8 +522,15 @@ export class RacePilot {
     // cornering: the line bends within CORNER_S of travel, or she is already laid over
     const tilt = Math.acos(clamp(upY, -1, 1));
     let cornerK = 0;
-    for (let q = 0, c = Math.ceil((V * CORNER_S) / line.ds); q <= c; q++) cornerK = Math.max(cornerK, Math.abs(line.kappa[(idx + q) % line.n]));
+    // and the same read over GAP_CORNER_S, for how much room she wants behind a boat by the time the line bends
+    let gapK = 0;
+    for (let q = 0, c = Math.ceil((V * GAP_CORNER_S) / line.ds), cc = Math.ceil((V * CORNER_S) / line.ds); q <= c; q++) {
+      const k = Math.abs(line.kappa[(idx + q) % line.n]);
+      if (q <= cc && k > cornerK) cornerK = k;
+      if (k > gapK) gapK = k;
+    }
     const cornering = cornerK > CORNER_K || tilt > HEEL_CORNER;
+    const cornerNear = clamp(Math.max(gapK / CORNER_K, tilt / HEEL_CORNER), 0, 1);
     const wakes = L.spec.wakeField === true;
     /** the boat in this lane ahead: how far along, across, its speed along this line and over ground, its lane and how slow it is */
     let aheadAlong = Infinity;
@@ -613,8 +624,21 @@ export class RacePilot {
     // side fits ⇒ follow at the gap (longer in a corner: the stern hollow)
     let passTarget = NaN;
     if (aheadAlong < Infinity) {
-      const passLat = Math.max(AVOID_LAT, aheadLane + 2);
-      const gapM = wakes ? WAKE_GAP_MIN + WAKE_GAP_SLOW * aheadSlow : FOLLOW_GAP;
+      // HOW WIDE SHE WANTS TO GO BY, AND HOW WIDE THE CORRIDOR CAN GIVE (§T.213 follow-up). The berth she wants is that
+      // boat's lane plus slack — its beam when it is quick, its whole Kelvin wedge at hump speed. That wedge is 15–20 m
+      // by 40 m astern and the corridor is ROOM_CAP (12 m) wide, so "no side fits ⇒ follow" refused the pass exactly
+      // where passing matters: behind a boat at hump speed, in a corner queue. She now takes the widest berth the
+      // corridor HAS, never less than AVOID_LAT — the separation the alongside rule already keeps between two hulls.
+      // Crossing the wedge at that width is what the brace, the roll damper and the directional heel limit are for.
+      const wantLat = Math.max(AVOID_LAT, aheadLane + 2);
+      // THE WAKE GAP IS FOR THE CORNER, NOT THE STRAIGHT (§T.213 follow-up). What it was measured against is a hull in
+      // another's stern hollow WITH HELM ON — §T.207's lee 16 m behind a blocker through a sweeper went 18° → 38° of heel
+      // in 0.4 s — while a straight-line wake crossing peaks at 8° of tilt at any speed (§T.213 #3, both measured). Held
+      // flat, that gap IS the pack spread: six of them down a queue is 150–270 m, and 270 m at 27 m/s is 10 s of a 13 s
+      // finish spread ([M] with the cap removed entirely the spread falls to 7.3 s — and the boats touch 1034 times in
+      // 24 races instead of 231, so the cap has to stay; what can go is holding a corner's room down a straight).
+      // It opens over GAP_CORNER_S of travel, so the room is there before the helm is.
+      const gapM = wakes ? FOLLOW_GAP + (WAKE_GAP_MIN - FOLLOW_GAP + WAKE_GAP_SLOW * aheadSlow) * cornerNear : FOLLOW_GAP;
       const uP = (s + V) / line.ds;
       const vProf = lv.speed[((Math.floor(uP) % line.n) + line.n) % line.n];
       const jOff = xte + aheadLat;
@@ -623,15 +647,22 @@ export class RacePilot {
         let k = 0;
         for (let q = 0, span = Math.round(150 / line.ds); q < span; q++) k += line.kappa[(idx + q) % line.n];
         for (const side of [1, -1]) {
-          const tgt = jOff + side * passLat;
-          if (tgt < -Math.max(0, roomP - 1) || tgt > Math.max(0, roomS - 1)) continue;
+          const avail = side > 0 ? Math.max(0, roomS - 1) - jOff : jOff + Math.max(0, roomP - 1);
+          if (avail < AVOID_LAT) continue; // not even a hull's berth on this side
+          const tgt = jOff + side * Math.min(wantLat, avail);
           if (Number.isNaN(best) || Math.abs(tgt - offset) < Math.abs(best - offset) - 0.5 || (Math.abs(Math.abs(tgt - offset) - Math.abs(best - offset)) <= 0.5 && Math.sign(k) === side)) best = tgt;
         }
         passTarget = best;
       }
-      // still in its lane ⇒ close no nearer than the gap; the cap is never below the leader's own pace (a cap under it
-      // compounds down a queue into a standstill, and a queue crawling at 6 m/s is a queue of hump-speed wakes)
-      if (Math.abs(aheadLat) < aheadLane) followCap = aheadU + FOLLOW_CLOSE * (aheadAlong - gapM);
+      // still behind it ⇒ close no nearer than the gap; the cap is never below the leader's own pace (a cap under it
+      // compounds down a queue into a standstill, and a queue crawling at 6 m/s is a queue of hump-speed wakes).
+      // THE SPEED CAP USES THE HULL'S OWN LANE, NOT ITS WAKE (§T.213 follow-up): being inside a boat's wedge but clear of
+      // the boat is not a reason to match its speed — it is a reason to be out of the wedge, which the berth above and
+      // the brace below are for. [M] with the wedge gating the cap, every grid row behind the leader lost ~2 s of lap
+      // per row, cumulatively (+2.4 s row 1 … +6.4 s row 3 over 6 seeds, wake field on vs off), the finishing order was
+      // the grid order in all 24 Tower Reach races, and the profile speed the traffic cap took off a follower doubled
+      // (0.9–1.8 → 2.3–2.9 m/s). Nothing passed, and the spread WAS that loss.
+      if (Math.abs(aheadLat) < LANE_HALF) followCap = aheadU + FOLLOW_CLOSE * (aheadAlong - gapM);
       if (followCap < Infinity) followCap = Math.max(followCap, aheadSpeed - FOLLOW_SLACK, Math.min(aheadU, FOLLOW_FLOOR));
     }
     // held up in a lane by a slower boat: pull out to pass (the side away from it), the follow cap lifts once clear of its lane

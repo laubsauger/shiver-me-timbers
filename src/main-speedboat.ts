@@ -166,6 +166,8 @@ async function boot(): Promise<void> {
     ? createAutopilotControls({
         setup: pilotSetup, index: npcs.playerIndex, boats: NPC_COUNT + 1, lockRad: hull.drives[0].maxSteerRad, sea: sea.cpuOcean,
         time: () => state.time, world: () => session.snapshot, standing: () => session.playerAiIn, propImmersion: () => player.hw.propImmersion,
+        // the rivals' wakes she already floats on, read by her pilot as a rival's WAKE WORLD (§T.213 follow-up)
+        wakeSources: () => (session.rivalWake ? { rec: session.rivalWake, count: NPC_COUNT } : null),
       })
     : null;
   const session = createRaceSession({

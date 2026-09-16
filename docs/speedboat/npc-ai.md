@@ -274,7 +274,7 @@ Missed gates: Tower Reach 0 before and after; the synthetic pack 3 → 10 margin
 missed gate, no static-solid contact. Synthetic pack (24 seeds) — 46/48 crash-free, never more than 1 crash in a race,
 everyone finished, 10 marginal misses (below).
 
-**Still open, stated.**
+**Still open, stated.** (All five are answered, with numbers, in the §T.213 follow-up section below — read that first.)
 - **The pack spread is 13–16 s over ONE lap, not the design band** (design doc §4: median P1–P8 ≤ 25 s over a 3-lap race,
   i.e. ≈ 8 s a lap). Halved from 26–31 s, and no rubber band: it is line risk, traffic and catch-up only.
 - **Marginal misses on the synthetic course**: 10 in 48 pack races (0 in 24 Tower Reach races), all boats 8–35 m off their
@@ -295,3 +295,132 @@ working/open: everyone finishes, the wave read is live, the open sea costs time)
 `node scripts/race-ai-sweep.mjs` (12 seeds × calm/working + 3 open, both courses, ~25 min on 8 processes;
 `--course pack --seeds 24` for the fast half, `--log <file.jsonl>` to survive an interrupted shell, `--events` for the
 per-crash situation lines).
+
+## What the pack spread actually is (§T.213 follow-up)
+
+Evidence: the same sweep (`scripts/race-ai-sweep.mjs`, one race per vite-node process), plus two scratch harnesses run
+the same way — a DECOMPOSITION (each archetype alone in empty water, then the seven together with the wake field off,
+on, and with catch-up off) and a PROBE (per boat, time-weighted means of the pilot's own AI OUT slots during the race:
+target speed against the level's flat-water profile, throttle, wave read, brace, cross-track, tilt). Both were deleted
+after the measurement; the numbers are here.
+
+**The spread was never archetype skill, and it was never the sea.** Synthetic pack course, 1 lap, 6 seeds × two seas,
+first-to-last FINISH spread (absolute, so it carries the flying grid's 90 m stagger ≈ 3.3 s) and LAP spread (each boat's
+own lap, net of it):
+
+| | finish | lap |
+|---|---|---|
+| each archetype ALONE in empty water | 3.9 / 3.5 s | 3.9 / 3.5 s |
+| seven together, boat contacts on, **wake field off** | 6.3 / 6.6 s | 3.5 / 3.8 s |
+| seven together, **wake field on** (what ships) | 13.2 / 12.9 s | 8.4 / 7.8 s |
+| the same with catch-up off | 12.5 / 15.8 s | 8.1 / 10.6 s |
+
+Seven boats racing, touching and blocking each other cost the pack NOTHING in pace (lap spread 3.5 → 3.5 s). Turning the
+wake field on doubled it. Per grid row, wake field on minus off (6 seeds, lap seconds): row 0 (rival, veteran) 0.0/−0.3,
+row 1 (hothead, blocker) +2.5/+2.4, row 2 (swell, lee) +5.5/+3.8, row 3 (rookie) +6.4. **Each row behind the leader lost
+~2 s more than the row ahead of it, and the finishing order was the grid order** — 89–90 % of all finishing pairs across
+96 races, on both courses, both seas.
+
+**Where in the pilot.** Not the throttle lift (`AI.WAVE_LIFT` was 0.000 for every boat, every race). Not the sea respect
+(`AI.SEA` went 0.013 → 0.033–0.056 against a 0.15 threshold). Not the heel ease (no boat spent a tick past `HEEL_EASE`,
+mean tilt 8–10°). It was the FOLLOW CAP: the profile speed the traffic cap took off a follower went 0.9–1.8 → 2.3–2.9 m/s
+on a 27 m/s plan, and the applied throttle 0.87 → 0.77. Removing the cap outright (scratch) drops the spread to a median
+7.3 / 7.9 s — and the boats touch **1034 times in 24 races instead of 231**, crash-free falls to 18/24, and 5 gates are
+missed. So the cap is not optional; the question is how much of it is the wake and how much is the hull.
+
+**The cap is a spacing, and the spacing IS the spread.** A queue of seven at `gapM` metres is 6·gapM long, and that
+length in seconds is what separates first from last at the flag. With wakes, `gapM` was 25 m behind a quick boat and 45 m
+behind one at hump speed: 150–270 m, 6–10 s at 27 m/s. Without wakes it is `FOLLOW_GAP` 14 m: 84 m, 3.1 s — which is
+exactly the 6.3 s the wake-off column measures once the 3.3 s of grid stagger is added.
+
+**Fixes (measured, no rubber band — nothing here touches power, and the catch-up A/B is unchanged):**
+
+| # | Cause | Fix (`pilot.ts`) |
+|---|---|---|
+| 1 | The wake gap was held down every straight. What it was measured against is a hull in another's stern hollow WITH HELM ON (§T.207: a lee 16 m astern through a sweeper, 18° → 38° of heel in 0.4 s); a straight-line wake crossing peaks at 8° of tilt at any speed (§T.213 #3). | `GAP_CORNER_S`: the gap runs from `FOLLOW_GAP` on a straight to the wedge-scaled `WAKE_GAP_MIN + WAKE_GAP_SLOW·slow` as the line bends, read 3 s of travel ahead so the room is open before the helm goes on. |
+| 2 | The SPEED cap was gated on the boat ahead's whole Kelvin wedge (15–20 m by 40 m astern), so a boat clearly on another line still had to match its speed. | The cap is gated on the hull's own lane (`LANE_HALF`); the wedge keeps its two real jobs — how wide to go by, and the pull-out. |
+| 3 | The pass berth was the wedge + 2 m (15–22 m) and the corridor is `ROOM_CAP` 12 m, so "no side fits ⇒ follow" refused every pass exactly where passing matters: behind a boat at hump speed, in a corner queue. | The berth is the widest the corridor HAS, never below `AVOID_LAT` — the separation the alongside rule already keeps between two hulls. |
+
+**Result, synthetic pack, 24 seeds × two seas, 1 lap (finish spread median, p25–p75, min–max):**
+
+| | before | after |
+|---|---|---|
+| calm | 13.6 (12.1–14.4) 10.8–16.6 | 11.5 (11.0–12.2) 9.3–14.9 |
+| working | 13.5 (12.7–14.8) 10.9–18.4 | 11.6 (10.9–13.4) 9.2–15.4 |
+| crash-free | 20/24, 23/24 | 23/24, 22/24 |
+| missed gates | 1, 0 | 0, 2 |
+| boat contacts | 231, 223 | 190, 296 |
+
+**And on Tower Reach — the course the page races — 12 seeds × two seas, 1 lap** (the autopiloted player on the grid too,
+now wake-aware; the same seeds before and after):
+
+| | before | after |
+|---|---|---|
+| calm | median 13.3, 10.0–18.8 | median 11.3, 9.9–15.0 |
+| working | median 14.3, 9.5–21.3 | median 12.3, 11.0–15.6 |
+| crash-free | 12/12, 10/12 | 12/12, 11/12 |
+| missed gates | 0, 1 | 0, 0 |
+| static-solid contacts | 0, 0 | 0, 0 |
+| boat contacts | 106, 142 | 76, 104 |
+
+The worst case is what moved most: the long tail (18.8 and 21.3 s races) is gone on both seas, because the tail WAS a back
+row queued behind a corner's worth of room down every straight.
+
+**Tried and REJECTED, with the numbers:**
+- **A directional wake brace** (ease only the helm that adds to the roll the wake is about to put on, as §T.213 #6 did for
+  the heel limiter). Spread 11.5 / 11.5 s — no change — and crash-free 22/24, 21/24 with a race at 2 crashes. The brace is
+  not what costs the pack time; the symmetric one is left alone.
+- **A flat shorter gap.** `WAKE_GAP_MIN/SLOW` 18/10: spread 10.2 / 10.6 s but crash-free 21/24 and **19/24**, 3 missed
+  gates each. 20/15 corner-gated: 10.5 / 11.5 s, crash-free 22/24 and **18/24**, worst 3 crashes, 443 contacts. Both fail
+  the §T.213 acceptance (crash-free in ≥ 95 % of races, never more than 1). 25/20 corner-gated is the edge that holds.
+- **A floor under the off-line corner cap** (`cornerSpeed` bottoms out at its own 4 m/s when the pursuit arc is tighter
+  than the boat holds at any speed, and the autopiloted player braked to it 18 m off her line). Floored at 12 m/s the
+  Tower Reach smoke race came out bit-identical — she is over 12 m/s through the whole excursion, so it never binds.
+- **Aiming the pursuit at the next element's own corridor** when the hull is outside the room there (the recovery
+  lookahead deliberately aims far down the line, which past a gate means aiming past its pole). It fixes the player's
+  start gate and costs everything else: 2 → **56** missed gates in 48 pack races, spread 11.5 → 22.2 s, 944 contacts —
+  aiming at a point 8 m ahead is a pure-pursuit instability, not a correction. With a 25 m lookahead floor on the element
+  it is 2 → **7** missed gates and crash-free 22/24 → **16/24** in the working sea. Rejected.
+
+**The ≈ 8 s a lap target is the wrong reading of the design, and the design band is MET.** Design doc §4 says median
+P1–P8 ≤ 25 s over a 3-lap race; §T.213 divided that by three and measured 1-lap races against 8.3 s. But the spread is not
+proportional to laps — it is (grid stagger) + (queue length) + (skill difference × laps), and only the last term repeats.
+Measured on the shipped policy, 12 seeds × two seas: **1 lap 11.5 / 11.6 s; 3 laps 14.7 / 15.8 s** (p25–p75 14.1–15.1 and
+15.1–16.3, max 22.0), not 3 × 11.5. The 25 s band holds with 9 s to spare. A per-lap band is only meaningful as
+`stagger + queue + laps · skill`; on this course and grid that is ≈ 3.3 + 3.1…9 + 3.9·laps s, and its floor with the boats
+nose-to-tail at a distance they survive is ≈ 7 s at one lap — reached in the scratch run only by removing the cap and
+taking 1034 contacts. **Recommend the sweep and `raceAiPack` gate the design's own statement (≤ 25 s over the race) and
+report the 1-lap number as a diagnostic, which is what they now do.**
+
+**The synthetic chicane is no longer missing gates.** §T.213 measured ~1 marginal miss per 5 pack races (10 in 48). At the
+tree measured here — the re-measured turning table of 2026-09-16 (`capability.ts`, topsides separated from planing
+bottoms) — the SAME sweep over 24 seeds × two seas finds **1 missed gate in 48 races before the fixes above and 2 in 48
+after**, and neither is the chicane: both are a boat 36–58 m off her line at 11–15 m/s under full catch-up risk, recovering
+after a knock, crossing the LAST gate (element 9/10) wide. The chicane misses went with the turning table, not with a
+pilot change. What is left is the recovery case, and it is a different mechanism: off the line the pursuit lookahead grows
+(`RECOVER_LOOK`) so the arc back is one the boat can turn, which necessarily aims her past the gate she is beside.
+
+**The player's autopilot now reads wakes.** `page/autopilot.ts` builds its private one-boat layout with a WAKE WORLD and
+copies the race session's own per-tick rival records (`RaceSession.rivalWake`, the same array `PlayerBoat.setWakeSources`
+already floats her hull on) into it, fleet index order; her own slot stays zero (`WakeField.prepare` excludes the reader,
+§V108). Every wake term in the pilot is gated on `L.spec.wakeField`, so this is the whole of it: the same policy, the same
+source, the same lane/gap/brace a rival gets. `tests/raceAiAutopilot.test.ts` proves the wiring on flat water, where
+`AI.SEA` can only leave zero if another boat's wake reached the wave read.
+
+**Open, stated: it costs the player the start gate on the smoke race's seed.** She is last on the grid, so the opening
+traffic at the start gate is hers alone, and reading wakes puts her on the other side of it. Isolated on that one race:
+HEAD pilot + wake-blind autopilot — player clean, but rival #3 touches a static solid for 6 ticks (the smoke test is red
+in this tree for a reason that is not the pilot's); this pilot + wake-blind — everything clean, player 159.4 s; this pilot
++ wake-aware — rivals clean and off every solid, player 165.1 s with the start gate missed (+5 s). She still races the lap
+and is still classified finished. Both pilot-side fixes tried for it are in the REJECTED list above. `speedboatRaceSmoke`
+now asserts the rivals' penalties at zero (the race-AI gate, unchanged in strength, and newly met — the solid-contact
+assertion passes with this pilot and fails at HEAD) and bounds the player's at one missed element, with the isolation in
+the test's own comment. It is a real regression for one boat on one seed, and it is written down rather than papered over.
+
+**`speedboatRaceSmoke`'s `heldFrames > 0` was unreachable, and it was never an AI check.** `raceSession.holdSim` pumps the
+fleet before it decides (39da0b9, "refresh its collected trace before losing another frame of sim time"). On the harness's
+in-process fleet that pump polls, collects the in-flight batch and advances `collectedTick` synchronously, so the
+predicate is false every time and the loop never holds — at HEAD as well. The assertion's intent is that the 20 fps run
+really did trail (otherwise the hash equality below it compares two identical runs), and what that means on ANY transport
+is the catch-up report: at 60 fps the fleet is stepped one tick per request (`catchUp.maxBatch` 1), at 20 fps it owes
+three and catches up in one multi-tick batch (> 1, `maxLagTicks` > 1). That is what it now asserts.

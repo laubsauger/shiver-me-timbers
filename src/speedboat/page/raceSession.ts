@@ -300,6 +300,12 @@ export function createRaceSession(d: RaceSessionDeps) {
     playerAiIn,
     /** the tick-start WORLD snapshot, fleet index order (valid after `controls`) */
     snapshot,
+    /**
+     * §T.207 the rivals' wake records for this tick (fleet index order from 0, `nNpc` of them) — the same array the
+     * player's own hull floats on (`setWakeSources`). Valid after `controls`; empty when the fleet carries no wakes.
+     * An autopilot pilot reads it as WAKE WORLD so it is no more wake-blind than a rival (§T.213 follow-up).
+     */
+    rivalWake: npcs.wakes ? rivalWake : null,
     gridOrder,
 
     /** loop predicate: hold the whole frame while a frame of ticks could outrun the collected rival trace */

@@ -106,6 +106,8 @@ export interface SliceOptions {
 export interface Slice {
   session: RaceSession;
   npcs: NpcFleet;
+  /** the player's own pilot (§T.191 autopilot): `readAi(AI.*)` reads its block as `npcs.fleet.readAi` reads a rival's */
+  autopilot: ReturnType<typeof createAutopilotControls>;
   player: ReturnType<typeof createPlayerBoat>;
   mirror: CpuOcean;
   fetch: FetchField;
@@ -184,6 +186,7 @@ export async function runSlice(o: SliceOptions): Promise<SliceResult> {
   const autopilot = createAutopilotControls({
     setup: fx.pilot, index: npcs.playerIndex, boats: NPCS + 1, lockRad: hull.drives[0].maxSteerRad, sea: mirror,
     time: () => time, world: () => session.snapshot, standing: () => session.playerAiIn, propImmersion: () => player.hw.propImmersion,
+    wakeSources: () => (session.rivalWake ? { rec: session.rivalWake, count: NPCS } : null),
   });
   session = createRaceSession({
     course: { ...fx.course, laps: o.laps ?? fx.course.laps }, hull, player, npcs, controls: autopilot,
@@ -194,7 +197,7 @@ export async function runSlice(o: SliceOptions): Promise<SliceResult> {
       if (slice) o.onPlayerTeleport?.(tick, pose, slice);
     },
   });
-  slice = { session, npcs, player, mirror, fetch, simWorld, tick, time };
+  slice = { session, npcs, autopilot, player, mirror, fetch, simWorld, tick, time };
   session.start(0);
   const sl = slice as Slice;
   const tpf = o.ticksPerFrame ?? 1;
