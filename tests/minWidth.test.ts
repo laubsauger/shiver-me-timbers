@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { BoxGeometry, CylinderGeometry, Matrix4, Vector3, type BufferGeometry } from 'three';
-import { computeThinAxes, minWidthResponse, projectedWidthPxAt, THIN_MIN_WIDTH_PX, type ThinAxisGeometry } from '../src/core/minWidth';
+import { computeThinAxes, coverageMode, minWidthResponse, projectedWidthPxAt, thinMinWidthPx, THIN_BLEND_RENDER_ORDER, THIN_MIN_WIDTH_PX, type ThinAxisGeometry } from '../src/core/minWidth';
 
 /** concatenate geometries into one indexed soup, the way a GLB primitive joins every member of a material */
 function soup(parts: BufferGeometry[]): ThinAxisGeometry & { pos: number[] } {
@@ -86,5 +86,43 @@ describe('minimum projected width', () => {
     for (let i = 0; i < g.pos.length / 3; i++) if (axes[i * 4 + 3] > 0) radii.add(Math.round(axes[i * 4 + 3] * 1000));
     // both members found, each with its own half-width (box half-diagonals 0.085 and 0.057)
     expect([...radii].sort()).toEqual([57, 85]);
+  });
+});
+
+/**
+ * §T.215. The widening is only half the technique; the coverage it hands back has to LAND somewhere. `hash` spends it
+ * as one binary decision per pixel per frame, which is a picture only after something averages those decisions —
+ * and since T214 the playable tiers run the scene pass at `samples: 0`, where nothing does. Measured at 1080p on the
+ * radio mast: MSAA 0 gives scattered isolated dots, the same frame at MSAA 4 gives a continuous tower.
+ */
+describe('§T.215 coverage mode follows what the frame can resolve', () => {
+  it('is analytic with no multisampling and hashed with it', () => {
+    // no resolve exists at samples 0 — not SMAA (it cannot rebuild a one-bit-per-pixel signal), not a downscale
+    expect(coverageMode(0)).toBe('blend');
+    // 4 is the only other count WebGPU will allocate here (core/postPipeline.msaaSamples)
+    expect(coverageMode(4)).toBe('hash');
+    // a garbage sample count must fall on the mode that needs nothing, never on the one that needs a resolve
+    expect(coverageMode(Number.NaN)).toBe('blend');
+    expect(coverageMode(-1)).toBe('blend');
+  });
+
+  it('the width floor rises when there is one sample per pixel', () => {
+    // 1.25 px is a floor on WIDTH, not on a pixel's coverage: a diagonal band that wide still hits some rows' pixel
+    // centres and misses others, and at one sample each hit is full contrast. Measured on the radio mast at 1080p,
+    // the crop's full-contrast fraction falls 1.2 % → 0.6 % between these two floors, at no measurable GPU cost.
+    expect(thinMinWidthPx(4)).toBe(THIN_MIN_WIDTH_PX);
+    expect(thinMinWidthPx(0)).toBeGreaterThan(THIN_MIN_WIDTH_PX);
+    // energy is conserved by the coverage payback, so a wider floor is a FAINTER line, not a fatter one — but past
+    // ~4 px a mid-distance lattice reads as a wash rather than a structure, so the floor is bounded on both sides
+    expect(thinMinWidthPx(0)).toBeLessThanOrEqual(4);
+    // a garbage sample count must land on the floor that needs no resolve, like coverageMode above
+    expect(thinMinWidthPx(Number.NaN)).toBe(thinMinWidthPx(0));
+  });
+
+  it('blended coverage draws before the ocean, so the sea still refracts the drowned legs', () => {
+    // the ocean is a transparent, depth-writing mesh at renderOrder 0; the hull volume mask caps sit at −1 and the
+    // prop bubbles at −0.5 (ocean/hullVolumeMask.ts). A lattice that leaves the opaque pass must be ahead of all of
+    // them or the pylon legs below the waterline vanish out of the sea's refraction copy.
+    expect(THIN_BLEND_RENDER_ORDER).toBeLessThan(-1);
   });
 });

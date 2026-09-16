@@ -15,10 +15,18 @@
  * is right in the half-res reflection pass, at any FOV and at the trailer's 640×360 look passes and 1080p master.
  *
  * COVERAGE ON OPAQUE GEOMETRY. Ropes and the course cables are their own transparent meshes and blend it (`blend`).
- * The lattice lives in the course's opaque BatchedMeshes (the ocean's refraction copy must still see the drowned
- * legs), so there it is a hashed discard (`hash`): a per-pixel interleaved-gradient threshold stepped by the golden
- * ratio each frame. The trailer's jittered subframes are separate frames, so N of them resolve coverage in ~1/N steps
- * per pixel, and live play averages it over frames — rather than the fixed dash the rasteriser made.
+ * The lattice can also take a hashed discard (`hash`): a per-pixel interleaved-gradient threshold stepped by the
+ * golden ratio each frame. The trailer's jittered subframes are separate frames, so N of them resolve coverage in
+ * ~1/N steps per pixel — rather than the fixed dash the rasteriser made.
+ *
+ * `hash` IS A STOCHASTIC MASK AND SOMETHING MUST RESOLVE IT (§T.215). It is ONE binary decision per pixel per frame.
+ * It only becomes partial coverage if the frame averages those decisions: multisampling in the scene pass, or the
+ * trailer's jittered subframes. Since T214 the playable tiers build the scene pass at `samples: 0` and there is no
+ * temporal accumulation, so the hash is the whole of what the player sees — measured at 1080p on the radio mast, the
+ * lattice came out as scattered isolated dots (1.3 % of the crop at full member contrast, the tower unreadable) where
+ * the SAME frame at MSAA 4 reads as a continuous grey structure at 0.4 %. `blend` is analytic and needs nothing to resolve it, at the
+ * price of the transparent queue; {@link THIN_BLEND_RENDER_ORDER} is what keeps that price at zero here. Callers pick
+ * the mode from the sample count they are actually drawn with, they do not pick a favourite.
  *
  * WHERE THE AXIS COMES FROM. The course GLBs are triangle soups: flat-shaded faces, members joined per material, the
  * far LODs decimated. {@link computeThinAxes} rebuilds the members on the CPU once at load (welded shells, then
@@ -64,11 +72,63 @@ type TSLNode = any;
 export const THIN_AXIS_ATTRIBUTE = 'thinAxis';
 
 /**
- * Never draw a member narrower than this. A little over a pixel, not exactly one: the half-width is the member's
- * LARGEST offset from its axis, and an L-angle or a hexagonal tube seen along a flat presents 0.7–1× of that, so a
- * 1 px floor would still leave sub-pixel slivers on some rows.
+ * Never draw a member narrower than this, WHEN THE PASS IS MULTISAMPLED. A little over a pixel, not exactly one: the
+ * half-width is the member's LARGEST offset from its axis, and an L-angle or a hexagonal tube seen along a flat
+ * presents 0.7–1× of that, so a 1 px floor would still leave sub-pixel slivers on some rows.
+ *
+ * This value was tuned against a 4× scene pass and it does NOT survive one sample per pixel — see
+ * {@link thinMinWidthPx}.
  */
 export const THIN_MIN_WIDTH_PX = 1.25;
+
+/**
+ * The floor for a pass of `sceneSamples` — §T.215, MEASURED, not derived.
+ *
+ * 1.25 px is a floor on the member's WIDTH, not on its coverage of a pixel: a diagonal band a pixel and a quarter
+ * wide still hits some rows' pixel centres and misses others, and at one sample per pixel each hit is full contrast.
+ * At 4× the resolve turns those into greys and the picture holds; at 0× it is a field of isolated hard dots, which is
+ * exactly what the user reported and what the T214 default made visible. Measured on the radio mast at 1080p (the
+ * sweep and the crops are docs/speedboat/perf-2026-09.md §9.3), fraction of the crop at full member contrast:
+ *
+ *   floor px   1.25   2.0   2.5   3.0   4.0   6.0      MSAA 4 at 1.25
+ *   hard dark  1.2 %  0.9   0.8   0.8   0.6   0.3      0.6 %
+ *
+ * and GPU busy is FLAT across that sweep (14.0–15.2 ms, i.e. inside the noise of one frozen frame): the members this
+ * touches are far, so widening them costs a few hundred pixels. 4.0 is where the dot field stops reading as a dot
+ * field. 6.0 is cleaner still and was not taken: the widening is paid back as coverage, so a wider floor is a fainter
+ * line, and past ~4 px a mid-distance lattice starts to read as a wash rather than as a structure.
+ *
+ * The residual dark dots at 4.0 are members {@link computeThinAxes} did not claim (the tower's C_Steel slot carries
+ * axes on 12.8 % of its vertices against the mast's 78 %) — a separate defect, recorded, not fixed here.
+ */
+export function thinMinWidthPx(sceneSamples: number): number {
+  return Number.isFinite(sceneSamples) && sceneSamples > 0 ? THIN_MIN_WIDTH_PX : 4;
+}
+
+/**
+ * Transparent `renderOrder` for geometry that WAS opaque and now blends its coverage (`blend` on a lattice).
+ *
+ * The ocean is a transparent, DEPTH-WRITING mesh at order 0, and the refraction copy it takes of the framebuffer is
+ * why the lattice was opaque in the first place: the sea must still see the drowned pylon legs through the water.
+ * Everything at a NEGATIVE order draws before it and is therefore in that copy — the hull volume mask caps are at
+ * −1 and the prop bubbles at −0.5 (ocean/hullVolumeMask.ts), so −2 sits ahead of every existing pre-ocean consumer.
+ * With `depthWrite` left on, a member whose coverage is 1 (anything at or above {@link THIN_MIN_WIDTH_PX} on screen,
+ * i.e. everything the camera is near) draws exactly as it did in the opaque pass.
+ */
+export const THIN_BLEND_RENDER_ORDER = -2;
+
+/**
+ * Which coverage mode a pass of `sceneSamples` can actually RESOLVE — not which reads better on a still.
+ *
+ * `hash` is one binary decision per pixel per frame and is partial coverage only once the frame averages those
+ * decisions. Multisampling averages them (the resolve), and so do the trailer's jittered subframes. Nothing else in
+ * this engine does: there is no temporal accumulation, and neither SMAA nor a downscale can rebuild a signal that was
+ * quantised to one bit per pixel — measured, SMAA leaves the dots exactly where they are and 1.5× supersampling just
+ * makes more of them. So at `samples: 0` the honest mode is the analytic one.
+ */
+export function coverageMode(sceneSamples: number): 'hash' | 'blend' {
+  return Number.isFinite(sceneSamples) && sceneSamples > 0 ? 'hash' : 'blend';
+}
 
 /** divisor guard, CPU (same value as the rope mirror, src/ropes/phoneWireAA.ts) */
 const EPS = 1e-6;

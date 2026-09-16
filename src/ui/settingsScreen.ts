@@ -256,7 +256,7 @@ export function createSettingsScreen(
    */
   const msaa = segmentRow<number>({
     label: 'Edge smoothing',
-    hint: 'True multisampled edges on rigging and poles. Halves the frame rate; the post grade smooths edges without it.',
+    hint: 'True multisampled edges everywhere. Halves the frame rate; without it the post grade smooths edges and thin poles carry their own.',
     options: MSAA_SAMPLES.map((s) => ({ value: s, label: s === 0 ? 'Off' : `${s}×` })),
     onSelect: (v) => store.set({ graphics: { msaaSamples: v } }),
   });

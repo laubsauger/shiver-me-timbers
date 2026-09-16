@@ -30,9 +30,16 @@
  * put the neighbours, merged into ONE mesh.
  *
  * THIN MEMBERS (core/minWidth.ts, §V41). The pylon lattice, the radio mast, the spars and stakes are drawn never
- * narrower than ~1 px, with the widening paid back as a hashed coverage (USER: "the power poles in the distance get
- * too thin and then aliasing eats them"); the cables the same, blended. The far band keeps the members LOD1 has:
- * the pylon's and the mast's LOD2 drop their diagonals outright, which is a pop the coverage fade exists to avoid.
+ * narrower than ~1 px, with the widening paid back as coverage (USER: "the power poles in the distance get too thin
+ * and then aliasing eats them"); the cables the same, blended. The far band keeps the members LOD1 has: the pylon's
+ * and the mast's LOD2 drop their diagonals outright, which is a pop the coverage fade exists to avoid.
+ *
+ * §T.215: BOTH HALVES OF THAT DEPEND ON THE SAMPLE COUNT, and T214 changed it. The coverage is HASHED only when the
+ * frame can resolve a stochastic mask — a multisampled scene pass, or the trailer jittering subframes; at the
+ * playable tiers it is BLENDED instead, which puts the lattice in the transparent queue ahead of the ocean
+ * (minWidth.ts THIN_BLEND_RENDER_ORDER) so the sea's refraction copy still sees the drowned legs. And the ~1 px floor
+ * itself was tuned at 4×: at one sample per pixel it has to be 4 px (minWidth.ts thinMinWidthPx) or the lattice is a
+ * field of isolated hard dots. See the note at `mode` below for the measurement.
  */
 import * as THREE from 'three/webgpu';
 import { attribute, float, mix, normalMap, normalWorldGeometry, positionWorld, texture, uniform, vec2, vec3 } from 'three/tsl';
@@ -49,7 +56,9 @@ import { waterLighting } from '../caustics';
 import type { Course } from '../race/types';
 import type { CourseFurnitureData, RoofKind } from './towerReach';
 import { createStartMarkers } from './startMarkers';
-import { applyMinWidth, computeThinAxes, THIN_AXIS_ATTRIBUTE } from '../core/minWidth';
+import { applyMinWidth, computeThinAxes, coverageMode, thinMinWidthPx, THIN_AXIS_ATTRIBUTE, THIN_BLEND_RENDER_ORDER } from '../core/minWidth';
+import { msaaSamples } from '../core/postPipeline';
+import { postParams } from '../params/post';
 import { SPRAY_OVER_WATER_ORDER } from '../foam/sprayPool';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -543,12 +552,48 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const root = new THREE.Group();
   root.name = 'course-furniture';
   const materials = new Map<string, THREE.MeshStandardNodeMaterial>();
+  /**
+   * §T.215 — WHICH COVERAGE MODE THE FRAME CAN RESOLVE, not which one reads better on a still.
+   *
+   * `hash` is one binary decision per pixel per frame; it is partial coverage only once something averages those
+   * decisions. Multisampling does, and so do the trailer's jittered subframes — nothing else in this engine does, and
+   * since T214 the playable tiers build the scene pass at `samples: 0`. Measured at 1080p on the radio mast's
+   * lattice: at MSAA 0 the tower is scattered isolated dots, at MSAA 4 it is a continuous grey structure, same frame,
+   * same tree. So `blend` below MSAA (analytic, nothing to resolve) and `hash` at or above it (order-independent,
+   * and what `?cine` wants at 16 jittered samples). See core/minWidth.ts.
+   *
+   * READ FROM `postParams.msaaSamples`, THE REQUESTED COUNT, not from the scene pass's effective one — and that is a
+   * deliberate difference with one known edge. `postPipeline.ts` forces the pass to `samples: 0` whenever AO or DoF
+   * is built, because WebGPU cannot resolve a multisampled depth. `?cine` turns AO on, so its pass IS single-sampled
+   * — but the trailer resolves coverage TEMPORALLY, at 16 jittered subframes, which is exactly the resolve the hash
+   * wants and a sharper one than a 4 px analytic floor. Reading the requested count keeps `?cine` on the hash path,
+   * which is what it shot with before this change. The edge: a player who switches AO on at quality `high` gets a
+   * single-sampled pass and the hash anyway, i.e. the dot field — the same switch already trades the whole frame's
+   * MSAA away (see `aoEnabled` in params/post.ts), and it is off in every quality bundle.
+   *
+   * CONSTRUCTION GATE, like everything else `msaaSamples` touches: the material graph is baked once, so changing the
+   * sample count needs the reload the settings screen already asks for.
+   */
+  const sceneSamples = msaaSamples(postParams.msaaSamples);
+  const mode = coverageMode(sceneSamples);
+  const minWidthPx = thinMinWidthPx(sceneSamples);
+  /** materials that blend their coverage, so their meshes take THIN_BLEND_RENDER_ORDER */
+  const blendsCoverage = new Set<THREE.Material>();
   const materialFor = (asset: CourseAssetName, prim: Prim): THREE.MeshStandardNodeMaterial => {
     const key = `${asset}:${prim.slot}`;
     let m = materials.get(key);
     if (!m) {
       m = courseMaterial(prim.slot, prim.source, water, asset === 'course_pylon' ? 'steel' : asset === 'course_roofs' ? 'build' : undefined);
-      if (THIN_VARIANTS[asset] && prim.slot !== 'C_Lamp') applyMinWidth(m, 'hash');
+      if (THIN_VARIANTS[asset] && prim.slot !== 'C_Lamp') {
+        applyMinWidth(m, mode, minWidthPx);
+        if (mode === 'blend') {
+          // depthWrite stays ON: a member at full coverage must occlude exactly as it did in the opaque pass, and the
+          // ocean depth-tests against it. renderOrder is what keeps it inside the sea's refraction copy (minWidth.ts).
+          m.transparent = true;
+          m.depthWrite = true;
+          blendsCoverage.add(m);
+        }
+      }
       materials.set(key, m);
     }
     return m;
@@ -659,6 +704,9 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
         bm.frustumCulled = false;
         bm.perObjectFrustumCulled = true;
         bm.sortObjects = false;
+        // §T.215: a blended-coverage lattice is in the TRANSPARENT queue, and must draw before the ocean takes its
+        // refraction copy or the drowned legs go with it (core/minWidth.ts THIN_BLEND_RENDER_ORDER)
+        if (blendsCoverage.has(bm.material)) bm.renderOrder = THIN_BLEND_RENDER_ORDER;
         bm.castShadow = name !== 'course_roofs';
         bm.receiveShadow = true;
         const geometryIds = new Map<string, number>();
