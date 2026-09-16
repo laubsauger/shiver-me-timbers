@@ -105,7 +105,7 @@ async function boot(): Promise<void> {
   const waterAt = (x: number, z: number): number => sea.cpuOcean.heightAt(x, z, state.time);
   const world = course.attach(sea); // Tower Reach world, worker world data, colliders, bed; mirror on the grid seabed
   stage('course furniture');
-  const furniture = await createCourseFurniture({ renderer: app.renderer, data: world.world.furniture, course: world.world.course, seabedAt: world.world.seabedAt });
+  const furniture = await createCourseFurniture({ renderer: app.renderer, data: world.world.furniture, course: world.world.course, seabedAt: world.world.seabedAt, reflection: sea.reflection });
   app.scene.add(furniture.group);
 
   const boat: ShipState = {

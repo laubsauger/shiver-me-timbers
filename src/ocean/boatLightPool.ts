@@ -87,10 +87,22 @@ export function boatLightPoolNode(pool: BoatLightPool, surfacePos: TslNode, norm
   const { positions, colors, shape, spec } = pool.nodes;
   const acc = vec3(0).toVar();
   const foamBoost = float(1).add(foam.mul(shape.w));
+  /**
+   * §T.216: the pool's semi-axes are `shape.xy` in the boat's own frame, so whatever her yaw,
+   * a fragment further than the LARGER of the two in world XZ is outside the ellipse and `win`
+   * — which every term below is multiplied by — is exactly 0. One dot product rejects it
+   * before the yaw sin/cos, the two `normalize`s and the `pow`, at every water pixel of a
+   * 4600 m clipmap that is not beside a boat. Bit-exact: `fall = win²` gates BOTH `body` and
+   * `glint`, so the rejected fragments were already contributing nothing.
+   */
+  const reach = shape.x.max(shape.y);
+  const reach2 = reach.mul(reach);
   Loop(pool.max, ({ i }: { i: TslNode }) => {
     const pc = colors.element(i);
-    If(pc.x.notEqual(0).or(pc.y.notEqual(0)).or(pc.z.notEqual(0)), () => {
-      const pp = positions.element(i);
+    const pp = positions.element(i);
+    const relXZ = surfacePos.xz.sub(pp.xz);
+    const near = relXZ.dot(relXZ).lessThan(reach2);
+    If(near.and(pc.x.notEqual(0).or(pc.y.notEqual(0)).or(pc.z.notEqual(0))), () => {
       const rel = surfacePos.sub(pp.xyz);
       const c = cos(pp.w);
       const s = sin(pp.w);

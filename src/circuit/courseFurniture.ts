@@ -438,7 +438,32 @@ export interface CreateCourseFurnitureOptions {
   urls?: Partial<Record<CourseAssetName, string>>;
   /** texture anisotropy cap (settings `maxAnisotropy`); default and ceiling: the renderer's max */
   maxAnisotropy?: number;
+  /**
+   * §T.216: the planar reflection, when one is built. Every batch in the FAR LOD band is taken
+   * out of the mirror pass — see `FAR_BAND_REFLECTS`. Pass `null`/omit and nothing is excluded,
+   * which is the only correct behaviour without a mirror: `excludeFromReflection` moves an
+   * object OFF layer 0, and it is `PlanarReflection.update` that widens the main camera's mask
+   * to see layer 11 again. Excluding with no reflection deletes the furniture from the frame.
+   */
+  reflection?: { excludeFromReflection(object: THREE.Object3D): void } | null;
 }
+
+/**
+ * §T.216: does the FAR LOD band (LOD1-2, i.e. `bandLods[1]`) appear in the planar reflection?
+ *
+ * The mirror is a SECOND scene render and, measured (docs/speedboat/perf-2026-09.md §6), ~40% of
+ * every frame's draw calls with essentially no GPU cost — a pure main-thread tax at ~0.028 ms a
+ * draw. The course furniture is the largest single contributor, and half its batches are the far
+ * band: a placement enters it once it is past `COURSE_CONTRACT.lod.switchScreenFraction`, i.e.
+ * once it is a few percent of the screen. Its reflection then lands in a target at HALF
+ * resolution, blurred by `reflectionParams.blurNear..blurFar` mips, mixed toward the analytic
+ * sky by `fadeStart 350 m`/`fadeEnd 1400 m` and capped by the ocean's own fresnel × 0.13 — four
+ * multiplications, in series, on something already too small for its own LOD0 geometry.
+ *
+ * The NEAR band still reflects, which is what the eye actually checks: the pylon you are passing,
+ * the gate you are about to take. This is a look decision and it is written down as one.
+ */
+const FAR_BAND_REFLECTS = false;
 
 const Y = new THREE.Vector3(0, 1, 0);
 
@@ -658,6 +683,8 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
           b.lamp.push(attr);
           b.meshes.push(mesh);
           root.add(mesh);
+          // §T.216: lamp buckets split by LOD level, not by band — LOD ≥ 1 is the far band
+          if (lod > 0 && !FAR_BAND_REFLECTS) opts.reflection?.excludeFromReflection(mesh);
         }
         buckets.set(bucketKey(name, variant, lod), b);
       }
@@ -740,8 +767,12 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
           bm.userData.foamTarget = true;
           foamTargets.push(bm);
         }
+        // §T.216: the far band is main-view only (see FAR_BAND_REFLECTS). After root.add, so the
+        // mask is set on an object three has already parented — layers are per-object, not
+        // inherited, so order is irrelevant, but keep the two together.
         batches.push(bm);
         root.add(bm);
+        if (band > 0 && !FAR_BAND_REFLECTS) opts.reflection?.excludeFromReflection(bm);
       }
     }
     // lamp frustum test: the group's LOD0 members in asset space
