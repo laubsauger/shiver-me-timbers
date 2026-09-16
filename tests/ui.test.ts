@@ -225,7 +225,19 @@ describe('clamping (out-of-range values could break the renderer/mixer)', () => 
   });
 });
 
-describe('quality preset table (engine consumers rely on every hint field)', () => {
+/**
+ * ⚠️ THE NAME OF THIS BLOCK WAS A LIE AND IS NOW A WARNING. It used to read
+ * "engine consumers rely on every hint field". There are no engine consumers:
+ * grep over `src/` (2026-09-16) finds nothing reading `oceanResolution`,
+ * `cloudRtScale`, `foamBlurPasses` or `maxAnisotropy`, and `hints()` is called
+ * only from here. These tests check that a table is well formed, not that it
+ * does anything, and their being green is exactly what made the dead knob
+ * invisible for so long. See the comment on QUALITY_PRESETS.
+ *
+ * Kept because the shape checks still hold the day the table IS wired — but
+ * the title must not claim a consumer that does not exist (§Rule 8).
+ */
+describe('quality preset table (SHAPE ONLY — nothing in src/ reads it yet)', () => {
   const qualities: Quality[] = ['low', 'medium', 'high'];
   const hintKeys: (keyof QualityHints)[] = [
     'oceanResolution',

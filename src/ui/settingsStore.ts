@@ -310,8 +310,27 @@ export interface GameSettings {
 }
 
 /**
- * Engine hints per quality tier — consumers (ocean, clouds, renderer) wire
- * these later; the table lives here so a preset is one lookup, not logic.
+ * Engine hints per quality tier.
+ *
+ * ⚠️ NOTHING READS THIS TABLE. Measured 2026-09-16 by grep over `src/`: no
+ * module consumes `oceanResolution`, `cloudRtScale`, `foamBlurPasses` or
+ * `maxAnisotropy`, and `hints()` has no caller outside tests. The ocean builds
+ * at `oceanParams.resolution` (512), the clouds at their own fixed 768×432 RT,
+ * and every texture takes the renderer's maximum anisotropy — at EVERY tier,
+ * low included. This is the §V.62 dead-knob shape, and it is the dangerous
+ * variant: `tests/ui.test.ts` checks the table's shape and monotonicity, so it
+ * is green, documented and completely inert. Do not reason about what "low"
+ * costs from this table.
+ *
+ * The tier knobs that are LIVE are all in QUALITY_BUNDLES below — the feature
+ * switches, `shadowMapSize`, `foliageDensity`, `resolutionScale` and (since
+ * T214) `msaaSamples`, which is the largest of them by a wide margin.
+ *
+ * Left in place rather than deleted because wiring `oceanResolution` and
+ * `cloudRtScale` is a real and wanted follow-up (both are construction gates in
+ * files owned elsewhere this session); this comment is here so the next reader
+ * does not mistake the table for a description of the engine.
+ *
  * oceanResolution never drops below 512 (§V19 floor).
  */
 export interface QualityHints {
