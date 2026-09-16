@@ -51,7 +51,12 @@ import {
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
 import { sampleCascadeLayer } from './oceanTextures';
-import { refractionDepthNode, refractionOffsetNode, snellLookupPointNode } from './surfaceRefraction';
+import {
+  refractionDepthNode,
+  refractionOffsetNode,
+  seabedFloorFadeNode,
+  snellLookupPointNode,
+} from './surfaceRefraction';
 import { reflectionSkyVisibilityNode, unresolvedSlopeVarianceNode } from './surfaceFiltering';
 import { sparkleDiscMean } from './sparkleMath';
 import type { FoamSim } from '../foam';
@@ -1523,11 +1528,25 @@ export function buildOceanSurfaceMaterial(
     // vec3 on the left, matching causticsNode/waterLighting's
     // `absorption.mul(path)` — same expression, same units, so the above-water
     // and below-water halves of the sea visibly agree.
+    //
+    /**
+     * §B122: the drawn seabed is only the islands' square shelf aprons, and they end AT `seabedOpenDepth` — where
+     * Beer–Lambert still passes about a quarter of the blue. So the transmission channel stepped from a quarter of a
+     * lit sand floor to none of it along four straight lines, once per island: the reported rectangles. The sea's
+     * body colour IS the sea over the open-ocean floor, so a floor at that depth must already be inside it; this
+     * takes transmission to zero by then, over the band between the two depths the sea already owns. Both sides of
+     * the apron's rim are then zero by construction. Without a seabed (open-ocean scene) there is no plate to end
+     * and the term compiles out to 1. See `surfaceRefraction.seabedFloorFade` for the full account.
+     */
+    const floorFade = seabed
+      ? seabedFloorFadeNode(thicknessMeters, uShallowFullDepth, Math.max(-seabed.openHeight, 1e-3))
+      : float(1);
     const seeThrough = uAbsorption
       .mul(thicknessMeters)
       .negate()
       .exp()
-      .mul(refraction.visible.and(lookupValid).select(float(1), float(0)));
+      .mul(refraction.visible.and(lookupValid).select(float(1), float(0)))
+      .mul(floorFade);
     const sceneCol = viewportTexture(
       refraction.useBent.select(refractedUV, lookupUV),
       null,

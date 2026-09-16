@@ -1,4 +1,4 @@
-import { float, vec2, vec3, vec4 } from 'three/tsl';
+import { float, smoothstep, vec2, vec3, vec4 } from 'three/tsl';
 
 // Structural TSL node type, matching the ocean's other shader helpers.
 type Node = any;
@@ -61,4 +61,52 @@ export function refractionDepthNode(straight: Node, bent: Node, water: Node) {
   const useBent = behind(bent);
   const depth = useBent.select(bent, straight);
   return { useBent, depth, visible: behind(depth) };
+}
+
+/**
+ * B122 — THE SEA MUST STOP SHOWING THE FLOOR BEFORE THE WORLD STOPS DRAWING ONE.
+ *
+ * THE DEFECT: two hard-edged rectangles on the water, sized like an island's terrain square, one per island
+ * (`browser-sync/t174-shadow*-overhead-900m.jpg`, §B122). They are the island's SHELF APRON — the square plate of
+ * drawn seabed `islandMesh.buildIslandGeometry` continues out to ±(R + `seabedShelfWidth`), which is the whole of
+ * the seabed that anything ever draws. Past that square there is no floor at all, so `refractionDepthNode.visible`
+ * flips false and `seeThrough` drops to zero IN ONE PIXEL. What it drops FROM is not small: the apron's outer ring
+ * is at `seabedOpenDepth` = 45 m, and Beer–Lambert on the shipped extinction still passes exp(−0.03·45) ≈ 0.26 of
+ * the blue there. So the sea steps from a quarter of a lit sand floor to none of it, along four straight lines.
+ * The depth FIELD is smooth across that boundary (`seabed.sampleSeabedHeight` reports −45 m on both sides, and the
+ * apron's last ring sits exactly on it) — it is only the DRAWING that stops, which is why every CPU probe of the
+ * bug came back clean.
+ *
+ * WHY NOT WIDEN THE SHELF. The step is set by the DEPTH the plate ends at, not by how far out it goes: at a constant
+ * 45 m the water transmits the same 26 % however wide the apron is. Widening moves the rectangle; it does not close
+ * it.
+ *
+ * THE RULE INSTEAD, and it is an identity, not a fade-to-taste: the water's body colour is the sea over the
+ * open-ocean floor, so a floor AT `seabedOpenDepth` must already be inside it. Transmission is therefore taken to
+ * zero by that depth, over the band between the two depths the sea already owns — `shallowFullDepth` (where the
+ * shallow tint has completely given way to the body colour) and the field's own open depth. At the apron's rim the
+ * two sides of the boundary are then BOTH zero, by construction rather than by agreement, and the shallows keep the
+ * floor they always had.
+ *
+ * `thickness` is the water column along the VIEW RAY (the same quantity Beer–Lambert is fed), so a grazing view
+ * loses the floor sooner — which is what a grazing view does anyway.
+ */
+export function seabedFloorFade(thickness: number, shallowFull: number, openDepth: number): number {
+  const end = Math.max(openDepth, 1e-3);
+  // §V28, and NOT a clamp to `end - ε`: a world whose shallow tint runs deeper than its floor ever gets would
+  // then fade over nothing, i.e. STEP at the open depth — the very edge this exists to remove. Degenerate inputs
+  // fall back to the widest possible band instead, which is the only answer that cannot draw a line.
+  const start = shallowFull > 0 && shallowFull < end ? shallowFull : 0;
+  const t = Math.min(Math.max((thickness - start) / (end - start), 0), 1);
+  return 1 - t * t * (3 - 2 * t);
+}
+
+/** TSL twin of {@link seabedFloorFade} (§V23: functional smoothstep, e0 > e1 reads "1 at/below e1, 0 at/above e0") */
+export function seabedFloorFadeNode(thickness: Node, shallowFull: Node, openDepth: Node): Node {
+  const end = float(openDepth).max(1e-3);
+  const full = float(shallowFull);
+  const start = full.greaterThan(0).and(full.lessThan(end)).select(full, float(0));
+  // @band-limited-elsewhere: a ramp on a water-column DEPTH in metres — no spatial period, so no sub-pixel regime,
+  // and its two edges are tens of metres of water apart (18 → 45 m shipped), wider than any pixel footprint here.
+  return smoothstep(end, start, thickness);
 }

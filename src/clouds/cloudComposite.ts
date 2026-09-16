@@ -1,11 +1,32 @@
 /**
- * Cloud composite (§V11 stage 3): camera-pinned quad ~quadDistance out on the
- * frustum, sampling the blurred cloud texture via screenUV. Colour is
+ * Cloud composite (§V11 stage 3): camera-pinned quad near the FAR plane,
+ * sampling the blurred cloud texture via screenUV. Colour is
  * reconstructed as sunColor*R + skyColor*G with alpha from B; edges are
  * distorted + eroded by tileable 3D value noise sampled along the view
  * direction and scrolled by time (the "distortion cubemap" role from the Rare
  * talk — a wrap-repeat Data3DTexture stands in for the cubemap, generated
  * once at init from the seed).
+ *
+ * §B122 — WHERE THE QUAD SITS IS NOT FREE. It used to ride the frustum at
+ * `cloudParams.quadDistance` (500 m), under the standing comment that "only
+ * the DIRECTION through each fragment matters, so the distance is free". That
+ * is true of the SHADING and false of the DEPTH: this quad is in the main
+ * scene, `transparent`, `depthWrite: false` — and `depthTest` is on. So the
+ * sea, the islands and the rocks BEYOND 500 m failed the test against it and
+ * were painted over with cloud, while everything nearer was not. The join is
+ * the plane z_view = 500 m, and it draws a dead-straight hard-edged line
+ * across whatever it crosses: a horizontal band across the water, and a
+ * straight light/dark line across the curved rock of a spire. Measured on a
+ * frozen 1080p frame: the step sits at a view
+ * depth of 501.1 m at fov 30, 55 and 80 — the same PLANE, three different
+ * screen rows — and hiding this one quad removes it (docs/ocean/b122-rectangles.md §2).
+ *
+ * {@link cloudPinDistance} is the rule instead: a camera-pinned cloud quad
+ * belongs just inside `camera.far`, behind every piece of world geometry, so
+ * ordinary depth testing gives the answer the sky background already gives —
+ * clouds show where nothing else was drawn. The same rule binds the mirror's
+ * stand-in (src/reflection/cloudMirror.ts), which had the same cut inside the
+ * reflection and put a SECOND straight edge on the water.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -39,6 +60,28 @@ interface PackedTexel {
 
 const NOISE_SIZE = 48;
 const LATTICE = 8;
+
+/**
+ * Fraction of `camera.far` a camera-pinned cloud quad is placed at (§B122).
+ *
+ * Not 1.0: a quad exactly ON the far plane maps to depth 1, which is what the
+ * buffer is cleared to, and `LESS` would reject every fragment — the clouds
+ * would vanish entirely. Not much less either: it only has to beat the
+ * furthest thing drawn, and the furthest thing drawn is the ocean disc at its
+ * §V30 rim (~4.6 km against a 8 km far plane). 0.9 clears that by 2.6 km and
+ * still leaves the quad ~800 m inside the frustum.
+ */
+export const CLOUD_PIN_FAR_FRACTION = 0.9;
+
+/**
+ * Where to pin a cloud quad on a camera's view axis: behind all world
+ * geometry, inside the far plane. Pure over the camera, so the mirror's
+ * stand-in and the main composite cannot drift apart (§B122).
+ */
+export function cloudPinDistance(camera: THREE.PerspectiveCamera): number {
+  const far = Number.isFinite(camera.far) ? camera.far : 8000; // §V28
+  return Math.max(1, far * CLOUD_PIN_FAR_FRACTION);
+}
 
 /** Tileable low-frequency RGB value noise, deterministic per seed. */
 export function createNoiseTexture(seed: number): THREE.Data3DTexture {
@@ -495,9 +538,13 @@ export function createCloudComposite(
     uSkyColor,
     edge,
     shafts,
-    /** pin the quad to the camera frustum at quadDistance, covering the view */
+    /**
+     * Pin the quad to the camera frustum, covering the view, at
+     * {@link cloudPinDistance} — NOT at `quadDistance` (§B122, see the header:
+     * this quad is depth-tested, so its distance decides what it paints over).
+     */
     fitToCamera(camera: THREE.PerspectiveCamera): void {
-      const d = p.quadDistance;
+      const d = cloudPinDistance(camera);
       const height = 2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5);
       const margin = 1.1; // oversize so distortion never reveals the border
       quad.scale.set(height * camera.aspect * margin, height * margin, 1);

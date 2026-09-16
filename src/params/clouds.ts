@@ -424,7 +424,17 @@ export interface CloudParams {
    *  clouds in the distance appear sharper" (talk 00:20:57). */
   alphaSoftNear: number;
   alphaSoftFar: number;
-  /** camera-pinned composite quad distance (m) */
+  /**
+   * Distance (m) the camera-pinned BAND sheet quad rides the frustum at.
+   *
+   * §B122: it no longer places the composite quad or the reflection's cloud
+   * stand-in. Those two are depth-tested inside a real scene, so their
+   * distance decides what they paint over, and at 500 m they cut the sea, the
+   * islands and the rocks on a plane (`cloudComposite.cloudPinDistance`). The
+   * band sheet draws alone into its own RT with nothing to occlude it, so here
+   * the distance really is free — only the direction through each fragment is
+   * read, and the deck is intersected analytically.
+   */
   quadDistance: number;
   /** lighting reconstruction colors: color = sunColor*R + skyColor*G */
   sunColor: number;

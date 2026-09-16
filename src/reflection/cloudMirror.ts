@@ -44,6 +44,7 @@ import {
   vec4,
 } from 'three/tsl';
 import {
+  cloudPinDistance,
   createCloudEdge,
   createNoiseTexture,
   createShafts,
@@ -224,8 +225,15 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
       );
 
       // the mirror camera copies the main camera's projection matrix, so the
-      // frustum it must cover has the same fov and aspect
-      const d = Math.max(1, p.quadDistance);
+      // frustum it must cover has the same fov and aspect — and the same far
+      // plane, which is what the pin distance is taken from.
+      //
+      // §B122: this stand-in is depth-tested inside the mirror pass exactly as
+      // the main composite is in the main pass, so pinning it at
+      // `quadDistance` (500 m) painted cloud over every reflected thing beyond
+      // 500 m and cut the REFLECTION on a plane. That edge lands on the water
+      // as a second straight line beside the main composite's own.
+      const d = cloudPinDistance(mainCamera);
       const height = 2 * d * Math.tan(THREE.MathUtils.degToRad(mainCamera.fov) * 0.5);
       const margin = 1.15; // oversize: distortion must never reveal the border
       quad.scale.set(height * mainCamera.aspect * margin, height * margin, 1);

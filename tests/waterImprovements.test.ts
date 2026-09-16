@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { coverageWeightedAgeNode, foamSourceAgesNode } from '../src/flowfoam/foamAge';
 import { uniform } from 'three/tsl';
 import { contactFoamNode } from '../src/flowfoam/intersectionMask';
-import { refractionDepthNode, snellLookupPoint } from '../src/ocean/surfaceRefraction';
+import { refractionDepthNode, seabedFloorFade, snellLookupPoint } from '../src/ocean/surfaceRefraction';
 import { reflectionSkyVisibilityNode, unresolvedSlopeVarianceNode } from '../src/ocean/surfaceFiltering';
 import { breakupJitterAligned } from '../src/foam/foamMath';
 import { OceanSimulation } from '../src/ocean/oceanCascades';
@@ -394,5 +394,76 @@ describe('B125 the see-through follows the refracted ray', () => {
       expect(Math.hypot(p.x, p.y, p.z)).toBeCloseTo(1, 9); // unit ray: pathLen is a length along it
       expect(Math.atan2(p.z, -p.y)).toBeLessThanOrEqual(Math.asin(1 / IOR) + 1e-9);
     }
+  });
+});
+
+/**
+ * §B122 — THE RECTANGLES ON THE WATER WERE THE EDGE OF THE ONLY DRAWN SEABED.
+ *
+ * `islandMesh.buildIslandGeometry` continues each island's terrain out as a SQUARE shelf apron to
+ * ±(R + `seabedShelfWidth`); nothing draws a seabed anywhere else. That plate ends at `seabedOpenDepth`, and
+ * Beer–Lambert on the shipped extinction still passes ~exp(−0.03·45) ≈ 0.26 of the blue at that depth, so
+ * `refractionDepthNode.visible` flipping false at the plate's rim was a quarter-of-a-floor step in ONE pixel, along
+ * four straight lines, once per island. The depth FIELD is smooth across it — only the drawing stops.
+ *
+ * What these pin is therefore an IDENTITY, not a taste: at the depth the world stops drawing a floor, the sea must
+ * already be showing none of it, so that "floor drawn" and "no floor" are the same colour there. The shallows must
+ * be untouched, or the fix has eaten the one thing §V24's transmission channel exists for.
+ */
+describe('seabed floor fade (§B122 the sea folds the floor into its body colour by the open depth)', () => {
+  const SHALLOW_FULL = 18; // oceanSurfaceParams.shallowFullDepth
+  const OPEN = 45; // islandParams.seabedOpenDepth
+
+  it('is exactly zero AT the depth the apron plate ends, which is what closes the rectangle', () => {
+    // the apron's outer ring sits on `seabedOpenDepth` by construction (islandMesh shelfRamp → 1), and just past it
+    // there is no geometry at all, i.e. transmission 0. Both sides must agree.
+    expect(seabedFloorFade(OPEN, SHALLOW_FULL, OPEN)).toBe(0);
+    expect(seabedFloorFade(OPEN + 1, SHALLOW_FULL, OPEN)).toBe(0);
+    expect(seabedFloorFade(1e6, SHALLOW_FULL, OPEN)).toBe(0);
+  });
+
+  it('leaves the shallows the floor they always had — the tint is what transmission is FOR', () => {
+    for (const d of [0, 1, 5, 12, SHALLOW_FULL]) {
+      expect(seabedFloorFade(d, SHALLOW_FULL, OPEN)).toBe(1);
+    }
+  });
+
+  it('closes smoothly, so the band itself cannot become a second edge', () => {
+    let prev = 1;
+    for (let d = SHALLOW_FULL; d <= OPEN; d += 0.5) {
+      const v = seabedFloorFade(d, SHALLOW_FULL, OPEN);
+      expect(v).toBeLessThanOrEqual(prev + 1e-12); // monotone down
+      expect(Math.abs(v - prev)).toBeLessThan(0.05); // no step inside the band
+      prev = v;
+    }
+    // smoothstep: zero slope at both ends, so it meets 1 and 0 without a crease
+    const h = 1e-3;
+    expect(seabedFloorFade(SHALLOW_FULL + h, SHALLOW_FULL, OPEN)).toBeCloseTo(1, 5);
+    expect(seabedFloorFade(OPEN - h, SHALLOW_FULL, OPEN)).toBeCloseTo(0, 5);
+  });
+
+  it('survives a panel that crosses or collapses the two depths (§V28)', () => {
+    for (const [full, open] of [[60, 45], [45, 45], [0, 0], [-5, 10], [18, 0]]) {
+      for (const d of [-1, 0, 10, 45, 1e6]) {
+        const v = seabedFloorFade(d, full, open);
+        expect(Number.isFinite(v)).toBe(true);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('a shallow tint deeper than the floor ever gets widens the band — it must never collapse to a step', () => {
+    // clamping `start` to just under `end` would fade over nothing, i.e. reintroduce exactly the edge B122 is
+    // about, in any world whose floor is shallower than its tint depth (a circuit lagoon, a panel sweep).
+    const open = 8;
+    let prev = 1;
+    for (let d = 0; d <= open; d += 0.25) {
+      const v = seabedFloorFade(d, 18, open);
+      expect(Math.abs(v - prev)).toBeLessThan(0.15);
+      prev = v;
+    }
+    expect(seabedFloorFade(open, 18, open)).toBe(0);
+    expect(seabedFloorFade(0, 18, open)).toBe(1);
   });
 });

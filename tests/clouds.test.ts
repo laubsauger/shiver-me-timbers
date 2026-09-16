@@ -56,6 +56,8 @@ import {
   cloudLayoutKey,
   type CloudParams,
 } from '../src/params/clouds';
+import { CLOUD_PIN_FAR_FRACTION, cloudPinDistance } from '../src/clouds/cloudComposite';
+import { oceanSurfaceParams } from '../src/params/oceanSurface';
 
 /**
  * A copy of the shipped cloud params taken at MODULE LOAD, i.e. before any
@@ -1853,6 +1855,59 @@ describe('banded cloud projection has no horizontal shelf', () => {
           expect(value).toBeLessThanOrEqual(1);
         }
       }
+    }
+  });
+});
+
+/**
+ * §B122 — THE COMPOSITE QUAD'S DISTANCE IS ITS OCCLUSION, NOT ITS LOOK.
+ *
+ * The quad is in the main scene, `transparent`, `depthWrite: false`, and
+ * `depthTest` ON. Its shading reads only the normalised view DIRECTION, so
+ * the old comment "the distance is free" held for the picture — and failed
+ * for the depth buffer. Pinned at `quadDistance` (500 m) it painted cloud
+ * over every drawn thing beyond 500 m: the sea, the islands, the rocks. The
+ * join is the plane z_view = quadDistance, and a plane cutting the world is a
+ * dead-straight hard edge — measured at a view depth of 501.1 m at fov 30, 55
+ * and 80 on one frozen frame.
+ *
+ * So the invariant is a SANDWICH, and both sides are load-bearing:
+ *  - behind the furthest thing ever drawn (the ocean disc at its §V30
+ *    `gridHorizonRadius` rim), or the cut comes back;
+ *  - strictly inside `camera.far`, or the quad is clipped away / rejected by
+ *    `LESS` against a depth buffer cleared to 1, and the sky loses its clouds.
+ */
+describe('cloud quad pin distance (§B122 the composite must sit behind the world)', () => {
+  const cam = (far: number): THREE.PerspectiveCamera =>
+    new THREE.PerspectiveCamera(55, 16 / 9, 0.1, far);
+
+  it('sits behind the ocean rim and inside the far plane on the shipped camera', () => {
+    const camera = cam(8000);
+    const d = cloudPinDistance(camera);
+    expect(d).toBeGreaterThan(oceanSurfaceParams.gridHorizonRadius);
+    expect(d).toBeLessThan(camera.far);
+  });
+
+  it('is NOT the band sheet distance — that one is what cut the world', () => {
+    expect(cloudPinDistance(cam(8000))).toBeGreaterThan(cloudParams.quadDistance * 10);
+  });
+
+  it('scales with the camera it is given, so a shorter far plane still fits', () => {
+    for (const far of [1000, 4000, 8000, 20000]) {
+      const camera = cam(far);
+      const d = cloudPinDistance(camera);
+      expect(d).toBeLessThan(far);
+      expect(d / far).toBeCloseTo(CLOUD_PIN_FAR_FRACTION, 6);
+    }
+  });
+
+  it('never returns a non-finite or non-positive distance (§V28)', () => {
+    for (const far of [NaN, Infinity, -1, 0]) {
+      const camera = cam(8000);
+      camera.far = far;
+      const d = cloudPinDistance(camera);
+      expect(Number.isFinite(d)).toBe(true);
+      expect(d).toBeGreaterThan(0);
     }
   });
 });

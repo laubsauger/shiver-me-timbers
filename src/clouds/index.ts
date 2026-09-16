@@ -287,8 +287,10 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
       composite.fitToCamera(camera);
       // the sheet only needs the DIRECTION through each fragment (the deck is
-      // intersected analytically), so its quad rides the frustum at the same
-      // distance the composite uses — well inside camera.far, §V32/§B.10
+      // intersected analytically) and it draws ALONE into the cores RT, with
+      // no scene depth to be tested against — so here the distance really is
+      // free (§V32/§B.10). The composite's is not: it is depth-tested in the
+      // real scene, so it takes `cloudPinDistance` instead (§B122).
       bands.fitToCamera(camera, p.quadDistance);
 
       // offscreen cores pass — save/restore renderer state
