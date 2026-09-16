@@ -10,9 +10,9 @@
  * Audio is master / music / effects / ambience, independently (§I).
  */
 import type { GameSettings, Quality, SettingsStore } from './settingsStore';
-import { GRAPHICS_FEATURES, SHADOW_MAP_SIZES } from './graphicsFeatures';
+import { GRAPHICS_FEATURES, MSAA_SAMPLES, SHADOW_MAP_SIZES } from './graphicsFeatures';
 import type { GraphicsFeatureId } from './graphicsFeatures';
-import { featureNeedsReload, featureWired, shadowMapSizeNeedsReload, unwiredFeatures } from './graphicsFeatures';
+import { featureNeedsReload, featureWired, msaaSamplesNeedsReload, shadowMapSizeNeedsReload, unwiredFeatures } from './graphicsFeatures';
 import { sectionHead, segmentRow, sliderRow, switchRow } from './settingsControls';
 import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
@@ -246,6 +246,21 @@ export function createSettingsScreen(
     onInput: (v) => store.set({ graphics: { resolutionScale: v } }),
   });
 
+  /**
+   * The largest single performance control in the renderer, so §I puts it on
+   * the MENU rather than in Tweakpane: measured at 1080p with 8 boats, Off →
+   * On costs roughly half the frame (GPU busy 15 → 32 ms, 59 → 30 fps).
+   *
+   * Two options, not three. 2× is not allocatable on WebGPU and fails by
+   * rendering NOTHING at a flattering frame rate — see MSAA_SAMPLES.
+   */
+  const msaa = segmentRow<number>({
+    label: 'Edge smoothing',
+    hint: 'True multisampled edges on rigging and poles. Halves the frame rate; the post grade smooths edges without it.',
+    options: MSAA_SAMPLES.map((s) => ({ value: s, label: s === 0 ? 'Off' : `${s}×` })),
+    onSelect: (v) => store.set({ graphics: { msaaSamples: v } }),
+  });
+
   // — feature switches —
   const switches = new Map<GraphicsFeatureId, SwitchRow>();
   const sectionByTitle = new Map<string, HTMLElement>();
@@ -443,7 +458,7 @@ export function createSettingsScreen(
   const graphicsRows = div(
     'smt-rows',
     div('smt-section', sectionHead('Preset'), quality.root),
-    div('smt-section', sectionHead('Display'), resolution.root),
+    div('smt-section', sectionHead('Display'), resolution.root, msaa.root),
     div('smt-section', sectionHead('World'), todPreset.root, todSlider.root),
     // the sea gets its own section: it is the biggest group on the screen now,
     // and "close to weather and all of this kind of stuff" (user) is satisfied
@@ -565,6 +580,8 @@ export function createSettingsScreen(
     resolution.set(s.graphics.resolutionScale);
     shadowMap.set(s.graphics.shadowMapSize);
     shadowMap.setPendingReload(shadowMapSizeNeedsReload(s.graphics.shadowMapSize));
+    msaa.set(s.graphics.msaaSamples);
+    msaa.setPendingReload(msaaSamplesNeedsReload(s.graphics.msaaSamples));
     foliage.set(s.graphics.foliageDensity);
     // the slider always shows the truth; the preset row highlights nothing
     // when the hour sits between named times, which is the honest state
