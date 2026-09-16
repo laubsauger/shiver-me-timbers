@@ -651,8 +651,18 @@ export interface WetTriangles {
  * hydrostatically that net is ρg × the column's submerged thickness ≥ 0. So the wet samples are summed
  * per hull-aligned plan cell of the height patch (≤ 0.8 m); cells still < 0 (dynamic suction, or a
  * face whose partner fell in the next cell) are clamped and the positive cells rescaled so that
- *   Σ fy = max(0, load.force[1])   exactly, with every fy ≥ 0.
+ *   Σ fy = min(max(0, load.force[1]), maxAccel·m)   with every fy ≥ 0.
  * A net DOWNWARD pull by the water (load.force[1] < 0) gives no wake load; `deficit` reports it.
+ *
+ * §B126 THE V110 BOUND APPLIES HERE TOO. `load.force[1]` carries the velocity-level impulse terms (slam, crossflow,
+ * face drag, sway entry) divided by the substep. Those are bounded against the RIGID BODY by construction (V103: they
+ * never reverse a point's velocity) but not in newtons, so one substep of an inverted hull dragged under at 25 m/s
+ * handed 5.6 GN — 300 000 × the boat's weight — to the wake field, which is a STEADY-pattern model (a Kelvin wake is
+ * forced by the load the hull carries, never by one substep of an impact). The consequence was fleet-wide: a source of
+ * 9.3e7 N threw ±80 m of "wake" across its 300 m wedge, and the boats inside it were buried 30–55 m deep for one tick
+ * and fired out at 460 and 1068 m/s. So the load the wake sees gets the SAME V110 bound (`maxAccel·m`) the explicit
+ * flux loads get, and every cell scales by that one factor: the pattern's centroid, second moments and depth are
+ * exactly the unbounded load's, only the amplitude is physical. `rescale` and `deficit` report the trim.
  */
 export interface WakeLoadSamples {
   count: number;
@@ -665,9 +675,9 @@ export interface WakeLoadSamples {
   sigma: Float64Array;
   /** plan-area-weighted mean depth, m, ≥ 0 */
   depth: Float64Array;
-  /** load.force[1] − Σ fy (≠ 0 only when the net vertical load is downward) */
+  /** load.force[1] − Σ fy (≠ 0 when the net vertical load is downward, or past the V110 bound — §B126) */
   deficit: number;
-  /** net load / Σ positive cell loads: 1 ⇔ no cell was negative, the columns are the physical split */
+  /** the load the wake carries / Σ positive cell loads: 1 ⇔ no cell was negative and the V110 bound was slack */
   rescale: number;
 }
 
@@ -2327,7 +2337,11 @@ export class HullWater {
     return dep > 0 ? dep * dry : 0;
   }
 
-  /** column-sum the signed wet samples into ≥ 0 plan-cell wake loads whose sum is max(0, netFy) */
+  /**
+   * Column-sum the signed wet samples into ≥ 0 plan-cell wake loads whose sum is max(0, netFy), bounded at the V110
+   * acceleration (§B126 — see the WakeLoadSamples header for why a steady-wake source may not be forced by one
+   * substep of an impact).
+   */
   private buildWakeLoad(netFy: number): void {
     const W = this.wet;
     const K = this.wake;
@@ -2361,7 +2375,10 @@ export class HullWater {
       const f = this.cellFy[list[k]];
       if (f > 0) pos += f;
     }
-    const target = netFy > 0 ? netFy : 0;
+    // §B126: the same V110 bound the explicit flux loads get. `netFy > 0` is false for NaN, so a non-finite load
+    // leaves no wake source at all instead of poisoning every receiver's height sampler.
+    const bound = this.params.maxAccel * this.mesh.mass;
+    const target = netFy > 0 ? (netFy < bound ? netFy : bound) : 0;
     const scale = pos > 0 ? target / pos : 0;
     let m = 0;
     let sum = 0;

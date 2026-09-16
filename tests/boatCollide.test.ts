@@ -281,6 +281,76 @@ describe('§T.188 boat ↔ boat', () => {
     expect(a.s.velocity[2]).toBeGreaterThan(0.6 * 25);
   });
 
+  /**
+   * §B126 asked whether a boat pair in contact at speed can fire out (two rivals left one tick of pack/open/seed 101 at
+   * 460 and 1068 m/s). It could not: the cause was the WAKE source, not the contact (hullWater, §B126 there). This is the
+   * measure that settles it, and the guard that keeps it settled — the pair impulse is a Catto sequential impulse, so
+   * whatever the configuration it may take kinetic energy out of the pair and never put any in, beyond the Baumgarte
+   * push-out's own budget where the hulls start INSIDE each other.
+   */
+  it('600 random contact configurations (head-on, glancing, overtaking, T-bone, stacked) gain no kinetic energy and stay inside the V110 bound', () => {
+    const I = hull.inertia;
+    const ke = (s: Rigid6State): number => {
+      const wb = rotate([-s.quaternion[0], -s.quaternion[1], -s.quaternion[2], s.quaternion[3]], s.angularVelocity);
+      return 0.5 * hull.mass * (s.velocity[0] ** 2 + s.velocity[1] ** 2 + s.velocity[2] ** 2) + 0.5 * (I[0] * wb[0] ** 2 + I[1] * wb[1] ** 2 + I[2] * wb[2] ** 2);
+    };
+    let seed = 126;
+    const r = (): number => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    const capV = BOAT_COLLIDE_DEFAULTS.maxImpactAccel * DT;
+    const capW = BOAT_COLLIDE_DEFAULTS.maxImpactAngularAccel * DT;
+    // the push-out is a positional correction, so it is the ONE way the pair may end with more energy than it began:
+    // at most maxBiasSpeed on each boat, over the pair's reduced mass
+    const biasBudget = 2 * (0.5 * hull.mass * BOAT_COLLIDE_DEFAULTS.maxBiasSpeed ** 2);
+    const kinds = ['head-on', 'glancing', 'overtaking', 'T-bone', 'stacked'] as const;
+    const mem = createBoatCollideMemory(ch);
+    let worstGain = -Infinity;
+    let hits = 0;
+    const seen = new Map<string, number>();
+    for (let n = 0; n < 600; n++) {
+      const kind = kinds[n % kinds.length];
+      const hA = (r() - 0.5) * 0.4;
+      const uA = 8 + 37 * r();
+      const uB = 8 + 37 * r();
+      // B is placed within a hull length of A along A's course, offset across it, on the heading the case wants
+      const across = kind === 'stacked' ? (r() - 0.5) * 0.4 : (r() - 0.5) * 6;
+      const along = kind === 'stacked' ? (r() - 0.5) * 2 : 6 + 12 * r();
+      const hB = kind === 'head-on' ? hA + Math.PI + (r() - 0.5) * 0.3
+        : kind === 'glancing' ? hA + (r() - 0.5) * 0.5
+        : kind === 'overtaking' ? hA + (r() - 0.5) * 0.1
+        : kind === 'T-bone' ? hA + Math.PI / 2 + (r() - 0.5) * 0.4
+        : hA + r() * 2 * Math.PI;
+      const a = boat([0, REST_Y, 0], hA, kind === 'overtaking' ? Math.min(uA, uB) : uA, [0, (r() - 0.5) * 2, 0], [(r() - 0.5) * 2, (r() - 0.5) * 3, (r() - 0.5) * 2]);
+      const p: Vec3 = [along * Math.sin(hA) + across * Math.cos(hA), REST_Y + (kind === 'stacked' ? (r() - 0.5) * 1.5 : 0), along * Math.cos(hA) - across * Math.sin(hA)];
+      const b = boat(p, hB, kind === 'overtaking' ? Math.max(uA, uB) : uB, [0, (r() - 0.5) * 2, 0], [(r() - 0.5) * 2, (r() - 0.5) * 3, (r() - 0.5) * 2]);
+      const before = ke(a.s) + ke(b.s);
+      const v0 = [Math.hypot(...a.s.velocity), Math.hypot(...b.s.velocity)];
+      const w0 = [Math.hypot(...a.s.angularVelocity), Math.hypot(...b.s.angularVelocity)];
+      const P0 = momentum([a, b]);
+      if (!boatPairContact(a.s, ch, b.s, ch, DT, mem, BOAT_COLLIDE_DEFAULTS)) continue;
+      const penetrating = mem.pair.depth0 < 0;
+      applyPairContact(a.s, ch, b.s, ch, mem.pair);
+      hits++;
+      seen.set(kind, (seen.get(kind) ?? 0) + 1);
+      const tag = `${kind} #${n}`;
+      for (const [k, s] of [a.s, b.s].entries()) {
+        for (const c of [...s.velocity, ...s.angularVelocity]) expect(Number.isFinite(c), `${tag}: finite`).toBe(true);
+        // V110: one contact may not accelerate a boat past the bound, however deep or degenerate the overlap
+        expect(Math.hypot(...s.velocity) - v0[k], `${tag}: |Δv| bound`).toBeLessThanOrEqual(capV + 1e-9);
+        expect(Math.hypot(...s.angularVelocity) - w0[k], `${tag}: |Δω| bound`).toBeLessThanOrEqual(capW + 1e-9);
+      }
+      // the pair impulse is internal: linear momentum is conserved to round-off
+      const P1 = momentum([a, b]);
+      for (let k = 0; k < 3; k++) expect(Math.abs(P1[k] - P0[k]), `${tag}: momentum ${k}`).toBeLessThan(1e-6 * (1 + Math.abs(P0[k])));
+      const gain = ke(a.s) + ke(b.s) - before;
+      worstGain = Math.max(worstGain, gain / before);
+      expect(gain, `${tag}: no energy gained`).toBeLessThanOrEqual((penetrating ? biasBudget : 0) + 1e-6 * before);
+    }
+    expect(hits, 'the sweep actually made contacts').toBeGreaterThan(200);
+    for (const kind of kinds) expect(seen.get(kind) ?? 0, `${kind} configurations reached contact`).toBeGreaterThan(10);
+    // eslint-disable-next-line no-console
+    console.info(`[boatCollide] ${hits} contacts, worst relative KE change ${(100 * worstGain).toFixed(3)} %`, Object.fromEntries(seen));
+  });
+
   it('a respawn ghost (mask bit) passes through, and so does the other boat', () => {
     const a = boat([0, REST_Y, 0], 0, 20);
     const b = boat([0, REST_Y, 20], Math.PI, 10);

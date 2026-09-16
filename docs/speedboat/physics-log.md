@@ -823,3 +823,44 @@ forcing ×2 energy, shoaling Sk bound 20 → 30 % (measured −24 %), audio slam
 hull 20/30 m/s 2.75/1.93 → 3.51/2.50°) but moves the manoeuvring envelope, crossing-swell hooks (2 → 4/16 at C_v 8), the AI
 capability table, pack band and three crash scenarios (11 tests). Coordinator: keep 0.34, separate task. Drive trim
 authority stays ≈ 0.1° (no surface-piercing prop vertical-force source in hand).
+
+# §B126, 2026-09-16: two boats fired out of an `open` race at 460 and 1068 m/s
+
+NOT the boat contact. `scripts/race-ai-sweep.mjs --course pack --seas open --seed-list 101` at t 18.45 s: boats 2 and 5
+were 25.9 m apart, their contact report was empty, and the pair solver (`sea-physics/boatCollide.ts`) is a Catto
+sequential impulse already bounded at V110 — 600 random contact configurations (head-on, glancing, overtaking, T-bone,
+stacked/coincident, tests/boatCollide.test.ts) conserve the pair's momentum to round-off and its worst kinetic-energy
+change is +0.11 %, the Baumgarte push-out's own budget.
+
+## The chain, measured
+1. Boat 0 capsized at t 18.05 s and planed inverted at 25 m/s, progressively driven under (up·y −0.96, |ω| 4.8 rad/s).
+2. One substep of that hull returned `load.force[1]` = 5.6 GN — 100 000 × her weight. V110 caps the EXPLICIT flux loads
+   (`capScale` 5.5e−5 there, doing its job); the velocity-level impulse terms (slam, crossflow, face drag, sway entry)
+   are bounded against the RIGID BODY by construction (V103) but not in newtons, and `buildWakeLoad` was handed the
+   whole `fY`.
+3. `writeWakeSource`'s 1 s low-pass divides a spike by 60, so the wake record still carried Σfy = 9.3e7 N (1774 mg;
+   an ordinary racing record is 0.7–4.8 mg).
+4. `WakeField` is a STEADY Havelock pattern — η ∝ F — so it laid ±80 m of "wake" over its 300 m wedge.
+5. The three boats inside the wedge read 30–55 m of water over their decks: displaced volume 42.8 m³ (hull ≈ 7),
+   slam impulse 3.2e7 N·s, and they left the tick at 1067.9 and 461.0 m/s horizontal. The race never finished.
+
+## Fix
+`buildWakeLoad` bounds the load the wake is handed at the SAME V110 acceleration the explicit loads get,
+`maxAccel·m` = 50 g × 5351 kg = 2.63 MN, with every cell scaled by that one factor: the pattern's centroid, second
+moments and depth are exactly the unbounded load's, only the amplitude is physical. No new constant, no feel knob, one
+place both threads go through (`hw.wake` → `writeWakeSource` on the worker and on the page, §V110/§V2). `netFy > 0` is
+false for NaN, so a non-finite load now leaves no source instead of poisoning every receiver's height sampler.
+
+## Numbers
+- pack/open/seed 101: max boat speed 1501 → 33.1 m/s; max wake η at a hull 81 → 0.39 m; max wake source 9.3e7 → 2.5e5 N.
+- The 12-seed `open` sweep at HEAD, before → after: every rival classified finished 11/12 → 12/12, pack spread max
+  ∞ → 37.1 s (median 22.7 → 21.9 s), seed 101 hooks 402 → 8, scares 548 → 10, wall 101 → 24 s. NINE of the twelve seeds
+  are bit-identical: the bound never bites in ordinary racing. The block still FAILs T213 on crash-free races (4/12,
+  the same four seeds before and after) — that is the AI's seakeeping in a big sea, not this.
+- Worst case with the bound in place ([M] tests/hullWater.test.ts): an emitter pinned AT the bound for 12 ticks gives a
+  boat 25 m astern 3.1 m of wake elevation, 3.7 m/s of Δv per tick and 25.7 m/s — a sea state, not a launch.
+
+## Known limit, reported
+50 g is the V110 safety bound, not a wave-making one: a source pinned at it for a whole second is 12 × the biggest
+record ordinary racing produces. Nothing in 12 seeds × 3 seas comes near it, and the measured receiver response above is
+bounded, so no second (tuned) constant was introduced.

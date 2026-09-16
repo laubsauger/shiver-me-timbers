@@ -29,6 +29,7 @@ import {
 } from '../src/speedboat/hullMesh';
 import { HULL_WATER_DEFAULTS, HullWater, planingSubsteps, type HeightSampler, type HullWaterMesh } from '../src/sea-physics/hullWater';
 import { createRigid6Memory, stepRigid6, type Rigid6State } from '../src/sea-physics/rigidBody';
+import { WAKE_SRC_LEN, WS, WakeField, writeWakeSource } from '../src/wake/wakeField';
 import type { Quat, Vec3 } from '../src/state/simState';
 
 const DT = 1 / 60;
@@ -641,6 +642,8 @@ describe('one contact, every consumer; bounded; memory', () => {
         expect(hw.wake.fy[j], `${name}: sample ${j}`).toBeGreaterThanOrEqual(0);
         wakeSum += hw.wake.fy[j];
       }
+      // these are ordinary loads, so the wake's V110 bound (§B126, next test) is slack and the sum is the whole load
+      expect(Math.max(0, net), name).toBeLessThan(HULL_WATER_DEFAULTS.maxAccel * hull.mass);
       expect(Math.abs(wakeSum - Math.max(0, net)), name).toBeLessThanOrEqual(1e-6 * Math.max(1, Math.abs(net)));
       if (expectsNegativeFaces) {
         // the scenario really has the defect the per-sample clamp would make
@@ -655,6 +658,86 @@ describe('one contact, every consumer; bounded; memory', () => {
     rest.evaluate(sr, DT);
     expect(rest.wake.rescale).toBeGreaterThan(0.98);
     expect(rest.wake.rescale).toBeLessThanOrEqual(1 + 1e-12);
+  });
+
+  it('§B126: the load the WAKE is handed is bounded at V110 too — a slam cannot force a steady Kelvin pattern, and the boat astern is not launched', () => {
+    // WHY (the bug this is the regression for): `load.force[1]` carries the velocity-level impulse terms (slam,
+    // crossflow, face drag, sway entry) DIVIDED BY the substep. Those are bounded against the rigid body by
+    // construction (V103) but not in newtons, so one substep of an inverted hull dragged under at 25 m/s handed
+    // 5.6 GN — 100 000 × her weight — to the wake field. The field is a STEADY-pattern model: a Kelvin wake is forced
+    // by the load the hull CARRIES, never by one substep of an impact. In pack/open/seed 101 at t 18.45 s that single
+    // substep made a 9.3e7 N source, threw ±80 m of "wake" across its 300 m wedge, buried the three boats inside it
+    // 30–55 m deep for one tick and fired two of them out at 460 and 1068 m/s.
+    const bound = HULL_WATER_DEFAULTS.maxAccel * hull.mass;
+    const INVERTED: Quat = [0, 0, 1, 0];
+    const hard: [string, Rigid6State, boolean][] = [
+      ['inverted 60 m/s entry', st([0, 0.8, 0], INVERTED, [-1, -60, 25]), true],
+      ['flat 60 m/s slam', st([0, 0.8, 0], [0, 0, 0, 1], [0, -60, 25]), true],
+      ['broadside 80 m/s', st([0, 0.5, 0], quatFromAxisAngle([0, 1, 0], Math.PI / 2), [80, -20, 0]), true],
+      ['capsized and driven under (the seed-101 pose)', st([0, -0.54, 0], [0.16786, -0.00446, -0.97632, 0.13642], [-14.85, -4.98, 20.15], [-2.05, 0.65, 4.25]), false],
+      ['upright planing (the control: the bound must not touch it)', st([0, 0.45, 0], [-Math.sin(0.02), 0, 0, Math.cos(0.02)], [0, 0, 25]), false],
+    ];
+    for (const [name, s0, expectsBoundToBite] of hard) {
+      const hw = new HullWater(hull);
+      const mem = createRigid6Memory();
+      const s = st(s0.position, s0.quaternion, s0.velocity, s0.angularVelocity);
+      let bitten = false;
+      for (let t = 0; t < 4; t++) {
+        hw.samplePatch(FLAT, s, DT);
+        stepRigid6(s, hull, DT, 2, (ss, h, out) => {
+          hw.evaluate(ss, h, out);
+          const net = hw.load.force[1];
+          let sum = 0;
+          for (let j = 0; j < hw.wake.count; j++) {
+            expect(hw.wake.fy[j], `${name}: sample ${j} ≥ 0`).toBeGreaterThanOrEqual(0);
+            sum += hw.wake.fy[j];
+          }
+          const want = Math.min(Math.max(0, net), bound);
+          expect(Math.abs(sum - want), `${name}: Σfy = min(max(0, netFy), maxAccel·m)`).toBeLessThanOrEqual(1e-6 * Math.max(1, want));
+          expect(Math.abs(hw.wake.deficit - (net - sum)), `${name}: deficit reports the trim`).toBeLessThanOrEqual(1e-6 * Math.max(1, Math.abs(net)));
+          if (net > bound * 1.01) bitten = true;
+        }, mem);
+      }
+      // the hard cases really do produce a load past the bound (without this the assertions above pass vacuously)
+      expect(bitten, `${name}: the load goes past maxAccel·m`).toBe(expectsBoundToBite);
+    }
+
+    // ---- the fleet chain, end to end: emitter → writeWakeSource → WakeField → the boat astern reads it as water
+    const chain = (maxAccel: number): { eta: number; dv: number; speed: number } => {
+      const em = st([0, 0.8, 0], [0, 0, 0, 1], [0, -60, 25]);
+      const ehw = new HullWater(hull, { maxAccel });
+      const emem = createRigid6Memory();
+      const rec = new Float64Array(2 * WAKE_SRC_LEN);
+      const field = new WakeField();
+      const sampler: HeightSampler = (x, z) => field.heightAt(x, z);
+      const rc = st([0, 0.45, -25], [-Math.sin(0.02), 0, 0, Math.cos(0.02)], [0, 0, 25]);
+      const rhw = new HullWater(hull);
+      const rmem = createRigid6Memory();
+      const out = { eta: 0, dv: 0, speed: 0 };
+      for (let t = 0; t < 12; t++) {
+        ehw.samplePatch(FLAT, em, DT);
+        stepRigid6(em, hull, DT, 2, (ss, h, o) => ehw.evaluate(ss, h, o), emem);
+        writeWakeSource(rec, 0, rec, 0, t === 0, em, ehw.wake, DT);
+        rec[WS.RUN] = 600; // an established pattern, so nothing is faded out
+        field.prepare(rec, 0, 2, 1, rc.position[0], rc.position[2]);
+        out.eta = Math.max(out.eta, Math.abs(sampler(rc.position[0], rc.position[2])));
+        const v0: Vec3 = [...rc.velocity] as Vec3;
+        rhw.samplePatch(sampler, rc, DT);
+        stepRigid6(rc, hull, DT, 2, (ss, h, o) => rhw.evaluate(ss, h, o), rmem);
+        out.dv = Math.max(out.dv, Math.hypot(rc.velocity[0] - v0[0], rc.velocity[1] - v0[1], rc.velocity[2] - v0[2]));
+        out.speed = Math.max(out.speed, Math.hypot(...rc.velocity));
+      }
+      return out;
+    };
+    const bounded = chain(HULL_WATER_DEFAULTS.maxAccel);
+    // the water the boat astern stands in is a sea state, not a wall: [M] 3.1 m, Δv 3.7 m/s per tick, 25.7 m/s
+    expect(bounded.eta).toBeLessThan(6);
+    expect(bounded.dv).toBeLessThan(HULL_WATER_DEFAULTS.maxAccel * DT); // the V110 per-tick bound
+    expect(bounded.speed).toBeLessThan(40);
+    // CONTROL: the same measure with the bound lifted is the bug — the emitter's one substep is the whole pattern
+    const free = chain(1e9);
+    expect(free.eta).toBeGreaterThan(40);
+    expect(free.speed).toBeGreaterThan(100);
   });
 
   it('bounds the result (V110): the EXPLICIT flux loads are scaled by one factor to the cap, the impulses never (T189); samples follow', () => {
