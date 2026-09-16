@@ -148,10 +148,8 @@ async function boot(): Promise<void> {
   camera.cam.onCockpitChange = (on) => pilots.hero.setHeadVisible(!(cockpitView = on));
   camera.cam.setEyeSource((p, q) => pilots.hero.eyeSource(p, q));
   const controls = createRaceControls({ player, camera, enabled: () => !camera.capturesInput() }); // §T.182
-  const audio = createSpeedboatAudioSink({ // §T.183
-    camera: app.camera, npcs, npcContact: (i) => npcs.contact(i), npcThrottle: (i) => npcs.throttle(i),
-    landmarks: world.colliders, // §T.212 gulls + bell near islands/furniture
-  });
+  // §T.183; §T.212 landmarks = the gulls' and bell's islands/furniture
+  const audio = createSpeedboatAudioSink({ camera: app.camera, npcs, landmarks: world.colliders, npcContact: (i) => npcs.contact(i), npcThrottle: (i) => npcs.throttle(i) });
   installAudioUnlock(audio);
   const cineDrive = createCineBoot(query, waterAt); // trailer (docs/cine/speedboat-trailer-v1.md): ?cine grade BEFORE the post graph
   const post = createPostPipeline(app.renderer, app.scene, app.camera, { sunDirection: () => sky.sunDirection });
@@ -162,11 +160,11 @@ async function boot(): Promise<void> {
     placeCamera: (view, dt) => (camera.update(view, dt, waterAt), cine.applyCamera(dt)),
   });
   // ?autopilot: the player's boat runs the rivals' §T.186 pilot (browser checks, and the smoke race's controls)
+  // `wakeSources`: the rivals' wakes she already floats on, read by her pilot as a rival's WAKE WORLD (§T.213 follow-up)
   const autopilot = query.has('autopilot') && mode === 'race'
     ? createAutopilotControls({
         setup: pilotSetup, index: npcs.playerIndex, boats: NPC_COUNT + 1, lockRad: hull.drives[0].maxSteerRad, sea: sea.cpuOcean,
         time: () => state.time, world: () => session.snapshot, standing: () => session.playerAiIn, propImmersion: () => player.hw.propImmersion,
-        // the rivals' wakes she already floats on, read by her pilot as a rival's WAKE WORLD (§T.213 follow-up)
         wakeSources: () => (session.rivalWake ? { rec: session.rivalWake, count: NPC_COUNT } : null),
       })
     : null;
@@ -217,7 +215,6 @@ async function boot(): Promise<void> {
       driveThrust: player.hw.driveThrust, driveAdvance: player.hw.driveAdvance, driveImmersion: player.hw.driveImmersion, driveRpm: player.hw.driveRpm,
     },
   };
-
   const loop = new GameLoop(
     (dt) => {
       state.tick++;
@@ -292,7 +289,6 @@ async function boot(): Promise<void> {
   loop.start();
   bootReady();
   ui.openSelect();
-
   // console/browser-verification handle (§V22): read-only use expected
   (window as unknown as Record<string, unknown>).__speedboat = { mode, cine, app, state, sea, boats, player, npcs, controls, camera, loop, session, ui, dash, world, furniture, frame, get pilots() { return pilots; } };
 }
