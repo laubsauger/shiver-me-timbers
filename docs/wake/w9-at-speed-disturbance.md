@@ -162,3 +162,47 @@ White edge = mix(lace edge, edgeBoil 0.03, smoothstep(0.55, 0.9, coverage) × fr
   failure in `flowfoam/index.ts` (7 → 8 texture sites) and the `bandLimitAudit` count (182 vs baseline 176) come from
   that work and from other directories, not from W9's lines. `tests/spray.test.ts` "fold gate" already fails at HEAD
   inputs.
+
+## 9. W10: where the round blobs come from (diagnosis; the cure is not in the tree)
+
+USER on the same 1080p sunset grid (chase and rear-3/4 panels): the trail behind the boat reads as LARGE ROUND SOFT
+BLOBS — bokeh, bubble-wrap — not churned water. Date: 2026-09-16.
+
+**The source `[M]`.** `src/foam/sprayPool.ts`, the `if (options.clumps)` branch of the sprite FRAGMENT shader — the
+pool this page built in §3, driven by `foam/hullSpray.ts`. It is not the lane's surface white (`flowfoam.wakeWhiteNode`
+§5, which is band-limited and behaves), not a texture, and not the rooster/mist pools.
+
+**Why it is a compositing failure and not a tuning value.** The pool is NORMAL-blended with an opaque core and runs
+about 10 k clumps alive per boat (§7). At 10–30 m the only thing on screen is the FRONT-MOST sprite's silhouette: every
+hole its own hashed mask carries is painted over by the sprite behind it, and its interior is never seen at all. §3
+gave each clump its own noise phase on the stated reasoning that "no two clumps share an outline"; at this density that
+reasoning inverts. Per-sprite breakup **cannot** draw churn at any tuning — it can only draw a mosaic of half-metre
+discs, and the discs are the report. What is left visible of the W9 mask is its outline: a level set of a single
+band-limited octave, which is a lobed circle.
+
+**Two cures, one of them already in flight.**
+
+1. *Make the sprite small enough and its silhouette elongated enough that no one disc reads.* The concurrent water
+   session's uncommitted `hullSpray` change does exactly this — `sizeDeath` 0.65 → 0.5 m and the pool `streak`
+   2.5 → 1.2 — and on its own it removes the blob read: the rear-3/4 trail becomes a torn fibrous mass.
+   `[M]` 1080p, R1 duel at 25/30 m/s: session scratchpad `w10/shots/b1-head-rear34.png` against
+   `w9/shots/after-sun-hero-rear34.png`.
+2. *Carve the mask with a field of the WORLD POINT the fragment stands on*, shared by every sprite that overlaps there,
+   so neighbours erode identically and the individual outlines stop existing. A sprite quad is offset in VIEW space
+   (three's `SpriteNodeMaterial`: `mvPosition.xy + geometry.xy·scale`, and `q = 2·uv − 1 = 2·geometry.xy`), so the
+   fragment's world point is `centre + (camera right·q.x + camera up·q.y)·½size`. A world-locked, slowly drifting fbm
+   of that point sets both the erosion threshold and the window's radius; the threshold's half-width grows with the
+   field's own coordinate footprint, so the far wake resolves to a soft pale trail (§V48b) with no seam against §5.
+
+**Status of (2): prepared, measured, NOT adopted.** Patch parked at session scratchpad `w10/churn-field.patch`
+(`sprayPool.ts` + its tests). It compiles, typechecks, the wake/spray suites stay green and `bandLimitAudit` goes
+186 → 185. A six-variant browser sweep over live uniforms (`w10/shots/t2-v*.png`, 1080p, same cameras) says the idea is
+right and my cell sizes are wrong: at 0.30–0.85 m the field is COARSER than a 0.5 m sprite, so it modulates whole
+sprites instead of carving their interiors, coverage falls and the result is a regression against the current tree.
+Flattening the window (v5: rim 0.35, falloff 0.7) brings the bokeh straight back, which is the diagnosis confirming
+itself. Next values when `src/foam/**` frees up: cell 0.10–0.15 m (several cells across a sprite), no field modulation
+of the window rim, erosion ≈ 0.30 — then re-tune against whatever `sizeDeath` the water session settles on.
+
+**Ownership.** `src/foam/**` is held by the concurrent water session (`docs/water-review/AGENT-COORD.md`); the patch is
+requested there and is deliberately not in the working tree. No perf delta is claimed: the change was never a candidate
+for landing, so no 8-boat pack measurement was taken.
