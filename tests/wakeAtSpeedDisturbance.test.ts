@@ -100,7 +100,7 @@ describe('W9 the planing contact, from pose + shared hull + record, is the physi
     for (let k = 0; k < base.length; k++) {
       expect(moved[k].x - base[k].x).toBeCloseTo(ox, 6);
       expect(moved[k].z - base[k].z).toBeCloseTo(oz, 6);
-      for (const key of ['y', 'axisX', 'axisZ', 'length', 'width0', 'width1', 'fill', 'out', 'up', 'along', 'size', 'rate'] as const) {
+      for (const key of ['y', 'axisX', 'axisZ', 'length', 'rise', 'width0', 'width1', 'fill', 'out', 'up', 'along', 'size', 'rate'] as const) {
         expect(moved[k][key]).toBeCloseTo(base[k][key], 6);
       }
     }
@@ -108,6 +108,43 @@ describe('W9 the planing contact, from pose + shared hull + record, is the physi
 });
 
 describe('W9 the disturbance is heavy at race speed, grows with speed, and is physically bounded', () => {
+  it('planing spray builds continuously through onset instead of switching on at full density', () => {
+    const t = towed(25);
+    const c = planingContact(t.hw.mesh, t.pose, t.fx.bow, t.fx.jets, createPlaningContact());
+    const sheetRate = (speed: number) => {
+      const out: HullSprayEmitter[] = [];
+      planingSprayEmitters({ ...c, speed }, t.fx.bow, t.fx.jets, t.fx.hollow, [], out);
+      return out[0]?.rate ?? 0;
+    };
+    const full = sheetRate(10);
+    expect(full).toBeGreaterThan(0);
+    expect(sheetRate(6)).toBe(0);
+    expect(sheetRate(6.001)).toBeLessThan(full * 0.000001);
+    expect(sheetRate(8)).toBeCloseTo(full * 0.5, 8);
+    expect(sheetRate(25)).toBe(full);
+  });
+
+  it('the chine sheet follows the sampled bow-to-stern surface and clears slope on slot reuse', () => {
+    const t = towed(25);
+    const c = planingContact(t.hw.mesh, t.pose, t.fx.bow, t.fx.jets, createPlaningContact());
+    const pool: HullSprayEmitter[] = [];
+    const out: HullSprayEmitter[] = [];
+    for (const rise of [-0.6, 0.6]) {
+      c.frontY = 0.3;
+      c.transomY = c.frontY + rise;
+      out.length = 0;
+      planingSprayEmitters(c, t.fx.bow, t.fx.jets, t.fx.hollow, pool, out);
+      expect(out[0].y).toBe(c.frontY);
+      expect(out[0].y + out[0].rise).toBeCloseTo(c.transomY, 10);
+      expect(out[0].rise).toBeCloseTo(rise, 10);
+    }
+    out.length = 0;
+    planingSprayEmitters(c, { ...t.fx.bow, inContact: false }, t.fx.jets, t.fx.hollow, pool, out);
+    expect(out.length).toBe(2);
+    expect(out[0].fill).toBe(1);
+    expect(out[0].rise).toBe(0);
+  });
+
   it('nothing from a boat at displacement speed (the W8 "white as soon as the engine runs" must not return)', () => {
     const t = towed(3);
     expect(t.U).toBeLessThan(PLANING_CONTACT_MIN_SPEED);
@@ -179,7 +216,7 @@ describe('W9 the disturbance is heavy at race speed, grows with speed, and is ph
 });
 
 describe('W9 the rooster hump lifts the drawn surface where the hollow closes', () => {
-  it('signed jet-type samples centred on the closure, peak lift HUMP_HEIGHT_SHARE of the hollow depth; none without a hollow', () => {
+  it('signed jet-type samples centred on the closure, nominal cell height HUMP_HEIGHT_SHARE of the hollow depth; none without a hollow', () => {
     const t = towed(30);
     const h = t.fx.hollow;
     expect(h.length).toBeGreaterThan(0);
@@ -191,23 +228,25 @@ describe('W9 the rooster hump lifts the drawn surface where the hollow closes', 
     const dip: Parameters<typeof hollowSamples>[1] = [];
     hollowSamples(h, dip);
     expect(hollow).toBeGreaterThan(0);
-    // every hump sample LIFTS (negative load) and lies at/after the closure; the hollow's press (positive) lies before it
+    // Positive visible head raises the closure; negative visible head lowers the hollow.
     for (const s of out) {
-      expect(s.fy).toBeLessThan(0);
+      expect(s.fy).toBeGreaterThan(0);
       const aft = (s.x - h.x) * -h.fwdX + (s.z - h.z) * -h.fwdZ;
       expect(aft).toBeGreaterThan(0.8 * h.length);
     }
-    for (const s of dip) expect(s.fy).toBeGreaterThan(0);
-    // the centre sample's head (fy / ρg·dx·w) is the share of the deepest hollow point
+    for (const s of dip) expect(s.fy).toBeLessThan(0);
+    // Nominal cell height sets integrated head; the Gaussian solver determines its peak.
     let dMax = 0;
     for (let k = 0; k < HOLLOW_DEPTHS; k++) dMax = Math.max(dMax, h.depths[k]);
     const centre = out[1];
     expect(dryTransomShare(30, h.depths[0])).toBe(1);
-    expect(-centre.fy / (WAKE_RHO * GRAVITY * 0.15 * h.length * h.width)).toBeCloseTo(HUMP_HEIGHT_SHARE * dMax, 6);
+    expect(centre.fy / (WAKE_RHO * GRAVITY * 0.15 * h.length * h.width)).toBeCloseTo(HUMP_HEIGHT_SHARE * dMax, 6);
     // the source buffer keeps the sign of a jet-type sample (a hull sample would clamp it to 0)
     const buf = new WakeSourceBuffer(8);
     buf.pushJet(centre.x, centre.z, centre.fy, centre.footprint, centre.depth);
-    expect(buf.jetData[2]).toBeLessThan(0);
+    expect(buf.jetData[2]).toBeGreaterThan(0);
+    buf.pushJet(dip[0].x, dip[0].z, dip[0].fy, dip[0].footprint, dip[0].depth);
+    expect(buf.jetData[7]).toBeLessThan(0);
     // a wet transom (displacement / semi-planing, Fn_T < 3) makes its stern wave in the solver: no lift
     const slow = towed(5);
     expect(slow.fx.hollow.length).toBeGreaterThan(0);

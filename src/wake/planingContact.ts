@@ -62,6 +62,8 @@ export interface PlaningHull {
 export const DEFAULT_DEADRISE = (24 * Math.PI) / 180;
 /** below this speed over the water (m/s) a hull is not planing: no sheet, boil or hump from this model */
 export const PLANING_CONTACT_MIN_SPEED = 6;
+/** Visual transition to the full planing spray budget; avoids a hard switch at 6 m/s. */
+export const PLANING_CONTACT_FULL_SPEED = 10;
 
 export interface PlaningContact {
   wet: boolean;
@@ -203,10 +205,14 @@ export function planingSprayEmitters(
   out: HullSprayEmitter[],
 ): number {
   if (!c.wet || !(c.speed > PLANING_CONTACT_MIN_SPEED)) return 0;
+  const onset = Math.min(1, (c.speed - PLANING_CONTACT_MIN_SPEED) / (PLANING_CONTACT_FULL_SPEED - PLANING_CONTACT_MIN_SPEED));
+  const planingShare = onset * onset * (3 - 2 * onset);
   const L = HULL_SPRAY_LOOK;
   let added = 0;
   const take = (): HullSprayEmitter => {
     const e = (pool[out.length] ??= createHullSprayEmitter());
+    // Slots are reused between emitter kinds as hull contact changes.
+    e.rise = 0;
     out.push(e);
     added++;
     return e;
@@ -224,6 +230,7 @@ export function planingSprayEmitters(
     e.axisX = aftX;
     e.axisZ = aftZ;
     e.length = Math.hypot(c.frontX - c.transomX, c.frontZ - c.transomZ);
+    e.rise = c.transomY - c.frontY;
     e.width0 = 0;
     e.width1 = c.rootHalfBeam;
     e.fill = 0;
@@ -231,7 +238,7 @@ export function planingSprayEmitters(
     e.up = l.up;
     e.along = -l.forward;
     e.size = L.sheetSize;
-    e.rate = L.sheetDensity * flux;
+    e.rate = L.sheetDensity * flux * planingShare;
   }
   // BOIL: the drives' surface air, across the hollow from the props aft
   let air = 0;
@@ -272,7 +279,7 @@ export function planingSprayEmitters(
     e.up = up;
     e.along = Number.isFinite(excess) ? excess / nj : 0;
     e.size = L.boilSize;
-    e.rate = L.boilDensity * air * dry;
+    e.rate = L.boilDensity * air * dry * planingShare;
   }
   // HUMP: where the hollow closes
   if (hollow && hollow.length > 0 && hollow.width > 0) {
@@ -304,7 +311,7 @@ export function planingSprayEmitters(
       e.up = v;
       e.along = 0;
       e.size = L.humpSize;
-      e.rate = L.humpDensity * refill * share;
+      e.rate = L.humpDensity * refill * share * planingShare;
     }
   }
   return added;

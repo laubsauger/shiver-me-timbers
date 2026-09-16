@@ -4,10 +4,10 @@
  * centreline profile the prop immersion uses), but the drawn water was flat there, so the lower units hovered over an
  * unbroken surface.
  *
- * The linear wake solver cannot make a separated hollow by itself, so the hollow enters it the way transom-stern flow is
- * treated in linear ship-wave theory: as a VIRTUAL EXTENSION OF THE HULL whose pressure holds the free surface down by
- * the hollow's depth (Doctors & Day 1997). Hull-type samples of weight ρ·g·dep·dA: the drawn surface (η + h) dips there,
- * and where the pressure ends the flow closes and the solver radiates the rooster-tail hump aft of it.
+ * The drawn solver stores ζ = η + h_P, not physical pressure displacement η alone. A moving positive head therefore
+ * initially RAISES its visible surface. These explicit shape sources use signed heads: negative for the hollow,
+ * positive for the closure crest. Both go through pushJet, outside the positive hull-load/foam path. They do not
+ * change physical hull forces or the general hull-wave source convention.
  *
  * `HollowRecord` is the compact per-boat form (transom point, forward, length, width, HOLLOW_DEPTHS depths at the cell
  * centres) the sim-worker FX record carries, so rivals draw theirs too. Read LIVE every tick (trim is being re-fitted).
@@ -66,7 +66,7 @@ export function measureHollow(depthAt: (x: number, z: number) => number, x: numb
   return out;
 }
 
-/** the hollow as hull-type wake samples appended to `out` (returns how many were added) */
+/** Negative visible-head sources for the hollow; append to the signed (pushJet) channel, never hull loads. */
 export function hollowSamples(h: Readonly<HollowRecord>, out: HydroSample[]): number {
   if (!(h.length > 0) || !(h.width > 0) || ![h.x, h.z, h.fwdX, h.fwdZ, h.length, h.width].every(Number.isFinite)) return 0;
   const dx = h.length / HOLLOW_DEPTHS;
@@ -75,7 +75,7 @@ export function hollowSamples(h: Readonly<HollowRecord>, out: HydroSample[]): nu
     const dep = h.depths[c];
     if (!(dep > 0) || !Number.isFinite(dep)) continue;
     const aft = (c + 0.5) * dx;
-    out.push({ x: h.x - h.fwdX * aft, z: h.z - h.fwdZ * aft, fy: WAKE_RHO * GRAVITY * dep * dx * h.width, footprint: Math.max(0.5 * h.width, dx), depth: 0 });
+    out.push({ x: h.x - h.fwdX * aft, z: h.z - h.fwdZ * aft, fy: -WAKE_RHO * GRAVITY * dep * dx * h.width, footprint: Math.max(0.5 * h.width, dx), depth: 0 });
     n++;
   }
   return n;
@@ -86,9 +86,10 @@ export function hollowSamples(h: Readonly<HollowRecord>, out: HydroSample[]): nu
  * and heap ABOVE the undisturbed surface — the transom stern's "rooster tail" crest, measured at roughly the transom
  * draft behind dry transoms at high transom Froude numbers (Maki 2006; Doctors & Day 1997 draw its linear part). The
  * linear solver does not raise it from the hollow alone at planing speed: the free wave it radiates is 2πU²/g ≈ 400 m
- * long at 25 m/s. So the closure gets its own SUCTION: signed (jet-type, `WakeSourceBuffer.pushJet`) samples whose head
- * lifts the drawn surface by HUMP_HEIGHT_SHARE of the hollow's deepest point over ±15 % of the hollow length around the
- * closure. A jet-type sample is not a hull entering water, so the churn foam does not read it (simFoam `hullHead`).
+ * long at 25 m/s. So the closure gets its own positive visible head: signed (jet-type, `WakeSourceBuffer.pushJet`) samples that
+ * distribute a nominal HUMP_HEIGHT_SHARE of the hollow's deepest point over three closure cells. Gaussian splatting
+ * and wave evolution determine the actual peak; the load divided by the cell area is not the rendered height. A jet-type sample
+ * is not a hull entering water, so the churn foam does not read it (simFoam `hullHead`).
  * LOOK CALIBRATION, stated: the share (a crest below the measured ~1·T, since part of it breaks into the boil drawn
  * by `hullSpray`).
  */
@@ -113,7 +114,7 @@ export function dryTransomShare(speed: number, transomDepth: number): number {
 const HUMP_PROFILE: readonly (readonly [number, number])[] = [[0.85, 0.6], [1, 1], [1.15, 0.6]];
 
 /**
- * the closure hump as signed (negative fy = lift) jet-type samples appended to `out` for a boat at `speed` (m/s, over
+ * the closure hump as signed (positive visible head = crest) jet-type samples appended to `out` for a boat at `speed` (m/s, over
  * the water), × `dryTransomShare`; returns how many
  */
 export function humpSamples(h: Readonly<HollowRecord>, speed: number, out: HydroSample[]): number {
@@ -123,9 +124,14 @@ export function humpSamples(h: Readonly<HollowRecord>, speed: number, out: Hydro
   const dry = dryTransomShare(speed, h.depths[0]);
   if (!(dMax > HUMP_MIN_DEPTH) || !(dry > 0)) return 0;
   const dx = 0.15 * h.length;
+  // footprint is Gaussian sigma, not the cell's full longitudinal span. Using
+  // dx spreads a long hollow's narrow closure sideways and dilutes its height.
+  // Half the cell span preserves overlap between the three sources; half the
+  // width preserves the short-hollow profile. Integrated head stays unchanged.
+  const footprint = Math.max(0.5 * h.width, 0.5 * dx);
   for (const [at, w] of HUMP_PROFILE) {
     const aft = at * h.length;
-    out.push({ x: h.x - h.fwdX * aft, z: h.z - h.fwdZ * aft, fy: -WAKE_RHO * GRAVITY * HUMP_HEIGHT_SHARE * dry * dMax * w * dx * h.width, footprint: Math.max(0.5 * h.width, dx), depth: 0 });
+    out.push({ x: h.x - h.fwdX * aft, z: h.z - h.fwdZ * aft, fy: WAKE_RHO * GRAVITY * HUMP_HEIGHT_SHARE * dry * dMax * w * dx * h.width, footprint, depth: 0 });
   }
   return HUMP_PROFILE.length;
 }

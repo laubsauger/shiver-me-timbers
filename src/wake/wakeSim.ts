@@ -46,7 +46,7 @@ export const WAKE_MAX_VESSELS = 8;
 export interface VesselWakeInput {
   readonly samples: readonly HydroSample[];
   readonly jets: readonly PropWashInput[];
-  /** W9 signed jet-type samples (the transom's rooster hump, `transomHollow.humpSamples`); absent = none */
+  /** Signed visible-head samples (negative transom hollow and positive closure crest); absent = none */
   readonly lifts?: readonly HydroSample[];
   /** plan position and velocity of that step (m, m/s) */
   readonly x: number;
@@ -303,8 +303,15 @@ export class WakeSim {
         counts.overflowed++;
         continue;
       }
-      const { radius } = vesselExtent(o.x, o.z, o.samples);
-      const reach = WAKE_SPLAT_RADIUS_SIGMAS * splatSigma(maxFootprint(o.samples, o.jets), solver.texel, solver.n);
+      let { radius } = vesselExtent(o.x, o.z, o.samples);
+      let footprint = maxFootprint(o.samples, o.jets);
+      // The hollow and its closure extend behind the physical hull. Include
+      // both signs in domain containment, or their clipped splats can wrap.
+      if (o.lifts) for (const q of o.lifts) {
+        radius = Math.max(radius, Math.hypot(q.x - o.x, q.z - o.z));
+        footprint = Math.max(footprint, q.footprint);
+      }
+      const reach = WAKE_SPLAT_RADIUS_SIGMAS * splatSigma(footprint, solver.texel, solver.n);
       const weight = vesselDomainWeight(o.x, o.z, radius, reach, solver.centerX, solver.centerZ, solver.domain, solver.sponge);
       if (!(weight > 0)) {
         counts.culled++;

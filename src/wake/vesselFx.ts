@@ -137,6 +137,9 @@ export function createVesselFx(d: VesselFxDeps) {
   const heroLifts: HydroSample[] = [];
   const rivalLifts: HydroSample[][] = [];
   const heroLoad = { load: 0 };
+  // Stable fleet slots, never the nearest-first render order. Worker samples
+  // are immutable inputs; the ramp applies only to our pooled copies.
+  const rivalLoads: ({ load: number; tick: number } | undefined)[] = [];
   const fxStruts: AppendageInput[] = [];
   const extras: RoosterExtraSource[] = [];
   const extraPool: RoosterExtraSource[] = [];
@@ -219,10 +222,9 @@ export function createVesselFx(d: VesselFxDeps) {
         }
       };
       pushStruts(heroFx.jets, heroSamples);
-      // W8 round 5: the transom hollow as a virtual hull extension (wake/transomHollow.ts) — once HullWater publishes it
-      hollowSamples(heroFx.hollow, heroSamples);
-      // W9: the closure's rooster hump (signed jet-type samples)
+      // Both explicit transom shapes use signed visible heads, separate from positive hull loads.
       heroLifts.length = 0;
+      hollowSamples(heroFx.hollow, heroLifts);
       humpSamples(heroFx.hollow, Math.hypot(hero.state.velocity[0], hero.state.velocity[2]), heroLifts);
       const hx = hero.state.position[0];
       const hz = hero.state.position[2];
@@ -233,9 +235,10 @@ export function createVesselFx(d: VesselFxDeps) {
       tick++;
       order.length = 0;
       const n = rivals ? rivals.spec.boats : 0;
+      rivalLoads.length = n;
       for (let i = 0; i < n; i++) {
         const e = rivals!.effects(i);
-        if (e.tick < 0) { contact.remove(i + 1); continue; }
+        if (e.tick < 0) { contact.remove(i + 1); rivalLoads[i] = undefined; continue; }
         ids.push(i + 1);
         order.push(effects.length);
         effects.push(e);
@@ -268,12 +271,26 @@ export function createVesselFx(d: VesselFxDeps) {
         const e = effects[k];
         const p = e.pose;
         const rs = (rivalSamples[others.length] ??= []);
-        rs.length = 0;
-        for (const sm of e.wake) rs.push(sm);
+        const load = (rivalLoads[ids[k] - 1] ??= { load: 0, tick: e.tick });
+        if (e.tick < load.tick) load.load = 0;
+        load.tick = e.tick;
+        let total = 0;
+        for (const sm of e.wake) total += sm.fy;
+        const share = wakeLoadRamp(load, total, dt);
+        for (let i = 0; i < e.wake.length; i++) {
+          const sm = e.wake[i];
+          const copy = (rs[i] ??= { x: 0, z: 0, fy: 0, footprint: 0, depth: 0 });
+          copy.x = sm.x;
+          copy.z = sm.z;
+          copy.fy = sm.fy * share;
+          copy.footprint = sm.footprint;
+          copy.depth = sm.depth;
+        }
+        rs.length = e.wake.length;
         pushStruts(e.fx.jets, rs);
-        if (e.fx.hollow) hollowSamples(e.fx.hollow, rs);
         const rl = (rivalLifts[others.length] ??= []);
         rl.length = 0;
+        if (e.fx.hollow) hollowSamples(e.fx.hollow, rl);
         if (e.fx.hollow) humpSamples(e.fx.hollow, Math.hypot(p.velocity[0], p.velocity[2]), rl);
         others.push({ samples: rs, jets: e.fx.jets, lifts: rl, x: p.position[0], z: p.position[2], vx: p.velocity[0], vz: p.velocity[2] });
         for (const j of e.fx.jets) jets.push(j);
@@ -313,7 +330,10 @@ export function createVesselFx(d: VesselFxDeps) {
     },
 
     /** A player teleport starts a new contact source without deleting old foam. */
-    resetContact(): void { contact.resetContact(0); },
+    resetContact(): void {
+      contact.resetContact(0);
+      heroLoad.load = 0;
+    },
 
     /** the page's spray toggle (graphics settings): hidden pools are not stepped */
     setVisible(on: boolean): void {

@@ -304,7 +304,7 @@ describe('W8 round 4: a prop that re-enters the water lays its lane over time, n
 describe('W8 round 5: the transom hollow is drawn as a virtual hull extension, from the physics own depth field', () => {
   // a hollow shaped like the physics' profile: 0.3 m deep at the transom, closing 9 m aft; 0 ahead of the transom
   const depthAt = (_x: number, z: number): number => (z < 0 && z > -9 ? 0.3 * (1 - (-z / 9) ** 2) : 0);
-  it('measures where the hollow closes and its depths, and presses the surface by ρ·g·depth over it, astern', () => {
+  it('measures where the hollow closes and its depths, and supplies negative visible head of magnitude ρ·g·depth astern', () => {
     const rec = measureHollow(depthAt, 0, 0, 0, 1, 2.3, createHollowRecord());
     expect(rec.length).toBeGreaterThan(8);
     expect(rec.length).toBeLessThanOrEqual(9.2);
@@ -315,7 +315,7 @@ describe('W8 round 5: the transom hollow is drawn as a virtual hull extension, f
     const load = out.reduce((a, q) => a + q.fy, 0);
     let integral = 0;
     for (let z = -0.005; z > -rec.length; z -= 0.01) integral += depthAt(0, z) * 0.01 * rec.width;
-    expect(Math.abs(load / (WAKE_RHO * GRAVITY * integral) - 1)).toBeLessThan(0.05);
+    expect(Math.abs(-load / (WAKE_RHO * GRAVITY * integral) - 1)).toBeLessThan(0.05);
     // a wet transom / no hollow publishes nothing
     expect(hollowSamples(measureHollow(() => 0, 0, 0, 0, 1, 2.3, createHollowRecord()), [])).toBe(0);
   });

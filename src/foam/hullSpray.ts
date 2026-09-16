@@ -45,7 +45,9 @@ export const HULL_SPRAY_LOOK = {
   boilSize: 1,
   humpSize: 0.8,
   /** sprite diameter at death (m); born at 60 % of it (`SprayPoolOptions.clumps`) */
-  sizeDeath: 0.65,
+  sizeDeath: 0.5,
+  /** Heavy water fragments stay broad; the separate fine-drop pool supplies long motion streaks. */
+  streak: 1.2,
   opacity: 1,
   /**
    * the clump's share of the sun (Lambert-ish radiance, like the lane's foam film: a clump is lit on its sun-facing half
@@ -72,6 +74,8 @@ export interface HullSprayEmitter {
   axisZ: number;
   /** run length along the axis (m) */
   length: number;
+  /** Change in water-surface height from the start to the end of the spawn run (m). */
+  rise: number;
   /** lateral half-width at the origin / at the run's end (m) */
   width0: number;
   width1: number;
@@ -88,7 +92,7 @@ export interface HullSprayEmitter {
 }
 
 export function createHullSprayEmitter(): HullSprayEmitter {
-  return { x: 0, y: 0, z: 0, axisX: 0, axisZ: 1, length: 0, width0: 0, width1: 0, fill: 0, out: 0, up: 0, along: 0, size: 1, rate: 0 };
+  return { x: 0, y: 0, z: 0, axisX: 0, axisZ: 1, length: 0, rise: 0, width0: 0, width1: 0, fill: 0, out: 0, up: 0, along: 0, size: 1, rate: 0 };
 }
 
 /** W9 multiply-scattered share of the key light on a whitewater clump (the rooster's thin plume: 0.5) */
@@ -123,7 +127,7 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
     // a boat-attached effect seen from a chase/tracking camera: visible to ~250 m, gone by 400 m
     fadeNear: () => 250,
     fadeFar: () => 400,
-    streak: () => 2.5,
+    streak: () => L.streak,
     // per VERTEX (a varying): a clump is a few pixels to a few dozen across and its light (sun lobe, sky, eight LED
     // pools) is smooth over it — per fragment it cost the pack's overdraw × the LED loop
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node
@@ -132,7 +136,7 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
   const count = pool.count;
-  /** per slot: (x, y, z, CDF upper bound), (axisX, axisZ, length, fill), (width0, width1, size, 0), (out, up, along, 0) */
+  /** per slot: (x, y, z, CDF upper bound), (axisX, axisZ, length, fill), (width0, width1, size, rise), (out, up, along, 0) */
   const posV = Array.from({ length: slots }, () => new THREE.Vector4(0, -1000, 0, 1));
   const axisV = Array.from({ length: slots }, () => new THREE.Vector4(0, 1, 0, 0));
   const widthV = Array.from({ length: slots }, () => new THREE.Vector4());
@@ -182,8 +186,9 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
       // on the line (fill 0) or anywhere across it (fill 1); ±5 cm of jitter so a root line is not a ruled edge
       const lateral = sign.mul(halfW.mul(float(1).sub(A.w.mul(float(1).sub(rFill))))).add(rJit.sub(0.5).mul(0.1));
       const xz = vec2(P.x, P.z).add(axis.mul(A.z.mul(rAlong))).add(side.mul(lateral));
-      pool.posAge.element(instanceIndex).assign(vec4(xz.x, P.y, xz.y, 0));
-      pool.birthHeight!.element(instanceIndex).assign(P.y);
+      const birthY = P.y.add(W.w.mul(rAlong));
+      pool.posAge.element(instanceIndex).assign(vec4(xz.x, birthY, xz.y, 0));
+      pool.birthHeight!.element(instanceIndex).assign(birthY);
       // outboard in proportion to where across the run it was born (a sheet root: ±1; a boil: a self-similar fan that
       // stays filled at its centre instead of emptying into two lanes)
       const across = lateral.div(halfW.max(0.05)).clamp(-1, 1);
@@ -223,7 +228,7 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
       rates.length = 0;
       dists.length = 0;
       for (const e of emitters) {
-        const ok = [e.x, e.y, e.z, e.axisX, e.axisZ, e.length, e.width0, e.width1, e.fill, e.out, e.up, e.along, e.size, e.rate].every(fin) && e.rate > 0;
+        const ok = [e.x, e.y, e.z, e.axisX, e.axisZ, e.length, e.rise, e.width0, e.width1, e.fill, e.out, e.up, e.along, e.size, e.rate].every(fin) && e.rate > 0;
         rates.push(ok ? e.rate : 0);
         dists.push(ok ? Math.hypot(e.x - viewer.x, e.y - viewer.y, e.z - viewer.z) : Infinity);
       }
@@ -241,7 +246,7 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
         const len = Math.hypot(e.axisX, e.axisZ) || 1;
         posV[k].set(e.x, e.y, e.z, 0);
         axisV[k].set(e.axisX / len, e.axisZ / len, Math.max(0, e.length), Math.min(1, Math.max(0, e.fill)));
-        widthV[k].set(Math.max(0, e.width0), Math.max(0, e.width1), Math.min(1, Math.max(0, e.size)), 0);
+        widthV[k].set(Math.max(0, e.width0), Math.max(0, e.width1), Math.min(1, Math.max(0, e.size)), e.rise);
         launchV[k].set(e.out, e.up, e.along, 0);
         total += grant[k];
       }
