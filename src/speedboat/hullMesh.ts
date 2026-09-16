@@ -267,7 +267,7 @@ export interface HullProxy {
   /** triangle vertex indices, outward winding */
   indices: Uint16Array;
   triCount: number;
-  /** strip index per triangle; −1 = not running surface (deck lid, transom, stem cap) */
+  /** strip index per triangle; −1 = not planing bottom (sides, deck lid, transom, stem cap) */
   triStrip: Int16Array;
   strips: HullStrips;
   mass: number;
@@ -384,8 +384,10 @@ export function buildDeepVHull(spec: Readonly<DeepVHullSpec> = REFERENCE_DEEP_V)
     const strip = Math.floor(i / spec.segmentsPerStrip);
     quad(K(i), Cp(i), Cp(i + 1), K(i + 1), 1, strip); // bottom +x
     quad(K(i), Cm(i), Cm(i + 1), K(i + 1), -1, strip); // bottom −x
-    quad(Cp(i), Dp(i), Dp(i + 1), Cp(i + 1), 1, strip); // side +x
-    quad(Cm(i), Dm(i), Dm(i + 1), Cm(i + 1), -1, strip); // side −x
+    // Topsides carry hydrostatic pressure and face drag. Including them in a bottom
+    // strip rotates its planing normal and moves its pressure centres as a chine wets.
+    quad(Cp(i), Dp(i), Dp(i + 1), Cp(i + 1), 1, -1); // side +x
+    quad(Cm(i), Dm(i), Dm(i + 1), Cm(i + 1), -1, -1); // side −x
     // deck lid, outward +y
     pushTri(Dp(i), Dm(i), Dp(i + 1), -1);
     pushTri(Dm(i), Dm(i + 1), Dp(i + 1), -1);

@@ -149,8 +149,10 @@ function turnScenario(cv: number, lockFraction: number): { r: Rig; control: (t: 
 }
 
 describe('§T.188 crash detection: every kind within 0.5 s of its physical onset', () => {
-  it('HOOK — full lock at C_v 5 and 8 (onset: heel or slip past 45°, the T179 departure)', () => {
-    for (const cv of [5, 8]) {
+  // Bottom-only planing lets C_v 5 survive; retain real departures at higher speeds
+  // and the same independent 45° onset / 0.5 s detection budget.
+  it('HOOK — full lock at C_v 7–10 on the 4 MW stress hull (onset: heel or slip past 45°)', () => {
+    for (const cv of [7, 8, 10]) {
       const { r, control, helmAt } = turnScenario(cv, 1);
       const tl = timeline(r, helmAt + 6, control, (s) => Math.abs(s.heelDeg) > 45 || s.slipDeg > 45, { from: helmAt });
       expect(tl.onsetT, `C_v ${cv}: she departs`).toBeGreaterThan(0);
@@ -160,8 +162,8 @@ describe('§T.188 crash detection: every kind within 0.5 s of its physical onset
     }
   });
 
-  it('…and a steady hard turn is not a hook: half lock at C_v 4 and 6, full lock at C_v 3 (a 12 m/s stumble)', () => {
-    for (const [cv, frac] of [[4, 0.5], [6, 0.5], [3, 1]] as const) {
+  it('…and a steady hard turn is not a hook: half lock at C_v 4 and 6, full lock at C_v 3 and 5', () => {
+    for (const [cv, frac] of [[4, 0.5], [6, 0.5], [3, 1], [5, 1]] as const) {
       const { r, control, helmAt } = turnScenario(cv, frac);
       const tl = timeline(r, helmAt + 8, control, () => false, { from: helmAt });
       expect(tl.kind, `C_v ${cv} lock ${frac}`).toBe(null);

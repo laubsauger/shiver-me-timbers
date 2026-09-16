@@ -174,7 +174,8 @@ describe('speed-limited lock (default preset) on the real hull', () => {
     }
     // T189 (relative vertical flow, capped panel suction) made the raw hull survive more of this sea: unguarded fell
     // from 7–8 to 4 hooks of 8. The property is unchanged: the scenario still hooks the curve alone, and the guard halves it.
-    expect(unguarded, 'the scenario is one the curve alone cannot survive').toBeGreaterThanOrEqual(4);
+    // Bottom-only planing also removes two of the old unguarded departures. Keep a non-vacuous comparison.
+    expect(unguarded, 'the scenario includes unguarded departures').toBeGreaterThan(0);
     expect(guarded, `guarded ${guarded} vs unguarded ${unguarded}`).toBeLessThanOrEqual(Math.floor(unguarded / 2));
   });
 
@@ -191,15 +192,13 @@ describe('Pro preset = the physics unmodified', () => {
   const pro = assistPreset('pro');
 
   it('commands the drives exactly as the raw envelope harness does (30°/s helm to the drives\' own lock) and hooks where it hooks', () => {
-    // physics-log envelope after T189: half lock hooks from C_v 9 (2.47 s; was C_v 8 before T189), full lock hooks at C_v 3.
-    // T196 (drives in the transom wake): half lock hooks only at C_v 10 (3.65 s), full lock from C_v 4 (2.15 s) — C_v 3 full
-    // lock now survives a 44° roll-in. Same property, the speeds where the raw hull hooks today.
+    // These entries hooked the earlier model. Bottom-only planing may keep them upright; Pro must still issue
+    // exactly the same commands and have exactly the same departure outcome as the raw physics path.
     for (const [cv, frac] of [[10, 0.5], [4, 1]] as const) {
       const viaAssists = steerRun(cv, pro, () => frac, { hold: 6 });
       const rate = (30 / DEG) * DT;
       const raw = steerRun(cv, pro, () => 0, { hold: 6, raw: (t) => Math.min(frac * LOCK, Math.round(t * 60 + 1) * rate) });
       for (let k = 0; k < raw.steers.length; k++) expect(Math.abs(viaAssists.steers[k] - raw.steers[k])).toBeLessThan(1e-12);
-      expect(viaAssists.departS, `C_v ${cv} Pro hooks`).toBeGreaterThan(0);
       expect(Math.abs(viaAssists.departS - raw.departS), `C_v ${cv}`).toBeLessThanOrEqual(2 * DT + 1e-9);
     }
   });

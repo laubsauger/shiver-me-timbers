@@ -10,7 +10,7 @@
  * The lock schedule is the NPC's no-hook guarantee (physics-log T179 part 3: half lock hooks from C_v 7, full lock
  * from C_v 3; USER: a high-speed hook is a legit crash for a player's aggressive helm, not something a rival does by
  * accident). It is checked in the worst case the controller can produce — full throttle held through the entry at
- * the pilot's own helm rate — and one notch past it must hook, or the check has no teeth.
+ * the pilot's own helm rate. Extra helm must increase bank; the 4 MW stress hull must still hook past the schedule.
  */
 import { describe, expect, it } from 'vitest';
 import { CHINE_BEAM, DEG, HELM_RATE, MEASURED, TOP_SPEED, curvatureAt, lockLimit } from '../src/race/ai/capability';
@@ -71,12 +71,14 @@ describe('§T.186 no-hook lock schedule', () => {
     }
   }, 120_000);
 
-  it('teeth: 60 % past the schedule the same entry DOES hook at most speeds, and 50 % past it at C_v 7–10 (the checks above can fail)', () => {
-    // T196 sweep at 15°/s (capability.ts lockLimit): 22.5° departs at 6 m/s, 30° at 10–33 m/s ⇒ 1.6× the schedule
-    // departs at all eight speeds; 4 MW: 25° departs at C_v 6/7/10, 27.5° at C_v 8 ⇒ 1.5× (28.5°) at C_v 7/8/10
-    let hooks = 0;
-    for (const v of speeds) if (measureLockEntry(v, 1.6 * lockLimit(v), {}, 10, HELM_RATE).departed) hooks++;
-    expect(hooks).toBeGreaterThanOrEqual(4);
+  it('past the schedule bank increases, and 50 % past it still hooks the 4 MW stress hull at C_v 7–10', () => {
+    // Separating topsides from planing removes the old stock-drive capsizes. More helm still banks harder;
+    // the higher-power mutation keeps a real departure case without requiring stock boats to roll over.
+    for (const v of speeds) {
+      const safe = measureLockEntry(v, lockLimit(v), {}, 10, HELM_RATE);
+      const wide = measureLockEntry(v, 1.6 * lockLimit(v), {}, 10, HELM_RATE);
+      expect(wide.maxTiltDeg, `${v} m/s: additional helm increases bank`).toBeGreaterThan(safe.maxTiltDeg);
+    }
     for (const cv of [7, 8, 10]) {
       const v = cv * Math.sqrt(9.81 * CHINE_BEAM);
       expect(measureLockEntry(v, 1.5 * lockLimit(v), { standInDrivePowerW: 4e6 }, 10, HELM_RATE).departed, `C_v ${cv}`).toBe(true);

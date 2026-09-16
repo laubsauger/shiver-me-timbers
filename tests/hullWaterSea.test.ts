@@ -17,13 +17,20 @@ import { seaPhysicsParams } from '../src/params/seaPhysics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { HullWater, type HeightSampler, type HullWaterParams } from '../src/sea-physics/hullWater';
 import { createRigid6Memory, rigid6KineticEnergy, stepRigid6, type Rigid6State } from '../src/sea-physics/rigidBody';
-import { buildDeepVHull, HULL_DATA } from '../src/speedboat/hullMesh';
+import { buildDeepVHull, HULL_DATA, type HullProxy } from '../src/speedboat/hullMesh';
 import type { Quat, Vec3 } from '../src/state/simState';
 
 const DT = 1 / 60;
 const G = 9.81;
 const FLAT: HeightSampler = () => 0;
 const hull = buildDeepVHull();
+// Historical T179 mutation includes its old geometry classification, not just its force flags.
+const t179Hull = buildDeepVHull();
+for (let i = 0; i < t179Hull.spec.segments; i++) {
+  for (let sideTriangle = 4; sideTriangle < 8; sideTriangle++) {
+    t179Hull.triStrip[i * 10 + sideTriangle] = Math.floor(i / t179Hull.spec.segmentsPerStrip);
+  }
+}
 const B = 2 * HULL_DATA.spec.chineHalfBeam;
 const DEG = Math.PI / 180;
 /** every T189 fluid change off, and T196's water-exit rule (the T179 model) */
@@ -55,13 +62,14 @@ describe('at rest in the shipped Working sea (Hs ≈ 2.8 m)', () => {
     return maxHeel;
   };
 
-  it('a drifting hull rolls in a bounded way and never capsizes; with the water taken as still (relative flow off) she capsizes', () => {
+  it('a drifting hull rolls in a bounded way and never capsizes; with the water taken as still (relative flow off) she exceeds the roll budget', () => {
     // WHY: static GM ≈ 0.97 m, GZ max 0.36 m at 50°, vanishing ≈ 100° (measured on the proxy) — a 12 m deep-V does not
     // capsize lying in a Beaufort 6 sea. Measured (T189, 90 s): max heel 11–13° over seeds 188/7/1/2; relative flow off
     // (T179): 3 of those 4 capsized, roll rates 125–290°/s — Kirchhoff's p and V_n taken over still water while the hull
     // heaves with the swell. Seed 188, 60 s here.
     expect(drift(188, {}, 60)).toBeLessThan(30);
-    expect(drift(188, { waterVelocity: false }, 90), 'mutation: still-water velocities').toBeGreaterThan(60);
+    // Topsides no longer feed planing lift, so this mutation peaks near 45° rather than capsizing.
+    expect(drift(188, { waterVelocity: false }, 90), 'mutation: still-water velocities exceed the same 30° budget').toBeGreaterThan(30);
   });
 });
 
@@ -128,7 +136,7 @@ describe('at rest in calm water: zero-speed wave radiation damping (T196, user: 
 
 describe('energy: the water never throws a hull (passivity, face drag, impulses uncapped)', () => {
   /** capsized/inverted re-entries in flat water at throttle 0: largest rise of mechanical energy above its initial value */
-  const reentries = (params: Partial<HullWaterParams>): number => {
+  const reentries = (params: Partial<HullWaterParams>, mesh: HullProxy = hull): number => {
     let worst = -Infinity;
     for (const heel of [120, 180]) {
       for (const [U, drop, p] of [[35, 1.5, 3], [35, 3, 0], [25, 1.5, 1.5]] as const) {
@@ -137,14 +145,14 @@ describe('energy: the water never throws a hull (passivity, face drag, impulses 
         const l = Math.hypot(...q);
         for (let i = 0; i < 4; i++) q[i] /= l;
         const s = st([0, drop + 0.6, 0], q, [0, -1, U], [0, 0, p]);
-        const hw = new HullWater(hull, params);
+        const hw = new HullWater(mesh, params);
         const mem = createRigid6Memory();
-        const E = (): number => rigid6KineticEnergy(s, hull) + hull.mass * G * s.position[1];
+        const E = (): number => rigid6KineticEnergy(s, mesh) + mesh.mass * G * s.position[1];
         const E0 = E();
         for (let t = 0; t < 6 * 60; t++) {
           hw.samplePatch(FLAT, s, DT);
-          stepRigid6(s, hull, DT, 2, (ss, h, out) => hw.evaluate(ss, h, out), mem);
-          worst = Math.max(worst, (E() - E0) / (hull.mass * G));
+          stepRigid6(s, mesh, DT, 2, (ss, h, out) => hw.evaluate(ss, h, out), mem);
+          worst = Math.max(worst, (E() - E0) / (mesh.mass * G));
         }
       }
     }
@@ -156,7 +164,7 @@ describe('energy: the water never throws a hull (passivity, face drag, impulses 
     // above the initial energy; T189: 0 (216/216). The mutation (passivity, face drag and the impulse cap back to T179)
     // must gain metres. Units: metres of height (ΔE / m·g).
     expect(reentries({})).toBeLessThan(0.05);
-    expect(reentries(T179), 'mutation: T179 fluid model').toBeGreaterThan(3);
+    expect(reentries(T179, t179Hull), 'mutation: T179 fluid model').toBeGreaterThan(3);
   });
 });
 
@@ -169,13 +177,13 @@ describe('turning in a crossing swell (the T182 blocker)', () => {
     return A * (0.6 * Math.sin(0.06 * z + 0.02 * x - 0.8 * t) + 0.3 * Math.sin(0.11 * x - 0.05 * z - 1.1 * t));
   };
   /** the T182 16-run set: raw helm 30°/s to `deg`, 12 s speed hold then throttle frozen, 20 s; hooks = heel or slip > 45° */
-  const hooks = (cv: number, deg: number, params: Partial<HullWaterParams>): number => {
+  const hooks = (cv: number, deg: number, params: Partial<HullWaterParams>, mesh: HullProxy = hull): number => {
     let n = 0;
     for (const A of [0.66, 1]) {
       for (const rot of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
         for (const sign of [1, -1]) {
           const U = cv * Math.sqrt(G * B);
-          const hw = new HullWater(hull, { standInDrivePowerW: 4e6, ...params });
+          const hw = new HullWater(mesh, { standInDrivePowerW: 4e6, ...params });
           const mem = createRigid6Memory();
           const s = st([0, 0.35, 0], [-Math.sin(0.02), 0, 0, Math.cos(0.02)], [0, 0, U]);
           let integ = 0;
@@ -196,7 +204,7 @@ describe('turning in a crossing swell (the T182 blocker)', () => {
               hw.setControls(sign * Math.min(deg * DEG, Math.round((time - 12) * 60 + 1) * 30 * DEG * DT), thrSum / thrN);
             }
             hw.samplePatch(swell(A, rot)(time), s, DT);
-            stepRigid6(s, hull, DT, 2, (ss, h, out) => hw.evaluate(ss, h, out), mem);
+            stepRigid6(s, mesh, DT, 2, (ss, h, out) => hw.evaluate(ss, h, out), mem);
             if (time > 12) {
               const f = rotateVec(s.quaternion, [0, 0, 1]);
               const up = rotateVec(s.quaternion, [0, 1, 0]);
@@ -224,7 +232,7 @@ describe('turning in a crossing swell (the T182 blocker)', () => {
     // hull instead of steering her stern through a 1 s flight). The two left: 1.0–1.3 s flights rolling 20 → 45° under the
     // drive loads of the low-side props still in the water. Mutation: the T179 fluid model.
     expect(hooks(8, 6, {})).toBeLessThanOrEqual(2);
-    expect(hooks(8, 6, T179), 'mutation: T179 fluid model').toBeGreaterThanOrEqual(8);
+    expect(hooks(8, 6, T179, t179Hull), 'mutation: T179 fluid model').toBeGreaterThanOrEqual(8);
   });
 });
 
