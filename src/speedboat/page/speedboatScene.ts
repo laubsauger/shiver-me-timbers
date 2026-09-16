@@ -69,6 +69,12 @@ export function npcLivery(i: number): BoatLivery {
   return liveryFor(paint ? paint.id : 'signal', r.number);
 }
 
+/** §T177 wetline atlas slots: the player is 0, rival i is 1 + i, the marshal skiff is last */
+export const WETLINE_HERO_SLOT = 0;
+export function wetlineSlotOfNpc(i: number): number {
+  return WETLINE_HERO_SLOT + 1 + i;
+}
+
 export interface SpeedboatBoatsOptions {
   /** CPU water height at the current sim time (the pace boat sits on it); default flat water */
   waterAt?: (x: number, z: number) => number;
@@ -77,8 +83,12 @@ export interface SpeedboatBoatsOptions {
 export async function buildSpeedboatBoats(app: App, sea: SpeedboatSea, npcCount: number, opts: SpeedboatBoatsOptions = {}) {
   const loader = await createBoatAssetLoader(app.renderer);
   const asset = await loader.load(HERO_BOAT_URL);
-  // before instantiate: the slot materials bake the wetline into their graphs
-  const wetline = sea.caustics.attachHullWetline(wetlineOptions(asset.extras));
+  // before instantiate: the slot materials bake the wetline into their graphs.
+  // §T177: ONE slot per hull on the page — hero, every rival, and the marshal skiff. Eight boats share seven
+  // materials, so a single-slot atlas would paint every rival with the HERO's boot-top; the drawn object picks its
+  // own pair of rows through `userData.wetlineSlot` (caustics/waterLighting.ts). Still one texture, one binding.
+  const slots = 2 + npcCount;
+  const wetline = sea.caustics.attachHullWetline({ ...wetlineOptions(asset.extras), slots });
   const fov = app.camera.fov;
   const hero = asset.instantiate({ variant: 'hero', water: true, livery: HERO_LIVERY, fovDeg: fov });
   const npcs: BoatInstance[] = [];
@@ -86,6 +96,10 @@ export async function buildSpeedboatBoats(app: App, sea: SpeedboatSea, npcCount:
   for (const b of [hero, ...npcs]) app.scene.add(b.object);
   // §T.191 rolling start: the marshal skiff, also after the wetline (hidden until RaceState.paceBoat is set)
   const pace = createPaceBoat(app, asset, opts.waterAt ?? (() => 0));
+  // slot 0 = hero, 1…npcCount = rivals, npcCount + 1 = the skiff (speedboatFrame feeds them; §T177)
+  hero.object.userData.wetlineSlot = WETLINE_HERO_SLOT;
+  for (let i = 0; i < npcs.length; i++) npcs[i].object.userData.wetlineSlot = WETLINE_HERO_SLOT + 1 + i;
+  pace.instance.object.userData.wetlineSlot = slots - 1;
 
   // §T.195 (docs/wake/w6-multivessel.md): every boat's wake sources, prop ribbons, bow sheet, rooster tail and prop
   // bubbles — the player's from her contact, the rivals' from the worker's per-step FX record — one pool each

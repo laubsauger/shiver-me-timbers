@@ -23,6 +23,7 @@
  */
 import { Quaternion, Vector3 } from 'three/webgpu';
 import type { App } from '../../core/app';
+import { wetlineContactsFromPose, type WetlineStation } from '../../caustics';
 import { createSeaFrame } from '../../core/seaFrame';
 import { HullWaterStations } from '../../sea-physics/hullWater';
 import { unitTrimToRad } from '../../sim-worker/stepCore';
@@ -37,7 +38,21 @@ import { roosterApex, roosterTailEmission } from '../../foam/roosterTail';
 import { sprayParams } from '../../params/spray';
 import type { NpcFleet } from './npcFleet';
 import type { PlayerBoat } from './playerBoat';
-import type { SpeedboatBoats, SpeedboatSea } from './speedboatScene';
+import { wetlineSlotOfNpc, type SpeedboatBoats, type SpeedboatSea } from './speedboatScene';
+
+/**
+ * §T177 — HOW MANY CHINE SLICES A RIVAL'S WETLINE IS RECONSTRUCTED FROM.
+ *
+ * The player's band comes off her solved contact patch (every strip, §V101).
+ * A rival's pose is all that crosses back from the sim worker, so her band is
+ * traced against the page's water sampler instead, and each slice costs three
+ * `waterAt` calls (the leaning-line fixed point in `wetlineContactsFromPose`).
+ * Five per side is 30 samples per rival: the wetline resamples them onto its
+ * own 24-station grid, and over a 12 m hull the water between two slices is
+ * smoother than that grid can draw anyway — more slices buy nothing visible
+ * and the cost is paid by eight hulls every frame.
+ */
+const RIVAL_WETLINE_SLICES = 5;
 
 /**
  * T192's drive-state hook on a boat instance (`boatModel.setDriveState`): outboards yaw with the helm, props spin.
@@ -140,6 +155,20 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
   const seaFrame = createSeaFrame({ app, sea, sky, state, weatherHere: d.weatherHere, waterAt: d.waterAt });
   // §V101: burial rates + per-station waterline, off the contact patch the player's step just used
   const stations = new HullWaterStations(hull);
+  // §T177: the chine slices a rival's own wetline is traced through (body frame, both sides)
+  const rivalStations: WetlineStation[] = [];
+  {
+    const st = hull.strips;
+    const last = Math.max(st.count - 1, 0);
+    for (let s = 0; s < RIVAL_WETLINE_SLICES; s++) {
+      const k = Math.round((s * last) / Math.max(RIVAL_WETLINE_SLICES - 1, 1));
+      rivalStations.push({ x: -st.chineHalfBeam[k], z: st.zCentre[k] });
+      rivalStations.push({ x: st.chineHalfBeam[k], z: st.zCentre[k] });
+    }
+  }
+  const rivalContacts = new Float64Array(rivalStations.length);
+  const pacePos = [0, 0, 0];
+  const paceQuat = [0, 0, 0, 1];
   let ticked = false;
   /** particles/s the GPU rooster tail budgeted on the last tick (its own return value) */
   let roosterRate = 0;
@@ -225,6 +254,12 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
         const o = boats.npcs[i].object;
         o.position.fromArray(npcView.position);
         o.quaternion.fromArray(npcView.quaternion);
+        // §T177: HER waterline, not the hero's. All eight boats share the slot materials, so before this a rival on
+        // her chines next to a hero flying wore the hero's boot-top; each now owns two rows of the wetline atlas.
+        // Traced against `waterAt` — the drawn sea, her mound and the wake field included (B125) — at her RENDER pose,
+        // which is the pose the fragment being shaded belongs to.
+        wetlineContactsFromPose(npcView.position, npcView.quaternion, rivalStations, d.waterAt, rivalContacts);
+        boats.wetline.updateFromHullContact(frameDt, rivalStations, rivalContacts, wetlineSlotOfNpc(i));
         const t = boats.npcs[i] as unknown as DriveStateTarget;
         if (drive && t.setDriveState) {
           const lock = hull.drives[0]?.maxSteerRad ?? 0;
@@ -241,6 +276,15 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
         if (drive.heroPropRpm) heroDrive.propRpm = Array.from(drive.heroPropRpm);
         else heroDrive.propRpm = placeholderPropRpm(drive.heroThrottle, hull.drives.length, heroRpm);
         ht.setDriveState(heroDrive, frameDt);
+      }
+      // §T177: the marshal skiff owns the last slot; she is only posed while visible, so an invisible one is left
+      // holding her last memory rather than being dried by a pose nobody wrote.
+      const paceObj = boats.pace.instance.object;
+      if (paceObj.visible) {
+        paceObj.position.toArray(pacePos);
+        paceObj.quaternion.toArray(paceQuat);
+        wetlineContactsFromPose(pacePos, paceQuat, rivalStations, d.waterAt, rivalContacts);
+        boats.wetline.updateFromHullContact(frameDt, rivalStations, rivalContacts, boats.wetline.slots - 1);
       }
       boats.lights.update(sky.nightFactor, sky.sunDirection); // §T.209 LEDs at this frame's poses, before any pass draws
       d.placeCamera(view, frameDt);

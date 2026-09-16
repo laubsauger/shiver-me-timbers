@@ -27,7 +27,7 @@
  * extinction coefficient in 1/m and must NOT get an sRGB transfer.
  */
 import * as THREE from 'three/webgpu';
-import { color, float, mix, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
+import { color, float, mix, objectGroup, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
 import { causticsParams as cp } from '../params/caustics';
 // the sea's own bounce colour is a SKY quantity — see setBounceColor (§T.39)
@@ -39,7 +39,7 @@ import {
   type CausticsUniforms,
   type TslNode,
 } from './causticsNode';
-import type { HullWetline } from './hullWetline';
+import { wetlineRow, wetlineRowV, type HullWetline } from './hullWetline';
 
 /**
  * Just enough of THE KEY LIGHT to drive the caustic. `sky.sunLight` satisfies
@@ -306,25 +306,61 @@ export interface WaterLightingContext {
 }
 
 /**
+ * §T177 — WHICH HULL IS BEING DRAWN. Eight boats share seven materials, so a
+ * material's TSL graph cannot bake a boat identity; it has to ASK the object
+ * being drawn. `userData.wetlineSlot` on the drawn mesh or its nearest
+ * ancestor (the boat root) is that answer, and the walk stops at `boatRoot` —
+ * the same convention, and the same shape of walk, as slotMaterials.ts's
+ * `liveryOwner`, which is how the hulls already get their per-instance paint.
+ * Anything without one (terrain, the raft, the pirate ship) is slot 0.
+ */
+export function wetlineSlotOf(object: THREE.Object3D | null): number {
+  for (let o = object; o !== null; o = o.parent) {
+    const s = (o.userData as { wetlineSlot?: unknown }).wetlineSlot;
+    if (typeof s === 'number' && Number.isFinite(s)) return s;
+    if (o.userData.boatRoot === true) break;
+  }
+  return 0;
+}
+
+/**
  * Wet height from the hull's drying memory (hullWetline.ts). Rows are port /
- * starboard; the station axis is ship-local Z. Falls back to the live wave
- * height when no wetline is bound, which still moves the band with the swell
- * but has no drying lag.
+ * starboard PER HULL; the station axis is ship-local Z. Falls back to the live
+ * wave height when no wetline is bound, which still moves the band with the
+ * swell but has no drying lag.
  */
 function wetDepthNode(ctx: WaterLightingContext, r: WaterReceiver, depth: TslNode): TslNode {
   const rise = ctx.lighting.wetRise;
   // no memory bound → the band still rides the live local wave (so it is not
   // a fixed ring), but it has no drying lag. See the header of hullWetline.
   if (!ctx.wetline || !r.shipLocalPos || !ctx.wetlineSpan) return depth.add(rise);
+  const w = ctx.wetline;
   const u = r.shipLocalPos.z.sub(ctx.wetlineSpan.x).mul(ctx.wetlineSpan.y).clamp(0, 1);
-  // Port/starboard rows sit at v = 0.25 / 0.75, so sliding v across the keel
-  // lets the texture's own LinearFilter blend the two. A step() here would
-  // draw a hard seam down the centreline — and §V.38 records that the hull
-  // material differentiates its height field in screen space, where any
-  // discontinuity this contributes to spikes into a one-pixel line.
+  // This hull's port/starboard rows sit at the texel centres of rows 2·slot
+  // and 2·slot + 1, so sliding v between them lets the texture's own
+  // LinearFilter blend the two. A step() here would draw a hard seam down the
+  // centreline — and §V.38 records that the hull material differentiates its
+  // height field in screen space, where any discontinuity this contributes to
+  // spikes into a one-pixel line. `side` is a smoothstep in [0,1], so v can
+  // never leave this hull's pair and reach the next boat's rows.
   const blend = ctx.lighting.wetSideBlend.max(1e-3);
   const side = smoothstep(blend.negate(), blend, r.shipLocalPos.x);
-  const wetTop = texture(ctx.wetline.texture, vec2(u, side.mul(0.5).add(0.25))).r;
+  // the CPU writer and this sampler share the row arithmetic (hullWetline
+  // `wetlineRow` / `wetlineRowV`) so the two cannot drift apart
+  const rowStep = 1 / w.rows;
+  let v: TslNode = side.mul(rowStep).add(wetlineRowV(wetlineRow(0, 0), w.rows));
+  if (w.slots > 1) {
+    // §T177: ONE object-scoped scalar, no extra sampler and no extra binding
+    // (§V40). Single-hull pages never build it, so their graph — and the row
+    // arithmetic above, which folds to the old `side·0.5 + 0.25` at rows = 2
+    // — is bit-identical to before.
+    const slot = uniform(0).setGroup(objectGroup);
+    slot.onObjectUpdate((frame) => {
+      slot.value = wetlineSlotOf(frame.object);
+    });
+    v = slot.mul(2 * rowStep).add(v);
+  }
+  const wetTop = texture(w.texture, vec2(u, v)).r;
   return wetTop.sub(r.shipLocalPos.y).add(rise);
 }
 

@@ -65,8 +65,9 @@ import {
 import { HullWetline, type HullWetlineOptions } from './hullWetline';
 
 export { causticsParams } from '../params/caustics';
-export { HullWetline, dryStep } from './hullWetline';
+export { HullWetline, WETLINE_MAX_SLOTS, dryStep, wetlineContactsFromPose, wetlineRow, wetlineRowV } from './hullWetline';
 export type { HullWetlineOptions, WetlineStation } from './hullWetline';
+export { wetlineSlotOf } from './waterLighting';
 export { waterHeightNode } from './causticsNode';
 export type { WaterLighting, WaterReceiver } from './waterLighting';
 
@@ -158,11 +159,15 @@ export class Caustics {
     this.wakeElevation = node;
   }
 
-  /** hull drying memory ("where the water lapped") — one per ship */
+  /**
+   * Hull drying memory ("where the water lapped") — ONE atlas, `opts.slots`
+   * hulls in it (§T177). The span is shared across the slots and baked, not a
+   * uniform: a page's hulls come off one asset, so their stem/transom offsets
+   * are the same number, and that number does not move.
+   */
   attachHullWetline(opts: HullWetlineOptions): HullWetline {
     const w = new HullWetline(opts);
     this.wetline = w;
-    // baked, not a uniform: the hull's stem/transom offsets do not move
     this.wetlineSpan = vec2(w.sternZ, 1 / (w.bowZ - w.sternZ));
     return w;
   }

@@ -40,7 +40,15 @@ import {
   type Vec2,
   type Vec3,
 } from '../src/caustics/causticsMath';
-import { HullWetline, dryStep } from '../src/caustics/hullWetline';
+import {
+  HullWetline,
+  WETLINE_MAX_SLOTS,
+  dryStep,
+  wetlineContactsFromPose,
+  wetlineRow,
+  wetlineRowV,
+} from '../src/caustics/hullWetline';
+import { wetlineSlotOf } from '../src/caustics/waterLighting';
 import { causticsParams } from '../src/params/caustics';
 import { cascadeBand, waveSpectrum } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
@@ -823,6 +831,158 @@ describe('wetline resampling of sea-physics hull stations', () => {
     const w = new HullWetline({ bowZ, sternZ, stations: 8 });
     // a NaN immersion from a degenerate tick must not poison the band
     w.updateFromHullContact(1 / 60, stations, stations.map(() => NaN));
+    const data = w.texture.image.data as Float32Array;
+    expect(data.every((v) => Number.isFinite(v))).toBe(true);
+  });
+});
+
+describe('§T177 one wetline per HULL, not per page', () => {
+  // THE BUG: the eight speedboats share seven materials (asset-pipeline.md §5.3) and a material bakes ONE TSL
+  // graph, so a single-hull wetline texture handed every rival the HERO's drying memory — a rival on her chines
+  // beside a hero flying wore the hero's boot-top. The atlas gives each hull two rows of the one texture; these
+  // tests are the reason a future "simplification" back to one row pair has to fail loudly.
+  const bowZ = 8.4;
+  const sternZ = -3.6;
+  const sides = (z: number) => [{ x: -1.3, z }, { x: 1.3, z }];
+  const along = [sternZ, (sternZ + bowZ) / 2, bowZ].flatMap(sides);
+
+  /** what the fragment shader's v resolves to for this hull and side (waterLighting `wetDepthNode`) */
+  const shaderV = (slot: number, side: 0 | 1, rows: number): number => {
+    const rowStep = 1 / rows;
+    return slot * 2 * rowStep + side * rowStep + wetlineRowV(wetlineRow(0, 0), rows);
+  };
+  /** the texture row a v coordinate actually samples (LinearFilter, clamped, no mips) */
+  const rowAt = (v: number, rows: number): number => Math.floor(v * rows);
+
+  it('gives boat i its OWN two rows — i reads its own span and no one else can reach it', () => {
+    const slots = 8;
+    const w = new HullWetline({ bowZ, sternZ, stations: 6, slots });
+    // every hull at a different trim: boat i sits i·0.25 m deeper than boat 0
+    for (let i = 0; i < slots; i++) {
+      w.updateFromHullContact(1 / 60, along, along.map(() => 0.1 + 0.25 * i), i);
+    }
+    const data = w.texture.image.data as Float32Array;
+    for (let i = 0; i < slots; i++) {
+      for (const side of [0, 1] as const) {
+        const row = rowAt(shaderV(i, side, w.rows), w.rows);
+        // the v this boat's fragments sample lands on this boat's row, never a neighbour's
+        expect(row).toBe(wetlineRow(i, side));
+        for (let k = 0; k < w.stations; k++) {
+          expect(data[(row * w.stations + k) * 4]).toBeCloseTo(0.1 + 0.25 * i, 4);
+        }
+      }
+    }
+  });
+
+  it('a hero flying does not dry the rival still in the water (the §T177 symptom itself)', () => {
+    const w = new HullWetline({ bowZ, sternZ, stations: 6, slots: 3 });
+    // frame 1: both wet
+    w.updateFromHullContact(1 / 60, along, along.map(() => 0.6), 0);
+    w.updateFromHullContact(1 / 60, along, along.map(() => 0.6), 1);
+    // frame 2: the hero launches clear of the water, the rival stays buried
+    for (let f = 0; f < 120; f++) {
+      w.updateFromHullContact(1 / 60, along, along.map(() => -4), 0);
+      w.updateFromHullContact(1 / 60, along, along.map(() => 0.6), 1);
+    }
+    const heroTop = w.wetHeight[0];
+    const rivalTop = w.wetHeight[2 * w.stations];
+    expect(rivalTop).toBeCloseTo(0.6, 4);
+    // the hero has dried well below her band; before T177 these were ONE number
+    expect(heroTop).toBeLessThan(rivalTop - 0.2);
+  });
+
+  it('is the old single-row texture, byte for byte, at slots = 1', () => {
+    // the raft and the pirate ship must not move at all: same rows, same v, same seed
+    const w = new HullWetline({ bowZ: 15, sternZ: -15, stations: 8 });
+    expect(w.slots).toBe(1);
+    expect(w.rows).toBe(2);
+    expect(w.texture.image.height).toBe(2);
+    expect(shaderV(0, 0, w.rows)).toBeCloseTo(0.25, 12);
+    expect(shaderV(0, 1, w.rows)).toBeCloseTo(0.75, 12);
+  });
+
+  it('refuses a slot it never allocated, and a slot count it cannot hold (§Rule 8)', () => {
+    // a silent clamp would put two boats on one row and rebuild the bug
+    const w = new HullWetline({ bowZ, sternZ, stations: 4, slots: 2 });
+    expect(() => w.updateFromContacts(1 / 60, new Float32Array(8), 2)).toThrow(/slot 2/);
+    expect(() => w.updateFromContacts(1 / 60, new Float32Array(8), -1)).toThrow(/slot -1/);
+    expect(() => new HullWetline({ bowZ, sternZ, slots: WETLINE_MAX_SLOTS + 1 })).toThrow(/slots/);
+    expect(() => new HullWetline({ bowZ, sternZ, slots: 0 })).toThrow(/slots/);
+  });
+
+  it('picks a hull’s slot off the drawn object, walking up to the boat root', () => {
+    // the drawn thing is a per-primitive mesh deep under the LOD; the slot is written on the boat root,
+    // the same place and the same walk the per-instance livery uses (slotMaterials `liveryOwner`)
+    const root = { userData: { boatRoot: true, wetlineSlot: 5 }, parent: null } as never;
+    const mesh = { userData: {}, parent: { userData: {}, parent: root } } as never;
+    expect(wetlineSlotOf(mesh)).toBe(5);
+    // terrain, the raft, the pirate ship: nothing marked, slot 0
+    expect(wetlineSlotOf({ userData: {}, parent: null } as never)).toBe(0);
+    expect(wetlineSlotOf(null)).toBe(0);
+    // the walk stops at the boat root: a scene-level slot must not leak into a boat that has none
+    const scene = { userData: { wetlineSlot: 9 }, parent: null } as never;
+    const orphan = { userData: { boatRoot: true }, parent: scene } as never;
+    expect(wetlineSlotOf(orphan)).toBe(0);
+  });
+});
+
+describe('§T177 a rival’s waterline, reconstructed from her pose', () => {
+  // only a rival's POSE crosses back from the sim worker, so her band is traced against the page's water
+  // sampler (the drawn sea, her own mound included). This is the mirror of HullWaterStations' fixed point.
+  const stations = [{ x: -1.3, z: -3.6 }, { x: 1.3, z: -3.6 }, { x: -1.3, z: 8.4 }, { x: 1.3, z: 8.4 }];
+
+  it('reads the hull’s height above flat water as a uniform ship-local band', () => {
+    const out = new Float64Array(stations.length);
+    // level, 1.2 m of freeboard over a flat sea at y = 0: the sea reaches ship-local −1.2 everywhere
+    wetlineContactsFromPose([0, 1.2, 0], [0, 0, 0, 1], stations, () => 0, out);
+    for (const v of out) expect(v).toBeCloseTo(-1.2, 6);
+  });
+
+  it('separates two boats at different trim — the whole point of the slot', () => {
+    const out = new Float64Array(stations.length);
+    const low = new Float64Array(stations.length);
+    wetlineContactsFromPose([0, 1.5, 0], [0, 0, 0, 1], stations, () => 0, out);
+    wetlineContactsFromPose([0, 0.4, 0], [0, 0, 0, 1], stations, () => 0, low);
+    for (let k = 0; k < out.length; k++) expect(low[k] - out[k]).toBeCloseTo(1.1, 6);
+  });
+
+  it('wets the low side of a heeled hull and lifts the high side', () => {
+    const out = new Float64Array(stations.length);
+    // roll about +z (the bow axis) by 10°: quaternion (0, 0, sin, cos)
+    const a = (10 * Math.PI) / 180;
+    wetlineContactsFromPose([0, 0, 0], [0, 0, Math.sin(a / 2), Math.cos(a / 2)], stations, () => 0, out);
+    // rolling about +z by a drops PORT (world y of the port chine = −1.3·sin a), so the sea climbs the port
+    // planking: port's ship-local mark is +1.3·tan a and starboard's is −1.3·tan a. Port and starboard must not
+    // be the same number — that sameness across the keel is the §T177 failure inside a single hull.
+    expect(out[0]).not.toBeCloseTo(out[1], 3);
+    expect(out[0]).toBeCloseTo(1.3 * Math.tan(a), 6);
+    expect(out[1]).toBeCloseTo(-1.3 * Math.tan(a), 6);
+  });
+
+  it('follows the DRAWN water height, her own wake mound included (B125)', () => {
+    const flat = new Float64Array(stations.length);
+    const mound = new Float64Array(stations.length);
+    wetlineContactsFromPose([0, 1, 0], [0, 0, 0, 1], stations, () => 0, flat);
+    // the same pose over water lifted 0.3 m by her own mound: the band rides 0.3 m higher up the planking
+    wetlineContactsFromPose([0, 1, 0], [0, 0, 0, 1], stations, () => 0.3, mound);
+    for (let k = 0; k < flat.length; k++) expect(mound[k] - flat[k]).toBeCloseTo(0.3, 6);
+  });
+
+  it('reports NaN rather than a guess when there is no vertical line or no water (§V.28)', () => {
+    const out = new Float64Array(stations.length);
+    // on her beam ends: the body-vertical line is horizontal, there is nothing to intersect
+    const a = Math.PI / 2;
+    wetlineContactsFromPose([0, 0, 0], [0, 0, Math.sin(a / 2), Math.cos(a / 2)], stations, () => 0, out);
+    for (const v of out) expect(Number.isNaN(v)).toBe(true);
+    wetlineContactsFromPose([0, 1, 0], [0, 0, 0, 1], stations, () => NaN, out);
+    for (const v of out) expect(Number.isNaN(v)).toBe(true);
+  });
+
+  it('feeds a HullWetline slot that a NaN station cannot poison (§V.28)', () => {
+    const w = new HullWetline({ bowZ: 8.4, sternZ: -3.6, stations: 6, slots: 2 });
+    const out = new Float64Array(stations.length);
+    wetlineContactsFromPose([0, 0.5, 0], [0, 0, 0, 1], stations, (x) => (x < 0 ? NaN : 0), out);
+    w.updateFromHullContact(1 / 60, stations, out, 1);
     const data = w.texture.image.data as Float32Array;
     expect(data.every((v) => Number.isFinite(v))).toBe(true);
   });

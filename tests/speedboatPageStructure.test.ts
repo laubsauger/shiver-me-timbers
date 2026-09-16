@@ -113,6 +113,24 @@ describe('§T.181 boot order', () => {
     inOrder(code(sceneSrc), ['attachHullWetline(', 'instantiate(']);
   });
 
+  it('§T177 every hull on the page gets its OWN wetline slot, and every hull is fed', () => {
+    // the eight boats share seven materials, so one slot would paint every rival with the hero's boot-top.
+    // The atlas is sized for hero + rivals + the marshal skiff and each object carries its own slot number.
+    const scene = code(sceneSrc);
+    expect(scene).toMatch(/const slots = 2 \+ npcCount/);
+    expect(scene).toMatch(/attachHullWetline\(\{ \.\.\.wetlineOptions\(asset\.extras\), slots \}\)/);
+    expect(scene).toMatch(/hero\.object\.userData\.wetlineSlot = WETLINE_HERO_SLOT/);
+    expect(scene).toMatch(/npcs\[i\]\.object\.userData\.wetlineSlot = WETLINE_HERO_SLOT \+ 1 \+ i/);
+    expect(scene).toMatch(/pace\.instance\.object\.userData\.wetlineSlot = slots - 1/);
+    // a slot nobody writes is a hull stuck on its bone-dry seed, so the frame must feed each one
+    const frame = code(frameSrc);
+    expect(frame).toMatch(/wetline\.updateFromHullContact\(frameDt, stations\.stations, stations\.waterlineY\)/); // hero, slot 0
+    expect(frame).toMatch(/wetline\.updateFromHullContact\(frameDt, rivalStations, rivalContacts, wetlineSlotOfNpc\(i\)\)/);
+    expect(frame).toMatch(/wetline\.updateFromHullContact\(frameDt, rivalStations, rivalContacts, boats\.wetline\.slots - 1\)/);
+    // and a rival's band must be traced against the DRAWN sea (B125), not against still water
+    expect(frame).toMatch(/wetlineContactsFromPose\(npcView\.position, npcView\.quaternion, rivalStations, d\.waterAt, rivalContacts\)/);
+  });
+
   it('the sea and the fleet are built from ONE sea-params object, with the deep-V draft as the Smith depth', () => {
     expect(main).toMatch(/const seaParams = speedboatSeaParams\(hull\)/);
     expect(main).toMatch(/buildSpeedboatSea\([^)]*seaParams\)/);
