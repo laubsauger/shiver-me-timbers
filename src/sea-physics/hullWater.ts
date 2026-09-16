@@ -446,6 +446,8 @@ export class WaterPatch {
   outside = 0;
   sampleCount = 0;
   private built = false;
+  /** Whether the current grid belongs to the next velocity difference (separate from height availability). */
+  private retainForVelocity = false;
   /** the previous build's grid (for ∂η/∂t, see `verticalVelocityAt`) */
   private readonly prevHeights: Float64Array;
   private pnu = 0;
@@ -467,6 +469,7 @@ export class WaterPatch {
   /** V108: the next build has no previous grid (a teleport is not a wave) */
   forgetPrevious(): void {
     this.hasPrev = false;
+    this.retainForVelocity = false;
   }
 
   /**
@@ -509,7 +512,7 @@ export class WaterPatch {
     spacing: number,
     margin: number,
   ): void {
-    if (this.built) {
+    if (this.retainForVelocity) {
       this.prevHeights.set(this.heights.subarray(0, this.nu * this.nw));
       this.pnu = this.nu;
       this.pnw = this.nw;
@@ -597,6 +600,7 @@ export class WaterPatch {
     this.sampleCount = nu * nw;
     this.outside = 0;
     this.built = true;
+    this.retainForVelocity = true;
   }
 
   heightAt(x: number, z: number): number {
