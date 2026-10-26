@@ -216,7 +216,8 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
     // Drift-2: on down toward the water, eased
     const dk = ramped(clamp01((t - starts.drift2) / Math.max(1e-6, p.drift2)), 0.3, 0.4);
     dist = EARTH_RADIUS + altitude * Math.exp(Math.log(p.driftAltitude / p.floodAltitude) * dk);
-    sunNow = slerp(sunNow, domeDir(p.approachEl - 4, p.approachAz + 30, tiltDeg), smooth((t - starts.flood) / Math.max(1e-6, p.flood)));
+    // the morning Sun, high enough to stay clear of the limb as it rises with our descent
+    sunNow = slerp(sunNow, domeDir(p.approachEl + 14, p.approachAz + 30, tiltDeg), smooth((t - starts.flood) / Math.max(1e-6, p.flood)));
   }
   return { centreDir, distance: dist, sun: sunNow, radiusDeg: (Math.asin(Math.min(1, EARTH_RADIUS / dist)) * 180) / Math.PI };
 }

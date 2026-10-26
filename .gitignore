@@ -42,3 +42,8 @@ out/drift
 docs/speedboat/refs/_local/
 !docs/speedboat/concept/*.png
 scripts/blender/**/__pycache__/
+
+# ── THE DRIFT'S EARTH MAPS ARE BUILT, NOT COMMITTED ───────────────────────────────
+# ~150 MB of satellite data (NASA Blue Marble / Black Marble / VIIRS, AWS Terrain Tiles);
+# rebuild with scripts/drift-earth-data.py (sources and URLs in docs/drift/earth-data.md).
+public/drift/earth/

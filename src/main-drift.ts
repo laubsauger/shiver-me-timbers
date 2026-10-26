@@ -306,6 +306,8 @@ async function boot(): Promise<void> {
     }
   };
 
+  // the Earth's maps (~150 MB of satellite data) load in the background; nothing may be captured before
+  await arrival.ready;
   (window as unknown as Record<string, unknown>).__drift = {
     app,
     /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */

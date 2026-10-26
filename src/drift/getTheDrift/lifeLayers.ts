@@ -1,19 +1,21 @@
 /**
- * The planet's life as shader layers over the Earth's surface (life.ts gives the states; earth.ts calls
- * these with its own elevation field). Each layer arrives as a TIME WAVE: a soft front travelling over the
- * sphere from a point on the front limb toward the audience, its edge broken by noise, so a layer is never
- * switched on — it rolls in.
+ * The planet's life as shader layers over the measured Earth (earthMaps.ts; life.ts gives the states). Each
+ * layer arrives as a TIME WAVE: a soft front travelling over the sphere from a point on the front limb
+ * toward the audience, its edge broken by noise, so a layer is never switched on — it rolls in.
  *
- *   fields    low and middle ground takes a first tint of life (ochre → olive), wettest first
- *   forests   a second front brings dark green up the lowlands near water
- *   ice       polar caps about the planet's axis: big on the young world, settling, shrinking in the overshoot
- *   lights    on the night side only: population where it is low, near water and temperate — sparks (camps),
- *             then clusters (villages), then networks (cities) at the same places, so they grow in place;
- *             in the overshoot they brighten, whiten and run together; under a risen sea they go dark
- *   sea       the sea level the surface floods to (elevation units of earth.ts's height field)
+ *   young     before life the land is bare: where the Blue Marble is green (forest, field, steppe) it is
+ *             rock and sediment instead; the deserts are as they are
+ *   fields    a first front brings back about half of the green
+ *   forests   a second front brings the rest: the land as the satellites see it today
+ *   ice       the young world's ice: caps down to ~50° latitude and snow down to ~1800 m, settling to the
+ *             caps of today's climate, shrinking further in the overshoot
+ *   lights    on the night side only, from the Black Marble: camp fires first (a faint speckle where people
+ *             will live), then every settlement grows from its brightest core out to its dim edges; in the
+ *             overshoot they brighten, whiten (LED) and run together; under the risen sea they go dark
+ *   sea       metres the sea has risen: the measured elevation floods to it
  */
 import * as THREE from 'three/webgpu';
-import { abs, exp, float, floor, fract, hash, max, mix, mx_noise_float, pow, smoothstep, step, vec3 } from 'three/tsl';
+import { abs, float, floor, hash, max, mix, mx_noise_float, smoothstep, step, vec3 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -27,93 +29,66 @@ export interface LifeUniforms {
   sea: F;
   /** unit, where the time waves start (a point on the front limb) */
   waveOrigin: V3;
-  /** unit, the planet's spin axis (for the ice caps) */
-  axis: V3;
 }
+
+/** m the sea rises by the end of the flood: about what all the land ice holds */
+export const SEA_RISE_M = 70;
 
 /** 0..1: has the front of a wave at progress k (0..1 over the half-sphere) reached unit surface normal n? */
 function waveFront(n: V3, k: F, L: LifeUniforms, seed: number): F {
   const reach = float(1).sub(n.dot(L.waveOrigin)).mul(0.5); // 0 at the origin, 1 at its antipode
-  const ragged = mx_noise_float(n.mul(5).add(seed)).mul(0.08);
+  const ragged = mx_noise_float(n.mul(5).add(seed)).mul(0.08).add(mx_noise_float(n.mul(40).add(seed * 2)).mul(0.015));
   return smoothstep(reach.add(ragged).sub(0.04), reach.add(ragged).add(0.04), k.mul(1.15));
 }
 
-/** how high the sea has risen, in the elevation field's units, added to its base sea level */
-export const seaRise = (L: LifeUniforms): F => L.sea.mul(0.09);
+/** m, the sea level now */
+export const seaLevel = (L: LifeUniforms): F => L.sea.mul(SEA_RISE_M);
 
 /**
- * The surface albedo with life on it. `e` is elevation (sea level `sea`), `wet` 0..1 how near water / how
- * moist (earth.ts can pass its own; a noise is fine).
+ * The land's albedo (linear) with life on it: `real` is the Blue Marble colour, `bare` the same map's desert
+ * (earth.ts samples the Sahara for it: real bare rock and sand, its own geology), `e` elevation (m), `lat` deg.
  */
-export function lifeAlbedo(n: V3, e: F, sea: F, wet: F, base: V3, L: LifeUniforms): V3 {
-  const land = smoothstep(sea, sea.add(0.01), e);
-  const height = e.sub(sea);
-  const fieldsHere = waveFront(n, L.fields, L, 1.3).mul(smoothstep(0.55, 0.1, height)).mul(wet.mul(0.6).add(0.4));
-  const forestsHere = waveFront(n, L.forests, L, 4.7).mul(smoothstep(0.35, 0.05, height)).mul(smoothstep(0.35, 0.75, wet));
-  const field = mix(vec3(0.33, 0.29, 0.14), vec3(0.2, 0.27, 0.1), wet);
-  const forest = vec3(0.04, 0.11, 0.05);
-  let a = mix(base, field, fieldsHere.mul(land).mul(0.85));
-  a = mix(a, forest, forestsHere.mul(land).mul(0.9));
-  // ice caps about the axis: the cap's edge is a latitude, broken by noise
-  const lat = abs(n.dot(L.axis));
-  const edge = float(1).sub(L.ice.mul(0.32)).add(mx_noise_float(n.mul(6).add(8.8)).mul(0.04));
-  const ice = smoothstep(edge, edge.add(0.03), lat);
-  return mix(a, vec3(0.82, 0.86, 0.9), ice);
+export function lifeAlbedo(n: V3, real: V3, bare: V3, e: F, lat: F, L: LifeUniforms): V3 {
+  // green: the vegetation index of the colour (forest ~0.2, steppe ~0.05, desert < 0)
+  const green = smoothstep(0, 0.2, real.y.sub(real.x).div(real.y.add(real.x).add(1e-3)));
+  // the young world's rock is darker and greyer than today's sand
+  const young = mix(real, bare.mul(vec3(0.72, 0.66, 0.62)), green);
+  const life = waveFront(n, L.fields, L, 1.3).mul(0.5).add(waveFront(n, L.forests, L, 4.7).mul(0.5));
+  const a = mix(young, real, life);
+  // ice: a latitude edge and a snow line, both broken by noise
+  const ragged = mx_noise_float(n.mul(9).add(8.8));
+  const edge = float(90).sub(L.ice.mul(40)).add(ragged.mul(4));
+  const snowLine = float(4600).sub(L.ice.mul(2800)).add(ragged.mul(350));
+  const ice = max(smoothstep(edge, edge.add(2.5), abs(lat)), smoothstep(snowLine, snowLine.add(400), e));
+  return mix(a, vec3(0.72, 0.77, 0.82), ice);
 }
 
 /**
- * Night lights (emission, linear), after the satellite and ISS imagery of Earth at night: cities are CLUSTERS
- * of many fine sodium-amber points, densest and whitest at their cores and thinning outward; their sizes
- * follow a steep power law (a few big cities, many towns); a faint rural speckle between them; thin threads
- * of road joining them. Zero by day (earth.ts multiplies by its night factor).
- *
- * Two scales of cells on the sphere: CITY cells (~45 km) each may host a city of its own size, and FINE
- * cells (~2.5 km) that light when they fall inside a city's extent (with a probability falling off from its
- * core) or, rarely, as a rural light. Where a fine cell is smaller than ~2 pixels (`fp`, the pixel footprint
- * on the unit sphere) the points are replaced by their average — no shimmer, no grit.
- *
- * Stages (L.lights): camps 0–1 are the rural speckle alone; villages 1–2 light the small cities' cores; cities
- * 2–3 grow every cluster to its full extent; the overshoot merges and whitens them. Drowned under the sea.
+ * Night lights (emission, linear) from the Black Marble grey `v` (0..1, a gamma-encoded radiance), after the
+ * ISS imagery: sodium amber with whiter cores, a faint rural speckle, the cores the brightest by far.
+ * `land` 0..1 is the land above the sea now; `fp` the pixel's footprint on the unit sphere.
  */
-export function nightLights(n: V3, e: F, sea: F, L: LifeUniforms, fp: F = float(0)): V3 {
-  const height = e.sub(sea);
-  const lowland = smoothstep(0, 0.008, height).mul(smoothstep(0.2, 0.03, height)).mul(smoothstep(0.85, 0.55, abs(n.dot(L.axis))));
-  const region = smoothstep(0.5, 0.8, mx_noise_float(n.mul(6).add(3.7)).mul(0.5).add(0.5).add(smoothstep(0.05, 0, height).mul(0.25)));
+export function nightLights(n: V3, v: F, land: F, L: LifeUniforms, fp: F): V3 {
   const stage = L.lights;
-  // ---- cities: one may sit in each ~45 km cell, at a random point, its size from a steep power law
-  const pc = n.mul(140);
-  const cc = floor(pc);
-  const hc = hash(cc.x.add(cc.y.mul(157)).add(cc.z.mul(113)));
-  const centre = cc.add(vec3(hash(hc.add(0.1)), hash(hc.add(0.2)), hash(hc.add(0.3)))).div(140);
-  const isCity = step(hash(hc.add(0.7)), region.mul(lowland).mul(0.55));
-  const big = pow(hash(hc.add(0.9)), float(3)); // most small, a few big
-  // a city's radius (unit sphere) grows with the stage: cores in the village stage, full in the city stage
-  const grow = smoothstep(1, 2, stage).mul(0.35).add(smoothstep(2, 3, stage).mul(0.65)).add(L.overshoot.mul(0.6));
-  const radius = big.mul(0.009).add(0.0015).mul(grow);
-  const dc = n.sub(centre).length();
-  const inCity = isCity.mul(exp(dc.div(radius.max(1e-5)).pow(2).negate()));
-  // ---- fine lights: ~2.5 km cells, lit inside a city (denser to its core) or rarely in the countryside
-  const pf = n.mul(2500);
-  const cf = floor(pf);
-  const hf = hash(cf.x.add(cf.y.mul(311)).add(cf.z.mul(197)));
-  const at = vec3(hash(hf.add(0.1)), hash(hf.add(0.2)), hash(hf.add(0.3))).mul(0.8).add(0.1);
-  const df = fract(pf).sub(at).length();
-  const rural = lowland.mul(region.mul(0.7).add(0.3)).mul(0.035).mul(smoothstep(0.2, 1, stage));
-  const chance = inCity.mul(0.85).add(rural);
-  const on = step(hf, chance);
-  const brightness = hash(hf.add(0.5)).pow(2).mul(1.5).add(0.25).mul(inCity.mul(2).add(0.6));
-  const point = exp(df.div(0.18).pow(2).negate());
-  // LOD: where a fine cell is under ~2 px, its average (its probability × brightness × a point's area)
-  const fine = smoothstep(2 / 2500, 1 / 2500, fp);
-  const glow = mix(chance.mul(brightness).mul(0.1), on.mul(point).mul(brightness), fine);
-  // the cores' diffuse glow (too dense to resolve), whiter
-  const core = inCity.pow(3).mul(big.mul(2).add(0.5)).mul(0.6);
-  // road threads between towns: thin, faint, only once there are cities
-  const web = mx_noise_float(n.mul(400)).mul(0.5).add(0.5);
-  const roads = smoothstep(0.015, 0, abs(web.sub(0.5))).mul(lowland).mul(region).mul(smoothstep(2, 3, stage)).mul(0.06);
-  const sodium = vec3(1, 0.55, 0.2);
-  const white = mix(vec3(1, 0.85, 0.65), vec3(0.92, 0.95, 1), L.overshoot);
-  const light = sodium.mul(glow.add(roads)).add(white.mul(core));
-  // drowned: under the risen sea the lights are out
-  return light.mul(max(stage, 0).min(1)).mul(L.overshoot.mul(0.8).add(1)).mul(smoothstep(-0.002, 0.004, height)).mul(0.6);
+  // camp fires: a sparse warm speckle (~3 km cells) wherever there will be people, faint, early
+  const pc = n.mul(2000);
+  const cell = floor(pc);
+  const hc = hash(cell.x.add(cell.y.mul(157)).add(cell.z.mul(113)));
+  const inhabited = smoothstep(0.02, 0.12, v);
+  const fineEnough = smoothstep(2 / 2000, 0.7 / 2000, fp);
+  const camp = mix(inhabited.mul(0.04), step(hc, inhabited.mul(0.25)), fineEnough).mul(smoothstep(0, 1, stage)).mul(float(1).sub(smoothstep(1.5, 2.5, stage)));
+  // settlements grow from the core out: a pixel lights when the stage passes its level (bright = early);
+  // the regions wake at different times
+  const wake = mx_noise_float(n.mul(22).add(3.1)).mul(0.1);
+  const level = float(1.05).sub(stage.sub(1).div(2).clamp(0, 1).mul(1.15)).sub(L.overshoot.mul(0.25)).add(wake);
+  const on = smoothstep(level.sub(0.12), level.add(0.02), v);
+  // within a ~1 km pixel: the streets' own grain, where it can show
+  const grain = mx_noise_float(n.mul(16000)).mul(0.7).mul(float(1).sub(smoothstep(0.25, 0.5, fp.mul(16000)))).add(1);
+  const radiance = v.mul(v).mul(on).mul(grain).mul(L.overshoot.mul(0.9).add(1));
+  const sodium = vec3(1, 0.52, 0.18);
+  const core = vec3(1, 0.83, 0.62);
+  const led = vec3(0.86, 0.92, 1);
+  const tint = mix(mix(sodium, core, smoothstep(0.55, 0.9, v)), led, L.overshoot.mul(0.55));
+  const fire = vec3(1, 0.42, 0.12).mul(camp).mul(0.25);
+  return tint.mul(radiance).mul(6).add(fire).mul(land);
 }

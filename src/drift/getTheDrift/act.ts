@@ -10,7 +10,7 @@ import type { GetTheDriftParams } from '../../params/getTheDrift';
 import type { Vec3 } from '../../cine/domeMaster';
 import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, type ArrivalState } from './timeline';
 import { createEarth } from './earth';
-import { createDebris } from './debris';
+import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
 import { OUR_LOOK, createGalaxies, galaxyField, type GalaxySpec } from './galaxies';
 import { createMilkyWay } from './milkyWay';
@@ -19,6 +19,8 @@ export interface ArrivalAct {
   readonly group: THREE.Group;
   /** s, the act's length */
   readonly total: number;
+  /** resolves once the Earth's maps are loaded (a render must wait for it) */
+  readonly ready: Promise<void>;
   /** put the act into the state of its time t; returns the state and writes the eye into `eye` */
   update(t: number, eye: THREE.Vector3): ArrivalState;
   setPixelAngle(rad: number): void;
@@ -39,32 +41,23 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const centre = new THREE.Vector3();
   const sun = new THREE.Vector3();
   const waveOrigin = new THREE.Vector3();
-  // the planet's spin axis runs across the view (left–right, leaned): we look down onto the temperate and
-  // tropical latitudes, the ice caps sit at the left and right limbs (looking down a pole, all is ice)
-  const planetAxis = new THREE.Vector3(1, 0.35, 0.2).normalize();
 
-  // Drift-2's spirals sit on the water in front of the audience as the flood ends: the point a ray at 14°
-  // elevation straight ahead meets the planet then (the planet only translates, so it stays put on it)
+  // Drift-2's spirals sit on the water in front of the audience: the point a ray at gatherEl straight ahead
+  // meets the planet at the act's end (the planet only translates, so it stays put on it)
   const { starts } = beatStarts(p);
-  const endFlood = earthPose(starts.flood + p.flood, p, tiltDeg);
-  const c = endFlood.centreDir.map((x) => x * endFlood.distance) as Vec3;
-  const ray = domeDir(14, 0, tiltDeg);
+  const end = earthPose(starts.drift2 + p.drift2, p, tiltDeg);
+  const c = end.centreDir.map((x) => x * end.distance) as Vec3;
+  const ray = domeDir(p.gatherEl, 0, tiltDeg);
   const b = ray[0] * c[0] + ray[1] * c[1] + ray[2] * c[2];
   const hit = b - Math.sqrt(Math.max(0, b * b - (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + EARTH_RADIUS * EARTH_RADIUS));
   const up = new THREE.Vector3(ray[0] * hit - c[0], ray[1] * hit - c[1], ray[2] * hit - c[2]).normalize();
   const east = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize();
   const north = new THREE.Vector3().crossVectors(east, up);
-  const du = {
-    time: uniform(0), presence: uniform(0), centre: uniform(new THREE.Vector3()), radius: uniform(EARTH_RADIUS),
-    up: uniform(up), east: uniform(east), north: uniform(north), sun: uniform(new THREE.Vector3(0, 1, 0)), pixelAngle: uniform(0.0015),
-  };
-  const v3 = (x: unknown) => x as THREE.Node<'vec3'>;
-  const debris = createDebris(120000, {
-    time: du.time, presence: du.presence, centre: v3(du.centre), radius: du.radius, up: v3(du.up), east: v3(du.east), north: v3(du.north),
-    sun: v3(du.sun), pixelAngle: du.pixelAngle,
-  });
-  debris.renderOrder = 1;
-  group.add(debris);
+  // WHERE ON EARTH: the debris gathers over the drowned lowland of the north-eastern Netherlands (Drenthe,
+  // ~10–30 m up today), geographic north straight ahead. The flood flies ~1000 km north to it, so we arrive
+  // over the western Mediterranean (between the Balearics and Sardinia), the Alps and Europe toward the limb.
+  const front = new THREE.Vector3(...domeDir(0, 0, tiltDeg));
+  earth.setGeo(geoFrameAt(52.85, 6.75, up, front));
   // the debris lifts off the drowned coasts late in the flood
   const lift = starts.flood + p.flood * 0.55;
   let pixelAngle = 0.0015;
@@ -72,6 +65,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   return {
     group,
     total: beatStarts(p).total,
+    ready: earth.ready,
     update(t, eye) {
       const s = arrivalState(t, p);
       eye.set(...arrivalEye(t, p, g));
@@ -96,13 +90,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       const hitT = disc > 0 ? -bb - Math.sqrt(disc) : -bb;
       waveOrigin.set(eye.x + ahead[0] * hitT - centre.x, eye.y + ahead[1] * hitT - centre.y, eye.z + ahead[2] * hitT - centre.z).normalize();
       const L = lifeState(t, p);
-      earth.update({ centre, sun, presence: s.earth, sunPresence: s.earth, pixelAngle, eye, life: { ...L, waveOrigin, axis: planetAxis } });
-      du.time.value = Math.max(0, t - lift);
-      du.presence.value = Math.min(1, Math.max(0, (t - lift) / 5));
-      du.centre.value.copy(centre);
-      du.sun.value.copy(sun);
-      du.pixelAngle.value = pixelAngle;
-      debris.visible = t > lift;
+      const drift = { up, east, north, time: Math.max(0, t - lift), presence: Math.min(1, Math.max(0, (t - lift) / 6)) };
+      earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: s.earth, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
       milky.update({
         // with a sunlit planet in view the sky steps back (the eye — and a camera — would lose the faint stars)
         volume: s.volume * (1 - 0.5 * s.earth), local: s.local * (1 - 0.65 * s.earth), sunStar: s.sunStar * (1 - s.earth),
@@ -119,8 +108,6 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       (galaxies.material as THREE.Material).dispose();
       milky.dispose();
       earth.dispose();
-      debris.geometry.dispose();
-      (debris.material as THREE.Material).dispose();
     },
   };
 }
