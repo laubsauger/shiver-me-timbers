@@ -17,6 +17,15 @@
  *   node scripts/cine-sink.mjs [--out out/cine] [--port 7654] [--crf 12]
  *   node scripts/cine-sink.mjs --edit sb-trailer-v1          EDIT DELIVERY (docs/cine/trailer-edit-plan.md)
  *
+ * Options for a lane of a parallel render (scripts/drift-render.mjs, docs/cine/drift-render.md), all off by default:
+ *   --port 0          any free port; the listening line prints the real one
+ *   --fps <n>         frame rate before any /manifest (a lane posts none)
+ *   --threads <n>     libx264 threads — N lanes share the machine's cores
+ *   --preset <p>      libx264 preset (default slow)
+ *   --codec prores    seg/<shot>.mov, ProRes 422 HQ on the VideoToolbox engine (intra-only: joins anywhere)
+ *   --queue <n>       answer a frame once it is QUEUED, holding at most n frames ahead of ffmpeg, so the page
+ *                     renders on while the encoder catches up (0 = answer once ffmpeg took the frame)
+ *
  * Routes (all POST):
  *   /manifest                       fps, size, shot/transition list
  *   /frame?shot=D&n=..&w=..&h=..    raw RGBA body -> piped into seg/D.mp4
@@ -50,6 +59,13 @@ const OUT = resolve(arg('out', EDIT === null ? 'out/cine' : `out/cine/${EDIT}`))
 const PORT = Number(arg('port', '7654'));
 const CRF = arg('crf', '12');
 const PROXY = arg('proxy', '1920x1080');
+const THREADS = arg('threads', null);
+const PRESET = arg('preset', 'slow');
+const CODEC = arg('codec', 'x264');
+const QUEUE = Math.max(0, Number(arg('queue', '0')) || 0);
+if (CODEC !== 'x264' && CODEC !== 'prores') throw new Error(`--codec ${CODEC}: x264 | prores`);
+/** a non-edit clip's file: seg/<shot>.mp4, or .mov for ProRes (the mp4 muxer has no ProRes tag) */
+const SEG_EXT = CODEC === 'prores' ? 'mov' : 'mp4';
 
 if (EDIT === null) mkdirSync(join(OUT, 'seg'), { recursive: true });
 else for (const d of ['video', 'proxy', 'sfx']) mkdirSync(join(OUT, d), { recursive: true });
@@ -149,7 +165,7 @@ function writePlan() {
 
 /** shot id -> { proc, frames } — one long-lived ffmpeg per shot */
 const encoders = new Map();
-let fps = 24;
+let fps = Number(arg('fps', '24'));
 let started = 0;
 
 /**
@@ -160,7 +176,7 @@ let started = 0;
  * throttles the render instead of corrupting it.
  */
 function openEncoder(shot, w, h) {
-  const file = EDIT === null ? join(OUT, 'seg', `${shot}.mp4`) : join(OUT, 'video', `${shot}.mov`);
+  const file = EDIT === null ? join(OUT, 'seg', `${shot}.${SEG_EXT}`) : join(OUT, 'video', `${shot}.mov`);
   if (EDIT !== null && existsSync(file)) console.warn(`\n[sink] OVERWRITING ${file} — pass a new take to keep it`);
   // .part until it closes cleanly. An mp4 only becomes playable when ffmpeg
   // writes its `moov` atom at the END, so a file that is still being written —
@@ -169,9 +185,12 @@ function openEncoder(shot, w, h) {
   // only in QuickTime's error dialog.
   const part = `${file}.part`;
   // the edit master: ProRes 422 HQ (profile 3), 10-bit 4:2:2, a constant frame rate
-  const codec = EDIT === null
-    ? ['-c:v', 'libx264', '-preset', 'slow', '-crf', CRF, '-pix_fmt', 'yuv420p']
-    : ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le'];
+  // --codec prores (lanes): the same HQ 422 10-bit, on the hardware ProRes engine instead of the CPU
+  const codec = EDIT !== null
+    ? ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le']
+    : CODEC === 'prores'
+      ? ['-c:v', 'prores_videotoolbox', '-profile:v', 'hq', '-pix_fmt', 'p210le']
+      : ['-c:v', 'libx264', '-preset', PRESET, '-crf', CRF, '-pix_fmt', 'yuv420p', ...(THREADS !== null ? ['-threads', THREADS] : [])];
   const proc = spawn(
     'ffmpeg',
     [
@@ -186,7 +205,7 @@ function openEncoder(shot, w, h) {
       // muxer from the extension: without this it fails with "Unable to choose
       // an output format", the encoder dies on the first frame, and the write
       // side then waits forever on a `drain` from a closed pipe
-      '-f', EDIT === null ? 'mp4' : 'mov',
+      '-f', EDIT === null ? SEG_EXT : 'mov',
       part,
     ],
     { stdio: ['pipe', 'ignore', 'inherit'] },
@@ -198,7 +217,8 @@ function openEncoder(shot, w, h) {
   // ONCE, at spawn. Attaching this per frame added a listener per frame and
   // node started warning about a leak at 11 — on a 5760-frame film it would
   // have been 5760 of them on one socket.
-  const rec = { proc, file, part, frames: 0, w, h, failed: null, closing: null, exited: false };
+  // tail / queued / room: the --queue path (enqueueFrame); with --queue 0 the tail stays resolved
+  const rec = { proc, file, part, frames: 0, w, h, failed: null, closing: null, exited: false, tail: Promise.resolve(), queued: 0, room: [] };
   proc.stdin.on('error', (e) => {
     rec.failed = e;
   });
@@ -210,6 +230,11 @@ function openEncoder(shot, w, h) {
     if (code !== 0 && rec.failed === null) {
       rec.failed = new Error(`ffmpeg for ${shot} exited ${code} before the shot ended`);
     }
+  });
+  // remembered for closeEncoder: an encoder that died mid-shot has ALREADY emitted 'close', and waiting for it again
+  // hung the shot's /endshot (and the page awaiting it) forever
+  proc.on('close', (code) => {
+    rec.closeCode = code;
   });
   encoders.set(shot, rec);
   console.log(`\n[sink] ${shot} -> ${file} (${w}x${h} @ ${fps})`);
@@ -234,6 +259,31 @@ const writeFrame = (rec, buf) =>
   });
 
 /**
+ * --queue N: the frame is answered once it is QUEUED, and the page waits only when N frames are already waiting for
+ * ffmpeg — a slow encode then still throttles the render (bounded memory: N × w×h×4 bytes per encoder) but no longer
+ * stalls it frame by frame. Writes stay in arrival order on one chain; a failed write fails every later frame and the
+ * shot's /endshot. --queue 0 is writeFrame itself.
+ */
+function enqueueFrame(rec, buf) {
+  if (QUEUE === 0) return writeFrame(rec, buf);
+  if (rec.failed !== null) return Promise.reject(rec.failed);
+  rec.queued++;
+  rec.tail = rec.tail
+    .then(() => (rec.failed === null ? writeFrame(rec, buf) : undefined))
+    .catch((e) => {
+      if (rec.failed === null) rec.failed = e;
+    })
+    .finally(() => {
+      rec.queued--;
+      rec.room.shift()?.();
+    });
+  if (rec.queued <= QUEUE) return Promise.resolve();
+  return new Promise((res) => rec.room.push(res)).then(() => {
+    if (rec.failed !== null) throw rec.failed;
+  });
+}
+
+/**
  * Finish ONE shot's clip: close the pipe, wait for ffmpeg to write its `moov`,
  * then take the `.part` off the name.
  *
@@ -253,8 +303,9 @@ function closeEncoder(name, verdict = null) {
   const rec = encoders.get(name);
   if (rec === undefined) return Promise.resolve();
   if (rec.closing !== null) return rec.closing;
-  rec.closing = new Promise((res) => {
-    rec.proc.on('close', (code) => {
+  // --queue: every queued frame reaches ffmpeg before its stdin closes (a no-op tail without it)
+  rec.closing = rec.tail.then(() => new Promise((res) => {
+    const onClose = (code) => {
       if (code === 0 && existsSync(rec.part) && verdict !== null) {
         const bad = rec.file.replace(/\.(mov|mp4)$/, '_FAILED.$1');
         renameSync(rec.part, bad);
@@ -269,9 +320,11 @@ function closeEncoder(name, verdict = null) {
         console.error(`\n[sink] ${name}: ffmpeg exited ${code} — left ${rec.part}`);
       }
       res();
-    });
+    };
+    if (rec.closeCode !== undefined) onClose(rec.closeCode);
+    else rec.proc.on('close', onClose);
     rec.proc.stdin.end();
-  });
+  }));
   return rec.closing;
 }
 
@@ -342,7 +395,7 @@ const server = createServer(async (req, res) => {
         rec = openEncoder(shot, w, h);
         rec.group = group;
       }
-      await writeFrame(rec, body);
+      await enqueueFrame(rec, body);
       rec.frames++;
       if (rec.frames % 24 === 0) process.stdout.write('.');
       res.writeHead(204).end();
@@ -355,9 +408,13 @@ const server = createServer(async (req, res) => {
       // the page says how many frames the take has; anything else is a broken take
       const expected = Number(url.searchParams.get('frames'));
       const failed = url.searchParams.get('failed');
+      // --queue: frames were answered before ffmpeg took them, so a write that failed later surfaces here
+      if (rec !== undefined) await rec.tail;
       const verdict = failed
         ? `the page failed the take: ${failed}`
-        : rec !== undefined && Number.isFinite(expected) && expected > 0 && rec.frames !== expected
+        : rec !== undefined && rec.failed !== null
+          ? `the encoder failed: ${rec.failed.message ?? rec.failed}`
+          : rec !== undefined && Number.isFinite(expected) && expected > 0 && rec.frames !== expected
           ? `${rec.frames} frames written, ${expected} expected`
           : null;
       await closeEncoder(clip, verdict);
@@ -372,7 +429,7 @@ const server = createServer(async (req, res) => {
       // a record with `resume` skips a clip whose master is on disk AND was rendered with the same settings key
       const clip = url.searchParams.get('clip') ?? '';
       const key = url.searchParams.get('key') ?? '';
-      const file = EDIT === null ? join(OUT, 'seg', `${clip}.mp4`) : join(OUT, 'video', `${clip}.mov`);
+      const file = EDIT === null ? join(OUT, 'seg', `${clip}.${SEG_EXT}`) : join(OUT, 'video', `${clip}.mov`);
       const have = existsSync(file) && existsSync(`${file}.key`) && readFileSync(`${file}.key`, 'utf8') === key;
       res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }).end(JSON.stringify({ have }));
       return;
@@ -460,5 +517,6 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 }
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[sink] listening on http://127.0.0.1:${PORT} -> ${OUT}`);
+  // the bound port, not PORT: `--port 0` lets the OS pick (scripts/drift-render.mjs reads this line)
+  console.log(`[sink] listening on http://127.0.0.1:${server.address().port} -> ${OUT}`);
 });

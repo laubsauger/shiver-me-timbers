@@ -38,6 +38,7 @@ docs/**/*.mov
 # locally and worthless to anyone else. Keep them on disk, out of the repo.
 tests/zzScratch*
 out/cine
+out/drift
 docs/speedboat/refs/_local/
 !docs/speedboat/concept/*.png
 scripts/blender/**/__pycache__/

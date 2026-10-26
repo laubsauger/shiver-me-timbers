@@ -11,7 +11,8 @@
     "test:changed": "node scripts/test-changed.mjs",
     "test:watch": "vitest",
     "cine:sink": "node scripts/cine-sink.mjs",
-    "cine:mux": "node scripts/cine-mux.mjs"
+    "cine:mux": "node scripts/cine-mux.mjs",
+    "drift:render": "node scripts/drift-render.mjs"
   },
   "dependencies": {
     "three": "^0.186.1",
@@ -25,6 +26,7 @@
     "@types/three": "^0.186.0",
     "@webgpu/types": "^0.1.71",
     "meshoptimizer": "^1.2.0",
+    "playwright": "1.63.0",
     "typescript": "^5.6.0",
     "vite": "^6.0.0",
     "vitest": "^2.1.0"
