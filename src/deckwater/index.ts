@@ -230,12 +230,12 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
 
   const u = createDeckWaterUniforms(p);
   const splashVecs = Array.from({ length: MAX_SPLASHES }, () => new THREE.Vector4());
-  const uSplashes = uniformArray(splashVecs);
+  const uSplashes = uniformArray<'vec4'>(splashVecs, 'vec4'); // explicit type = what three infers from Vector4; needed for typed .x/.y/.z
 
   const makeInit = (dst: THREE.StorageTexture) =>
     Fn(() => {
       If(instanceIndex.lessThan(uint(w * h)), () => {
-        const x = int(instanceIndex.modInt(w));
+        const x = int(int(instanceIndex).mod(int(w)));
         const y = int(instanceIndex.div(uint(w)));
         const seed = textureLoad(seedTex, ivec2(x, y));
         // R = deck height, G/B = dry and empty, A = drain mask (carried for

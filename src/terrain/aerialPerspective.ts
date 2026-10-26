@@ -133,7 +133,7 @@ export function aerialOutputNode(u: AerialUniforms): AnyNode {
   const hazeT = aerialHazeFactor(u);
   // §V23 functional form. `output` is the lit result three assigns before it
   // evaluates outputNode; alpha is carried through untouched.
-  return vec4(mix(output.rgb, vec3(u.color), hazeT), output.a);
+  return vec4(mix(output.rgb, vec3(u.color as unknown as THREE.Node<'vec3'>), hazeT), output.a);
 }
 
 /**

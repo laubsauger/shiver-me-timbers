@@ -153,7 +153,7 @@ export type FoamUniforms = ReturnType<typeof createFoamUniforms>;
 const TENSOR_TAPS = 8;
 
 /** wrap a texel index into [0, n) — cascade textures tile with their domain */
-function wrapTexel(v: ReturnType<typeof int>, n: number) {
+function wrapTexel(v: THREE.Node<'int'>, n: number) {
   return v.add(int(n)).mod(int(n));
 }
 
@@ -245,7 +245,7 @@ export function createInjectPass(
     // (λDx, h, λDz, det J) and (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) — see unpackPass
     const det = textureLoad(own.displacement, leadCoord).w;
     // derivatives is a LAYER of the ocean's shared array texture (§V.40)
-    const d = loadCascadeLayer(own.derivatives, leadCoord);
+    const d: THREE.Node<'vec4'> = loadCascadeLayer(own.derivatives, leadCoord);
     // tr J = 2 + λ(∂Dx/∂x + ∂Dz/∂z)
     const trace = float(2).add(u.uChoppiness.mul(d.z.add(d.w))).toVar();
     // foamMath.minEigenvalue. The discriminant is ≥ 0 for a real symmetric
@@ -322,7 +322,7 @@ export function createInjectPass(
         const oz = Math.round(Math.sin(ang) * tensorRadius);
         const tx = wrapTexel(gx.add(int(ox)), n);
         const tz = wrapTexel(gy.add(int(oz)), n);
-        const g = loadCascadeLayer(own.derivatives, ivec2(tx, tz));
+        const g: THREE.Node<'vec4'> = loadCascadeLayer(own.derivatives, ivec2(tx, tz));
         jxx.addAssign(g.x.mul(g.x));
         jzz.addAssign(g.y.mul(g.y));
         jxz.addAssign(g.x.mul(g.y));

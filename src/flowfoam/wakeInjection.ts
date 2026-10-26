@@ -105,8 +105,8 @@ export function createWakeInjector(p: FlowFoamParams) {
   // (x, z, fx, fz) and (age, dist, speed, unused) per slot
   const posVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4(0, 0, 0, 1));
   const metaVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4());
-  const uTrackPos = uniformArray(posVecs);
-  const uTrackMeta = uniformArray(metaVecs);
+  const uTrackPos = uniformArray<'vec4'>(posVecs);
+  const uTrackMeta = uniformArray<'vec4'>(metaVecs);
   const uTrackCount = uniform(0);
   const uTrackMin = uniform(new THREE.Vector2(0, 0));
   const uTrackMax = uniform(new THREE.Vector2(0, 0));
@@ -205,9 +205,9 @@ export function createWakeInjector(p: FlowFoamParams) {
   const aabb = { minX: 1, minZ: 1, maxX: -1, maxZ: -1 };
 
   /** falling edge: 1 at x = 0, 0 at x = e (§V23 functional smoothstep) */
-  const fadeTo = (e: any, x: any): any => smoothstep(float(0), e.max(EPS), x).oneMinus();
+  const fadeTo = (e: any, x: any): THREE.Node<'float'> => smoothstep(float(0), e.max(EPS), x).oneMinus();
   /** true dissipation exp(−a/τ) — see wakeMath.dissipate for why not smoothstep */
-  const dissipate = (tau: any, a: any): any => a.div(tau.max(EPS)).negate().exp();
+  const dissipate = (tau: any, a: any): THREE.Node<'float'> => a.div(tau.max(EPS)).negate().exp();
 
   return {
     /** §T.161 — see `speedScale`; 1 = the galleon the ramp was authored on */

@@ -559,7 +559,7 @@ export function createKitMaterialSet(atlas: SierraAtlas, deps: KitMaterialDeps):
         albedo: packedAlbedo,
         roughness: packedRough.x,
         emissiveGate: float(1).sub(bedrock).mul(float(1).sub(rubble)),
-        normal: mix(ctx.sand.reliefNormal, reliefNormal(packedRough.y, float(1)), solid).normalize(),
+        normal: mix(ctx.sand.reliefNormal as THREE.Node<'vec3'>, reliefNormal(packedRough.y, float(1)), solid).normalize(),
       };
     },
     rock(ctx) {

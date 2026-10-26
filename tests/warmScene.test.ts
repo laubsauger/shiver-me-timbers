@@ -20,13 +20,14 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { lights } from 'three/tsl';
-import Nodes from 'three/src/renderers/common/nodes/Nodes.js';
+// r186 renamed renderers/common/nodes/Nodes.js → NodeManager.js (same getCacheKey)
+import Nodes from 'three/src/renderers/common/nodes/NodeManager.js';
 
 function makeNodes(): { getCacheKey(scene: THREE.Scene, lightsNode: unknown): number } {
   // `getCacheKey` memoises per `renderer.info.calls`; a fresh id per call keeps
   // every lookup honest instead of replaying the first answer.
   let calls = 0;
-  const renderer = { info: { get calls() { return ++calls; } }, getOutputRenderTarget: () => null, shadowMap: { enabled: true } };
+  const renderer = { info: { get calls() { return ++calls; } }, getOutputRenderTarget: () => null, lighting: { enabled: true }, shadowMap: { enabled: true, type: THREE.PCFShadowMap } };
   return new (Nodes as unknown as new (r: unknown, b: unknown) => ReturnType<typeof makeNodes>)(renderer, {});
 }
 
@@ -86,9 +87,9 @@ describe('§T.124 the warm-up binds a real frame\'s target, not a placeholder', 
     expect(scenePass.renderTarget.width).toBe(1);
     expect(scenePass.renderTarget.height).toBe(1);
 
-    // and this is the sizing a real frame performs, which syncPassTarget mirrors
-    scenePass.setPixelRatio(2);
-    scenePass.setSize(1800, 985);
+    // and this is the sizing a real frame performs, which syncPassTarget mirrors:
+    // r186 PassNode takes the drawing-buffer size (CSS size × pixel ratio, here 1800×985 @ 2)
+    scenePass.setSize(3600, 1970);
     expect(scenePass.renderTarget.width).toBe(3600);
     expect(scenePass.renderTarget.height).toBe(1970);
   });
@@ -101,17 +102,18 @@ describe('§T.124 the warm-up binds a real frame\'s target, not a placeholder', 
     //   copyFramebufferToTexture: Source and destination formats do not match.
     //   bgra8unorm rgba16float
     // — and a copy that fails is a copy that did not happen.
-    const contexts = new (RenderContexts as unknown as new () => {
-      get(s: THREE.Scene, c: THREE.Camera, t: THREE.RenderTarget): { renderTarget?: unknown | null };
-    })();
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera();
+    // r186 RenderContexts reads the renderer's clear depth/stencil when it makes a context
+    const renderer = { getClearDepth: () => 1, getClearStencil: () => 0 };
+    const contexts = new (RenderContexts as unknown as new (r: unknown) => {
+      get(t: THREE.RenderTarget, mrt: unknown): { renderTarget?: unknown | null };
+    })(renderer);
     const target = new THREE.RenderTarget(64, 64);
-    const context = contexts.get(scene, camera, target);
+    const context = contexts.get(target, null);
     expect(context.renderTarget ?? null).toBeNull();
 
-    // …and the context is keyed on (scene, camera, target), so assigning the
-    // field before compileAsync fetches it reaches the very same object.
-    expect(contexts.get(scene, camera, target)).toBe(context);
+    // …and the context is keyed on (target, MRT, call depth) since r186, so
+    // assigning the field before compileAsync fetches it reaches the very same
+    // object (postPipeline.bindCompileTarget relies on this).
+    expect(contexts.get(target, null)).toBe(context);
   });
 });

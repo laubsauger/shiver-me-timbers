@@ -51,7 +51,7 @@ export interface WaterlineBand {
 export function createWaterlineBand(): WaterlineBand {
   // column count is a uniform-buffer size — snapshot at build (doc above)
   const samples = Math.max(2, Math.round(p.waterlineSamples));
-  const heights = uniformArray(new Array<number>(samples).fill(0.5), 'float');
+  const heights = uniformArray<'float'>(new Array<number>(samples).fill(0.5), 'float');
 
   const uCrossFade = uniform(0);
   const uTime = uniform(0);

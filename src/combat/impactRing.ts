@@ -137,7 +137,7 @@ export function createImpactRings(p: CombatFxParams): ImpactRings {
   // drive OPACITY. Fading the colour instead would turn the mark grey as it
   // died rather than thinning it — foam gets sparser, it does not get darker.
   material.colorNode = vec3(RING_TINT.r, RING_TINT.g, RING_TINT.b);
-  material.opacityNode = instancedBufferAttribute(fadeAttr, 'float').mul(
+  material.opacityNode = instancedBufferAttribute<'float'>(fadeAttr, 'float').mul(
     mix(
       attribute('band', 'float'),
       attribute('disc', 'float'),

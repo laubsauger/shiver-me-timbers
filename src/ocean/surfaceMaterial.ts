@@ -605,7 +605,7 @@ export function buildOceanSurfaceMaterial(
     Math.max(0, Math.round(sp.radialLodMaxLevel)),
     sp.radialLodMorph,
   );
-  const worldXZ = gridXZ.add(originUniform);
+  const worldXZ: THREE.Node<'vec2'> = gridXZ.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
 
   // §V30: local vertex spacing from the clipmap law (surfaceGeometry header).
@@ -1585,7 +1585,8 @@ export function buildOceanSurfaceMaterial(
     // chosen to look right when PAINTED is not the colour that sky delivers
     // as LIGHT (sky agent's ambient rework, same principle).
     const ndl = normalWorld.dot(sunDirectionUniform).max(0);
-    const skyLum = uHazeColor.dot(vec3(0.2126, 0.7152, 0.0722));
+    // cast: @types/three types 'color' nodes narrower than their vec3 runtime
+    const skyLum = (uHazeColor as unknown as THREE.Node<'vec3'>).dot(vec3(0.2126, 0.7152, 0.0722));
     const skylightCol = mix(uHazeColor, vec3(skyLum), uSkylightDesat.clamp(0, 1));
     const lightWrap = skylightCol
       .mul(uLightFloor)
@@ -1601,7 +1602,7 @@ export function buildOceanSurfaceMaterial(
     // and still vanishes when you look away, because that is correct. What
     // must not vanish is the sea looking sunlit (user).
     const bodyScatter = pow(ndl, uScatter.y.max(0.05)).mul(uScatter.x).mul(shade);
-    waterCol.assign(waterCol.add(uSss.mul(uSunLightColor).mul(bodyScatter)));
+    waterCol.assign(waterCol.add((uSss as unknown as THREE.Node<'vec3'>).mul(uSunLightColor).mul(bodyScatter)));
 
     // §V.5 SSS fake: choppy horizontal offset isolates wave sides;
     // boost where the camera looks toward the sun through the crest.
@@ -1657,7 +1658,7 @@ export function buildOceanSurfaceMaterial(
       .mul(shade)
       .mul(sunUpFactor);
     const sssAmount = sssDrive.clamp(0, uSssMaxMix.clamp(0, 1));
-    const scatterCol = uSss.mul(uSunLightColor).mul(uSssBrightness);
+    const scatterCol = (uSss as unknown as THREE.Node<'vec3'>).mul(uSunLightColor).mul(uSssBrightness);
     waterCol.assign(mix(waterCol, scatterCol, sssAmount));
 
     // ── reflected sky, unified with the live day cycle ──────────────────
@@ -1669,12 +1670,12 @@ export function buildOceanSurfaceMaterial(
     // warms in lockstep with sky, fog and ambient off ONE source instead of
     // holding cold constants under a warm sky (§T.39 — the sea stayed mint
     // turquoise while everything else warmed). §V28: floored divisor, capped.
-    const skyDayTint = uHazeColor
-      .div(uSkyRefHaze.max(vec3(0.02, 0.02, 0.02)))
+    const skyDayTint = (uHazeColor as unknown as THREE.Node<'vec3'>)
+      .div((uSkyRefHaze as unknown as THREE.Node<'vec3'>).max(vec3(0.02, 0.02, 0.02)))
       .clamp(0, uSkyTintMax);
     const follow = uSkyFollow.clamp(0, 1);
-    const horizonLive = mix(uHorizon, uHorizon.mul(skyDayTint), follow);
-    const zenithLive = mix(uZenith, uZenith.mul(skyDayTint), follow);
+    const horizonLive = mix(uHorizon, (uHorizon as unknown as THREE.Node<'vec3'>).mul(skyDayTint), follow);
+    const zenithLive = mix(uZenith, (uZenith as unknown as THREE.Node<'vec3'>).mul(skyDayTint), follow);
 
     // ── reflected sky: THE sky, asked directly ─────────────────────────
     // `skyDomeColor` is src/sky/skyBackground.ts's own dome function — the
@@ -1978,7 +1979,7 @@ export function buildOceanSurfaceMaterial(
           )).dot(sunDirectionUniform).max(0)
         : ndl;
       const foamAmbient = skyLum.mul(uLightFloor.add(0.1));
-      const foamDirect = uSunLightColor.dot(vec3(0.2126, 0.7152, 0.0722))
+      const foamDirect = (uSunLightColor as unknown as THREE.Node<'vec3'>).dot(vec3(0.2126, 0.7152, 0.0722))
         .mul(uLightGain.mul(0.6)).mul(shade);
       const foamCol = foamBase
         .mul(foamTintNode())
@@ -2019,7 +2020,7 @@ export function buildOceanSurfaceMaterial(
           ? float(1).sub(wakeCoverageW8.mul(1.6).add(crest.mul(0.35)).negate().exp())
           : wakeAlpha;
         const aerated = aerSoft.mul(froth.oneMinus()).mul(foamGain).mul(whitecapAmount.oneMinus());
-        const aerTint = flowFoam?.wakeWhiteNode ? mix(uWakeFoam, vec3(uWakeFoam.dot(vec3(0.2126, 0.7152, 0.0722))), 0.45) : uWakeFoam;
+        const aerTint = flowFoam?.wakeWhiteNode ? mix(uWakeFoam, vec3((uWakeFoam as unknown as THREE.Node<'vec3'>).dot(vec3(0.2126, 0.7152, 0.0722))), 0.45) : (uWakeFoam as unknown as THREE.Node<'vec3'>);
         // W8 round 5: the boats' LEDs reach their own lanes (flowfoam/wakeLight.ts; speedboat page only, else no node)
         // round 6: only where the lane's foam is (× its coverage), never the open water between boats
         // @band-limited-elsewhere: a VALUE gate on the filtered wake coverage sample
@@ -2522,7 +2523,7 @@ export function buildOceanSurfaceMaterial(
     // radiance — the same space the literal it replaces was in. No sRGB
     // triple reaches this multiply.
     col.assign(
-      col.add(uSunLightColor.mul(glint).mul(mix(float(1), uGlintHaze, hazeT))),
+      col.add((uSunLightColor as unknown as THREE.Node<'vec3'>).mul(glint).mul(mix(float(1), uGlintHaze, hazeT))),
     );
 
     // ── underside (§V.24/§V.25): the camera can dive under the surface ──

@@ -275,6 +275,11 @@ describe('§B70 — the face SDF resolves its node type in linear time', () => {
   // level's type; this bounds the walk so the chain cannot grow back.
   it('getNodeType on the full fill + stroke chain returns within 250 ms', () => {
     const builder = {
+      // three r186 memoises `getNodeType` in this per-node data (Node.js
+      // `nodeData.type`). A FRESH object per call keeps that memo out of the
+      // measurement, so the bound is on the chain's own shape (the typed Fn),
+      // exactly as on r180 where no memo existed.
+      getDataFromNode: () => ({}),
       getTypeLength: (t: string) => ({ float: 1, vec2: 2, vec3: 3, vec4: 4, bool: 1, int: 1, uint: 1 }[t] ?? 1),
       isMatrix: (t: string) => typeof t === 'string' && t.startsWith('mat'),
       getVectorType: (t: string) => t,

@@ -30,6 +30,7 @@ import {
   uv,
   vec3,
 } from 'three/tsl';
+import type * as THREE from 'three/webgpu';
 import type { ShipMaterialParams } from '../params/ship';
 import {
   SAIL_ARC_COEFF,
@@ -56,8 +57,8 @@ import type { SailWindUniforms } from './sailDriver';
 
 const TAU = Math.PI * 2;
 
-type Node = ReturnType<typeof float>;
-type UniformNode = ReturnType<typeof uniform>;
+type Node<T extends string = 'float'> = THREE.Node<T>;
+type UniformNode = THREE.UniformNode<'float', number>;
 
 /**
  * §B84, §T.128 — A TYPED `Fn`, AND IT IS THE DIFFERENCE BETWEEN 320 ms AND
@@ -70,9 +71,10 @@ type UniformNode = ReturnType<typeof uniform>;
  * several times (`clothAt` → `sparPushAll` → three nested `sparPushAt`,
  * `clothZ` → `sectionAt` → `acrossAt`/`leechAt`/`downAt`, and the finite
  * differences that build the normal call `clothAt` four more times). That is
- * §B84's ~4^depth again, and it is NOT covered by the §T.79 memo: the vertex
- * graph is built inside `subBuild(…, 'VERTEX')` (NodeMaterial.js:460) and
- * `src/core/nodeTypeCache.ts:164` bypasses the memo for the whole of it.
+ * §B84's ~4^depth again, and on three r180 it was NOT covered by the §T.79 memo: the
+ * vertex graph is built inside `subBuild(…, 'VERTEX')` and the old project patch
+ * (src/core/nodeTypeCache.ts, removed with r186, whose own memo covers sub-builds)
+ * bypassed it for the whole of it.
  *
  * Pinning the type short-circuits that first `||` and the walk stops at each
  * level. The body is still INLINED per call (no `layout`), so the emitted
@@ -82,10 +84,10 @@ type UniformNode = ReturnType<typeof uniform>;
  * runtime takes the node type second; same cast, same reason, as
  * `raftSailFace.ts`.
  */
-const typedFn = Fn as unknown as <A extends Node[]>(
-  jsFunc: (args: A) => Node,
+const typedFn = Fn as unknown as <A extends THREE.Node[], R extends THREE.Node>(
+  jsFunc: (args: A) => R,
   nodeType: string,
-) => (...args: Array<Node | UniformNode>) => Node;
+) => (...args: A) => R;
 
 /** the shape uniforms, so the material can refresh them from params */
 export interface SailShapeUniforms {
@@ -116,11 +118,11 @@ export interface SailClothNodes {
    *  beside the fold it is supposed to be sitting in */
   panelCoord: Node;
   /** material.positionNode */
-  position: Node;
+  position: Node<'vec3'>;
   /** the billowed surface normal, in LOCAL space (pre-view-transform) */
-  localNormal: Node;
+  localNormal: Node<'vec3'>;
   /** the cloth's own u tangent in local space — the seam ridge tilts along it */
-  uTangent: Node;
+  uTangent: Node<'vec3'>;
   /** 1 on cloth the shader may move, 0 on robands and the furled bundle */
   clothWeight: Node;
   /** baked fold occlusion — 1 on cloth, < 1 in the bundle's creases and waists */
@@ -447,7 +449,7 @@ export function createSailClothNodes(
     const yc = clamp(y, float(0), float(1));
     return yc.mul(yc).mul(float(2).sub(yc)).add(max(y.sub(1), float(0)));
   }, 'float');
-  const sparPushAt = typedFn(([p, flatAt, a, b, r]: [Node, Node, Node, Node, Node]) => {
+  const sparPushAt = typedFn(([p, flatAt, a, b, r]: [Node<'vec3'>, Node<'vec3'>, Node<'vec3'>, Node<'vec3'>, Node<'vec2'>]) => {
     const ab = b.sub(a);
     const len2 = ab.dot(ab);
     const len = max(len2, float(1e-12)).sqrt(); // §V28 floored divisor
@@ -493,7 +495,7 @@ export function createSailClothNodes(
 
   /** out of the mast, out of a bipod's other leg, out of its own yard — the
    *  same order sailShape.sailSparPush applies them in */
-  const sparPushAll = typedFn(([p, flatAt]: [Node, Node]) =>
+  const sparPushAll = typedFn(([p, flatAt]: [Node<'vec3'>, Node<'vec3'>]) =>
     sparPushAt(
       sparPushAt(
         sparPushAt(p, flatAt, wind.mastA, wind.mastB, wind.mastR),

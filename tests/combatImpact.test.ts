@@ -96,6 +96,18 @@ function ringTransform(mesh: Object3D, i: number): Matrix4 {
   return m;
 }
 
+/**
+ * One ring instance's scale, read as the lengths of the stored basis columns.
+ * NOT via `decompose`: since three r186 `Matrix4.decompose` reports any
+ * matrix with a zero determinant as unit scale and identity rotation, so it
+ * reads §V.28's zero-scale dead write back as scale 1 — it cannot see the
+ * thing these tests guard. A column length is 0 exactly when that column is
+ * all zeros, so `toBe(0)` on all three still demands the full zero basis.
+ */
+function ringScale(mesh: Object3D, i: number): Vector3 {
+  return new Vector3().setFromMatrixScale(ringTransform(mesh, i));
+}
+
 interface FxPool {
   position: Float32Array;
   color: Float32Array;
@@ -393,8 +405,7 @@ describe('the surface ring (§V.28, §V.62)', () => {
     const rings = createImpactRings(combatFxParams);
     rings.spawn(0, 0, 0);
     for (let i = 0; i < 200; i++) rings.update(1 / 60, () => 0);
-    const scale = new Vector3(1, 1, 1);
-    ringTransform(rings.mesh, 0).decompose(new Vector3(), new Quaternion(), scale);
+    const scale = ringScale(rings.mesh, 0);
     expect(scale.x).toBe(0);
     expect(scale.y).toBe(0);
     expect(scale.z).toBe(0);
@@ -441,14 +452,14 @@ describe('the surface ring (§V.28, §V.62)', () => {
 
     // 2 s in: the ring is long dead, the scar is not
     for (let i = 0; i < 120; i++) rings.update(1 / 60, () => 0, 10, 0);
-    const rs = new Vector3();
-    ringTransform(rings.mesh, ringSlot).decompose(new Vector3(), new Quaternion(), rs);
+    const rs = ringScale(rings.mesh, ringSlot);
     expect(rs.x).toBe(0); // §V.28 dead is zero SCALE
 
-    const fp = new Vector3();
-    const fs = new Vector3();
-    ringTransform(rings.mesh, foamSlot).decompose(fp, new Quaternion(), fs);
+    // scale from the columns too: `decompose` would report a DEAD scar as
+    // scale 1 (see ringScale), and this would pass with the scar gone
+    const fs = ringScale(rings.mesh, foamSlot);
     expect(fs.x).toBeGreaterThan(0);
+    const fp = new Vector3().setFromMatrixPosition(ringTransform(rings.mesh, foamSlot));
     // drifted downwind: 10 m/s x 0.1 x 2 s = 2 m, and it must be downwind
     expect(fp.x).toBeGreaterThan(1);
     expect(fp.x).toBeLessThan(3);

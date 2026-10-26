@@ -865,7 +865,7 @@ export function createSierraTerrainMaterial(
   // the sand bedform's shading normal is identity on land, so the sheeting
   // relief (already band-limited: it differentiates `bandLimitedEdge`) can
   // take over there without the two fighting
-  const baseNormal = material.normalNode as AnyNode;
+  const baseNormal = material.normalNode as THREE.Node<'vec3'> | null;
   if (bound.infoNodes && baseNormal) {
     material.normalNode = mix(baseNormal, reliefNormal(surface.relief, float(1)), landW).normalize();
   }

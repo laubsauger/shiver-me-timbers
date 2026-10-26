@@ -241,7 +241,7 @@ export function createSierraAtlas(layers: number = SIERRA_ATLAS_LAYERS): SierraA
     (jointDirB.value as THREE.Vector2).copy(b.jointDirB);
     bandPhase.value = b.bandPhase;
   };
-  for (const u of [layer, radius, jointOffset, jointDirA, jointDirB, bandPhase]) u.onObjectUpdate(update);
+  for (const u of [layer, radius, jointOffset, jointDirA, jointDirB, bandPhase] as THREE.Node[]) u.onObjectUpdate(update);
 
   const bound = new Map<IslandHeightmap, SierraIslandBinding>();
   const free: number[] = [];

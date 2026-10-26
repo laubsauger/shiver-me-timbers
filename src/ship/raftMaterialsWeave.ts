@@ -280,7 +280,7 @@ export function createThatchMaterial(
   // tile's own `periodResolved` once a tile is sub-pixel (§V.48b).
   const tileC = side.div(uTileWidth.max(0.02));
   const tileF = coordFilter(side).div(uTileWidth.max(0.02));
-  const tileResolved = periodResolved(tileC, tileF);
+  const tileResolved: THREE.Node<'float'> = periodResolved(tileC, tileF);
   const stagger = hash2(vec2(tileC.floor(), piece.seed.mul(19))).sub(0.5).mul(uStagger).mul(tileResolved);
   // courses of leaves, each edge wandering a little, overlapping down the slope
   const wander = fbm2(vec2(side.mul(2), piece.seed.mul(31)), 2).sub(0.5).mul(uRagged);

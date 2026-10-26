@@ -11,7 +11,6 @@
 import { webgpuAvailable, renderGatePage } from './core/gate';
 import { App } from './core/app';
 import { GameLoop } from './core/loop';
-import { installNodeTypeCache } from './core/nodeTypeCache';
 import { createInitialState, type SimState } from './state/simState';
 import { createDebugShell } from './debug';
 import { DEFAULT_BOOT_TARGET, bootJumpTarget, installJump } from './debug/jump';
@@ -42,7 +41,6 @@ import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import { raftWorldParams } from './params/raftWorld';
 
 async function boot(): Promise<void> {
-  installNodeTypeCache();
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
   if (!(await webgpuAvailable())) {
@@ -283,7 +281,7 @@ async function boot(): Promise<void> {
     post.updateFromParams();
     await post.presentAsync();
   } else {
-    await app.renderer.renderAsync(app.scene, app.camera);
+    app.renderer.render(app.scene, app.camera);
   }
   loop.start();
   bootReady();

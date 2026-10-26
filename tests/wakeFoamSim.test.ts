@@ -348,7 +348,9 @@ function flowfoamWgsl(ff: FlowFoam): string[] {
     const backend = (renderer as any).backend;
     backend.renderer = renderer;
     (renderer as any).hasFeature = (name: string): boolean => name === 'float32-filterable';
-    const b = backend.createNodeBuilder(c, renderer);
+    // r186 builds a compute node the way NodeManager.getForCompute does: no object, `builder.compute` set
+    const b = backend.createNodeBuilder(null, renderer);
+    b.compute = c;
     b.build();
     const ids = new Map<string, number>();
     return [(b.computeShader as string).replace(/NodeBuffer_(\d+)/g, (_m, id: string) => {
@@ -390,7 +392,13 @@ describe('4b. one centre: the foam resample reads the centre the dispatched grou
     const renderer = new THREE.WebGPURenderer({ canvas: canvas as never });
     const backend = (renderer as any).backend;
     backend.renderer = renderer;
-    const b = backend.createNodeBuilder(passes[2], renderer); // update order: near advect, near blur, FAR advect, far blur
+    // r186 throws on hasFeature() before init (r180 answered false). Answer as flowfoamWgsl does:
+    // since r186 every FloatType texture's filterability (not only DataTextures') follows this
+    // answer, and WGSLNodeBuilder caches the first answer for the whole process (§5's pin included)
+    (renderer as any).hasFeature = (name: string): boolean => name === 'float32-filterable';
+    // r186 builds a compute node the way NodeManager.getForCompute does: no object, `builder.compute` set
+    const b = backend.createNodeBuilder(null, renderer);
+    b.compute = passes[2]; // update order: near advect, near blur, FAR advect, far blur
     b.build();
     const vec2s: any[] = [];
     let head = false;
@@ -410,7 +418,12 @@ describe('5. analytic shader baseline after the water corrections', () => {
   // Deliberately repinned after exact source integration, captured projection
   // winner and world-anchored vortex phase (water improvement plan, pass 19).
   // Both blur shaders remain identical. Vessel-only foam changes must not leak here.
-  const PINNED = { passes: 4, bytes: 219431, fnv: ['ff52194e', '698cb172', '2366b0e9', '9761ee6a'] };
+  // Repinned for three r186 (2026-10-26): same node graph as r180, and once three's own codegen changes are
+  // normalised away (banner, module-level `var<private>` temporaries, the new dispatch-count guard, repeated
+  // expressions emitted once instead of re-emitted — hence ~219 kB → ~104 kB) both blur passes are textually
+  // equal to r180's and the advect passes differ only in that de-duplication. r180 pin:
+  //   { passes: 4, bytes: 219431, fnv: ['ff52194e', '698cb172', '2366b0e9', '9761ee6a'] }
+  const PINNED = { passes: 4, bytes: 103572, fnv: ['3cb3fc35', '88e6f05f', '425e330b', 'c4847fb3'] };
 
   it('createFlowFoam() retains the accepted analytic shaders', () => {
     const wgsl = flowfoamWgsl(createFlowFoam());

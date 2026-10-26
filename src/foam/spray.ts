@@ -145,7 +145,7 @@ export function createSpray(cascades: SprayCascadeInput[], resolution: number) {
       // jacobian TRACE from the derivatives (.zw hold ∂Dx/∂x and ∂Dz/∂z
       // UNSCALED, so λ is re-applied below — same contract as injectPass)
       let det: any = float(1 - cascades.length);
-      let traceSum: any = float(0);
+      let traceSum: THREE.Node<'float'> = float(0);
       let disp: any = vec3(0);
       for (const c of cascades) {
         const tuv = cand.div(c.domain).fract();

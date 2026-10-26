@@ -42,7 +42,6 @@ import {
   rankCompile,
   type CompilePhase,
 } from './core/compileProfile';
-import { installNodeTypeCache } from './core/nodeTypeCache';
 import { createPostWarmGate, withFullCoverage } from './core/bootCompile';
 import { bindResolution, bindWorldSettings } from './core/bootSettings';
 import { bootReady, finishSplashTitleEntrance, showBootPhase } from './core/bootSplash';
@@ -112,12 +111,6 @@ const BOOT_BASELINE =
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
-
-  // §T.79 — FIRST, before any node graph is built. three r180's `getNodeType`
-  // has no memo and re-walks every shared subexpression once per path that
-  // reaches it, which is what made `shader compile` 231 s of MAIN-THREAD JS.
-  // Prototype patch, so it must be in place before the first NodeBuilder runs.
-  installNodeTypeCache();
 
   if (!(await webgpuAvailable())) {
     renderGatePage(root);
@@ -1882,7 +1875,7 @@ async function boot(): Promise<void> {
     post.updateFromParams();
     await post.presentAsync();
   } else {
-    await app.renderer.renderAsync(app.scene, app.camera);
+    app.renderer.render(app.scene, app.camera);
   }
 
   bootMark('first frame');

@@ -237,8 +237,8 @@ export function hullMaskKeepNode(mask: HullMask, worldPos: TslNode): TslNode {
         const f = b.z.sub(s0.x).div(s0.y.sub(s0.x)).clamp(0, 1).mul(K1);
         const i0 = f.floor().min(K1.sub(1)).toVar();
         const tt = f.sub(i0);
-        const A = d.element(int(i0).add(STATION0));
-        const B = d.element(int(i0).add(STATION0 + 1));
+        const A: THREE.Node<'vec4'> = d.element(int(i0).add(STATION0));
+        const B: THREE.Node<'vec4'> = d.element(int(i0).add(STATION0 + 1));
         const st = mix(A.xyz, B.xyz, tt).toVar(); // keelY, chineY, chineHalf (NOT `A.mix(B, t)`: TSL's method form is mix(t, a, b))
         const yy = b.y.min(s0.z);
         const vHalf = st.z.mul(yy.sub(st.x)).div(st.y.sub(st.x).max(1e-4));

@@ -111,7 +111,7 @@ export function createCrateMaterial(
   const bf = mix(coordFilter(pos.y), coordFilter(pos.x), upness).div(uBoard);
   const bfr = bc.fract();
   const seam = bandLimitedEdge(bfr.min(bfr.oneMinus()), bc, float(0.06), bf);
-  const boardTone = hash2(vec2(bc.floor(), 5.1)).sub(0.5).mul(0.16).mul(periodResolved(bc, bf));
+  const boardTone = hash2(vec2(bc.floor(), 5.1)).sub(0.5).mul(0.16).mul(periodResolved(bc, bf) as THREE.Node<'float'>);
   const khaki = gateAbove(piece.seed, 0.55);
   const pineBoards = uPine.mul(float(1).add(boardTone)).mul(mix(float(0.6), float(1), seam)).mul(mix(float(0.9), float(1.1), noise));
   const pine = mix(pineBoards, uKhaki.mul(mix(float(0.92), float(1.05), noise)), khaki);

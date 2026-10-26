@@ -87,14 +87,15 @@ class Accumulator {
       samples: 0,
     });
     const add = new THREE.NodeMaterial();
-    add.fragmentNode = vec4(sRGBTransferEOTF(texture(this.sub.texture).rgb), 1);
+    // @types/three 0.186 types the sRGB transfer functions as untyped Node → Node; they return vec3 here
+    add.fragmentNode = vec4(sRGBTransferEOTF(texture(this.sub.texture).rgb) as THREE.Node<'vec3'>, 1);
     add.blending = THREE.AdditiveBlending;
     add.transparent = true;
     add.depthTest = false;
     add.depthWrite = false;
     this.add = new THREE.QuadMesh(add);
     const resolve = new THREE.NodeMaterial();
-    resolve.fragmentNode = vec4(sRGBTransferOETF(texture(this.sum.texture).rgb.div(this.count)), 1);
+    resolve.fragmentNode = vec4(sRGBTransferOETF(texture(this.sum.texture).rgb.div(this.count)) as THREE.Node<'vec3'>, 1);
     resolve.depthTest = false;
     resolve.depthWrite = false;
     this.resolveQuad = new THREE.QuadMesh(resolve);

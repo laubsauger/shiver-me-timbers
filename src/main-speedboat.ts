@@ -17,7 +17,6 @@ import { TimestampQuery } from 'three/webgpu';
 import { webgpuAvailable, renderGatePage } from './core/gate';
 import { App } from './core/app';
 import { GameLoop } from './core/loop';
-import { installNodeTypeCache } from './core/nodeTypeCache';
 import { createPostWarmGate, withFullCoverage } from './core/bootCompile';
 import { bindResolution } from './core/bootSettings';
 import { bootProgress, bootReady } from './core/bootSplash';
@@ -69,7 +68,6 @@ const stage = (label: string): void => {
 };
 
 async function boot(): Promise<void> {
-  installNodeTypeCache();
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
   if (!(await webgpuAvailable())) {
@@ -284,7 +282,7 @@ async function boot(): Promise<void> {
     post.updateFromParams();
     await post.presentAsync();
   } else {
-    await app.renderer.renderAsync(app.scene, app.camera);
+    app.renderer.render(app.scene, app.camera);
   }
   loop.start();
   bootReady();

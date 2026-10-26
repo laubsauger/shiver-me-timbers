@@ -35,7 +35,7 @@ import type { DeckWaterUniforms } from './outflowPass';
 export const MAX_SPLASHES = 8;
 
 /** vec4 uniform array node: per splash x=u, y=v, z=amount, w=unused */
-export type SplashArrayNode = ReturnType<typeof uniformArray>;
+export type SplashArrayNode = ReturnType<typeof uniformArray<'vec4'>>;
 
 /**
  * Build the inflow/resolve compute for one ping-pong direction:
@@ -53,7 +53,7 @@ export function createInflowPass(
 ) {
   return Fn(() => {
     If(instanceIndex.lessThan(uint(w * h)), () => {
-      const x = int(instanceIndex.modInt(w));
+      const x = int(int(instanceIndex).mod(int(w)));
       const y = int(instanceIndex.div(uint(w)));
       const cell = textureLoad(stateSrc, ivec2(x, y));
       const own = textureLoad(outflow, ivec2(x, y));
@@ -64,7 +64,7 @@ export function createInflowPass(
       const inFrom = (
         dx: number,
         dy: number,
-        pick: (f: ReturnType<typeof textureLoad>) => THREE.Node,
+        pick: (f: ReturnType<typeof textureLoad>) => THREE.Node<'float'>,
       ) => {
         const sx = x.add(int(dx));
         const sy = y.add(int(dy));

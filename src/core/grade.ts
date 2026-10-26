@@ -27,7 +27,6 @@
 import * as THREE from 'three/webgpu';
 import { float, mix, texture3D, uniform, vec3 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { gradeParams, GRADE_SLOTS, type GradeParams } from '../params/grade';
 import { skyParams } from '../params/sky';
 import {
@@ -61,7 +60,7 @@ export interface GradeNodeOptions {
 
 export interface GradeNode {
   /** the graded vec3, display space, clamped 0..1 */
-  node: ShaderNodeObject<Node>;
+  node: Node<'vec3'>;
   /** per frame, BEFORE render: push uniforms and rebind the two LUT slots */
   update(): void;
   /** replace a slot's LUT in place (any size; resampled onto LUT_SIZE³) */
@@ -75,7 +74,7 @@ export interface GradeNode {
   dispose(): void;
 }
 
-export function createGradeNode(input: ShaderNodeObject<Node>, opts: GradeNodeOptions = {}): GradeNode {
+export function createGradeNode(input: Node<'vec3'>, opts: GradeNodeOptions = {}): GradeNode {
   const p = opts.params ?? gradeParams;
   const hour = opts.timeOfDay ?? ((): number => skyParams.timeOfDay);
 

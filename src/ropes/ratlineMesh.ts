@@ -30,7 +30,6 @@ import {
   uniform,
   vec3,
 } from 'three/tsl';
-import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { MIN_RUNG } from '../ship/ratlinePlan';
 import { ropeParams } from '../params/ropes';
@@ -42,8 +41,7 @@ const REF_SWAP = 0.99;
 
 /** any TSL node — same alias, and same reason, as ropeMesh.ts: an accumulator
  *  changes node class as it is folded, which `let` inference will not allow */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type TSLNode = ShaderNodeObject<any>;
+type TSLNode<T extends string> = THREE.Node<T>;
 
 /**
  * Tube segments per rung. A rung's belly is only a few centimetres, but at the
@@ -120,14 +118,14 @@ export function createRatlineMesh(
    * link lengths are built ONCE as node objects and reused, so the builder
    * emits 17 storage reads rather than one per use.
    */
-  function sampleRope(rope: ReturnType<typeof float>, t: ReturnType<typeof float>) {
+  function sampleRope(rope: TSLNode<'float'>, t: TSLNode<'float'>) {
     const base0 = int(rope).mul(pointsPerRope);
     const p = Array.from({ length: segments + 1 }, (_, i) =>
       pts.element(base0.add(int(i))).xyz);
     const link = Array.from({ length: segments }, (_, i) =>
       max(p[i + 1].sub(p[i]).length(), float(Z_MIN)));
 
-    let total: TSLNode = link[0];
+    let total: TSLNode<'float'> = link[0];
     for (let i = 1; i < segments; i++) total = total.add(link[i]);
 
     // distance to walk from the MASTHEAD end (sample 0), clamped so a t that
@@ -137,8 +135,8 @@ export function createRatlineMesh(
 
     // fold: pick the segment the station falls in, selecting the POSITION
     // rather than an index, so nothing has to index an array by a node
-    let acc: TSLNode = float(0);
-    let out: TSLNode = p[segments]; // default: the far end, never sample 0
+    let acc: TSLNode<'float'> = float(0);
+    let out: TSLNode<'vec3'> = p[segments]; // default: the far end, never sample 0
     for (let i = 0; i < segments; i++) {
       const hit = want.greaterThanEqual(acc).and(want.lessThanEqual(acc.add(link[i])));
       out = select(hit, mix(p[i], p[i + 1], want.sub(acc).div(link[i])), out);
@@ -149,7 +147,7 @@ export function createRatlineMesh(
 
   function segmentNodes() {
     const rungIdx = int(instanceIndex.div(uint(SEGMENTS_PER_RUNG)));
-    const segIdx = float(instanceIndex.modInt(SEGMENTS_PER_RUNG));
+    const segIdx = float(int(instanceIndex).mod(int(SEGMENTS_PER_RUNG)));
     const dA = rungA.element(rungIdx);
     const dB = rungB.element(rungIdx);
 
@@ -170,7 +168,7 @@ export function createRatlineMesh(
     const wide = smoothstep(uMinRung.mul(MIN_RUNG_FADE), uMinRung, span);
 
     /** the rung's own curve: a parabolic belly, pinned at both shrouds */
-    const at = (u: ReturnType<typeof float>) =>
+    const at = (u: TSLNode<'float'>) =>
       mix(pA, pB, u).sub(vec3(0, belly.mul(u.mul(u.oneMinus()).mul(4)), 0));
 
     const u0 = segIdx.div(SEGMENTS_PER_RUNG);
@@ -194,7 +192,7 @@ export function createRatlineMesh(
     return g;
   }
 
-  function place(n: ReturnType<typeof segmentNodes>, radius: ReturnType<typeof float>) {
+  function place(n: ReturnType<typeof segmentNodes>, radius: TSLNode<'float'>) {
     const g = positionGeometry;
     return n.q0
       .add(n.T.mul(g.y.mul(n.segLen)))

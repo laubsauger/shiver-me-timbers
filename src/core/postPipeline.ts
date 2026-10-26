@@ -62,14 +62,13 @@ import {
   vibrance,
 } from 'three/tsl';
 import type { Node, PassNode } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-// three's own pseudo lens flare (John Chapman) and anamorphic streak, both
-// driven off the BLOOM texture rather than a second scene pass — which is why
-// they cost nothing when bloom is already on, and nothing at all when it isn't
+// three's own pseudo lens flare (John Chapman), driven off the BLOOM texture
+// rather than a second scene pass — which is why it costs nothing when bloom is
+// already on, and nothing at all when it isn't. (The anamorphic streak went with
+// three r185, which removed AnamorphicNode.)
 import { lensflare } from 'three/addons/tsl/display/LensflareNode.js';
-import { anamorphic } from 'three/addons/tsl/display/AnamorphicNode.js';
 import { skyDof } from './skyDof';
 import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { postParams as pp } from '../params/post';
@@ -94,9 +93,9 @@ export interface PostOptions {
    * graph instead of behind a construction gate.
    */
   underwater?: {
-    buildStage(scenePass: ShaderNodeObject<PassNode>): {
-      apply(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
-      additive: ShaderNodeObject<Node>;
+    buildStage(scenePass: PassNode): {
+      apply(rgb: Node<'vec3'>): Node<'vec3'>;
+      additive: Node<'vec3'>;
       updateFromParams(): void;
     };
   };
@@ -175,7 +174,7 @@ export function createPostPipeline(
   camera: THREE.PerspectiveCamera,
   options: PostOptions = {},
 ): PostPipeline {
-  const post = new THREE.PostProcessing(renderer);
+  const post = new THREE.RenderPipeline(renderer); // `PostProcessing` until r183
   // we place the output transform ourselves (see header). PostProcessing then
   // publishes the renderer's toneMapping/outputColorSpace on the node context,
   // and the bare renderOutput() below picks them up from there.
@@ -272,7 +271,8 @@ export function createPostPipeline(
     aoPass.resolutionScale = 0.5; // half-res AO, §V.17 render budget
     // clamp before use: an AO sample that ever reads garbage must not be able
     // to multiply the whole frame to black (§V.28).
-    const aoRgb = aoPass.getTextureNode().rgb.clamp(0, 1);
+    // three r181+: GTAONode writes AO to the r channel only (g/b are no longer AO)
+    const aoRgb = vec3(aoPass.getTextureNode().r.clamp(0, 1));
     // B124: the sea writes depth, so GTAO marches the grazing water itself and printed blocky bars on the far sea.
     // AO lands only on surfaces that receive it; the ocean is exempt (aoReceiver.ts)
     const aoReceiver = scenePass.getTextureNode(AO_RECEIVER_OUTPUT).r;
@@ -329,20 +329,14 @@ export function createPostPipeline(
       ghostAttenuationFactor: uniform(pp.flareAttenuation),
       downSampleRatio: 4,
     });
-    hdr = hdr.add(flare.rgb.mul(uFlareStrength));
+    // @types/three 0.186 types LensflareNode as a bare TempNode; at runtime it is a vec4 node.
+    // Swizzle the NODE (not getTextureNode()) so the flare pass stays in the graph and still renders.
+    hdr = hdr.add((flare as unknown as Node<'vec4'>).rgb.mul(uFlareStrength));
   }
+  // three r185 removed AnamorphicNode, so `?streak` has nothing to build.
+  // Say so rather than silently rendering without it (§Rule 8).
   const uStreakStrength = uniform(pp.streakStrength);
-  if (bloomPass !== null && pp.streakEnabled) {
-    const streak = anamorphic(
-      vec4(lit.rgb.clamp(float(0), uBloomClamp), lit.a),
-      // nodes, not numbers: `anamorphic` wraps them with nodeObject and the
-      // threshold/scale are read as Node<float>
-      float(pp.streakThreshold),
-      float(pp.streakScale),
-      32,
-    );
-    hdr = hdr.add(streak.rgb.mul(uStreakStrength));
-  }
+  if (pp.streakEnabled) console.warn('post: anamorphic streak unavailable since three r185 (AnamorphicNode removed); streakEnabled ignored');
 
   // --- god rays ---------------------------------------------------------
   // Fed the RAW scene colour, not `lit`: shafts are built from the sharp,
@@ -475,7 +469,7 @@ export function createPostPipeline(
    */
   const syncPassTarget = (): void => {
     scenePass.renderTarget.samples = sceneSamples;
-    scenePass.renderTarget.texture.type = renderer.getColorBufferType();
+    scenePass.renderTarget.texture.type = renderer.getOutputBufferType(); // getColorBufferType until r182
     // §T.124 — and the SIZE too, for the same reason and one worse one.
     // `PassNode`'s target is constructed 1×1 and only sized in its own
     // `updateBefore`, i.e. on the first real frame. So the warm-up used to bind
@@ -488,8 +482,9 @@ export function createPostPipeline(
     // Mirroring PassNode.updateBefore here also means the first real frame no
     // longer reallocates the pass target from 1×1, which is exactly the hitch
     // the warm-up exists to remove.
-    renderer.getSize(_passSize);
-    scenePass.setPixelRatio(renderer.getPixelRatio());
+    // r186 PassNode sizes from the DRAWING-BUFFER size (pixel ratio already
+    // applied) and no longer has setPixelRatio — mirror its updateBefore.
+    renderer.getDrawingBufferSize(_passSize);
     scenePass.setSize(_passSize.width, _passSize.height);
   };
 
@@ -506,19 +501,20 @@ export function createPostPipeline(
    * tracks the half-float pass target). A copy that fails is a copy that did not
    * happen. compileAsync DOES fill `renderContext.textures`/`.depthTexture`
    * from the bound target, so the one missing assignment is all it takes —
-   * and the context is keyed on (scene, camera, target), so this is the same
-   * object compileAsync is about to fetch and the same one `_renderScene`
-   * overwrites on every real frame.
+   * and the context is keyed on (target, MRT, call depth) since r186 (it was
+   * (scene, camera, target) in r180), so with the pass target and its MRT bound
+   * this is the same object compileAsync is about to fetch and the same one
+   * `_renderScene` overwrites on every real frame. Call AFTER setMRT.
    */
   const bindCompileTarget = (): void => {
     const contexts = (
       renderer as unknown as {
         _renderContexts?: {
-          get(scene: THREE.Scene, camera: THREE.Camera, target: THREE.RenderTarget): { renderTarget?: THREE.RenderTarget };
+          get(target: THREE.RenderTarget, mrt: unknown): { renderTarget?: THREE.RenderTarget };
         };
       }
     )._renderContexts;
-    const context = contexts?.get(scene, camera, scenePass.renderTarget);
+    const context = contexts?.get(scenePass.renderTarget, renderer.getMRT());
     if (context) context.renderTarget = scenePass.renderTarget;
   };
 
@@ -552,7 +548,7 @@ export function createPostPipeline(
       await pending;
     },
     async presentAsync(): Promise<void> {
-      await post.renderAsync();
+      post.render();
     },
     async warmObject(object: THREE.Object3D): Promise<void> {
       syncPassTarget();

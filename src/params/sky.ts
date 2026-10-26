@@ -353,7 +353,7 @@ export interface SkyParams {
   /**
    * How dark a full sun shadow gets, scene-wide: 1 = the raw PCF result, 0 =
    * no shadow at all. Applied on `sunLight.shadow.intensity`, which
-   * `uncoloredShadowNode` already folds in as `mix(1, pcf, intensity)` — so
+   * three's ShadowNode folds in as `mix(1, pcf, intensity)` (r186, `transmitted` off) — so
    * this is ONE value reaching every receiver through the one shared shadow
    * node, at no extra binding (§V.40).
    *

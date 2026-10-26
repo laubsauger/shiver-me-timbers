@@ -32,7 +32,7 @@
 import * as THREE from 'three/webgpu';
 import type { SkyParams } from '../params/sky';
 import { shadowTexelSize, snapShadowCenter } from './shadowMath';
-import { installUncoloredShadow } from './uncoloredShadowNode';
+import { shadow } from 'three/tsl';
 import type { KeyLight } from './moonCycle';
 import { updateParticleLighting } from './particleLighting';
 import {
@@ -114,12 +114,13 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
   sc.far = 2600;
   let appliedExtent = 0;
   // §V.40 SAMPLER BUDGET. Publish the shadow node HERE, before any material is
-  // built, so every receiver (ocean surface, ship, ropes) shares one node — and
-  // make it the variant that does not bind three's coloured-shadow colour
-  // texture. That is one sampled texture and one SAMPLER back in the fragment
-  // stage of every shadow receiver, and the ocean material was at exactly 16 of
-  // 16 samplers. See uncoloredShadowNode.ts for why it is visually a no-op.
-  installUncoloredShadow(sunLight);
+  // built, so every receiver (ocean surface, ship, ropes) shares one node and
+  // the shadow map renders once. three r186's stock ShadowNode binds only the
+  // depth texture while `renderer.shadowMap.transmitted` stays false (the
+  // coloured-shadow colour texture is behind that flag), which is what the old
+  // UncoloredShadowNode override did by hand. Never turn `transmitted` on: it
+  // puts a sampler back into every receiver, and the ocean has one spare.
+  (sunLight.shadow as unknown as { shadowNode?: unknown }).shadowNode = shadow(sunLight);
 
   const followTarget = new THREE.Vector3();
   const hazeColor = new THREE.Color();
@@ -148,7 +149,7 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       // ortho extent needs the projection rebuilt — only when it moves
       sunLight.shadow.bias = p.shadowBias;
       sunLight.shadow.normalBias = p.shadowNormalBias;
-      // §V.33 scene-wide shadow darkness. `uncoloredShadowNode` reads this as a
+      // §V.33 scene-wide shadow darkness. three's ShadowNode reads this as a
       // live `reference('intensity', 'float', shadow)` inside the ONE shared
       // shadow node, so setting it here reaches the water, the ship, the
       // terrain and the sea floor through a single binding — and reaches them

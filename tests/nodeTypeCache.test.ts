@@ -1,80 +1,45 @@
 /**
- * §T.79 — the two things `src/core/nodeTypeCache.ts` has to be true for.
+ * §T.79 / §T.128: BOOT MUST NOT PAY AN EXPONENTIAL TYPE WALK.
  *
- * (1) IT CHANGES NOTHING THAT IS DRAWN. Every material below is built twice
- *     from a fresh graph — once against stock three, once with the memo
- *     installed — and the emitted WGSL must be BYTE-IDENTICAL. This is the
- *     whole safety argument: a wrong type cannot hide, because types are
- *     printed into every declaration, cast and swizzle in the shader.
+ * Every TSL node infers its type from its children's, and a TSL expression is a
+ * DAG. Without a memo, one query at the root re-walks every shared subgraph once
+ * per path that reaches it. On three r180 that cost 231 s of boot (34.8M
+ * `getNodeType` calls over 1,170 nodes on `ocean-surface`), and
+ * `src/core/nodeTypeCache.ts` patched a memo in. Three r186 memoises
+ * `getNodeType` itself, in the builder's per-node data, so that patch is now a
+ * no-op (its header has the measurements). This file keeps the protection and
+ * asserts it on THREE ITSELF, so an upgrade that loses the memo fails here
+ * instead of turning boot back into a "this tab is not responsive" dialog.
  *
- * (2) THE WALK IS LINEAR IN GRAPH SIZE, NOT EXPONENTIAL IN DEPTH. Asserted as
- *     a PROPERTY — `getNodeType` calls per DISTINCT node — never as a duration
- *     (§V.80: a threshold in ms pins a machine, not a decision). Stock r180
- *     measured 29,712 calls per distinct node on `ocean-surface`; with the memo
- *     it is 21. The bound below is two orders of magnitude above the measured
- *     value and still two orders below the defect, so it fails on a regression
- *     and survives any legitimate change to the shader.
+ * (1) THE WALK IS LINEAR IN GRAPH SIZE, NOT EXPONENTIAL IN DEPTH. Asserted as a
+ *     PROPERTY, `getNodeType` calls per DISTINCT node, never as a duration
+ *     (§V.80: a threshold in ms pins a machine, not a decision).
  *
- * (3) §T.128 — IT COVERS THE VERTEX STAGE, WHICH FOR TWO MONTHS IT DID NOT.
- *     `NodeMaterial.setupPosition` builds the whole vertex setup inside
- *     `subBuild(…, 'VERTEX')` (three r180 NodeMaterial.js:460) and every
- *     `varying` wraps its node the same way (VaryingNode.js:135), and the memo
- *     used to BYPASS itself for the entire duration of any sub-build. So every
- *     material that displaces or carries a varying still paid the full
- *     exponential re-walk, and this test passed anyway — because a ratio that
- *     is 29x instead of 5x still clears a bound of 400. The numbers that were
- *     hiding under that, measured on the raft's boot:
+ * (2) §T.128: THE VERTEX STAGE IS COVERED TOO. `NodeMaterial.setupPosition`
+ *     builds the whole vertex setup inside `subBuild(…, 'VERTEX')` and every
+ *     `varying` wraps its node the same way. Three keys its memo by the closest
+ *     sub-build, and a memo that misses inside sub-builds is exactly the defect
+ *     §T.133 found in the old patch (piece-sail 4,049,507 calls, 100% bypassed).
+ *     The ratio in (1) cannot see it. Measured on r186 with the memo bypassed
+ *     inside sub-builds only, every case here stays under the (1) bound (the
+ *     highest is hull-section at 164x). So it is asserted directly: inside a
+ *     sub-build, a type is GENERATED (`generateNodeType`, which three runs only
+ *     on a memo miss) a bounded number of times per distinct node.
  *
- *       piece-sail       4,049,507 getNodeType entries, 100% bypassed, 0% hit
- *       sierra terrain   7,791,113 entries,             100% bypassed, 0% hit
- *       rock (fragment)     30,270 entries,              16% bypassed, 54% hit
- *
- *     `compileAsync` on `/raft.html` was 79.2 s of main-thread JavaScript,
- *     which is what a "this tab is not responsive" dialog is made of.
- *
- *     Keying the sub-build stack instead of bypassing it moved every material
- *     in the table below, including ones that had nothing to do with the raft:
- *
- *       ocean-surface             20x -> 6x     (24 ms -> 15 ms)
- *       ship piece: hull-section 143x -> 6x     (42 ms -> 12 ms)
- *       ship piece: deck         137x -> 6x     (39 ms -> 10 ms)
- *       sand                      58x -> 5x     (26 ms -> 10 ms)
- *       terrain blend            29x  -> 5x     (65 ms -> 39 ms)
- *
- *     THE GUARD, AND WHY THE BOUND CANNOT REPLACE IT — measured, not assumed.
- *     Reinstating the bypass in a snapshot with the guard removed, this suite
- *     STILL PASSES: no case's ratio crosses 400 under the defect, not even the
- *     sierra terrain's. A ratio bound is the wrong instrument for "the memo
- *     was never consulted", because the un-memoised walk is still linear-ish
- *     in a small graph. So the property is asserted directly:
- *     `subBuildQueries` counts the queries the memo HANDLED inside a sub-build
- *     (it is incremented past the bypass, so a bypassed memo reads zero by
- *     construction), and this test fails if the vertex-stage cases stop
- *     producing any. With the bypass restored it fails on the sail case at
- *     "expected 0 to be greater than 0", which is the defect named exactly.
- *
- * WHY THIS RUNS AT ALL WITHOUT A GPU. `NodeBuilder.build()` — TSL setup, WGSL
+ * WHY THIS RUNS AT ALL WITHOUT A GPU. `NodeBuilder.build()` (TSL setup, WGSL
  * codegen and binding setup, i.e. exactly the `sync` column of
- * `src/core/compileProfile.ts` — never touches a GPUDevice; only the pipeline
+ * `src/core/compileProfile.ts`) never touches a GPUDevice. Only the pipeline
  * creation that follows it does. A `WebGPURenderer` that was never `init()`ed
  * is enough, given a stub canvas and the two fields `backend.init` would have
- * assigned. (The comment in `tests/oceanBindingBudget.test.ts` saying the body
- * of a `Fn()` "only runs inside NodeBuilder.build(), which needs a live
- * GPUDevice" is wrong on the second half — that file's own approach is still
- * the right one for a BINDING LEDGER, which this cannot replace.)
+ * assigned.
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
-import { lights } from 'three/tsl';
+import { Fn, float, lights } from 'three/tsl';
 import { OceanSimulation } from '../src/ocean/oceanCascades';
 import { buildOceanSurfaceMaterial } from '../src/ocean/surfaceMaterial';
 import { buildOceanGrid, type SurfaceGridOptions } from '../src/ocean/surfaceGeometry';
 import { oceanSurfaceParams as sp } from '../src/params/oceanSurface';
-import {
-  installNodeTypeCache,
-  nodeTypeCacheStats,
-  resetNodeTypeCacheStats,
-} from '../src/core/nodeTypeCache';
 import {
   createSandMaterial,
   terrainBlendMaterial,
@@ -103,60 +68,110 @@ function stubCanvas(): HTMLCanvasElement {
 }
 
 interface Built {
-  wgsl: string;
   /** wall ms of `NodeBuilder.build()` — REPORTED, never asserted (§V.80) */
   ms: number;
   /** `getNodeType` entries */
   typeCalls: number;
   /** distinct nodes those entries landed on */
   typeNodes: number;
+  /** `getNodeType` entries made while a sub-build was open */
+  subBuildQueries: number;
+  /** types GENERATED (memo misses) while a sub-build was open */
+  subBuildGenerations: number;
+  /** distinct nodes those generations landed on */
+  subBuildGeneratedNodes: number;
+}
+
+/** every prototype that OWNS `method`, so an override is counted where it runs */
+function prototypesOwning(method: string, extra: readonly object[]): Set<Record<string, unknown>> {
+  const protos = new Set<Record<string, unknown>>();
+  const add = (proto: unknown): void => {
+    for (let p = proto as Record<string, unknown> | null; p; p = Object.getPrototypeOf(p)) {
+      if (Object.prototype.hasOwnProperty.call(p, method)) {
+        protos.add(p);
+        return;
+      }
+    }
+  };
+  for (const value of Object.values(THREE as unknown as Record<string, unknown>)) {
+    const proto = (value as { prototype?: object } | undefined)?.prototype;
+    if (proto && Object.prototype.hasOwnProperty.call(proto, method)) protos.add(proto as Record<string, unknown>);
+  }
+  for (const node of extra) add(Object.getPrototypeOf(node));
+  return protos;
 }
 
 /**
- * Count `getNodeType` entries per class. `Node.prototype` alone is not enough —
- * ~30 subclasses override it — so wrap every prototype on three's export
- * surface. OperatorNode / MathNode are NOT exported and so are not counted
- * here; that only makes the measured ratio an UNDER-count, which is the safe
- * direction for an upper bound.
+ * Count the type walk. Two instruments, both wrapping prototypes rather than
+ * reading three's memo storage, so they measure what three DOES:
+ *
+ *  - `getNodeType` entries, on every prototype that owns one (Node and
+ *    PropertyNode on r186; a future class that overrides it again is counted
+ *    the same way). PropertyNode calls `super`, so its queries count twice:
+ *    an OVER-count, the strict direction for an upper bound.
+ *  - `generateNodeType` runs, which three makes only on a memo miss. Counted
+ *    once per outermost run on a node, so a `super.generateNodeType` call
+ *    (StorageBufferNode) is not a second miss. ShaderCallNodeInternal is not
+ *    on the export surface, so it is reached through one `Fn` call: on r186 a
+ *    call is a VarNode whose `.node` is the ShaderCallNodeInternal.
  */
-function countTypeCalls(): { stop: () => { calls: number; nodes: number } } {
-  let calls = 0;
-  const seen = new Set<unknown>();
+function probeTypeWalk(): { stop: () => Omit<Built, 'ms'> } {
+  let typeCalls = 0;
+  let subBuildQueries = 0;
+  let subBuildGenerations = 0;
+  const typeNodes = new Set<unknown>();
+  const subBuildGeneratedNodes = new Set<unknown>();
+  const generating = new Set<unknown>();
+  const inSubBuild = (builder: unknown): boolean =>
+    ((builder as { subBuildLayers?: unknown[] } | undefined)?.subBuildLayers?.length ?? 0) > 0;
   const restore: Array<() => void> = [];
-  for (const value of Object.values(THREE as unknown as Record<string, unknown>)) {
-    const proto = (value as { prototype?: Record<string, unknown> } | undefined)
-      ?.prototype;
-    if (!proto || !Object.prototype.hasOwnProperty.call(proto, 'getNodeType')) continue;
-    const original = proto.getNodeType;
-    if (typeof original !== 'function') continue;
+  const call = Fn(() => float(0))() as unknown as { node?: object };
+  const internals = [call, ...(call.node ? [call.node] : [])];
+
+  for (const proto of prototypesOwning('getNodeType', internals)) {
+    const original = proto.getNodeType as (...a: unknown[]) => unknown;
     proto.getNodeType = function (this: unknown, ...args: unknown[]): unknown {
-      calls++;
-      seen.add(this);
-      return (original as (...a: unknown[]) => unknown).apply(this, args);
+      typeCalls++;
+      typeNodes.add(this);
+      if (inSubBuild(args[0])) subBuildQueries++;
+      return original.apply(this, args);
     };
     restore.push(() => {
       proto.getNodeType = original;
     });
   }
+  for (const proto of prototypesOwning('generateNodeType', internals)) {
+    const original = proto.generateNodeType as (...a: unknown[]) => unknown;
+    proto.generateNodeType = function (this: unknown, ...args: unknown[]): unknown {
+      if (generating.has(this)) return original.apply(this, args);
+      if (inSubBuild(args[0])) {
+        subBuildGenerations++;
+        subBuildGeneratedNodes.add(this);
+      }
+      generating.add(this);
+      try {
+        return original.apply(this, args);
+      } finally {
+        generating.delete(this);
+      }
+    };
+    restore.push(() => {
+      proto.generateNodeType = original;
+    });
+  }
   return {
     stop: () => {
       for (const r of restore) r();
-      return { calls, nodes: seen.size };
+      return {
+        typeCalls,
+        typeNodes: typeNodes.size,
+        subBuildQueries,
+        subBuildGenerations,
+        subBuildGeneratedNodes: subBuildGeneratedNodes.size,
+      };
     },
   };
 }
-
-/**
- * THE ONE THING THAT LEGITIMATELY DIFFERS BETWEEN TWO BUILDS OF THE SAME
- * SHADER, and it is not a type. `WGSLNodeBuilder` names an unnamed uniform
- * buffer `NodeBuffer_` + the node's GLOBAL id (`WGSLNodeBuilder.js:982`), and
- * that counter advances for every node any code in the process has ever
- * constructed. The second leg therefore gets a higher number for the same
- * buffer — a rename, in one identifier, with no semantic content. Everything
- * else, including every type, cast and swizzle, is compared verbatim.
- */
-const normalise = (wgsl: string): string =>
-  wgsl.replace(/NodeBuffer_\d+/g, 'NodeBuffer_N');
 
 function build(material: THREE.Material, geometry: THREE.BufferGeometry): Built {
   const renderer = new THREE.WebGPURenderer({ canvas: stubCanvas() });
@@ -165,8 +180,8 @@ function build(material: THREE.Material, geometry: THREE.BufferGeometry): Built 
     .backend;
   // both normally assigned by `backend.init(renderer)`, which needs a device.
   // codegen reads `backend.renderer` only for sample counts, and `hasFeature`
-  // only to pick a texture path — pinned to the browser's answer so the WGSL
-  // this test compares is the WGSL the game ships.
+  // only to pick a texture path — pinned to the browser's answer so the graph
+  // this test walks is the graph the game ships.
   backend.renderer = renderer;
   (renderer as unknown as { hasFeature: (n: string) => boolean }).hasFeature = (
     name: string,
@@ -182,19 +197,11 @@ function build(material: THREE.Material, geometry: THREE.BufferGeometry): Built 
   (builder.context as Record<string, unknown>).material = material;
   builder.lightsNode = lights([]);
 
-  const probe = countTypeCalls();
+  const probe = probeTypeWalk();
   const t0 = performance.now();
   (builder as unknown as { build: () => void }).build();
   const ms = performance.now() - t0;
-  const { calls, nodes } = probe.stop();
-  return {
-    wgsl: normalise(
-      `${builder.vertexShader as string}\n/*---*/\n${builder.fragmentShader as string}`,
-    ),
-    ms,
-    typeCalls: calls,
-    typeNodes: nodes,
-  };
+  return { ms, ...probe.stop() };
 }
 
 const GRID: SurfaceGridOptions = {
@@ -205,9 +212,8 @@ const GRID: SurfaceGridOptions = {
 };
 
 /**
- * One entry per material under test. Each is a FACTORY, not a material: the
- * two legs must build from graphs that were constructed independently, or the
- * second leg would be reading node properties the first one left behind.
+ * One entry per material under test. Each is a FACTORY, not a material, so
+ * every case walks a graph that no earlier build has touched.
  */
 const CASES: Array<{
   name: string;
@@ -347,29 +353,45 @@ const CASES: Array<{
 ];
 
 /**
- * THE BOUND, and what it is a wall between. Measured on this machine, stock
- * r180 against the memo, `getNodeType` calls per DISTINCT node:
+ * THE BOUND ON (1), and what it is a wall between. `getNodeType` calls per
+ * DISTINCT node, measured on this machine with three r186 as shipped, against
+ * the same r186 with its memo taken out (`getNodeType` calling
+ * `generateNodeType` every time, which is r180's behaviour on today's graphs):
  *
- *   ocean-surface            29,712x ->  21x     (26,454 ms -> 36 ms)
- *   ocean-surface (hdr)      29,712x ->  21x     (25,923 ms -> 36 ms)
- *   ship piece: hull-section  1,033x -> 143x        (262 ms -> 62 ms)
- *   sand                        682x ->  58x        (183 ms -> 39 ms)
- *   terrain blend (islands)     496x ->  29x        (466 ms -> 100 ms)
- *   ship piece: deck            433x -> 137x        (117 ms -> 58 ms)
- *   rock                        272x ->   5x        (147 ms -> 25 ms)
+ *   ocean-surface               4.1x -> 114,886x     (21 ms -> 79,335 ms)
+ *   ocean-surface (hdr)         4.1x -> 114,886x     (20 ms -> 96,145 ms)
+ *   sierra terrain              3.8x ->   3,300x     (41 ms ->  6,156 ms)
+ *   ship piece: hull-section    3.8x ->   1,154x     (11 ms ->    569 ms)
+ *   sand                        3.7x ->   1,146x     (10 ms ->    578 ms)
+ *   terrain blend (islands)     3.7x ->     806x     (32 ms ->  1,087 ms)
+ *   ship piece: deck            3.8x ->     492x     (11 ms ->    242 ms)
  *
- * 400 sits above every memoised ratio and below every stock ratio in that
- * list, so each of those seven cases FAILS this test if the memo is removed or
- * stops hitting. The remaining cases (palm 14x, waterline 46x, rain 33x,
- * impact rings 6x, the two stock three materials) are small enough that they
- * never had the problem and would pass either way — they are carried for the
- * BYTE-IDENTITY half, which is where their value is.
+ * 400 sits two orders above every memoised ratio and below every one of those
+ * seven, so each of them FAILS this test if three's memo goes. The rest stay
+ * under 400 even without it (rock 392x, sail 216x, waterline 52x, rain 33x,
+ * palm 21x, the stock three materials 12x, impact rings 7x). They are carried
+ * for (2), the sail above all, and because they are what boot builds.
  *
  * The ratio is what is asserted, never the ms: the times are reported so a
  * regression has something to be compared against, but a duration pins a
  * machine rather than a decision (§V.80).
  */
 const MAX_TYPE_CALLS_PER_NODE = 400;
+
+/**
+ * THE BOUND ON (2). Inside a sub-build, types GENERATED per distinct node:
+ * with three's memo working, 1.1x to 2.3x for every case (2.26x is the sail,
+ * the deepest vertex graph here). That figure is bounded by how many memo
+ * coordinates a node is asked under (cache, stage, sub-build), not by the
+ * graph's depth. With the memo bypassed inside sub-builds only:
+ *
+ *   ocean-surface 332x, sierra terrain 300x, terrain blend 300x, sand 286x,
+ *   hull-section 279x, deck 270x, sail 270x
+ *
+ * while every case's (1) ratio stays under 400. 25 sits about 11x above the
+ * worst working figure and about 11x below the best of those.
+ */
+const MAX_SUB_BUILD_GENERATIONS_PER_NODE = 25;
 
 /**
  * The cases that exist to exercise `subBuild(…, 'VERTEX')` (§T.128). Named
@@ -383,65 +405,56 @@ const VERTEX_STAGE_CASES = [
 ] as const;
 
 describe('§T.79 getNodeType memo', () => {
-  it('emits byte-identical WGSL and walks the graph a bounded number of times', () => {
-    const before = new Map<string, Built>();
-    for (const c of CASES) {
-      const { material, geometry } = c.make();
-      // GUARD: `NodeBuilder.build()` silently substitutes a default
-      // NodeMaterial for anything that is not one, and would then compare two
-      // identical DEFAULT shaders and pass while testing nothing (§V.80's
-      // "passes while enforcing the defect"). Fail instead.
-      expect(
-        (material as unknown as { isNodeMaterial?: boolean }).isNodeMaterial,
-        `${c.name}: not a NodeMaterial, this case would test nothing`,
-      ).toBe(true);
-      before.set(c.name, build(material, geometry));
-    }
-
-    installNodeTypeCache();
-
+  it('three walks the type graph a bounded number of times, vertex stage included', () => {
     const rows: string[] = [];
-    /** how many memoised queries arrived inside a sub-build, per case (§T.128) */
     let subBuildTotal = 0;
     const subBuildByCase = new Map<string, number>();
     for (const c of CASES) {
       const { material, geometry } = c.make();
-      resetNodeTypeCacheStats();
-      const after = build(material, geometry);
-      const memo = { ...nodeTypeCacheStats };
-      subBuildTotal += memo.subBuildQueries;
-      const stock = before.get(c.name);
-      expect(stock, c.name).toBeDefined();
-      // (1) same picture — the emitted shader is the same text
-      expect(after.wgsl, `${c.name}: WGSL changed`).toBe(stock?.wgsl);
-      // (2) the walk is linear in graph size
-      const ratio = after.typeCalls / Math.max(1, after.typeNodes);
+      // GUARD: `NodeBuilder.build()` silently substitutes a default
+      // NodeMaterial for anything that is not one, and would then measure the
+      // DEFAULT shader's walk and pass while testing nothing (§V.80's "passes
+      // while enforcing the defect"). Fail instead.
+      expect(
+        (material as unknown as { isNodeMaterial?: boolean }).isNodeMaterial,
+        `${c.name}: not a NodeMaterial, this case would test nothing`,
+      ).toBe(true);
+      const b = build(material, geometry);
+      // (1) the walk is linear in graph size
+      const ratio = b.typeCalls / Math.max(1, b.typeNodes);
       expect(
         ratio,
-        `${c.name}: ${after.typeCalls} getNodeType calls over ` +
-          `${after.typeNodes} distinct nodes = ${ratio.toFixed(0)}x`,
+        `${c.name}: ${b.typeCalls} getNodeType calls over ` +
+          `${b.typeNodes} distinct nodes = ${ratio.toFixed(0)}x`,
       ).toBeLessThan(MAX_TYPE_CALLS_PER_NODE);
-      subBuildByCase.set(c.name, memo.subBuildQueries);
-      const s0 = stock as Built;
+      // (2) inside a sub-build the memo answers, rather than re-deriving
+      const subRatio = b.subBuildGenerations / Math.max(1, b.subBuildGeneratedNodes);
+      expect(
+        subRatio,
+        `${c.name}: ${b.subBuildGenerations} types generated inside sub-builds ` +
+          `over ${b.subBuildGeneratedNodes} distinct nodes = ${subRatio.toFixed(1)}x — ` +
+          `three's memo is missing in the vertex stage (§T.128)`,
+      ).toBeLessThan(MAX_SUB_BUILD_GENERATIONS_PER_NODE);
+      subBuildByCase.set(c.name, b.subBuildQueries);
+      subBuildTotal += b.subBuildQueries;
       rows.push(
-        `${c.name.padEnd(34)} ` +
-          `${s0.ms.toFixed(0).padStart(7)} -> ${after.ms.toFixed(0).padStart(5)} ms   ` +
-          `${(s0.typeCalls / Math.max(1, s0.typeNodes)).toFixed(0).padStart(6)}x -> ` +
-          `${ratio.toFixed(0).padStart(3)}x   over ${String(after.typeNodes).padStart(5)} nodes  ` +
-          `sub-build queries ${String(memo.subBuildQueries).padStart(7)}, ` +
-          `${((100 * memo.hits) / Math.max(1, memo.calls)).toFixed(0).padStart(3)}% hit`,
+        `${c.name.padEnd(38)} ${b.ms.toFixed(0).padStart(5)} ms   ` +
+          `${ratio.toFixed(1).padStart(5)}x over ${String(b.typeNodes).padStart(5)} nodes   ` +
+          `sub-build queries ${String(b.subBuildQueries).padStart(6)}, ` +
+          `generated ${subRatio.toFixed(2)}x per node`,
       );
     }
     /**
      * §T.128 — THE SUITE MUST LIGHT THE VERTEX STAGE UP.
      *
-     * Not every material sub-builds: a flat quad with no `positionNode` and no
-     * varyings (the waterline band, the impact rings) resolves its types
-     * without one, and demanding otherwise of every case would only be a false
+     * Not every material sub-builds much: a flat quad with no `positionNode`
+     * and few varyings (the waterline band) resolves almost every type
+     * without one, and demanding a floor of every case would only be a false
      * requirement on new cases. What must hold is that the SET reaches the
-     * vertex stage, and that the two cases carried FOR that reach it — a
-     * fragment-only suite measures half a graph and is exactly how a memo that
-     * bypassed 100% of the vertex stage passed this file once already.
+     * vertex stage, and that the cases carried FOR that reach it: (2) is
+     * vacuous on a case that never opens a sub-build, and a fragment-only
+     * suite is exactly how a memo that bypassed 100% of the vertex stage
+     * passed this file once already.
      */
     for (const name of VERTEX_STAGE_CASES) {
       expect(
@@ -455,7 +468,7 @@ describe('§T.79 getNodeType memo', () => {
       'no case exercises a sub-build — this suite cannot detect the §T.128 defect',
     ).toBeGreaterThan(1000);
     console.log(
-      'material                             build ms          getNodeType per node\n' +
+      'material                               build ms   getNodeType per node\n' +
         rows.join('\n'),
     );
   }, 600_000);

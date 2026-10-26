@@ -268,7 +268,7 @@ export function crestAnisoCoord(coord: AnyNode): AnyNode {
     // branch skips the angle noise and trigonometry for every covered pixel;
     // it also avoids roundoff from rotating large world coordinates twice.
     If(uElong.greaterThan(1), () => {
-      const angle = fbm2(coord.mul(uCrestDirScale), 2).sub(0.5).mul(uCrestDirSwing);
+      const angle: THREE.Node<'float'> = fbm2(coord.mul(uCrestDirScale), 2).sub(0.5).mul(uCrestDirSwing);
       const ca = angle.cos();
       const sa = angle.sin();
       const prop = vec2(uPropX.mul(ca).sub(uPropZ.mul(sa)), uPropX.mul(sa).add(uPropZ.mul(ca)));

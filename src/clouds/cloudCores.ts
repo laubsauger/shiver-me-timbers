@@ -60,7 +60,6 @@ import {
   vec4,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { bandLimitAmplitude } from '../ship/bandLimit';
 import { createRng } from '../state/rng';
 import { hashCell } from '../weather/field';
@@ -69,7 +68,8 @@ import { createCloudLobeGeometry } from './cloudGeometry';
 import type { CloudParams } from '../params/clouds';
 import type { ShaftSlot } from './cloudComposite';
 
-type N = ShaderNodeObject<Node>;
+type F = Node<'float'>;
+type V3 = Node<'vec3'>;
 
 /**
  * THE PACK'S BLENDING CONTRACT, in one place because THREE materials now write
@@ -929,13 +929,13 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uFluffVary = uniform(p.fluffScaleVary);
 
   // -- shared instance attribute nodes ---------------------------------------
-  const iOffset = instancedBufferAttribute(offsetAttr, 'vec3');
-  const iRadius = instancedBufferAttribute(radiusAttr, 'vec3');
-  const iDir = instancedBufferAttribute(dirAttr, 'vec3');
-  const iSeed = instancedBufferAttribute(seedAttr, 'float');
-  const iHeight = instancedBufferAttribute(heightAttr, 'float');
-  const iInterior = instancedBufferAttribute(interiorAttr, 'float');
-  const iStorm = instancedBufferAttribute(stormAttr, 'float');
+  const iOffset = instancedBufferAttribute<'vec3'>(offsetAttr, 'vec3');
+  const iRadius = instancedBufferAttribute<'vec3'>(radiusAttr, 'vec3');
+  const iDir = instancedBufferAttribute<'vec3'>(dirAttr, 'vec3');
+  const iSeed = instancedBufferAttribute<'float'>(seedAttr, 'float');
+  const iHeight = instancedBufferAttribute<'float'>(heightAttr, 'float');
+  const iInterior = instancedBufferAttribute<'float'>(interiorAttr, 'float');
+  const iStorm = instancedBufferAttribute<'float'>(stormAttr, 'float');
 
   /**
    * A storm cluster is DARKER and FLATTER-LIT than its fair-weather
@@ -947,9 +947,9 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * that cluster, so per-cluster colour falls out of the existing 4-channel
    * pack with no extra uniform and no pipeline change.
    */
-  const stormSunFactor = (st: N): N =>
+  const stormSunFactor = (st: F): F =>
     float(1).sub(uStormSunCut.clamp(0, 1).mul(st.clamp(0, 1)));
-  const stormSkyFactor = (st: N): N =>
+  const stormSkyFactor = (st: F): F =>
     float(1).sub(uStormSkyCut.clamp(0, 1).mul(st.clamp(0, 1)));
 
   /**
@@ -972,13 +972,13 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * §V44 bounded at source — the CUT is clamped, not the product, and the two
    * weights are independently in [0,1], so the factor cannot leave [1-cut, 1].
    */
-  const stormBaseFactor = (st: N, heightN: N): N =>
+  const stormBaseFactor = (st: F, heightN: F): F =>
     float(1).sub(
       uStormBaseDark.clamp(0, 1).mul(st.clamp(0, 1)).mul(heightN.clamp(0, 1).oneMinus()),
     );
 
   /** normalized view distance of an instance centre (RT alpha channel) */
-  const depthOf = (centre: N): N =>
+  const depthOf = (centre: V3): F =>
     modelViewMatrix.mul(vec4(centre, 1)).xyz.length().div(uMaxDist.max(1)).clamp(0, 1);
 
   /** cluster-level gradient: lobes on the sun side of their cluster get more */
@@ -1011,7 +1011,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * currently no transmitted path AT ALL. This floor is that path's isotropic
    * component, which is the part that does not depend on where you stand.
    */
-  const multiScattered = (direct: N): N =>
+  const multiScattered = (direct: F): F =>
     mix(uMultiScatter.clamp(0, 1), float(1), direct.clamp(0, 1));
 
   /**
@@ -1032,7 +1032,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const lowKey = float(1)
     .sub(uSunWorld.y.abs().div(uBaseGlowSpan.max(1e-3)))
     .clamp(0, 1);
-  const baseGlowAt = (downFace: N): N =>
+  const baseGlowAt = (downFace: F): F =>
     uBaseGlow.clamp(0, 2).mul(lowKey).mul(downFace.clamp(0, 1));
 
   // == polygonal lobes =======================================================
@@ -1081,12 +1081,12 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    *    ellipsoid (`iRadius`) is untouched, so nothing here changes packing,
    *    overlap or the cluster silhouette family (§V7).
    */
-  const frameOf = (d: N): N =>
+  const frameOf = (d: V3): V3 =>
     vec3(
       d.x.add(d.y.mul(uShear).mul(uWindDir.x)),
       d.y.mul(uSquash.max(0.1)),
       d.z.add(d.y.mul(uShear).mul(uWindDir.y)),
-    ) as N;
+    ) as V3;
 
   /**
    * DOMAIN WARP — the one term that turns concentric bumps into folded
@@ -1106,12 +1106,12 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * SILHOUETTE, which is what §T.119(b) is about, gets the full warp: every
    * vertex has its own `unit` and therefore its own warp vector.
    */
-  const warpBase = frameOf(unit).mul(uWarpScale).add(nSeed) as N;
+  const warpBase = frameOf(unit).mul(uWarpScale).add(nSeed) as V3;
   const warp = vec3(
     mx_noise_float(warpBase),
     mx_noise_float(warpBase.add(19.7)),
     mx_noise_float(warpBase.add(41.3)),
-  ).mul(uWarp) as N;
+  ).mul(uWarp) as V3;
 
   /**
    * Radial displacement factor at a unit direction. THREE octaves on the
@@ -1127,8 +1127,8 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * [(1 - 1.67·0.6)·(1-flatten), 1 + 1.67·0.6] and cannot reach zero, so the
    * radius can never invert. Mirrored on the CPU by {@link lobeReliefValue}.
    */
-  const reliefAt = (d: N): N => {
-    const q = frameOf(d).mul(uReliefScale).add(nSeed).add(warp) as N;
+  const reliefAt = (d: V3): F => {
+    const q = frameOf(d).mul(uReliefScale).add(nSeed).add(warp) as V3;
     // cauliflower gain: 0 at the base of the lobe, full at its top
     const cauli = mix(float(1).sub(uCauli.clamp(0, 1)), float(1), d.y.mul(0.5).add(0.5));
     const fbm = mx_noise_float(q)
@@ -1142,7 +1142,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     // drive it negative.
     const down = d.y.negate().max(0);
     const flat = float(1).sub(uBaseFlat.clamp(0, 0.6).mul(down).mul(down));
-    return fbm.mul(uRelief).add(1).mul(flat) as N;
+    return fbm.mul(uRelief).add(1).mul(flat) as F;
   };
 
   // finite-difference normal needs two directions that are never parallel to
@@ -1257,11 +1257,11 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    */
   const cosT = uSunWorld.dot(V).negate();
   /** TSL twin of {@link hgPhaseValue} — see it for the whole argument */
-  const phaseAt = (c: N): N => {
+  const phaseAt = (c: F): F => {
     const k = float(1).add(uPhaseG.mul(uPhaseG));
     const peak = k.sub(uPhaseG.mul(2)).max(1e-4); // (1−g)², floored for g→1
     const here = k.sub(uPhaseG.mul(c).mul(2)).max(1e-4);
-    return peak.div(here).pow(1.5).clamp(0, 1) as N;
+    return peak.div(here).pow(1.5).clamp(0, 1) as F;
   };
   const phase = phaseAt(cosT);
   // silver lining: rim brightening when the sun is BEHIND the cloud. Expressed
@@ -1333,7 +1333,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const fluffJitter = iSeed.mul(7.31).add(0.137).fract();
   // scale via a UNIFORM, not baked into the attribute: a baked fluffScale
   // would only take effect on the next layout rebuild, i.e. silently never
-  fluffMat.scaleNode = instancedBufferAttribute(scaleAttr, 'float')
+  fluffMat.scaleNode = instancedBufferAttribute<'float'>(scaleAttr, 'float')
     .mul(uFluffScale.max(0))
     .mul(
       mix(
@@ -1372,15 +1372,15 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
    * correct answer and is invisible.
    */
   const breakSeed = iSeed.mul(137.13);
-  const bq1 = q.mul(uFluffBreakScale.max(0.1)) as N;
-  const bq2 = bq1.mul(2.6) as N;
+  const bq1 = q.mul(uFluffBreakScale.max(0.1)) as Node<'vec2'>;
+  const bq2 = bq1.mul(2.6) as Node<'vec2'>;
   const NOISE_CELL = float(0.5); // one mx_noise_float lattice cell, halved
   const breakN = mx_noise_float(vec3(bq1.x, bq1.y, breakSeed))
-    .mul(bandLimitAmplitude(NOISE_CELL, bq1.x))
+    .mul(bandLimitAmplitude(NOISE_CELL, bq1.x) as F)
     .add(
       mx_noise_float(vec3(bq2.x, bq2.y, breakSeed.add(7.7)))
         .mul(0.45)
-        .mul(bandLimitAmplitude(NOISE_CELL, bq2.x)),
+        .mul(bandLimitAmplitude(NOISE_CELL, bq2.x) as F),
     );
   const r2 = q.dot(q).sub(breakN.mul(uFluffBreak.clamp(0, 0.9)));
   const shape = r2.oneMinus().max(0);
@@ -1431,7 +1431,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   // silver lining the lobe underneath just grew. In view space the eye is at
   // +Z from the sprite, so the scattering cosine is simply −sunView.z.
   const fluffCosT = uSunView.z.negate();
-  const fluffPhase = phaseAt(fluffCosT as N);
+  const fluffPhase = phaseAt(fluffCosT as F);
   const fluffChord = shape.sqrt(); // the fake sphere's own |N·V|
   const fluffPowder = float(1).sub(
     uPowder

@@ -194,7 +194,7 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
     seed.value = hashPieceId(id);
     variant.value = variantOf(id, aabbMax.value.x - aabbMin.value.x);
   };
-  for (const u of [aabbMin, aabbMax, origin, downRest, seed, variant]) u.onObjectUpdate(update);
+  for (const u of [aabbMin, aabbMax, origin, downRest, seed, variant] as THREE.Node[]) u.onObjectUpdate(update);
 
   return { aabbMin, aabbMax, origin, downRest, seed, variant };
 }

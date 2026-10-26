@@ -14,7 +14,7 @@
     "cine:mux": "node scripts/cine-mux.mjs"
   },
   "dependencies": {
-    "three": "^0.180.0",
+    "three": "^0.186.1",
     "tweakpane": "^4.0.5"
   },
   "devDependencies": {
@@ -22,7 +22,7 @@
     "@gltf-transform/core": "^4.5.0",
     "@gltf-transform/extensions": "^4.5.0",
     "@gltf-transform/functions": "^4.5.0",
-    "@types/three": "^0.180.0",
+    "@types/three": "^0.186.0",
     "@webgpu/types": "^0.1.71",
     "meshoptimizer": "^1.2.0",
     "typescript": "^5.6.0",

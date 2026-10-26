@@ -449,7 +449,7 @@ export async function bakeImpostorAtlas(opts: BakeImpostorOptions): Promise<Impo
         const y = row * layout.tile;
         opts.renderer.setViewport(x, y, layout.tile, layout.tile);
         opts.renderer.setScissor(x, y, layout.tile, layout.tile);
-        await opts.renderer.renderAsync(scene, camera);
+        opts.renderer.render(scene, camera);
       }
     }
   };

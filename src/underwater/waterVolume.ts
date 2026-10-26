@@ -89,7 +89,6 @@
 import * as THREE from 'three/webgpu';
 import { exp, float, min, mix, screenUV, select, vec2, vec3, vec4, uniform } from 'three/tsl';
 import type { Node, PassNode, UniformNode } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
 import { causticsParams as cp } from '../params/caustics';
 
@@ -106,20 +105,20 @@ import { causticsParams as cp } from '../params/caustics';
  */
 export interface VolumeUniforms {
   /** inverse projection of the SCENE camera */
-  invProj: ShaderNodeObject<UniformNode<THREE.Matrix4>>;
+  invProj: UniformNode<'mat4', THREE.Matrix4>;
   /** world matrix of the SCENE camera (view → world) */
-  camWorld: ShaderNodeObject<UniformNode<THREE.Matrix4>>;
+  camWorld: UniformNode<'mat4', THREE.Matrix4>;
   /** world-space camera position */
-  camPos: ShaderNodeObject<UniformNode<THREE.Vector3>>;
+  camPos: UniformNode<'vec3', THREE.Vector3>;
   /** sea surface height (m) at the camera's own XZ — the split plane */
-  seaY: ShaderNodeObject<UniformNode<number>>;
+  seaY: UniformNode<'float', number>;
   /**
    * How far above `seaY` a crest may reach near the eye, in metres — the LIVE
    * envelope, measured off the same height function the hull floats on (§V.8),
    * never authored. See `rise` below for what it is for and why it is a CAP
    * rather than a height.
    */
-  waveRise: ShaderNodeObject<UniformNode<number>>;
+  waveRise: UniformNode<'float', number>;
 }
 
 export interface WaterVolume {
@@ -129,7 +128,7 @@ export interface WaterVolume {
    * radiance, so anything additive downstream must see the fogged image or it
    * blooms light that the water already absorbed.
    */
-  apply(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  apply(rgb: Node<'vec3'>): Node<'vec3'>;
   updateFromParams(): void;
 }
 
@@ -144,10 +143,10 @@ export function createVolumeUniforms(): VolumeUniforms {
 }
 
 export function buildWaterVolume(
-  scenePass: ShaderNodeObject<PassNode>,
+  scenePass: PassNode,
   v: VolumeUniforms,
   /** day-cycle tint owned by index.ts — dims the inscatter after dark */
-  dayTint: ShaderNodeObject<UniformNode<THREE.Color>>,
+  dayTint: UniformNode<'color', THREE.Color>,
   /**
    * 0..1 camera submersion (submersion.ts). SINGLE-OWNER GATE: while the
    * camera is ABOVE the surface, absorption through the water is already owned
@@ -168,7 +167,7 @@ export function buildWaterVolume(
    * A continuous gate that produces a step is a §V.25 pop with extra steps.
    * Mixing the finished colour makes the ramp mean what it says.
    */
-  blend: ShaderNodeObject<UniformNode<number>>,
+  blend: UniformNode<'float', number>,
 ): WaterVolume {
   // Jerlov K_d (1/m). NOT a colour — raw vector, no transfer function.
   const uAbsorb = uniform(
@@ -325,7 +324,7 @@ export function buildWaterVolume(
   const inscatter = body.mul(downFade);
 
   return {
-    apply(rgb): ShaderNodeObject<Node> {
+    apply(rgb): Node<'vec3'> {
       // L = L_surface·T + L_water·(1 − T), per channel (§V.44: the water term
       // is a MULTIPLY on what arrives plus a bounded inscatter, never a
       // negative addend).

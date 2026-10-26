@@ -66,7 +66,7 @@ function sampleMotion(
 
 export interface FlagWindUniforms {
   /** angle (rad) the cloth leaves the staff at, in the flag's LOCAL frame */
-  rootAngle: ReturnType<typeof uniform>;
+  rootAngle: THREE.UniformNode<'float', number>;
   /**
    * tip angle MINUS root angle — the whip, spread along the fly in the
    * shader. Sent as a difference, not as a second absolute angle, because the
@@ -75,18 +75,18 @@ export interface FlagWindUniforms {
    * flag would start to judder. The root is wrapped to (−π, π] and the lag
    * rides along with it, so the pair stays small forever.
    */
-  lagAngle: ReturnType<typeof uniform>;
+  lagAngle: THREE.UniformNode<'float', number>;
   /** 0..1 stream strength: 1 = board stiff, 0 = hanging dead */
-  strength: ReturnType<typeof uniform>;
+  strength: THREE.UniformNode<'float', number>;
   /**
    * Ripple phase, ∫rate dt, wrapped to [0, 2π). NOT `time × rate` in the
    * shader: with a rate that answers the wind, that expression's instantaneous
    * frequency is ω + t·dω/dt and it ramps away without bound as the app runs
    * (measured 0.93 Hz intended → 59.5 Hz after ten minutes). See advanceFlag.
    */
-  wavePhase: ReturnType<typeof uniform>;
+  wavePhase: THREE.UniformNode<'float', number>;
   /** the crack's own phase, integrated at FLAG_CRACK_RATIO × the ripple rate */
-  crackPhase: ReturnType<typeof uniform>;
+  crackPhase: THREE.UniformNode<'float', number>;
 }
 
 export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {

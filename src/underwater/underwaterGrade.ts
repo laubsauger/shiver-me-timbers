@@ -29,23 +29,22 @@ import {
   vec3,
 } from 'three/tsl';
 import type { Node, PassNode, UniformNode } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
 
 /** shared per-frame uniforms owned by index.ts, read by all builders */
 export interface UnderwaterUniforms {
   /** 0..1 submersion blend (rate-limited by submersion.ts) */
-  blend: ShaderNodeObject<UniformNode<number>>;
+  blend: UniformNode<'float', number>;
   /** camera depth below the surface in meters (≥ 0) */
-  camDepth: ShaderNodeObject<UniformNode<number>>;
+  camDepth: UniformNode<'float', number>;
   /** scene time in seconds */
-  time: ShaderNodeObject<UniformNode<number>>;
+  time: UniformNode<'float', number>;
   /** sun position in screen UV space (may be off-screen) */
-  sunScreen: ShaderNodeObject<UniformNode<THREE.Vector2>>;
+  sunScreen: UniformNode<'vec2', THREE.Vector2>;
   /** 0..1 sun-in-front-of-camera visibility */
-  sunVis: ShaderNodeObject<UniformNode<number>>;
+  sunVis: UniformNode<'float', number>;
   /** day-cycle tint (dims/warms underwater colors with the sun) */
-  dayTint: ShaderNodeObject<UniformNode<THREE.Color>>;
+  dayTint: UniformNode<'color', THREE.Color>;
 }
 
 /**
@@ -61,15 +60,15 @@ export interface UnderwaterUniforms {
  */
 export interface UnderwaterGrade {
   /** refractive wobble — pass the RAW scene rgb, blend-gated to identity above water */
-  lens(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  lens(rgb: Node<'vec3'>): Node<'vec3'>;
   /** desaturate + blue-green grade + depth vignette, blend-gated */
-  finish(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  finish(rgb: Node<'vec3'>): Node<'vec3'>;
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
 
 export function buildUnderwaterGrade(
-  scenePass: ShaderNodeObject<PassNode>,
+  scenePass: PassNode,
   u: UnderwaterUniforms,
 ): UnderwaterGrade {
   const uGradeStrength = uniform(p.gradeStrength);

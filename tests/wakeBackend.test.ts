@@ -41,7 +41,6 @@ import raftFrameSource from '../src/raft/raftFrame.ts?raw';
 import wakeSimSource from '../src/wake/wakeSim.ts?raw';
 import { createFlowFoam, type FlowFoam } from '../src/flowfoam';
 import { raftWakeBackend } from '../src/raft/raftScene';
-import { installNodeTypeCache } from '../src/core/nodeTypeCache';
 import { createSimWakeField, packSimRate, simSurfaceCpu } from '../src/flowfoam/simInjection';
 import { buildOceanSurfaceMaterial } from '../src/ocean/surfaceMaterial';
 import { buildOceanGrid, type SurfaceGridOptions } from '../src/ocean/surfaceGeometry';
@@ -85,6 +84,12 @@ function headlessBuilder(object: unknown): any {
   const backend = (renderer as any).backend;
   backend.renderer = renderer;
   (renderer as any).hasFeature = (name: string): boolean => name === 'float32-filterable';
+  // r186 builds a compute node the way NodeManager.getForCompute does: no object, `builder.compute` set
+  if ((object as any)?.isComputeNode) {
+    const builder = backend.createNodeBuilder(null, renderer);
+    builder.compute = object;
+    return builder;
+  }
   return backend.createNodeBuilder(object, renderer);
 }
 
@@ -113,25 +118,36 @@ interface Built {
 /**
  * Uniform-array buffers are named by a process-global node id
  * (`NodeBuffer_1317`), so two builds in one process differ only there; renumber
- * by first appearance. Everything else is emitted from stage-local counters.
+ * by first appearance. Since r186 the members of a SHARED uniform group's struct
+ * (`renderStruct`: camera, screen size) are also ordered by process-global node
+ * id (NodeBuilder._getBindGroup), and screenSize's uniform is minted per build
+ * while the camera's are minted once, so the first build in a process orders
+ * them differently from every later one; sort those members by name. Everything
+ * else is emitted from stage-local counters.
  */
-function canonical(wgsl: string): string {
+function canonical(wgsl: string, shared: readonly string[] = []): string {
   const ids = new Map<string, number>();
-  return wgsl.replace(/NodeBuffer_(\d+)/g, (_m, id: string) => {
+  let out = wgsl.replace(/NodeBuffer_(\d+)/g, (_m, id: string) => {
     if (!ids.has(id)) ids.set(id, ids.size);
     return `NodeBuffer_#${ids.get(id)}`;
   });
+  for (const group of shared) {
+    out = out.replace(new RegExp(`(struct ${group}Struct \\{\\n)([^}]*)(\\n\\};)`, 'g'), (_m, open: string, body: string, close: string) =>
+      open + body.split(',\n').map((m) => m.replace(/,$/, '')).sort().join(',\n') + close);
+  }
+  return out;
+}
+
+/** names of the shared uniform groups a built shader declares */
+function sharedGroups(builder: any): string[] {
+  return Object.values<any>(builder.uniformGroups ?? {}).filter((g) => g.groupNode?.shared).map((g) => g.name);
 }
 
 function buildCompute(node: unknown): Built {
   const b = headlessBuilder(node);
   b.build();
-  return { wgsl: canonical(b.computeShader), textures: boundTextures(b), values: boundValues(b) };
+  return { wgsl: canonical(b.computeShader, sharedGroups(b)), textures: boundTextures(b), values: boundValues(b) };
 }
-
-// three's getNodeType memo — main.ts and main-raft.ts install it at boot, and
-// it is what makes the shipped ocean material build in ~1 s instead of ~40 s
-installNodeTypeCache();
 
 /** a renderer that records what the frame asks of it */
 function recorder() {
@@ -197,7 +213,7 @@ async function oceanWgsl(ff: FlowFoam): Promise<Built> {
   b.context.material = surface.material;
   b.lightsNode = lights([]);
   b.build();
-  return { wgsl: canonical(`${b.vertexShader}\n----\n${b.fragmentShader}`), textures: boundTextures(b), values: [] };
+  return { wgsl: canonical(`${b.vertexShader}\n----\n${b.fragmentShader}`, sharedGroups(b)), textures: boundTextures(b), values: [] };
 }
 
 const simFoam = (): FlowFoam => createFlowFoam({ wakeBackend: 'sim', wakeTier: WAKE_RAFT_TIER });
@@ -370,7 +386,10 @@ describe('3. raft: the near tier draws the SIM surface; foam + slick doses are t
       walk(root);
       return out;
     };
-    const parts = (near.rate as any).nodes;
+    // r186: a TSL constructor called outside any Fn stack (as here) wraps its JoinNode in an
+    // intent VarNode (VarIntent no longer passes the node through when there is no stack)
+    const rate: any = (near.rate as any).isVarNode && (near.rate as any).intent ? (near.rate as any).node : near.rate;
+    const parts = rate.nodes;
     expect(parts?.length).toBe(4);
     expect([...channelsInto(parts[2], sim.solver.slopeTexture)]).toEqual([swz[WAKE_TEX_CHANNEL.SLOPE_DX]]);
     expect([...channelsInto(parts[3], sim.solver.slopeTexture)]).toEqual([swz[WAKE_TEX_CHANNEL.SLOPE_DZ]]);

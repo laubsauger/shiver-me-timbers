@@ -1050,8 +1050,8 @@ export function createSimFoamField(
   /** §T.195 per vessel: (x, z, radius, lift) and (vx, vz, depth, 0) — a dead slot sits far away with radius 1 */
   const vesselPos = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(1e7, 1e7, 1, 0));
   const vesselVel = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 0, LIFT_DEPTH_FLOOR, 0));
-  const uVesselPos = vesselSlots > 0 ? uniformArray(vesselPos) : null;
-  const uVesselVel = vesselSlots > 0 ? uniformArray(vesselVel) : null;
+  const uVesselPos = vesselSlots > 0 ? uniformArray<'vec4'>(vesselPos) : null;
+  const uVesselVel = vesselSlots > 0 ? uniformArray<'vec4'>(vesselVel) : null;
   const uHullVel = uniform(new THREE.Vector2(0, 0));
   const uHullDirection = uniform(new THREE.Vector2(0, 1));
   const uLift = uniform(0);
@@ -1067,14 +1067,14 @@ export function createSimFoamField(
   const uSlickPerFoam = uniform(p.simSlickPerFoam);
   const jetPos = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4());
   const jetMeta = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4());
-  const uJetPos = jetSlots > 0 ? uniformArray(jetPos) : null;
-  const uJetMeta = jetSlots > 0 ? uniformArray(jetMeta) : null;
+  const uJetPos = jetSlots > 0 ? uniformArray<'vec4'>(jetPos) : null;
+  const uJetMeta = jetSlots > 0 ? uniformArray<'vec4'>(jetMeta) : null;
   /** W8 per jet: exhaust boil (along, σ, 0, 0) — `packPropJet().boil` */
   const jetBoil = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4());
-  const uJetBoil = jetSlots > 0 && vesselSlots > 0 ? uniformArray(jetBoil) : null;
+  const uJetBoil = jetSlots > 0 && vesselSlots > 0 ? uniformArray<'vec4'>(jetBoil) : null;
   /** W8 round 4: per jet slot, metres run since the prop last entered the water (x) — `jetRunWindow` */
   const jetRun = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4(1e4, 0, 0, 0));
-  const uJetRun = jetSlots > 0 && vesselSlots > 0 ? uniformArray(jetRun) : null;
+  const uJetRun = jetSlots > 0 && vesselSlots > 0 ? uniformArray<'vec4'>(jetRun) : null;
   const runs = new Float64Array(Math.max(1, jetSlots)).fill(1e4);
   let yaw = 0;
   let speed = 0;
@@ -1106,11 +1106,11 @@ export function createSimFoamField(
   const sheetA = Array.from({ length: packetSlots }, () => new THREE.Vector4());
   const sheetB = Array.from({ length: packetSlots }, () => new THREE.Vector4(0, 1, 1, 1));
   const sheetBounds = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
-  const uSheetA = vesselSlots > 0 ? uniformArray(sheetA) : null;
-  const uSheetB = vesselSlots > 0 ? uniformArray(sheetB) : null;
-  const uSheetBounds = vesselSlots > 0 ? uniformArray(sheetBounds) : null;
+  const uSheetA = vesselSlots > 0 ? uniformArray<'vec4'>(sheetA) : null;
+  const uSheetB = vesselSlots > 0 ? uniformArray<'vec4'>(sheetB) : null;
+  const uSheetBounds = vesselSlots > 0 ? uniformArray<'vec4'>(sheetBounds) : null;
   const sheetCounts = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
-  const uSheetCounts = vesselSlots > 0 ? uniformArray(sheetCounts) : null;
+  const uSheetCounts = vesselSlots > 0 ? uniformArray<'vec4'>(sheetCounts) : null;
   let sheets: readonly ChineSheetEmitter[] = [];
   const frame: SimFoamFrame<any> = {
     hullVelX: uHullVel.x,
@@ -1164,7 +1164,7 @@ export function createSimFoamField(
           sum.addAssign(simFoamSample(ops, texel, g.x.add(ox), g.y.add(oy), w, jet, frame));
         });
       }
-      const foam = sum.mul(1 / (S * S)).mul(simEdgeWindow(NODE, n, edge, g.x, g.y));
+      const foam = sum.mul(1 / (S * S)).mul(simEdgeWindow<THREE.Node<'float'>>(NODE, n, edge, g.x, g.y));
       out.assign(vec2(foam, foam.mul(uSlickPerFoam)));
     });
     return out;

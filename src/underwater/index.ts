@@ -30,7 +30,6 @@
 import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import type { Node, PassNode } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
 import { skyParams } from '../params/sky';
 import { sunDirection as solarDirection } from '../sky/sunCycle';
@@ -49,9 +48,9 @@ export type WaterHeightFn = (x: number, z: number) => number;
 /** what postPipeline needs from us — one stage over its own scene pass */
 export interface UnderwaterStage {
   /** scene-linear HDR rgb in → rgb out (volume + lens grade) */
-  apply(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  apply(rgb: Node<'vec3'>): Node<'vec3'>;
   /** additive god-ray shafts, already masked by submersion + sun visibility */
-  additive: ShaderNodeObject<Node>;
+  additive: Node<'vec3'>;
   updateFromParams(): void;
 }
 
@@ -63,7 +62,7 @@ export interface UnderwaterHandle {
    * Called once by createPostPipeline; there is deliberately no second
    * `pass()` here (see header).
    */
-  buildStage(scenePass: ShaderNodeObject<PassNode>): UnderwaterStage;
+  buildStage(scenePass: PassNode): UnderwaterStage;
   /** per-frame; heightFn defaults to a flat sea at y=0 until sea-physics */
   update(dt: number, waterHeightFn?: WaterHeightFn, time?: number): void;
   /** extra {value:number} uniforms to receive blend each update (e.g. to

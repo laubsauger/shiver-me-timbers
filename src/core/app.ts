@@ -3,6 +3,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { installOpaqueShadowCasters } from './opaqueShadowCasters';
 
 /** re-enabled after B5 (spray NaN) proved to be the wedge, not shadows */
 const SHADOWS_ENABLED = true;
@@ -118,7 +119,8 @@ export class App {
     // materials stalled the GPU process (black screen, frozen rAF) — under
     // investigation; re-enable via this flag once isolated (§B candidate)
     renderer.shadowMap.enabled = SHADOWS_ENABLED;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap; // r186 removed PCFSoftShadowMap from WebGPURenderer
+    installOpaqueShadowCasters(renderer);
     await renderer.init();
 
     // §T.40 fail-loud: the GPU process died three times in one boot session

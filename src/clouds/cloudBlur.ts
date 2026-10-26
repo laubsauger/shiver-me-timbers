@@ -49,7 +49,7 @@ export function createCloudBlur(input: THREE.Texture, p: CloudParams) {
   ) =>
     Fn(() => {
       If(instanceIndex.lessThan(uint(w * h)), () => {
-        const x = int(instanceIndex.modInt(w));
+        const x = int(int(instanceIndex).mod(int(w)));
         const y = int(instanceIndex.div(uint(w)));
         const center = textureLoad(src, ivec2(x, y));
         // weighted-average depth of the accumulated puffs at this pixel

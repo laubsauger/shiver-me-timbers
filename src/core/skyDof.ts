@@ -49,7 +49,7 @@ class ParticleCoveragePass extends THREE.PassNode {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  updateBefore(frame: any): void {
+  updateBefore(frame: any): boolean | undefined {
     const renderer = frame.renderer as THREE.WebGPURenderer;
     const scene = this.scene as THREE.Scene & { backgroundNode?: unknown };
     const background = scene.background;
@@ -61,7 +61,7 @@ class ParticleCoveragePass extends THREE.PassNode {
     scene.backgroundNode = null;
     renderer.setClearColor(0x000000, 0);
     try {
-      super.updateBefore(frame);
+      return super.updateBefore(frame);
     } finally {
       scene.background = background;
       scene.backgroundNode = backgroundNode;
@@ -79,11 +79,12 @@ export function skyDof(color: TslNode, scenePass: THREE.PassNode, scene: THREE.S
   // accumulated alpha of additive and normal pools alike: a soft 0..1 coverage (a thin mist barely counts)
   const coverage = smoothstep(float(0.1), float(0.5), particles.getTextureNode('output').a);
 
-  const depth = scenePass.getTextureNode('depth');
+  // a depth texture samples as a float; @types/three 0.186 types every pass texture as vec4
+  const depth: TslNode = scenePass.getTextureNode('depth');
   const viewZ = scenePass.getViewZNode();
   const sky = depth.greaterThanEqual(1);
   const opticalZ = select(sky, focus.negate(), viewZ);
-  const blurred = dof(color, opticalZ, focus, range, bokeh);
+  const blurred: TslNode = dof(color, opticalZ, focus, range, bokeh);
   // the sharp beauty wherever the sky is AND wherever spray covers the pixel — above and below the horizon alike. (Fed
   // through the DOF's own CoC instead, the coverage never reached it: that pass runs inside the DOF node's private
   // material and read nothing — measured, before/after identical to 0.05 % of pixels.)

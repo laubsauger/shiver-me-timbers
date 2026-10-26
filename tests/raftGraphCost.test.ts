@@ -12,6 +12,8 @@
  * entire duration of any sub-build. Measured on `piece-sail`: 4,049,507
  * `getNodeType` entries, 100% of them bypassing the memo, 590 per distinct
  * node — §B84 alive again in the one place the fix for it cannot reach.
+ * (three r186 memoises getNodeType natively, sub-builds included, and the
+ * project patch is gone; the bound below now holds three itself to it.)
  *
  * So a material that does real work in the vertex stage has to defend itself,
  * and the defence is the same one §B84 landed: a TYPED `Fn`.
@@ -47,7 +49,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { lights } from 'three/tsl';
-import { installNodeTypeCache } from '../src/core/nodeTypeCache';
 import { createPieceMaterial } from '../src/ship/pieceMaterials';
 import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
 import type { PieceKind } from '../src/ship/pieceTypes';
@@ -159,9 +160,8 @@ const MAX_TYPE_CALLS_PER_NODE = 300;
 
 describe('§T.128 raft material graph cost', () => {
   it('walks each piece graph a bounded number of times per node', () => {
-    // the memo is installed by both entries before the first build; measure
-    // what the game measures (`main-raft.ts:42`, `main.ts:116`)
-    installNodeTypeCache();
+    // three r186 memoises getNodeType itself (sub-builds included), so this
+    // measures exactly what the game runs — no project patch to install
 
     // EVERY KIND THE RAFT ACTUALLY CARRIES, read off the blueprint rather than
     // listed here — a kind added to the raft is a material that boots, so it

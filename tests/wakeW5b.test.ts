@@ -76,6 +76,12 @@ function headlessBuilder(object: unknown): any {
   const backend = (renderer as any).backend;
   backend.renderer = renderer;
   (renderer as any).hasFeature = (name: string): boolean => name === 'float32-filterable';
+  // r186 builds a compute node the way NodeManager.getForCompute does: no object, `builder.compute` set
+  if ((object as any)?.isComputeNode) {
+    const builder = backend.createNodeBuilder(null, renderer);
+    builder.compute = object;
+    return builder;
+  }
   return backend.createNodeBuilder(object, renderer);
 }
 function built(node: unknown): { wgsl: string; values: unknown[] } {

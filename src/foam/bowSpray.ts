@@ -449,9 +449,9 @@ export function createBowSprayFleet(opts: BowSprayFleetOptions = {}) {
   const posCdf = Array.from({ length: slots }, () => new THREE.Vector4(0, -1000, 0, 1));
   const frameV = Array.from({ length: slots }, () => new THREE.Vector4(0, 1, 0, 0));
   const launchV = Array.from({ length: slots }, () => new THREE.Vector4());
-  const uPosCdf = uniformArray(posCdf);
-  const uFrame = uniformArray(frameV);
-  const uLaunch = uniformArray(launchV);
+  const uPosCdf = uniformArray<'vec4'>(posCdf);
+  const uFrame = uniformArray<'vec4'>(frameV);
+  const uLaunch = uniformArray<'vec4'>(launchV);
   const uStemLength = uniform(sprayParams.bowStemLength);
   const uSlamRise = uniform(sprayParams.bowSlamRise);
   const uSlamSpread = uniform(sprayParams.bowSlamSpread);

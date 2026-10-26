@@ -158,12 +158,13 @@ export function createSkyBackground(p: SkyParams) {
   //
   // NOTE §B1/§V23: functional mix(a,b,t) ONLY — chained a.mix(b,t) reads the
   // RECEIVER as the factor (mixElement) and silently inverts the blend.
-  const skyDome = Fn(([dir]: [ReturnType<typeof vec3>]) => {
+  const skyDome = Fn(([dir]: [THREE.Node<'vec3'>]) => {
     const lift = dir.y.max(0); // sin(elevation), 0 at and below the horizon
 
     // 1. sky body: mid → zenith with height
     const height = lift.pow(uGradCurve.max(EPS));
-    const body = mix(vec3(uMid), vec3(uZenith), height);
+    // cast: @types/three types 'color' nodes narrower than their vec3 runtime
+    const body = mix(vec3(uMid as unknown as THREE.Node<'vec3'>), vec3(uZenith as unknown as THREE.Node<'vec3'>), height);
 
     // 2. haze band: exponential wedge hugging the horizon, thickened on the
     //    sun's side (forward scattering makes the sun's quarter of the sky
@@ -172,11 +173,11 @@ export function createSkyBackground(p: SkyParams) {
     const sunSide = d.mul(0.5).add(0.5);
     const band = lift.div(uHazeFalloff.max(EPS)).negate().exp().clamp(0, 1);
     const hazeAmt = band.mul(uHazeStrength.add(sunSide.mul(uSunHaze))).clamp(0, 1);
-    const hazed = mix(body, vec3(uHaze), hazeAmt);
+    const hazed = mix(body, vec3(uHaze as unknown as THREE.Node<'vec3'>), hazeAmt);
 
     // 3. golden-hour warmth, strongest in the band on the sun's side
     const warmMask = band.mul(sunSide.mul(sunSide)).mul(uWarmAmount).clamp(0, 1);
-    return mix(hazed, vec3(uWarm), warmMask);
+    return mix(hazed, vec3(uWarm as unknown as THREE.Node<'vec3'>), warmMask);
   });
 
   // three pins the background mesh to the camera (matrixWorld.copyPosition),
@@ -201,7 +202,7 @@ export function createSkyBackground(p: SkyParams) {
    * the above-water reflection cannot pick the disc up by accident. See
    * `skySunTerm`'s own note for why transmission is the other case.
    */
-  const sunFor = Fn(([dir]: [ReturnType<typeof vec3>]) => {
+  const sunFor = Fn(([dir]: [THREE.Node<'vec3'>]) => {
     const c = dir.dot(uSunBodyDir);
     /**
      * §V.48, BOTH HALVES — and it is not the background that needs it. On the
@@ -237,7 +238,7 @@ export function createSkyBackground(p: SkyParams) {
     // §V91: the whole body — disc, glow AND halo — is gated by the CPU
     // horizon gate, so a set sun leaves no glow on the sea and nothing is
     // ever drawn from below it (ocean Snell's window included).
-    return vec3(uSunColor).mul(disc.add(glow).add(halo).mul(uSunGate));
+    return vec3(uSunColor as unknown as THREE.Node<'vec3'>).mul(disc.add(glow).add(halo).mul(uSunGate));
   });
   const sunTerm = sunFor(viewDir);
 
@@ -310,7 +311,7 @@ export function createSkyBackground(p: SkyParams) {
   // relying on a clamp downstream.
   // §V91: and the whole moon is gated by its horizon+glare gate — 0 below the
   // sea, 0 inside the sun's glare — so a near-new moon is simply not there.
-  const moonTerm = vec3(uMoonColor).mul(
+  const moonTerm = vec3(uMoonColor as unknown as THREE.Node<'vec3'>).mul(
     moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)).mul(uMoonGate),
   );
 

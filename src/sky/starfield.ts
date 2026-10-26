@@ -399,7 +399,8 @@ export function createStarfield(p: SkyParams) {
     // ── 6. colour, horizon, night ───────────────────────────────────────
     // Squared so the warm tail is a minority: the references are a field of
     // blue-white with a scattering of amber, not an even mix.
-    const tint = mix(vec3(uCool), vec3(uWarm), hColor.mul(hColor));
+    // cast: @types/three types 'color' nodes narrower than their vec3 runtime
+    const tint = mix(vec3(uCool as unknown as THREE.Node<'vec3'>), vec3(uWarm as unknown as THREE.Node<'vec3'>), hColor.mul(hColor));
     // Stars sit BEHIND the haze band, so they are gone well before the
     // geometric horizon. A dedicated ramp rather than a second copy of
     // `skyDome`'s haze wedge (§T39: a duplicate drifts the moment either side

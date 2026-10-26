@@ -24,11 +24,11 @@ import * as THREE from 'three/webgpu';
 import {
   cameraPosition,
   clamp,
-  directionToFaceDirection,
   float,
   fract,
   max,
   mix,
+  negateOnBackSide,
   normalLocal,
   normalWorld,
   positionLocal,
@@ -294,7 +294,7 @@ export function createSailClothMaterial(
     .mul(-4)
     .mul(uSeamRidge)
     .mul(bandLimitAmplitude(float(PANEL_SEAM), panelCoord, panelFilter));
-  material.normalNode = directionToFaceDirection(
+  material.normalNode = negateOnBackSide(
     viewNormal.add(viewTangentU.mul(seamSlope)).normalize(),
   );
 

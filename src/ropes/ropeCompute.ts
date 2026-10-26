@@ -64,7 +64,6 @@ import {
 } from 'three/tsl';
 import { Vector3 } from 'three';
 import type { Node } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import {
   CATENARY_ITERATIONS,
   FPRIME_MIN,
@@ -78,7 +77,7 @@ import { DT_MAX, DT_MIN } from './ropeDynamics';
 import { ropeParams } from '../params/ropes';
 import { oceanParams } from '../params/ocean';
 
-type N = ShaderNodeObject<Node>;
+type N = Node<'float'>;
 
 /** how far past the leash a particle must be to count as blown up rather than
  *  merely straying — also the NaN trap, since any comparison against NaN is
@@ -217,7 +216,7 @@ export function createRopeCompute(maxRopes: number, segments: number) {
       const dirH = vec3(delta.x, 0, delta.z).div(hSafe).toVar();
 
       /** rest-state position of sample i — the catenary the chain hangs from */
-      const catAt = (t: N): N => {
+      const catAt = (t: N): Node<'vec3'> => {
         const x = t.mul(h);
         const catY = coshT(x.sub(xm).div(a)).mul(a).add(y0);
         return select(straight, mix(A, B, t), A.add(dirH.mul(x)).add(vec3(0, catY, 0)));
@@ -370,8 +369,9 @@ export function createRopeCompute(maxRopes: number, segments: number) {
       // tangents: central differences over the just-written samples — this
       // thread owns the whole rope slice, so no cross-thread hazard exists.
       Loop({ start: int(0), end: int(segments), condition: '<=' }, ({ i }) => {
-        const i0 = max(int(i).sub(1), int(0));
-        const i1 = min(int(i).add(1), int(segments));
+        // chained form: @types/three 0.186 types functional min/max for floats only (see src/types/three-int-clamp.d.ts)
+        const i0 = int(i).sub(1).max(int(0));
+        const i1 = int(i).add(1).min(int(segments));
         const d = points
           .element(base.add(i1))
           .xyz.sub(points.element(base.add(i0)).xyz);

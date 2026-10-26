@@ -39,14 +39,12 @@
  *    (`minFilter === magFilter === NearestFilter` and no `compareFunction`)
  *    are read with `textureLoad` and cost NO sampler — that is why the
  *    FramebufferTexture and the shared viewport depth buffer are free here.
- *  - `shadow(light)` is normally TWO textures: the shadow map's DepthTexture
- *    (compare sampler) and the render target's COLOUR texture, which
- *    `ShadowNode.setupShadow` folds into `shadowOutput` unconditionally for
- *    coloured shadows. Both are `.toVar()`-ed, so neither compiles away — the
- *    only way to shed the second one is to never build that expression.
- *    `src/sky/uncoloredShadowNode.ts` does exactly that and publishes itself
- *    on `light.shadow.shadowNode`, so the `shadow()` call site below is a
- *    fallback that never fires and costs ONE texture, not two.
+ *  - `shadow(light)` binds the shadow map's DepthTexture (compare sampler).
+ *    three r186's ShadowNode adds the render target's COLOUR texture only when
+ *    `renderer.shadowMap.transmitted === true`, so with it off (asserted
+ *    below) the `shadow()` call site costs ONE texture, not two. The node is
+ *    published on `light.shadow.shadowNode` (src/sky/lighting.ts), so the
+ *    `shadow()` call site below is a fallback that never fires.
  *
  * THE CASCADE ARRAY TEXTURE, AND THE THREE TRAPS IN IT (all read out of
  * node_modules/three@0.180.0 — do not re-derive, but do re-verify the EMITTED
@@ -126,7 +124,6 @@ import flowFoamSource from '../src/flowfoam/index.ts?raw';
 import seabedSource from '../src/island/seabed.ts?raw';
 import reflectionShadingSource from '../src/reflection/reflectionShading.ts?raw';
 import planarReflectionSource from '../src/reflection/planarReflection.ts?raw';
-import uncoloredShadowSource from '../src/sky/uncoloredShadowNode.ts?raw';
 import oceanTexturesSource from '../src/ocean/oceanTextures.ts?raw';
 import fetchFieldSource from '../src/ocean/fetchField.ts?raw';
 
@@ -171,7 +168,7 @@ const LEDGER: readonly LedgerEntry[] = [
     // textures, see the vertex-stage note in the header) + ONE derivatives
     // ARRAY texture for all three cascades (sampleDeriv → sampleCascadeLayer,
     // three calls, one binding) + shadow map DEPTH ONLY (§V.40: the
-    // coloured-shadow colour RT is gone, see uncoloredShadowNode.ts) + the
+    // coloured-shadow colour RT stays off, `shadowMap.transmitted` false) + the
     // shared viewport depth buffer (2 call sites, ONE texture) + the
     // scene-colour FramebufferTexture
     fragmentTextures: 3 + 1 + 1 + 1 + 1,
@@ -202,26 +199,12 @@ const LEDGER: readonly LedgerEntry[] = [
     why: 'sampleCascadeLayer + loadCascadeLayer — accessors only, counted at the caller',
   },
   {
-    file: 'src/sky/uncoloredShadowNode.ts',
-    source: uncoloredShadowSource,
-    // ZERO. That is the whole point of the file: it reimplements
-    // `ShadowNode.setupShadow` WITHOUT `texture( shadowMap.texture, … )`.
-    // Adding a texture() here puts the sampler straight back into every
-    // shadow receiver in the scene, ocean material included.
-    sites: 0,
-    fragmentTextures: 0,
-    fragmentSamplers: 0,
-    vertexTextures: 0,
-    vertexSamplers: 0,
-    why: 'the shadow node that binds depth only — tripwire, must stay at 0',
-  },
-  {
     file: 'src/foam/index.ts',
     source: foamSource,
     sites: 3,
     // shadingNode: lane.front for all 3 cascades + lane.coarse on cascades 0
     // AND 1. The second filtered tier is the ONE sampler reclaimed by
-    // src/sky/uncoloredShadowNode.ts, spent deliberately and measured first:
+    // dropping three's coloured-shadow texture, spent deliberately and measured first:
     // from a 300 m camera one pixel covers ~0.25–0.5 m of sea against
     // cascade 1's 0.191 m texel, so that band aliases — but its 1–3 m caps are
     // five to fifteen texels across and fully resolvable, so it needs a
@@ -443,10 +426,21 @@ describe('§V.40 ocean material binding budget', () => {
     }
   });
 
+  it('never turns on coloured shadows, which would bind a sampler in every receiver', () => {
+    // three r186 ShadowNode builds texture(shadowMap.texture) for coloured
+    // shadows only when renderer.shadowMap.transmitted is true. That texture
+    // lands in EVERY shadow-receiving material, ocean included, and the ocean
+    // fragment stage has exactly one sampler spare.
+    const sources = import.meta.glob('../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+    for (const [file, source] of Object.entries(sources)) {
+      expect(source, file).not.toMatch(/shadowMap\.transmitted\s*=\s*true/);
+    }
+  });
+
   it('leaves the FRAGMENT stage ONE sampler of headroom', () => {
     const samplers = sum((e) => e.fragmentSamplers);
     // 15 of 16, reclaimed in two moves and spent twice:
-    //   −1  three's coloured-shadow colour texture (uncoloredShadowNode.ts)
+    //   −1  three's coloured-shadow colour texture (off while shadowMap.transmitted is false)
     //   +1  SPENT on the second foam filtered tier (cascade 1), deliberately
     //       and after measuring — without it that band either aliases into a
     //       field of hard specks from a high camera or has to be retired

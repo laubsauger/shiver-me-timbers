@@ -32,8 +32,8 @@ type TslNode = any;
 
 /** Wave-reflected ray offset in the horizontally mirrored reflection UV. */
 export function reflectionDistortionNode(
-  normalWorld: TslNode,
-  viewDirection: TslNode,
+  normalWorld: THREE.Node<'vec3'>,
+  viewDirection: THREE.Node<'vec3'>,
   viewMatrix: TslNode,
   viewport: TslNode,
   strength: TslNode,
@@ -148,7 +148,7 @@ export function createReflectionShading(
     return { depth, point: uMirrorWorld.mul(vec4(getViewPosition(q, depth, uMirrorProjInv), 1)).xyz };
   };
   /** a world point's texel in the pass (target uv: y down, and the pass's own X flip comes with its matrices) */
-  const passUv = (world: TslNode): TslNode => {
+  const passUv = (world: TslNode): THREE.Node<'vec2'> => {
     const c = uMirrorViewProj.mul(vec4(world, 1));
     const ndc = c.xy.div(c.w.max(1e-4));
     return vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5));

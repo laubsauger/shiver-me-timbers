@@ -365,7 +365,8 @@ export async function createBoatAssetLoader(renderer: THREE.WebGPURenderer): Pro
     return url;
   });
   const ktx2 = new KTX2Loader(manager).setTranscoderPath('/basis/');
-  await ktx2.detectSupportAsync(renderer);
+  await renderer.init(); // no-op once booted: detectSupport needs an initialised renderer (r181 deprecated detectSupportAsync)
+  ktx2.detectSupport(renderer);
   await MeshoptDecoder.ready;
   const gltf = new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
   return {

@@ -335,7 +335,7 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
     // across each sprite: interpolate vertex lighting, like hullSpray, instead of
     // repeating the fleet's light loop in every translucent fragment.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node
-    colorNode: (light) => varying(litTint(light) as any).mul(ROOSTER_MIST_BRIGHTNESS),
+    colorNode: (light) => varying<'vec3'>(litTint(light) as any).mul(ROOSTER_MIST_BRIGHTNESS),
     blending: THREE.NormalBlending,
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
@@ -344,9 +344,9 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
   const jetPos = Array.from({ length: MAX_JETS }, () => new THREE.Vector4());
   const jetDir = Array.from({ length: MAX_JETS }, () => new THREE.Vector4(0, 1, 0, 0));
   const jetSide = Array.from({ length: MAX_JETS }, () => new THREE.Vector4());
-  const uJetPos = uniformArray(jetPos);
-  const uJetDir = uniformArray(jetDir);
-  const uJetSide = uniformArray(jetSide);
+  const uJetPos = uniformArray<'vec4'>(jetPos);
+  const uJetDir = uniformArray<'vec4'>(jetDir);
+  const uJetSide = uniformArray<'vec4'>(jetSide);
   const uSizeVar = uniform(sprayParams.sizeVariation);
   const uTime = uniform(0);
 
@@ -579,7 +579,8 @@ export function createPropBubbles(opts: PropBubblesOptions = {}) {
     opacity: () => 0.3,
     fadeNear: () => 25,
     fadeFar: () => 80,
-    colorNode: (light) => vec3(0.78, 0.97, 0.93).mul(light.ambient.add(light.key)),
+    // @types/three 0.186 types 'color' uniforms narrower than their vec3 runtime (no color + color)
+    colorNode: (light) => vec3(0.78, 0.97, 0.93).mul((light.ambient as unknown as THREE.Node<'vec3'>).add(light.key)),
     // §T.199 under the surface: drawn before the ocean so its refraction carries them (sprayPool.ts)
     renderOrder: SPRAY_UNDER_WATER_ORDER,
   });
@@ -587,8 +588,8 @@ export function createPropBubbles(opts: PropBubblesOptions = {}) {
   /** per jet: (x, surfaceY, z, ΔV) and (dirX, dirZ, CDF upper bound, disc radius) */
   const jetPos = Array.from({ length: MAX_JETS }, () => new THREE.Vector4(0, -1000, 0, 0));
   const jetDir = Array.from({ length: MAX_JETS }, () => new THREE.Vector4(0, 1, 1, 0));
-  const uJetPos = uniformArray(jetPos);
-  const uJetDir = uniformArray(jetDir);
+  const uJetPos = uniformArray<'vec4'>(jetPos);
+  const uJetDir = uniformArray<'vec4'>(jetDir);
   const uCursor = uniform(0);
   const uBudget = uniform(0);
   const uTime = uniform(0);

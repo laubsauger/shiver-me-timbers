@@ -95,13 +95,13 @@ import {
   vec4,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { bandLimitAmplitude, coordFilter } from '../ship/bandLimit';
 import { applyPackedBlending } from './cloudCores';
 import { createRng } from '../state/rng';
 import type { CloudParams } from '../params/clouds';
 
-type N = ShaderNodeObject<Node>;
+type F = Node<'float'>;
+type V2 = Node<'vec2'>;
 
 /**
  * One mx_noise_float lattice cell is 1 unit of its input, so the smallest
@@ -346,7 +346,7 @@ export function createCloudBands(p: CloudParams, seed: number) {
   const coord = vec2(along.div(uLength.max(1)), across.div(uWidth.max(1)));
 
   /** worst-axis screen footprint of a coordinate, in that coordinate's units */
-  const footprint = (c: N): N => {
+  const footprint = (c: V2): F => {
     const f = coordFilter(c);
     return f.x.max(f.y);
   };
@@ -354,8 +354,8 @@ export function createCloudBands(p: CloudParams, seed: number) {
   // domain warp: bends the bands off straight so they read as advected air
   // rather than as ruled lines (every "too regular / lattice" complaint in this
   // project, §B.33, is what a straight one would earn).
-  const warpCoord = coord.mul(0.35) as N;
-  const warpAmp = bandLimitAmplitude(
+  const warpCoord = coord.mul(0.35) as V2;
+  const warpAmp: F = bandLimitAmplitude(
     float(NOISE_FEATURE),
     warpCoord.x,
     footprint(warpCoord),
@@ -371,18 +371,18 @@ export function createCloudBands(p: CloudParams, seed: number) {
   // mx_noise_float is zero-mean ⟹ amplitude→0 IS the octave's own mean
   // (§V.48b half b), the same argument the sail's antisymmetric seam ridge
   // rests on.
-  let field = float(0) as N;
+  let field = float(0) as F;
   /** resolution of the LOWEST octave — the last structure to go sub-pixel */
-  let resolved = float(1) as N;
+  let resolved = float(1) as F;
   OCTAVES.forEach((o, i) => {
-    const c = warped.mul(o.freq) as N;
-    const amp = bandLimitAmplitude(float(NOISE_FEATURE), c.x, footprint(c));
+    const c = warped.mul(o.freq) as V2;
+    const amp: F = bandLimitAmplitude(float(NOISE_FEATURE), c.x, footprint(c));
     // Fade toward the area mean only as the continuous map approaches its
     // horizon limit; the octave footprint still handles ordinary minification.
-    if (i === 0) resolved = amp.mul(nonDegenerate) as N;
-    field = field.add(mx_noise_float(vec3(c.x, c.y, zOff[i])).mul(o.amp).mul(amp)) as N;
+    if (i === 0) resolved = amp.mul(nonDegenerate) as F;
+    field = field.add(mx_noise_float(vec3(c.x, c.y, zOff[i])).mul(o.amp).mul(amp)) as F;
   });
-  field = field.div(OCTAVE_NORM) as N;
+  field = field.div(OCTAVE_NORM) as F;
 
   // mask → shape. No edge function: clamp then pow, so the falloff is
   // asymmetric (firm shoulder, long diffuse tail) with nothing to alias.

@@ -103,7 +103,9 @@ describe('the rule: reach astern, not λ_T', () => {
       backend.renderer = renderer;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (renderer as any).hasFeature = (name: string): boolean => name === 'float32-filterable';
-      const builder = backend.createNodeBuilder(c, renderer);
+      // r186 builds a compute node the way NodeManager.getForCompute does: no object, `builder.compute` set
+      const builder = backend.createNodeBuilder(null, renderer);
+      builder.compute = c;
       builder.build();
       expect((builder.computeShader as string).length).toBeGreaterThan(1000);
     }

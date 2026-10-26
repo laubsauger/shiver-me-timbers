@@ -135,7 +135,7 @@ export function createShoreFoam(
         // Positive rise injects; receding water only transports and decays.
         rise.subAssign(slope.dot(wind).mul(u.speed).mul(gain));
       }
-      const clipped = breakerClipNodes(displacement.y, depth, breaker.x, breaker.y);
+      const clipped: { clipped: THREE.Node<'float'>; slope: THREE.Node<'float'> } = breakerClipNodes(displacement.y, depth, breaker.x, breaker.y);
       const landed = world.add(displacement.xz);
       const floor = seabedHeightNode(bed, landed).toVar();
       const column = clipped.clipped.sub(floor).toVar();

@@ -24,9 +24,9 @@ import { vegetationParams, type VegetationParams } from '../params/vegetation';
 
 export interface WindSwayOptions {
   /** extra phase node (e.g. per-instance attribute) added to phaseOffset */
-  instancePhase?: Node;
+  instancePhase?: Node<'float'>;
   /** amplitude multiplier node (e.g. per-instance sway variation) */
-  amplitudeScale?: Node;
+  amplitudeScale?: Node<'float'>;
   /** params source (defaults to the registered vegetation params) */
   params?: VegetationParams;
 }

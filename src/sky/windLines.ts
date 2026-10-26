@@ -585,7 +585,8 @@ export function createWindLines(p: SkyParams) {
       .mul(profile)
       .mul(gust)
       .mul(horizon);
-    return vec3(uTint).mul(amp);
+    // cast: @types/three types 'color' nodes narrower than their vec3 runtime
+    return vec3(uTint as unknown as THREE.Node<'vec3'>).mul(amp);
   });
 
   return {

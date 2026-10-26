@@ -25,7 +25,6 @@ import * as THREE from 'three/webgpu';
 import { color, normalWorld, uv, vec3 } from 'three/tsl';
 import { App } from '../core/app';
 import { webgpuAvailable, renderGatePage } from '../core/gate';
-import { installNodeTypeCache } from '../core/nodeTypeCache';
 import { withFullCoverage } from '../core/bootCompile';
 import { buildSea, type Sea } from '../core/seaScene';
 import { createPostPipeline, type PostPipeline } from '../core/postPipeline';
@@ -62,7 +61,6 @@ const num = (key: string, fallback: number): number => {
 };
 
 async function boot(): Promise<void> {
-  installNodeTypeCache();
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
   if (!(await webgpuAvailable())) {

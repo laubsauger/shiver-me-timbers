@@ -267,7 +267,9 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   // round 5 COVERAGE CONSERVATION: a drop smaller than ~1.5 px is drawn at 1.5 px with its opacity × (true/drawn)²,
   // so a far plume of sub-pixel drops reads as the haze their summed cross-section makes instead of vanishing
   // (sub-pixel quads miss pixel centres). One pixel at depth z spans 2z/(P₁₁·H) m.
-  const minSize = viewDepth.mul(3).div(cameraProjectionMatrix.element(int(1)).element(int(1)).mul(screenSize.y).max(1));
+  // @types/three 0.186 types .element() on array nodes only; three chains it onto the mat4 (column, then row) too
+  const minSize = viewDepth.mul(3).div((cameraProjectionMatrix as unknown as { element(i: THREE.Node): { element(i: THREE.Node): THREE.Node<'float'> } })
+    .element(int(1)).element(int(1)).mul(screenSize.y).max(1));
   const drawnSize = trueSize ? trueSize.max(minSize) : null;
   const coverage = trueSize && drawnSize ? trueSize.div(drawnSize).pow(2) : null;
   const size = drawnSize
@@ -364,7 +366,8 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   // warm-white, shared with sea foam (§T.195: a pool may bring its own, e.g. the prop wash's aerated turquoise)
   const tint = options.colorNode
     ? options.colorNode(particleLighting)
-    : foamTintNode().mul(particleLighting.ambient.add(particleLighting.key));
+    // @types/three 0.186 types 'color' uniforms narrower than their vec3 runtime (no color + color)
+    : foamTintNode().mul((particleLighting.ambient as unknown as THREE.Node<'vec3'>).add(particleLighting.key));
   // W9 clumps: each clump's own brightness (0.45–1.25, hashed per particle) — torn whitewater is lit face by face, so a
   // dense sheet keeps its texture instead of averaging to one flat tone
   // @band-limited-elsewhere: fract of the particle INDEX (a seed), not a spatial coordinate

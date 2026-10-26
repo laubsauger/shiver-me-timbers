@@ -44,7 +44,7 @@ import fittingMaterialsSource from '../src/ship/fittingMaterials.ts?raw';
 import waterLightingSource from '../src/caustics/waterLighting.ts?raw';
 import causticsNodeSource from '../src/caustics/causticsNode.ts?raw';
 import deckMaterialNodeSource from '../src/deckwater/deckMaterialNode.ts?raw';
-import uncoloredShadowSource from '../src/sky/uncoloredShadowNode.ts?raw';
+import lightingSource from '../src/sky/lighting.ts?raw';
 import causticsIndexSource from '../src/caustics/index.ts?raw';
 
 /**
@@ -122,19 +122,18 @@ const LEDGER: readonly LedgerEntry[] = [
     why: 'texture(ctx.state) + texture(ctx.coarse) — deck family only',
   },
   {
-    file: 'src/sky/uncoloredShadowNode.ts',
-    source: uncoloredShadowSource,
-    // ZERO sites on purpose: this subclass exists precisely because it does
-    // NOT build `texture(shadowMap.texture, shadowCoord)`. If a `texture()`
-    // ever appears here, every shadow-receiving material in the project gains
-    // a binding at once — including all ~30 ship piece materials.
-    sites: 0,
-    // the sun shadow map's DepthTexture, bound by three's own lighting node
-    // rather than by any source file here. One, not two, because of this file.
+    file: 'src/sky/lighting.ts',
+    source: lightingSource,
+    // ONE site: `shadow(sunLight)`, published on `light.shadow.shadowNode` so
+    // every receiver shares it. It binds the sun shadow map's DepthTexture
+    // only, because three r186 adds the coloured-shadow texture just when
+    // `renderer.shadowMap.transmitted` is on (oceanBindingBudget asserts it
+    // never is) — otherwise all ~30 ship piece materials gain a binding at once.
+    sites: 1,
     fragmentTextures: 1,
     // a depth texture with a compareFunction takes a comparison sampler
     fragmentSamplers: 1,
-    why: 'the sun shadow map, depth only — the colour RT is what this file removes',
+    why: 'shadow(sunLight): the sun shadow map, depth only while shadowMap.transmitted is off',
   },
   {
     file: 'src/ship/fittingMaterials.ts',
@@ -203,8 +202,8 @@ describe('§V.40 ship material binding budget', () => {
     //   1  ocean derivatives ARRAY   (causticsNode, all three cascades)
     //   3  ocean displacement        (causticsNode, one per cascade)
     //   2  deck water state + tier   (deckMaterialNode)
-    //   1  sun shadow map, depth     (three's lighting, kept to one by
-    //                                 uncoloredShadowNode)
+    //   1  sun shadow map, depth     (shadow(sunLight) in sky/lighting,
+    //                                 depth only while transmitted is off)
     expect(sum((e) => e.fragmentSamplers)).toBe(10);
     expect(sum((e) => e.fragmentTextures)).toBe(10);
     // the wake elevation is wired, not merely budgeted (the site itself lives in flowfoam)

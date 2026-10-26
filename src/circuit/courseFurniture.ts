@@ -167,7 +167,8 @@ async function createCourseLoader(renderer: THREE.WebGPURenderer): Promise<GLTFL
     return url;
   });
   const ktx2 = new KTX2Loader(manager).setTranscoderPath('/basis/');
-  await ktx2.detectSupportAsync(renderer);
+  await renderer.init(); // no-op once booted: detectSupport needs an initialised renderer (r181 deprecated detectSupportAsync)
+  ktx2.detectSupport(renderer);
   await MeshoptDecoder.ready;
   return new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
 }

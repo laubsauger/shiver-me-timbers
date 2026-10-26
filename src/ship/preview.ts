@@ -18,6 +18,7 @@
  *   fp=1                              walk the raft (WASD, click to lock)
  */
 import * as THREE from 'three/webgpu';
+import { installOpaqueShadowCasters } from '../core/opaqueShadowCasters';
 import { createHarnessHud } from '../debug/harnessHud';
 import { ShipAssembly } from './shipAssembly';
 import { updateRig } from './rigTrim';
@@ -60,7 +61,8 @@ const renderer = new THREE.WebGPURenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(2, devicePixelRatio));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap; // r186 removed PCFSoftShadowMap from WebGPURenderer
+installOpaqueShadowCasters(renderer);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);

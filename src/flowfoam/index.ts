@@ -327,7 +327,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     return smoothstep(e0, e1, worldXZ.sub(acc.uniforms.uCenter).length());
   };
   /** caller's pixel footprint, or our own if they cannot supply theirs */
-  const footprint = (worldXZ: any, pixWorld?: any): any => {
+  const footprint = (worldXZ: THREE.Node<'vec2'>, pixWorld?: any): any => {
     if (pixWorld) return pixWorld;
     const f = fwidth(worldXZ);
     return f.x.max(f.y).max(1e-4);

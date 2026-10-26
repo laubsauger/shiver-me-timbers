@@ -28,19 +28,18 @@ import {
   vec3,
 } from 'three/tsl';
 import type { Node, PassNode } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
 import type { UnderwaterUniforms } from './underwaterGrade';
 
 export interface GodRays {
   /** vec3 additive streak color — add onto the graded output */
-  node: ShaderNodeObject<Node>;
+  node: Node<'vec3'>;
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
 
 export function buildGodRays(
-  scenePass: ShaderNodeObject<PassNode>,
+  scenePass: PassNode,
   u: UnderwaterUniforms,
 ): GodRays {
   const uIntensity = uniform(p.rayIntensity);
@@ -82,7 +81,7 @@ export function buildGodRays(
     .fract();
 
   // unrolled N-tap march from this pixel toward the sun's screen position
-  let acc: ShaderNodeObject<Node> = vec3(0);
+  let acc: Node<'vec3'> = vec3(0);
   for (let i = 1; i <= taps; i++) {
     // subtract, so each tap stays inside its own stratum ((i−1)/n, i/n]·length
     // and the march never samples t = 0 (the pixel itself).

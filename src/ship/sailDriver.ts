@@ -60,23 +60,23 @@ function sampleMotion(
 
 export interface SailWindUniforms {
   /** signed belly fill (−back … +full) */
-  drive: ReturnType<typeof uniform>;
+  drive: THREE.UniformNode<'float', number>;
   /** 0..1 shake */
-  luff: ReturnType<typeof uniform>;
+  luff: THREE.UniformNode<'float', number>;
   /** −1..1 sideways belly lag while turning */
-  skew: ReturnType<typeof uniform>;
+  skew: THREE.UniformNode<'float', number>;
   /** 0..1 cloth drop scale from sim sail trim (set via setSailDropScale) */
-  dropScale: ReturnType<typeof uniform>;
+  dropScale: THREE.UniformNode<'float', number>;
   /**
    * ∫ flutterRate dt, wrapped to [0, 2π). REPLACES the shader's old
    * `time × uFlutterFreq` carrier, and with it the last clock in the cloth
    * shape (§V.55, §B.30 — see sailFrame.ts).
    */
-  flutterPhase: ReturnType<typeof uniform>;
+  flutterPhase: THREE.UniformNode<'float', number>;
   /** unit direction, in the sail's own frame, each sheet hauls its clew
    *  toward — see sailFrame.sheetLeadDirections and sailShape.sailCornerPull */
-  sheetLeadPort: ReturnType<typeof uniform>;
-  sheetLeadStarboard: ReturnType<typeof uniform>;
+  sheetLeadPort: THREE.UniformNode<'vec3', THREE.Vector3>;
+  sheetLeadStarboard: THREE.UniformNode<'vec3', THREE.Vector3>;
   /**
    * RGB multiplier on the canvas colour, per sail mesh (§T.73 — the NPC flies
    * red canvas; the reference is docs/inspo/ship/ref-npc-smaller-variant.png).
@@ -85,7 +85,7 @@ export interface SailWindUniforms {
    * the hex onto each sail mesh's userData and this reads it back. White when
    * unset — the player's canvas is unchanged.
    */
-  tint: ReturnType<typeof uniform>;
+  tint: THREE.UniformNode<'color', THREE.Color>;
   /**
    * THE SPARS THIS SAIL MAY NOT PASS THROUGH (§T.114 / §B.74), as capsules in
    * the sail's OWN frame: two masts (a bipod is two legs) and its own yard,
@@ -97,15 +97,15 @@ export interface SailWindUniforms {
    * Resolved live from the piece graph every frame (§V71) — bracing swings the
    * yard about its mast, so these move whenever the crew touches a brace.
    */
-  mastA: ReturnType<typeof uniform>;
-  mastB: ReturnType<typeof uniform>;
-  mastR: ReturnType<typeof uniform>;
-  mast2A: ReturnType<typeof uniform>;
-  mast2B: ReturnType<typeof uniform>;
-  mast2R: ReturnType<typeof uniform>;
-  yardA: ReturnType<typeof uniform>;
-  yardB: ReturnType<typeof uniform>;
-  yardR: ReturnType<typeof uniform>;
+  mastA: THREE.UniformNode<'vec3', THREE.Vector3>;
+  mastB: THREE.UniformNode<'vec3', THREE.Vector3>;
+  mastR: THREE.UniformNode<'vec2', THREE.Vector2>;
+  mast2A: THREE.UniformNode<'vec3', THREE.Vector3>;
+  mast2B: THREE.UniformNode<'vec3', THREE.Vector3>;
+  mast2R: THREE.UniformNode<'vec2', THREE.Vector2>;
+  yardA: THREE.UniformNode<'vec3', THREE.Vector3>;
+  yardB: THREE.UniformNode<'vec3', THREE.Vector3>;
+  yardR: THREE.UniformNode<'vec2', THREE.Vector2>;
 }
 
 /** one capsule into its three uniforms; §V28 finite-guarded, since these move

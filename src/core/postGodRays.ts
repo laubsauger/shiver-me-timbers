@@ -59,14 +59,13 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import type { ShaderNodeObject } from 'three/tsl';
 import { postParams as pp } from '../params/post';
 import { skyParams } from '../params/sky';
 import { bodyHorizonGate } from '../sky/sunCycle';
 
 export interface PostGodRays {
   /** vec3 ADDITIVE term in scene-linear space — add before the tone map */
-  node: ShaderNodeObject<Node>;
+  node: Node<'vec3'>;
   /** per-frame: sun projection, live uniforms, render-target sizing */
   update(): void;
 }
@@ -230,7 +229,7 @@ export function buildGodRays(opts: {
   renderer: THREE.WebGPURenderer;
   camera: THREE.PerspectiveCamera;
   /** the scene pass — the god rays read its full-res, scene-linear, pre-exposure colour */
-  scenePass: ShaderNodeObject<PassNode>;
+  scenePass: PassNode;
   /** live sun direction, unit, pointing FROM the world TOWARD the sun */
   sunDirection: () => THREE.Vector3;
 }): PostGodRays {

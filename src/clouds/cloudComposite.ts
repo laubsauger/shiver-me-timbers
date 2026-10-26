@@ -45,17 +45,17 @@ import {
   vec3,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
-import type { ShaderNodeObject } from 'three/tsl';
 import { createRng } from '../state/rng';
 import type { CloudParams } from '../params/clouds';
 
-type N = ShaderNodeObject<Node>;
+type F = Node<'float'>;
+type V3 = Node<'vec3'>;
 
 /** the two channels of the packed RT the edge graph reads: B alpha, A depth */
 interface PackedTexel {
-  readonly a: N;
-  readonly b: N;
-  readonly r: N;
+  readonly a: F;
+  readonly b: F;
+  readonly r: F;
 }
 
 const NOISE_SIZE = 48;
@@ -152,7 +152,7 @@ export function createNoiseTexture(seed: number): THREE.Data3DTexture {
  */
 export function createCloudEdge(
   noiseTex: THREE.Data3DTexture,
-  viewDir: N,
+  viewDir: V3,
   p: CloudParams,
   /** LIVE world sun direction, held BY REFERENCE and mutated in place each
    *  frame by the clouds system — same contract as sunColorLive. */
@@ -210,7 +210,7 @@ export function createCloudEdge(
     uTransPower,
     uTransDepth,
     /** low-frequency uv push, added to whatever UV the caller samples with */
-    uvOffset: noiseLo.xy.sub(0.5).mul(uDistortStrength) as N,
+    uvOffset: noiseLo.xy.sub(0.5).mul(uDistortStrength) as Node<'vec2'>,
     /**
      * Sun TRANSMITTED through a thin margin, in sunColor units, to be ADDED to
      * the sunlight term (transmitted sunlight is sun-coloured, so it needs no
@@ -229,7 +229,7 @@ export function createCloudEdge(
      *    on is not a thin transmitting margin, and this is also what keeps
      *    sunColor*(R/B + trans) from climbing past the §B.19 summing ceiling.
      */
-    transmission(packed: PackedTexel): N {
+    transmission(packed: PackedTexel): F {
       const cov = packed.b;
       const sunFace = packed.r.div(cov.max(1e-4)).clamp(0, 1);
       const fwd = viewDir.dot(uSunDir).clamp(0, 1).pow(uTransPower.max(1));
@@ -237,7 +237,7 @@ export function createCloudEdge(
       return fwd
         .mul(through)
         .mul(sunFace.oneMinus())
-        .mul(uTransGain.max(0)) as N;
+        .mul(uTransGain.max(0)) as F;
     },
     /**
      * Opacity from one sampled texel of the packed RT.
@@ -252,7 +252,7 @@ export function createCloudEdge(
      * which is also the only place the packed A channel is read outside the
      * blur — it was computed, packed, blurred and then dropped.
      */
-    alpha(packed: PackedTexel): N {
+    alpha(packed: PackedTexel): F {
       const coverage = packed.b;
       const depthN = packed.a.div(coverage.max(1e-4)).clamp(0, 1);
       const cov = coverage.mul(uAlphaGain);
@@ -278,7 +278,7 @@ export function createCloudEdge(
       // open sky can never be tinted even though edge0 goes negative.
       const half = mix(uSoftNear, uSoftFar, depthN).max(1e-3).mul(0.5);
       // smoothstep in functional form per §V23: smoothstep(edge0, edge1, x).
-      return body.mul(smoothstep(rimT.sub(half), rimT.add(half), cov)).clamp(0, 1) as N;
+      return body.mul(smoothstep(rimT.sub(half), rimT.add(half), cov)).clamp(0, 1) as F;
     },
     push(cp: CloudParams): void {
       uDistortScale.value = cp.distortScale;
@@ -344,7 +344,7 @@ export interface ShaftSlot {
  * silhouette rather than a drawn outline: no `step`, no `smoothstep`, nothing
  * on a spatial coordinate for §V.48 to catch.
  */
-export function createShafts(count: number, viewDir: N, p: CloudParams) {
+export function createShafts(count: number, viewDir: V3, p: CloudParams) {
   const n = Math.min(Math.max(Math.floor(count) || 0, 0), 6);
   const uOpacity = uniform(p.shaftOpacity);
   const uDensityLen = uniform(p.shaftDensityLength);
@@ -374,7 +374,7 @@ export function createShafts(count: number, viewDir: N, p: CloudParams) {
   const vySafe = select(vy.greaterThanEqual(0), vy.max(1e-4), vy.min(-1e-4));
 
   /** 0..1 optical density of one shaft along this view ray */
-  const densityOf = (geo: N, strength: N): N => {
+  const densityOf = (geo: Node<'vec4'>, strength: F): F => {
     const o = camXZ.sub(vec2(geo.x, geo.y));
     const r = geo.z;
     const b = o.dot(dXZ);
@@ -439,24 +439,24 @@ export function createShafts(count: number, viewDir: N, p: CloudParams) {
       .mul(radial)
       .mul(ground)
       .mul(top)
-      .mul(strength.clamp(0, 1)) as N;
+      .mul(strength.clamp(0, 1)) as F;
   };
 
   // SOFT UNION, not a sum (§V44 bounded at source, same construction as the
   // storm field itself): two overlapping shafts saturate toward 1 instead of
   // stacking to an opaque grey wall.
-  let miss: N = float(1) as N;
+  let miss: F = float(1) as F;
   for (let i = 0; i < n; i++) {
-    miss = miss.mul(densityOf(uGeo[i] as unknown as N, uStrength[i] as unknown as N).oneMinus()) as N;
+    miss = miss.mul(densityOf(uGeo[i] as unknown as Node<'vec4'>, uStrength[i] as unknown as F).oneMinus()) as F;
   }
-  const alpha = (n === 0 ? float(0) : miss.oneMinus().mul(uOpacity.clamp(0, 1))).clamp(0, 1) as N;
+  const alpha = (n === 0 ? float(0) : miss.oneMinus().mul(uOpacity.clamp(0, 1))).clamp(0, 1) as F;
 
   const scratch = new THREE.Vector4();
   return {
     /** 0..1 coverage of the shaft layer for this fragment */
     alpha,
     /** multiplier on skyColor for the shaft body */
-    tint: uTint as unknown as N,
+    tint: uTint as unknown as F,
     slots: n,
     push(cp: CloudParams, list: readonly ShaftSlot[]): void {
       uOpacity.value = cp.shaftOpacity;

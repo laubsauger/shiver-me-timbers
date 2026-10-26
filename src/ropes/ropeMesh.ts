@@ -43,7 +43,6 @@ import {
   uniform,
   vec3,
 } from 'three/tsl';
-import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { minWidthWiden, projectedWidthPx } from '../core/minWidth';
 import { ropeParams } from '../params/ropes';
@@ -53,14 +52,13 @@ import { pushParam, type RopeCompute } from './ropeCompute';
 const REF_SWAP = 0.99;
 
 /** any TSL node — the regime maths is agnostic to how the point was built */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type TSLNode = ShaderNodeObject<any>;
+type TSLNode<T extends string> = THREE.Node<T>;
 
 /** the three §V41 thresholds, shared by every thin-geometry mesh in this dir */
 export interface RegimeUniforms {
-  uMinWidthPx: TSLNode;
-  uFarWidthPx: TSLNode;
-  uNearWidthPx: TSLNode;
+  uMinWidthPx: THREE.UniformNode<'float', number>;
+  uFarWidthPx: THREE.UniformNode<'float', number>;
+  uNearWidthPx: THREE.UniformNode<'float', number>;
 }
 
 /** moved to src/core/minWidth.ts (§V95: one implementation, shared with the course furniture); re-exported for
@@ -78,8 +76,8 @@ export { projectedWidthPx };
  * back, and how far into the cheap unlit regime the geometry is.
  */
 export function phoneWireRegime(
-  worldPos: TSLNode,
-  radius: TSLNode,
+  worldPos: TSLNode<'vec3'>,
+  radius: TSLNode<'float'>,
   u: RegimeUniforms,
 ) {
   const widthPx = projectedWidthPx(worldPos, radius);
@@ -90,7 +88,7 @@ export function phoneWireRegime(
   // near edge — FUNCTIONAL 3-arg form, never the chained receiver-is-factor
   // one (§V23/§B1). Inverted because a THIN rope is a FAR rope.
   const farness = smoothstep(u.uFarWidthPx, u.uNearWidthPx, widthPx).oneMinus();
-  return { drawnRadius: radius.mul(widen), aaAlpha, farness, widthPx };
+  return { drawnRadius: radius.mul(widen as TSLNode<'float'>), aaAlpha, farness, widthPx };
 }
 
 export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: number) {
@@ -114,7 +112,7 @@ export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: numb
    *  (node graphs are per-material, so this cannot be hoisted out) */
   function segmentNodes() {
     const ropeIdx = int(instanceIndex.div(uint(segments)));
-    const segIdx = int(instanceIndex.modInt(segments));
+    const segIdx = int(int(instanceIndex).mod(int(segments)));
     const base = ropeIdx.mul(rc.pointsPerRope).add(segIdx);
     const p0 = pts.element(base);
     const p1 = pts.element(base.add(1));

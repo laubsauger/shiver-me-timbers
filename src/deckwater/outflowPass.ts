@@ -67,7 +67,7 @@ export function createOutflowPass(
 ) {
   return Fn(() => {
     If(instanceIndex.lessThan(uint(w * h)), () => {
-      const x = int(instanceIndex.modInt(w));
+      const x = int(int(instanceIndex).mod(int(w)));
       const y = int(instanceIndex.div(uint(w)));
       const cell = textureLoad(state, ivec2(x, y));
       const volume = cell.b;

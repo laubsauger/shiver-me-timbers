@@ -21,10 +21,10 @@ import {
   attribute,
   clamp,
   cross,
-  directionToFaceDirection,
   float,
   max,
   mix,
+  negateOnBackSide,
   normalLocal,
   normalWorld,
   positionLocal,
@@ -91,7 +91,7 @@ export function createFlagClothMaterial(
   const phase = hash2(vec2(fly.mul(2.13), hoist.mul(5.77))).mul(TAU);
 
   /** cloth surface point (local space) for flag coords (u along fly, v up) */
-  const clothAt = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
+  const clothAt = Fn(([u, v]: [THREE.Node<'float'>, THREE.Node<'float'>]) => {
     const along = u.mul(fly);
     // the tip trails the root: the lag is spread linearly along the fly, so a
     // course change travels outward instead of pivoting the whole flag
@@ -166,7 +166,7 @@ export function createFlagClothMaterial(
   const dv = clothAt(u0, v0.add(e)).sub(surface);
   const clothNormal = cross(du, dv).normalize();
   const localNormal = mix(normalLocal, clothNormal, clothWeight).normalize();
-  material.normalNode = directionToFaceDirection(
+  material.normalNode = negateOnBackSide(
     transformNormalToView(localNormal).toVarying('vFlagNormalView').normalize(),
   );
 

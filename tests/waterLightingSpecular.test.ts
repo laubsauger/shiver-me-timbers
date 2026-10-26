@@ -6,6 +6,11 @@ import { WaterLitMaterial } from '../src/terrain/waterLitMaterial';
 // time. Inputs represent the already accumulated standard BRDF contributions.
 function evaluate(node: any): number {
   if (node.isConstNode || node.isUniformNode) return node.value;
+  // three r186 returns every `add`/`mul` result wrapped in a var INTENT
+  // (`nodeProxyIntent` → `toVarIntent`): a hint that the builder may hoist it
+  // into a variable, with no arithmetic of its own. Look through exactly that
+  // wrapper; an explicit `toVar()` (intent false) still throws.
+  if (node.isVarNode && node.intent === true) return evaluate(node.node);
   if (node.isOperatorNode) {
     if (node.op === '+') return evaluate(node.aNode) + evaluate(node.bNode);
     if (node.op === '*') return evaluate(node.aNode) * evaluate(node.bNode);

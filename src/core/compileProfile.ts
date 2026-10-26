@@ -6,16 +6,19 @@
  * subsystem hunch — the mast-stave and deck-field bugs were both single terms
  * doing outsized damage, and compile cost has the same failure shape.
  *
- * How: three's `Renderer._createObjectPipeline` is the per-(object, material)
- * entry point compileAsync uses instead of drawing. Wrapping it on the
- * INSTANCE (shadowing the prototype method) gives, per object:
+ * How (three r186): `compileAsync` first QUEUES one work item per render
+ * object, then builds them one at a time — `NodeManager.getForRender` (TSL
+ * graph + WGSL codegen, yielding to the main thread between shader stages) and
+ * `Pipelines.getForRender` (program + pipeline creation, awaited per object).
+ * Wrapping those two on the renderer's own instances gives, per render object:
  *
- *  - `sync`  main-thread ms: TSL graph build + WGSL codegen + bindings. This
- *            is the part that blocks; it is invisible in a wall-clock total.
- *  - `wait`  ms from that object's codegen finishing to its
- *            `createRenderPipelineAsync` promise resolving = driver work.
- *            Pipelines are created concurrently, so these OVERLAP and must not
- *            be summed — read the max, and read `sync` as the serial cost.
+ *  - `sync`  ms of node build + WGSL codegen. Since r186 this is WALL time from
+ *            build start to the built state: three yields between shader
+ *            stages, so frames that run in those gaps are included. During
+ *            boot little else runs, so it still ranks the heavy materials.
+ *  - `wait`  ms from pipeline request to its `createRenderPipelineAsync`
+ *            promise resolving = driver work. r186 awaits each object's
+ *            pipelines before the next, so these no longer overlap.
  *  - `wgsl`  bytes of shader source the object added, the honest proxy for how
  *            much work the driver was handed (and the first place to look for
  *            a pathological shader after a GPU-process death).
@@ -24,16 +27,14 @@
  * materials visible in the output: two ships with their own material set show
  * up twice, two ships sharing one set show up once.
  *
- * NESTED PASSES (§T.79). `_createObjectPipeline` runs each object's
- * `updateBefore` nodes (Renderer.js:3050), and a `ShadowNode` or reflector
- * answers that with a WHOLE `renderer.render()` of the scene — which, inside
- * `compileAsync`, still routes every object through `_createObjectPipeline`
- * (`_handleObjectFunction` is only reset when compileAsync returns,
- * Renderer.js:959). So the first lit object's sample used to CONTAIN the
- * entire shadow pass and the reflection pass, and summing samples counted
- * that work twice. Every counter is now EXCLUSIVE — the object's own work,
- * children subtracted — and `depth` says which pass a sample came from:
- * 0 is the compile root's own list, 1+ is a pass a node opened under it.
+ * NESTED PASSES (§T.79). A reflector answers its object's `updateBefore`
+ * with a whole `renderer.render()` of the scene (a `ShadowNode` no longer
+ * does during compile: r186 returns early while `_isPreCompiling`), and inside
+ * `compileAsync` that runs between the object's node build and its pipeline
+ * request. Each nested object gets its own sample (the counters are per call,
+ * so nothing is counted twice), and `depth` says which pass it came from: 0 is
+ * the compile root's own list, 1 is a pass a node opened under it (three's
+ * `_isPreCompiling` is set exactly while those passes run).
  */
 import type * as THREE from 'three/webgpu';
 
@@ -69,13 +70,21 @@ export interface CompilePhase {
 }
 
 /** three internals this module reaches into; all private-by-convention. */
+type NodeGetForRender = (renderObject: unknown, useAsync?: boolean) => unknown;
+type PipelineGetForRender = (renderObject: unknown, promises?: Array<Promise<unknown>> | null) => unknown;
 interface RendererInternals {
-  _createObjectPipeline: (...args: unknown[]) => void;
-  _compilationPromises: Array<Promise<unknown>> | null;
+  _isPreCompiling?: boolean;
+  _nodes: { getForRender: NodeGetForRender };
   _pipelines: {
+    getForRender: PipelineGetForRender;
     caches: Map<unknown, unknown>;
     programs: { vertex: Map<string, unknown>; fragment: Map<string, unknown> };
   };
+}
+
+interface RenderObjectLike {
+  object?: { name?: string; type?: string };
+  material?: { name?: string; type?: string };
 }
 
 function newKeyBytes(map: Map<string, unknown>, from: number): number {
@@ -101,63 +110,70 @@ export async function profileCompile(
   compile: () => Promise<unknown>,
 ): Promise<CompilePhase> {
   const internals = renderer as unknown as RendererInternals;
-  const original = internals._createObjectPipeline;
+  const nodes = internals._nodes;
+  const pipes = internals._pipelines;
+  const originalBuild = nodes.getForRender;
+  const originalPipeline = pipes.getForRender;
   const samples: CompileSample[] = [];
+  const byObject = new Map<unknown, CompileSample>();
   const t0 = performance.now();
-  /** inclusive totals of the samples opened UNDER each in-flight call */
-  const nestedStack: Array<{ sync: number; pipelines: number; programs: number; wgsl: number }> =
-    [];
 
-  internals._createObjectPipeline = function (
+  const sampleOf = (renderObject: unknown): CompileSample => {
+    let sample = byObject.get(renderObject);
+    if (sample === undefined) {
+      const ro = renderObject as RenderObjectLike;
+      sample = {
+        object: ro.object?.name || ro.object?.type || '?',
+        material: ro.material?.name || ro.material?.type || '?',
+        sync: 0,
+        wait: 0,
+        pipelines: 0,
+        programs: 0,
+        wgsl: 0,
+        depth: internals._isPreCompiling === true ? 1 : 0,
+      };
+      byObject.set(renderObject, sample);
+      samples.push(sample);
+    }
+    return sample;
+  };
+
+  nodes.getForRender = function (this: unknown, renderObject: unknown, useAsync?: boolean): unknown {
+    const start = performance.now();
+    const result = originalBuild.call(this, renderObject, useAsync);
+    const sample = sampleOf(renderObject);
+    const thenable = result as { then?: unknown } | null;
+    if (thenable !== null && typeof thenable?.then === 'function') {
+      return (result as Promise<unknown>).then((v) => {
+        sample.sync += performance.now() - start;
+        return v;
+      });
+    }
+    sample.sync += performance.now() - start;
+    return result;
+  };
+
+  pipes.getForRender = function (
     this: unknown,
-    ...args: unknown[]
-  ): void {
-    const object = args[0] as { name?: string; type?: string };
-    const material = args[1] as { name?: string; type?: string };
-    const pipes = internals._pipelines;
-    const promises = internals._compilationPromises;
-    const p0 = promises === null ? 0 : promises.length;
+    renderObject: unknown,
+    promises?: Array<Promise<unknown>> | null,
+  ): unknown {
+    const sample = sampleOf(renderObject);
+    const p0 = promises ? promises.length : 0;
     const cache0 = pipes.caches.size;
     const vert0 = pipes.programs.vertex.size;
     const frag0 = pipes.programs.fragment.size;
-
-    const nested = { sync: 0, pipelines: 0, programs: 0, wgsl: 0 };
-    nestedStack.push(nested);
     const start = performance.now();
-    original.apply(this, args);
+    const result = originalPipeline.call(this, renderObject, promises);
     const end = performance.now();
-    nestedStack.pop();
-
-    // inclusive deltas, then the children's inclusive totals come off
-    const inclusive = {
-      sync: end - start,
-      pipelines: pipes.caches.size - cache0,
-      programs: pipes.programs.vertex.size - vert0 + (pipes.programs.fragment.size - frag0),
-      wgsl: newKeyBytes(pipes.programs.vertex, vert0) + newKeyBytes(pipes.programs.fragment, frag0),
-    };
-    const parent = nestedStack[nestedStack.length - 1];
-    if (parent !== undefined) {
-      parent.sync += inclusive.sync;
-      parent.pipelines += inclusive.pipelines;
-      parent.programs += inclusive.programs;
-      parent.wgsl += inclusive.wgsl;
-    }
-    const sample: CompileSample = {
-      object: object?.name || object?.type || '?',
-      material: material?.name || material?.type || '?',
-      sync: inclusive.sync - nested.sync,
-      wait: 0,
-      pipelines: inclusive.pipelines - nested.pipelines,
-      programs: inclusive.programs - nested.programs,
-      wgsl: inclusive.wgsl - nested.wgsl,
-      depth: nestedStack.length,
-    };
-    samples.push(sample);
-
+    sample.sync += end - start;
+    sample.pipelines += pipes.caches.size - cache0;
+    sample.programs += pipes.programs.vertex.size - vert0 + (pipes.programs.fragment.size - frag0);
+    sample.wgsl += newKeyBytes(pipes.programs.vertex, vert0) + newKeyBytes(pipes.programs.fragment, frag0);
     // attribute the driver-side wait: replace each promise this call appended
     // with one that timestamps itself. compileAsync awaits the array, so
     // swapping entries in place is enough and changes no behaviour.
-    if (promises !== null) {
+    if (promises) {
       for (let i = p0; i < promises.length; i++) {
         promises[i] = promises[i].then((v) => {
           sample.wait = Math.max(sample.wait, performance.now() - end);
@@ -165,13 +181,17 @@ export async function profileCompile(
         });
       }
     }
+    return result;
   };
 
   try {
     await compile();
   } finally {
-    internals._createObjectPipeline = original;
+    nodes.getForRender = originalBuild;
+    pipes.getForRender = originalPipeline;
   }
+
+  for (const sample of samples) sample.sync = +sample.sync.toFixed(2);
 
   const phase: CompilePhase = {
     label,

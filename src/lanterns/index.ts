@@ -150,7 +150,7 @@ export function createLanterns(opts: LanternOptions) {
     // §V44: the factor is bounded [0.22, 1] by construction, so the product
     // with an already-bounded level cannot grow.
     const facing = positionViewDirection.dot(normalView).clamp(0, 1);
-    material.colorNode = vec3(uColorNode)
+    material.colorNode = vec3(uColorNode as unknown as THREE.Node<'vec3'>)
       .mul(uLevelNode)
       .mul(mix(float(0.22), float(1), facing.pow(0.5)));
     material.toneMapped = true;

@@ -449,7 +449,7 @@ export class WakeSolverGpu {
     return m;
   }
 
-  private coords(): { x: AnyNode; y: AnyNode; sign: AnyNode } {
+  private coords(): { x: AnyNode; y: AnyNode; sign: THREE.Node<'float'> } {
     const x = int(instanceIndex.mod(this.n)).toVar();
     const y = int(instanceIndex.div(this.n)).toVar();
     // (−1)^(x+y): centres k-space on the grid (unpackPass precedent)

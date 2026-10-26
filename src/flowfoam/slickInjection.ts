@@ -18,48 +18,49 @@
 import { float, smoothstep, uniform, vec2, vec3, vec4 } from 'three/tsl';
 import { GRAVITY, KELVIN_R_MAX, KELVIN_TAN_MAX, RIDGE_PEAK } from './slickMath';
 import type { FlowFoamParams } from '../params/flowfoam';
+import type { Node } from 'three/webgpu';
 
 /** floor for divisors and smoothstep spans (§V28) */
 const EPS = 1e-6;
 
 /**
  * Track-frame inputs, all already computed by the foam pass. Every field is a
- * TSL node (`any`, the same convention the rest of src/flowfoam uses).
+ * TSL node (a scalar `Node<'float'>` unless typed otherwise).
  */
 export interface SlickFrame {
   /** speed (m/s) the hull had at the projection */
-  speed: any;
+  speed: Node<'float'>;
   /** smoothstep(speedThreshold, fullWakeSpeed, speed) */
-  sf: any;
+  sf: Node<'float'>;
   /** |lateral offset| (m) from the track */
-  ay: any;
+  ay: Node<'float'>;
   /** arclength (m) forward to the live cutwater */
-  d: any;
+  d: Node<'float'>;
   /** seconds since the cutwater passed */
-  age: any;
+  age: Node<'float'>;
   /** d·tan(kelvinAngle) — the wedge half-width, already to hand */
-  kelvin: any;
+  kelvin: Node<'float'>;
   /** hull half-beam (m) */
-  halfBeam: any;
+  halfBeam: Node<'float'>;
   /** unit track forward (world XZ) at the projection */
-  fwd: any;
+  fwd: Node<'vec2'>;
   /** +1 if the point is to starboard of the track, −1 to port */
-  latSign: any;
+  latSign: Node<'float'>;
   /** tail × liveGate — the foam pass's own eviction envelope, WITHOUT the clip */
-  envelope: any;
+  envelope: Node<'float'>;
   /** fadeTo(bowClip, ahead) — the 0.8 m forward clip; the transverse train skips it */
-  clip: any;
+  clip: Node<'float'>;
   /** world size (m) of one texel of the tier being written — the §V48 yardstick */
-  texel: any;
+  texel: Node<'float'>;
   /**
    * WORLD-ANCHORED along-track coordinate (m) of this water: the odometer
    * reading when the cutwater passed it (`track.odo − dist`). Constant at a
    * fixed world point, which is what lets a shed eddy stay where it was shed —
    * see wakeTrack.WakeTrack.odo for why `dist` cannot do this job.
    */
-  odo: any;
+  odo: Node<'float'>;
   /** dist − hullLength (m): + once the transom has passed */
-  ds: any;
+  ds: Node<'float'>;
 }
 
 /**
@@ -69,23 +70,23 @@ export interface SlickFrame {
  */
 export interface BowFrame {
   /** signed distance (m) from the swept crest line; + = ahead of the crest */
-  dc: any;
+  dc: Node<'float'>;
   /** fore-aft thickness (m) of the ridge */
-  thick: any;
+  thick: Node<'float'>;
   /** |lateral offset| (m) from the stem */
-  aside: any;
+  aside: Node<'float'>;
   /** outboard half-extent (m) of the mound */
-  span: any;
+  span: Node<'float'>;
   /** crest aft-sweep per metre outboard */
-  sweep: any;
+  sweep: Node<'float'>;
   /** side/√(side² + (thick/2)²): the SOFT sign, d(mAside)/d(side) — slickMath.moundNoseCpu */
-  sgn: any;
+  sgn: Node<'float'>;
   /** live stem forward (world XZ) */
-  fwd: any;
+  fwd: Node<'vec2'>;
   /** gate × sf on the LAGGED mound speed — the same drive the foam mound rides */
-  drive: any;
+  drive: Node<'float'>;
   /** world size (m) of one texel of the tier being written */
-  texel: any;
+  texel: Node<'float'>;
 }
 
 export function createSlickInjector(p: FlowFoamParams) {
@@ -175,7 +176,7 @@ export function createSlickInjector(p: FlowFoamParams) {
       // component points aft and INWARD; with + the phase is not stationary
       // and |∇φ| runs to 28× k at the cusp — slickMath.kelvinPhaseCpu
       const sq = (t: any) => float(1).add(t.mul(t));
-      const phaseOf = (t: any) => kk.mul(f.d.sub(f.ay.mul(t))).mul(sq(t).sqrt());
+      const phaseOf = (t: Node<'float'>) => kk.mul(f.d.sub(f.ay.mul(t))).mul(sq(t).sqrt());
       // §V48 AT THE SOURCE: fade a train to its own mean (zero — it is a
       // zero-mean crest field) once its wavelength goes sub-texel. This is what
       // makes the divergent branch's centreline singularity harmless.

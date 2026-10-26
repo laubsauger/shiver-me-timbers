@@ -916,7 +916,8 @@ async function loadPilotGltf(renderer: THREE.WebGPURenderer, url: string): Promi
     return u;
   });
   const ktx2 = new KTX2Loader(manager).setTranscoderPath('/basis/');
-  await ktx2.detectSupportAsync(renderer);
+  await renderer.init(); // no-op once booted: detectSupport needs an initialised renderer (r181 deprecated detectSupportAsync)
+  ktx2.detectSupport(renderer);
   await MeshoptDecoder.ready;
   const loader = new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
   try {

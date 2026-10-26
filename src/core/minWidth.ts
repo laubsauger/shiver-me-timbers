@@ -184,15 +184,16 @@ export function minWidthWiden(widthPx: TSLNode, minWidthPx: TSLNode): { widen: T
  * before `positionNode` runs (same texture fetch as `three/src/nodes/accessors/BatchNode.js`, r180), identity for a
  * plain Mesh. `thinAxis` offsets are in geometry space and must turn with the instance.
  */
+// @types/three 0.186 types textureSize() as a bare TextureSizeNode (runtime: uvec2), so `.x` needs the loose type
 const instanceLinear = Fn((builder: TSLNode) => {
   const object = builder.object;
   if (!object?.isBatchedMesh) return mat3(1, 0, 0, 0, 1, 0, 0, 0, 1);
   const id = builder.getDrawIndex() === null ? instanceIndex : drawIndex;
   const indirect = object._indirectTexture;
-  const isize = int(textureSize(textureLoad(indirect), int(0)).x);
+  const isize = int((textureSize(textureLoad(indirect), int(0)) as TSLNode).x);
   const indirectId = textureLoad(indirect, ivec2(int(id).mod(isize), int(id).div(isize))).x;
   const matrices = object._matricesTexture;
-  const size = int(textureSize(textureLoad(matrices), int(0)).x);
+  const size = int((textureSize(textureLoad(matrices), int(0)) as TSLNode).x);
   const j = float(indirectId).mul(4).toInt().toVar();
   const x = j.mod(size);
   const y = j.div(size);

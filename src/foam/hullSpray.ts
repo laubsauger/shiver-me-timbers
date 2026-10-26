@@ -141,10 +141,10 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
   const axisV = Array.from({ length: slots }, () => new THREE.Vector4(0, 1, 0, 0));
   const widthV = Array.from({ length: slots }, () => new THREE.Vector4());
   const launchV = Array.from({ length: slots }, () => new THREE.Vector4());
-  const uPos = uniformArray(posV);
-  const uAxis = uniformArray(axisV);
-  const uWidth = uniformArray(widthV);
-  const uLaunch = uniformArray(launchV);
+  const uPos = uniformArray<'vec4'>(posV);
+  const uAxis = uniformArray<'vec4'>(axisV);
+  const uWidth = uniformArray<'vec4'>(widthV);
+  const uLaunch = uniformArray<'vec4'>(launchV);
   const uCursor = uniform(0);
   const uBudget = uniform(0);
   const uTime = uniform(0);

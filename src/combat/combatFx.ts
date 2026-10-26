@@ -205,9 +205,9 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const material = new THREE.SpriteNodeMaterial();
   material.positionNode = instancedBufferAttribute(posAttr, 'vec3');
 
-  const sizeNode = instancedBufferAttribute(sizeAttr, 'float');
-  const aspectNode = instancedBufferAttribute(aspectAttr, 'float');
-  const seedNode = instancedBufferAttribute(seedAttr, 'float');
+  const sizeNode = instancedBufferAttribute<'float'>(sizeAttr, 'float');
+  const aspectNode = instancedBufferAttribute<'float'>(aspectAttr, 'float');
+  const seedNode = instancedBufferAttribute<'float'>(seedAttr, 'float');
   const tearNode = instancedBufferAttribute(tearAttr, 'float');
   const alphaNode = instancedBufferAttribute(alphaAttr, 'float');
 
@@ -220,7 +220,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   material.scaleNode = vec2(sizeNode.mul(aspectNode), sizeNode.div(aspectNode));
   material.rotationNode = seedNode.mul(Math.PI * 2);
 
-  const tint = instancedBufferAttribute(colAttr, 'vec3');
+  const tint = instancedBufferAttribute<'vec3'>(colAttr, 'vec3');
   // soft round falloff; brightness IS the fade and a dead particle is already
   // zero-size before it can contribute anything. The exponent is fxMath's so
   // the CPU coverage twin (`discCoverage`) is provably the same curve.

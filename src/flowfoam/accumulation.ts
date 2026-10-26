@@ -320,7 +320,7 @@ export function createAccumulation(
 
   const advectPass = Fn(() => {
     If(instanceIndex.lessThan(uint(res * res)), () => {
-      const x = int(instanceIndex.modInt(res));
+      const x = int(int(instanceIndex).mod(int(res)));
       const y = int(instanceIndex.div(uint(res)));
       // texel-center uv, then world position (flowMath.worldForUv mirror)
       const u = float(x).add(0.5).div(res);
@@ -361,7 +361,8 @@ export function createAccumulation(
       const t01 = history(x0, y0.add(1));
       const t11 = history(x0.add(1), y0.add(1));
       // §V23 functional mix(a, b, t)
-      const prev = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
+      // vec2 or vec4 depending on carryOrientation; @types/three mix has no union overload
+      const prev: any = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
       const inject = profile.useCapture
         ? textureLoad(injectionRT.texture, ivec2(x, y)).r
         : float(0);
@@ -421,7 +422,7 @@ export function createAccumulation(
 
   const blurPass = Fn(() => {
     If(instanceIndex.lessThan(uint(res * res)), () => {
-      const x = int(instanceIndex.modInt(res));
+      const x = int(int(instanceIndex).mod(int(res)));
       const y = int(instanceIndex.div(uint(res)));
       const sum = vec4(0, 0, 0, 0).toVar();
       for (let dy = -1; dy <= 1; dy++) {

@@ -443,7 +443,7 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
       (hue.value as THREE.Color).set(l.dominant);
       (led.value as THREE.Color).set(ledColor(l));
     });
-    const halfArr = uniformArray(de.half, 'float');
+    const halfArr = uniformArray<'float'>(de.half, 'float');
     const p = positionLocal;
     const fi = p.z.sub(de.z0).div(Math.max(de.dz, 1e-4)).clamp(0, de.half.length - 1.001);
     const i0 = int(fi.floor());
@@ -481,7 +481,8 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
       const det = texture(s.clearcoatNormalMap, uv().mul(ns.atlasMetres / ns.tileMetres)).xyz.mul(2).sub(1);
       const base = texture(s.normalMap).xyz.mul(2).sub(1);
       const k = map.a.mul(smoothstep(ns.fade[0], ns.fade[1], positionView.length()).oneMinus()).mul(deckPaint ? deckPaint.oneMinus() : float(1));
-      const blended = normalize(vec3(base.xy.add(det.xy.mul(k)), base.z));
+      // `k` is a float at runtime; @types/three 0.186 resolves `.mul(any)` to vec3, so the xy sum is retyped loosely
+      const blended = normalize(vec3(base.xy.add(det.xy.mul(k)) as TslNode, base.z));
       m.normalNode = normalMap(blended.mul(0.5).add(0.5), w ? scale.mul(w.reliefScale) : scale);
     } else {
       m.normalNode = normalMap(texture(s.normalMap), w ? scale.mul(w.reliefScale) : scale);

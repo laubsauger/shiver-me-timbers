@@ -54,7 +54,7 @@ export function createReducePass(
 ) {
   return Fn(() => {
     If(instanceIndex.lessThan(uint(dstW * dstH)), () => {
-      const x = int(instanceIndex.modInt(dstW));
+      const x = int(int(instanceIndex).mod(int(dstW)));
       const y = int(instanceIndex.div(uint(dstW)));
       const x0 = x.mul(REDUCE_FACTOR);
       const y0 = y.mul(REDUCE_FACTOR);
