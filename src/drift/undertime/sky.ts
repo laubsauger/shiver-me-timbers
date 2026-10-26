@@ -73,8 +73,10 @@ export function createUndertimeSky(): UndertimeSky {
       const b = d.dot(oc);
       const m = sqrt(oc.dot(oc).sub(b.mul(b)).max(0));
       const x = rho.sub(m);
-      const core = exp(x.div(w).pow(2).negate());
-      const skirt = exp(x.div(w.mul(3)).pow(2).negate()).mul(0.08);
+      // (squared by hand: WGSL's pow of a negative base is undefined, and x is signed)
+      const xw = x.div(w);
+      const core = exp(xw.mul(xw).negate());
+      const skirt = exp(xw.mul(xw).div(9).negate()).mul(0.08);
       // m is measured from the whole LINE of sight, so the same ring also appears mirrored behind the eye:
       // keep the half in front (b > 0), faded softly — at the great circle b → 0 and the two halves meet
       const half = smoothstep(oc.length().mul(-0.3), oc.length().mul(0.3), b);
@@ -96,7 +98,8 @@ export function createUndertimeSky(): UndertimeSky {
     // the wave front, in angle from the dome front (θ = π·wave), with the pairs' ragged edge
     const theta = acos(d.dot(u.waveFront as unknown as V3).clamp(-1, 1));
     const x = theta.sub(u.wave.add(waveRag(d)).mul(PI)).negate(); // > 0: already passed
-    const band = exp(x.div(0.03).pow(2).negate()).add(exp(x.div(0.09).pow(2).negate()).mul(0.15));
+    const x2 = x.mul(x);
+    const band = exp(x2.div(0.03 * 0.03).negate()).add(exp(x2.div(0.09 * 0.09).negate()).mul(0.15));
     // the trail: ~1 s of the front's travel (π/7 rad per s at the default 7 s wave) back to black
     const trail = exp(x.max(0).div(0.12).negate()).mul(step01(x)).mul(0.05);
     const presence = smoothstep(0, 0.05, u.wave).mul(smoothstep(1, 0.92, u.wave));

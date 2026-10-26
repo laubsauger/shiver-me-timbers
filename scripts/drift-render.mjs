@@ -11,6 +11,9 @@
  *   node scripts/drift-render.mjs --size 1024 --fps 30 [--from 0] [--to <s>] [--lanes 2] [--allow-lanes]
  *        [--out out/drift/<name>.mp4] [--codec x264|prores] [--port 5288]
  *        [--crf 18] [--preset medium] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5]
+ *        [--query sea]   (extra drift.html query, e.g. a test act)
+ *        [--channel chromium|chrome]   (chrome: the installed Google Chrome; Playwright's Chromium 153 fails to
+ *                                      compile some of the game's sea shaders in Tint, Chrome 155 does not)
  *
  *   --lanes    parallel pages, at most 2 unless --allow-lanes (see MACHINE GUARDS)
  *
@@ -62,6 +65,9 @@ const CODEC = arg('codec', 'x264');
 const PORT = num('port', 5288);
 const CRF = arg('crf', '18');
 const PRESET = arg('preset', 'medium');
+/** extra drift.html query for every page (a test act such as `sea`), prefixed with & */
+const QUERY = arg('query', null) ? `&${arg('query', '')}` : '';
+const CHANNEL = arg('channel', 'chromium');
 const INFLIGHT = Math.max(1, Math.floor(num('inflight', 3)));
 const QUEUE = Math.max(0, Math.floor(num('queue', 8)));
 const KEEP = argv.includes('--keep');
@@ -193,13 +199,13 @@ async function main() {
   }
 
   // ------------------------------------------------- probe: boots the page once (warms Vite) and asks for the act end
-  const launch = () => chromium.launch({ channel: 'chromium', headless: true });
+  const launch = () => chromium.launch({ channel: CHANNEL, headless: true });
   const probeBrowser = await launch();
   browsers.push(probeBrowser);
   const probe = await probeBrowser.newPage({ viewport: { width: 256, height: 256 } });
   const probeErrors = [];
   probe.on('pageerror', (e) => probeErrors.push(String(e)));
-  await probe.goto(`${base}/drift.html?paused`);
+  await probe.goto(`${base}/drift.html?paused${QUERY}`);
   for (const until = Date.now() + 120_000; ; ) {
     if (probeErrors.length > 0) throw new Error(`drift.html failed to boot: ${probeErrors.join('\n')}`);
     if (await probe.evaluate(() => '__drift' in window || document.body.innerText.includes('requires WebGPU'))) break;
@@ -311,7 +317,7 @@ async function main() {
         size: String(SIZE), fps: String(FPS), from: String(l.from), to: String(l.to), shot: l.shot, group,
         sink: sinkUrls[i], inflight: String(INFLIGHT), blur: String(BLUR), shutter: String(SHUTTER),
       });
-      await page.goto(`${base}/drift.html?record&lane&${q}`);
+      await page.goto(`${base}/drift.html?record&lane&${q}${QUERY}`);
     }),
   );
   log(`${N} lane(s) launched in ${secs(tLaunch).toFixed(1)} s`);

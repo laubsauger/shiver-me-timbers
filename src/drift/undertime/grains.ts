@@ -168,7 +168,9 @@ export function createStars(U: GrainUniforms, knots: WebKnot[]): THREE.Instanced
   const lit = step(hash(seed), 0.88);
   const t0 = hash(seed.add(1.3)).mul(0.8).add(0.08);
   const on = smoothstep(t0, t0.add(0.05), U.stars);
-  const catchFlare = exp(U.stars.sub(t0.add(0.03)).div(0.04).pow(2).negate()).mul(1.5);
+  // (squared by hand: WGSL's pow of a negative base is undefined)
+  const catchX = U.stars.sub(t0.add(0.03)).div(0.04);
+  const catchFlare = exp(catchX.mul(catchX).negate()).mul(1.5);
   const bright = K.w.pow(0.6).mul(0.8).add(0.2);
   const alpha = lit.mul(on.add(catchFlare.mul(on))).mul(bright).mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.75)));
   // a point, not a disc: constant angular size whatever the distance

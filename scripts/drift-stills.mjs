@@ -4,7 +4,8 @@
  * show times, PNGs to out/drift/stills/<tag>_<t>.png. For review rounds — fast and light; motion goes
  * through scripts/drift-render.mjs (low-res x264), masters only after approval.
  *
- *   node scripts/drift-stills.mjs <tag> <t> [<t> ...] [--size 768] [--param key=value ...]
+ *   node scripts/drift-stills.mjs <tag> <t> [<t> ...] [--size 768] [--param key=value ...] [--query sea]
+ *        [--channel chromium|chrome]   (chrome for the sea acts: see drift-render.mjs)
  *
  *   --param   set a live tunable (src/params/drift.ts) before rendering, e.g. --param bloomStrength=0 (A/B)
  *
@@ -61,11 +62,12 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => void close().then
 try {
   vite = await createServer({ root: ROOT, clearScreen: false, logLevel: 'warn', cacheDir: join(ROOT, 'node_modules/.vite-drift-stills'), server: { port: 5293, strictPort: true, hmr: false, watch: null } });
   await vite.listen();
-  browser = await chromium.launch({ channel: 'chromium', headless: true });
+  browser = await chromium.launch({ channel: flag('channel', 'chromium'), headless: true });
   const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
   page.on('console', (m) => m.type() === 'error' && console.log('[console]', m.text().slice(0, 300)));
   page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 300)));
-  await page.goto(`http://localhost:5293/drift.html?t=${times[0]}&paused&view=dome&guides=0`);
+  const query = flag('query', null) ? `&${flag('query', '')}` : '';
+  await page.goto(`http://localhost:5293/drift.html?t=${times[0]}&paused&view=dome&guides=0${query}`);
   await page.waitForFunction(() => '__drift' in window, null, { timeout: 60000 });
   await page.evaluate(
     ([s, kv]) => {

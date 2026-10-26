@@ -38,6 +38,7 @@ import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/
 import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
+import { createSea } from './drift/wandering/sea';
 
 type View = 'flat' | 'dome';
 
@@ -135,7 +136,9 @@ async function boot(): Promise<void> {
   const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
   const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
-  const total = act2Start + arrival.total;
+  // ?sea: the sea-level test act (drift/wandering/sea.ts) in a scene of its own, on its own clock
+  const sea = new URLSearchParams(location.search).has('sea') ? createSea() : null;
+  const total = sea ? sea.total : act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({
     elTop: p.crawlElTop,
     sink: p.crawlSink,
@@ -161,7 +164,8 @@ async function boot(): Promise<void> {
     return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
   };
   // the crawl lives in master space, so it shows in the dome view only
-  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
+  // (the sea's sky and water are the game's, tuned under ACES at its exposure: sky.ts configureRenderer)
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, toneMapping: sea ? THREE.ACESFilmicToneMapping : undefined });
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;
@@ -194,6 +198,13 @@ async function boot(): Promise<void> {
   let act2: ArrivalState | null = null;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
+    if (sea) {
+      sea.update(at, eye, renderer);
+      dome.setNear(0.05);
+      dome.setFar(sea.far);
+      dome.setFaceSize(faceOverride ?? p.domeFace);
+      return state;
+    }
     const t2 = at - act2Start;
     act2 = t2 >= 0 ? arrival.update(t2, eye.position) : null;
     if (!act2) eye.position.set(...eyePath(at, p));
@@ -226,12 +237,20 @@ async function boot(): Promise<void> {
   };
   /** the master into whatever is bound, filling the current viewport */
   const look = (): DomeLook => ({
-    exposure: p.exposure,
+    exposure: sea ? sea.exposure : p.exposure,
     bloomStrength: p.bloomStrength,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,
-    overlayRadiance: p.crawlRadiance,
+    overlayRadiance: sea ? 0 : p.crawlRadiance,
   });
+  // the sea's sky is a background node, which never forces a clear: with autoClear off the faces kept the
+  // last frame's colour and depth
+  const stage = (draw: (s: THREE.Scene) => void): void => {
+    if (!sea) return draw(scene);
+    renderer.autoClear = true;
+    draw(sea.scene);
+    renderer.autoClear = false;
+  };
   let masterSize = 1024;
   const setPixelAngle = (rad: number): void => {
     field.setPixelAngle(rad);
@@ -239,7 +258,7 @@ async function boot(): Promise<void> {
   };
   const renderMaster = (): void => {
     setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
-    dome.render(renderer, scene, eye, p.domeTilt, masterSize, look());
+    stage((s) => dome.render(renderer, s, eye, p.domeTilt, masterSize, look()));
   };
   /** one recorded frame: the master of time `at`, motion-blurred over `shutter` s with `samples` sub-frames */
   const frame = (at: number, shutter: number, samples: number): void => {
@@ -253,7 +272,7 @@ async function boot(): Promise<void> {
     }
     for (let i = 0; i < samples; i++) {
       prepare(at + shutter * ((i + 0.5) / samples - 0.5));
-      dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, 1 / samples, i === 0);
+      stage((s) => dome.accumulate(renderer, s, eye, p.domeTilt, masterSize, 1 / samples, i === 0));
     }
     dome.presentAccumulated(renderer, look());
   };

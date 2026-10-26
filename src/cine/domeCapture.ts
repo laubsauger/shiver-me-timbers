@@ -139,6 +139,15 @@ export class DomeCapture {
     }
   }
 
+  /** Far clip of the six face cameras (the sea's acts need depth precision a 1e6 far plane spends) */
+  setFar(far: number): void {
+    for (const c of this.cubeCamera.children as THREE.PerspectiveCamera[]) {
+      if (c.far === far) continue;
+      c.far = far;
+      c.updateProjectionMatrix();
+    }
+  }
+
   /**
    * REBUILD, never resize: three r186 `RenderTarget.setSize` writes width/height onto `texture.image`, which
    * for a CubeTexture is the ARRAY of six face images — the faces keep their old size while the target
