@@ -41,10 +41,10 @@ export function createFlashes(slots: number, U: FlashUniforms, slotOf: (slot: F)
   const kind = float(instanceIndex.mod(7));
   const slot = float(instanceIndex.div(7));
   const P = slotOf(slot);
-  const tEnd = P.tEnd;
   // which end: kinds 1,3,5 are the matter track's end, 2,4,6 the antimatter track's
   const anti = step(0.5, kind.mod(2).oneMinus()).mul(step(0.5, kind)); // even and non-zero
   const q = float(1).sub(anti.mul(2));
+  const tEnd = mix(P.tEnd, P.tEndAnti, anti);
   const end = trackPosition(P, q, tEnd);
   const isSpark = step(kind, 0.5);
   const isCore = step(0.5, kind).mul(step(kind, 2.5));
@@ -82,11 +82,13 @@ export function createFlashes(slots: number, U: FlashUniforms, slotOf: (slot: F)
     const ring = smoothstep(0.55, 0.92, r).pow(2).mul(float(1).sub(smoothstep(0.92, 1, r))); // soft shell
     const soft = float(1).sub(r).pow(1.6);
     const tint = select(anti.greaterThan(0.5), U.anti, U.matter) as V3;
-    const sparkC = U.light.mul(U.coreRadiance).mul(disc);
+    // the birth spark: a needle-sharp core in a tight halo (the hero's first point of light is this)
+    const sparkC = U.light.mul(U.coreRadiance).mul(float(1).sub(r).pow(10).mul(1.5).add(disc.mul(0.15)));
     const hot = mix(float(1), float(1.6), P.forced);
     const coreC = mix(U.light, tint, 0.25).mul(U.coreRadiance.mul(U.flashGain).mul(hot)).mul(disc);
     const shellC = mix(U.light, vec3(0.72, 0.62, 1), 0.5).mul(U.shellRadiance.mul(U.flashGain)).mul(ring);
-    const hazeC = mix(U.light, tint, 0.35).mul(U.hazeRadiance.mul(U.haze).mul(hot.pow(1.5))).mul(soft);
+    // no haze on the wave front: its light is the sparks and the band, and blobs behind it read as bokeh
+    const hazeC = mix(U.light, tint, 0.35).mul(U.hazeRadiance.mul(U.haze).mul(float(1).sub(P.forced))).mul(soft);
     const c = sparkC.mul(isSpark).add(coreC.mul(isCore)).add(shellC.mul(isShell)).add(hazeC.mul(isHaze));
     return vec4(c.mul(alpha), 1);
   })();

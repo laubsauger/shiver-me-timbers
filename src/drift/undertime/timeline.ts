@@ -52,8 +52,6 @@ export interface UndertimeState {
   grains: number;
   /** linear scale of the world about the hero grain: 1 = native, 10^-zoomDecades at the end of the zoom */
   scale: number;
-  /** 0..1 the faint background glow the wave's light becomes */
-  afterglow: number;
   /** 0..1 how far the first stars have ignited */
   stars: number;
 }
@@ -146,7 +144,6 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
   const grains = smooth((rem - 0.35) / 0.55);
   // pull-back: eased in and out over ~3 s, constant through the middle (comfort: tests hold the peak rate)
   const scale = Math.pow(10, -p.zoomDecades * plateau(zoom, 3 / Math.max(6, p.zoom)));
-  const afterglow = smooth((zoom - 0.2) / 0.6) * (1 - 0.5 * smooth(gather));
   return {
     beat,
     u,
@@ -162,7 +159,6 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
     heroGrain,
     grains,
     scale,
-    afterglow,
     stars: smooth(gather / 0.8),
   };
 }
@@ -184,12 +180,6 @@ export function heroGrainPosition(p: DriftParams): Vec3 {
   const e = driftEnd(p);
   const d = domeAhead(p.heroGrainEl, p.domeTilt);
   return [e[0] + d[0] * p.heroGrainDist, e[1] + d[1] * p.heroGrainDist, e[2] + d[2] * p.heroGrainDist];
-}
-
-/** where the hero pair is born: in front and high, seen from the eye's start */
-export function heroVertex(p: DriftParams): Vec3 {
-  const d = domeAhead(p.heroEl, p.domeTilt);
-  return [d[0] * p.heroDist, d[1] * p.heroDist, d[2] * p.heroDist];
 }
 
 /**

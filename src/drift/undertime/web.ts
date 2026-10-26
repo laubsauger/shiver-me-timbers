@@ -101,6 +101,7 @@ export type GrainKind = 'scatter' | 'knot' | 'filament';
 /**
  * `n` grain positions for one zoom level: `webShare` of them on the web (a quarter clustered at knots, the
  * rest along filaments, denser toward the knots they drain into), the others scattered through the ball.
+ * The filaments ARE these grains — no drawn tubes: a gaussian cloud about each spine reads as matter.
  * Returns positions and, per grain, 0 = scatter, 1 = knot, 0.5 = filament (the shader's brightness weight).
  */
 export function placeGrains(w: Web, n: number, webShare: number, seed: number): { pos: Float32Array; kind: Float32Array } {
@@ -126,8 +127,11 @@ export function placeGrains(w: Web, n: number, webShare: number, seed: number): 
       while (fi < lengths.length - 1 && x > lengths[fi]) x -= lengths[fi++];
       const u = r();
       const t = r() < 0.5 ? u * u * 0.5 : 1 - u * u * 0.5; // denser toward both ends
-      const c = filamentPoint(w, w.filaments[fi], t);
-      const s = 0.008 + 0.01 * r();
+      const f = w.filaments[fi];
+      const c = filamentPoint(w, f, t);
+      // a gaussian about the spine, 1–3 % of the filament's length, swelling and thinning 3:1 along it
+      const swell = 0.5 + 0.5 * Math.sin(t * Math.PI * 2.3 + f.c[0] * 17);
+      const s = lengths[fi] * (0.01 + 0.02 * swell);
       p = [c[0] + gauss(r) * s, c[1] + gauss(r) * s, c[2] + gauss(r) * s];
       k = 0.5;
     }

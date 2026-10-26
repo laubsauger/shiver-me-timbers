@@ -14,7 +14,7 @@ npm run drift:render -- --size 1024 --to 4 --lanes 1 --crf 0  # lossless, for co
 | flag | default | |
 |---|---|---|
 | `--size` / `--fps` | 2048 / 30 | square master, frame rate |
-| `--from` / `--to` | 0 / act end | seconds. The act end comes from the page (`beatStarts(driftParams).total`) |
+| `--from` / `--to` | 0 / act end | seconds. The show's end comes from the page (`__drift.total`) |
 | `--lanes` | 4 | parallel pages. Each one gets its own browser, sink and encoder, and x264 gets `cores / lanes` threads per lane |
 | `--codec` | x264 | `x264` gives .mp4 (crf 12, preset slow, like the cine sink). `prores` gives .mov |
 | `--out` | `out/drift/undertime_<size>_<from>-<to>s.<ext>` |

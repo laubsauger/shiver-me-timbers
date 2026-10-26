@@ -40,15 +40,21 @@ export interface DriftRecordOptions {
   inFlight?: number;
   /** skip the sink's /manifest and /done — a lane of a multi-lane render, the driver owns those */
   lane?: boolean;
+  /** motion blur: sub-frames per frame (1 = none) */
+  blur?: number;
+  /** fraction of the frame interval the shutter is open (0.5 = a 180° shutter) */
+  shutter?: number;
   onProgress?: (frame: number, frames: number) => void;
 }
 
 export interface DriftRecordDeps {
   renderer: THREE.WebGPURenderer;
-  /** put the world into the state of act time t (field uniforms, crawl, glow) */
-  prepare(t: number): void;
-  /** render the dome master into the CURRENTLY BOUND target, filling it */
-  renderMaster(): void;
+  /**
+   * Render the dome master of show time t into the CURRENTLY BOUND target, filling it: the world put into
+   * the state of t, or — with `samples` > 1 — of `samples` instants spread over `shutter` seconds centred on
+   * t, averaged (motion blur).
+   */
+  frame(t: number, shutter: number, samples: number): void;
 }
 
 async function post(sink: string, path: string, body: BodyInit): Promise<void> {
@@ -88,10 +94,9 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
     for (; n < frames; n++) {
       const slot = slots[n % K];
       await slot.done; // this target's previous frame is read back AND posted
-      deps.prepare(from + n / fps);
       slot.cap.bind();
       try {
-        deps.renderMaster();
+        deps.frame(from + n / fps, (o.shutter ?? 0.5) / fps, Math.max(1, Math.round(o.blur ?? 1)));
       } finally {
         slot.cap.unbind();
       }

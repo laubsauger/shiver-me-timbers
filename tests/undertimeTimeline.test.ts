@@ -11,7 +11,7 @@ import { BEATS, beatStarts, eyePath, fieldClock, undertimeState } from '../src/d
 
 const p = { ...driftParams };
 const { starts, total } = beatStarts(p);
-const KEYS = ['clock', 'clockRate', 'pairDensity', 'flashGain', 'glow', 'wave', 'heroGrain', 'grains', 'scale', 'afterglow', 'stars'] as const;
+const KEYS = ['clock', 'clockRate', 'pairDensity', 'flashGain', 'glow', 'wave', 'heroGrain', 'grains', 'scale', 'stars'] as const;
 const at = (b: (typeof BEATS)[number], k: number) => undertimeState(starts[b] + p[b] * k, p);
 
 describe('Undertime timeline', () => {

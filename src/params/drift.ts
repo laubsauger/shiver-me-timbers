@@ -13,9 +13,9 @@
  *   zoom    pull back through orders of magnitude; the grains are seen to lie on a web
  *   gather  the web's knots ignite as the first stars; the signature
  *
- * Colour script: creation is the two charges (matter cyan, antimatter magenta) and their light (gold-white);
- * what remains is WARM (matter tinted toward starlight, `grainWarmth`) — the first warmth on the dome is the
- * thing that will become us; the first stars are warm and blue-white.
+ * Colour script: matter is warm amber-gold, antimatter cool cyan-violet, their light neutral gold-white. What
+ * remains is matter, so it stays amber (`grainWarmth` tints it a little toward starlight) — the warm thing on
+ * the dome is the thing that will become us; the first stars light amber to white and blue-white.
  *
  * Reload-scoped: `pairSlots`, `grainCount` (instance counts, baked into the draw).
  */
@@ -41,9 +41,6 @@ export interface DriftParams {
   approach: number;
   /** s, act time the hero pair is born (after the black) */
   heroBirth: number;
-  /** deg / m, where the hero pair is born: front, this high, this far */
-  heroEl: number;
-  heroDist: number;
   /** m/s, hero pair launch speed (its spirals' size) */
   heroSpeed: number;
   /** m/s, speed of the hero's light shells (they pass the audience) */
@@ -54,13 +51,11 @@ export interface DriftParams {
   heroGrainDist: number;
   /** 0..1, grains' colour from matter toward starlight */
   grainWarmth: number;
-  /** linear radiance of the faint background glow the wave's light becomes */
-  afterglowRadiance: number;
   starRadiance: number;
   /** linear radiance of the wave front's band of light (U3) */
   waveRadiance: number;
-  /** linear radiance of the web's threads (U5, U6) */
-  threadRadiance: number;
+  /** linear radiance of the wave front's sparks (U3) */
+  sparkRadiance: number;
   /** concurrent pair slots; each draws two tracks and seven light sprites */
   pairSlots: number;
   /** quads per track ribbon */
@@ -112,20 +107,14 @@ export interface DriftParams {
   exposure: number;
   /** linear radiance of matter/antimatter sprites (HDR, before the tone map) */
   particleRadiance: number;
-  /** s, act time the first crawl line appears (the treatment starts it as the boil cools) */
-  crawlStart: number;
-  /** s between crawl line starts */
-  crawlGap: number;
-  /** s a line takes from mid-heaven to the horizon */
-  crawlTravel: number;
-  /** deg, crawl lines appear / leave at these elevations (front safe zone: 10–60°) */
+  /** deg, elevation of a text phrase's first line as it appears (keep text at 25–40° in front) */
   crawlElTop: number;
-  crawlElBottom: number;
-  /** deg, where "the Drift" stops and holds */
+  /** deg, how far a phrase sinks while it is read */
+  crawlSink: number;
+  /** deg, where "the Drift" settles and holds */
   crawlHoldEl: number;
-  /** text height as a fraction of the master width, at the top and at the bottom */
-  crawlSizeTop: number;
-  crawlSizeBottom: number;
+  /** text height as a fraction of the master width (0.033 ≈ a 3° x-height) */
+  crawlSize: number;
   /** rad, the widest a line may span in azimuth (±50° safe zone ≈ 1.75) */
   crawlMaxArc: number;
   /** linear radiance the crawl is composited at (before the tone map) */
@@ -156,55 +145,48 @@ export const driftParams: DriftParams = registerParams(
     driftSpeed: 0.35,
     approach: 1.2,
     heroBirth: 1.4,
-    heroEl: 50,
-    heroDist: 9,
-    heroSpeed: 9,
-    heroShellSpeed: 6,
+    heroSpeed: 12,
+    heroShellSpeed: 7,
     heroShellRadiance: 3,
     heroGrainEl: 52,
     heroGrainDist: 7,
-    grainWarmth: 0.65,
-    afterglowRadiance: 0.01,
+    grainWarmth: 0.3,
     starRadiance: 40,
-    waveRadiance: 1.4,
-    threadRadiance: 0.06,
-    pairSlots: 3000,
+    waveRadiance: 0.6,
+    sparkRadiance: 8,
+    pairSlots: 4000,
     trackSegments: 40,
-    trackTail: 1.4,
+    trackTail: 2,
     trackWidth: 0.016,
     trackSpeed: 4.5,
-    trackCurl: 2.6,
-    trackDrag: 0.9,
+    trackCurl: 3.4,
+    trackDrag: 0.4,
     fieldTilt: 25,
-    trackRadiance: 6,
-    coreSize: 0.35,
+    trackRadiance: 4.5,
+    coreSize: 0.22,
     coreRadiance: 14,
     shellSpeed: 12,
     shellRadiance: 0,
-    hazeSize: 5,
-    hazeRadiance: 0.02,
+    hazeSize: 3,
+    hazeRadiance: 0.01,
     bloomStrength: 0.35,
     bloomRadius: 0.25,
     bloomThreshold: 1.4,
     grainCount: 48000,
     fieldRadius: 30,
     particleSize: 0.22,
-    pairLife: 2.2,
+    pairLife: 3.2,
     zoomDecades: 2,
-    matterColor: 0x7fd4ff,
-    antimatterColor: 0xff3f8e,
-    lightColor: 0xffe6c0,
+    matterColor: 0xffb44c,
+    antimatterColor: 0x6e9cff,
+    lightColor: 0xfff0d8,
     starColor: 0xffd394,
     exposure: 1,
-    particleRadiance: 1.6,
-    crawlStart: 9,
-    crawlGap: 6,
-    crawlTravel: 10,
-    crawlElTop: 44,
-    crawlElBottom: 26,
-    crawlHoldEl: 32,
-    crawlSizeTop: 0.024,
-    crawlSizeBottom: 0.02,
+    particleRadiance: 4,
+    crawlElTop: 37,
+    crawlSink: 5,
+    crawlHoldEl: 30,
+    crawlSize: 0.033,
     crawlMaxArc: 1.6,
     crawlRadiance: 1.4,
     crawlPocket: 1,
@@ -226,18 +208,15 @@ export const driftParams: DriftParams = registerParams(
     driftSpeed: { min: 0, max: 2, step: 0.01 },
     approach: { min: 0, max: 5, step: 0.05 },
     heroBirth: { min: 0, max: 6, step: 0.05 },
-    heroEl: { min: 10, max: 89, step: 1 },
-    heroDist: { min: 2, max: 30, step: 0.25 },
     heroSpeed: { min: 0.5, max: 30, step: 0.25 },
     heroShellSpeed: { min: 0.5, max: 30, step: 0.25 },
     heroShellRadiance: { min: 0, max: 10, step: 0.05 },
     heroGrainEl: { min: 10, max: 80, step: 1 },
     heroGrainDist: { min: 2, max: 30, step: 0.25 },
     grainWarmth: { min: 0, max: 1, step: 0.01 },
-    afterglowRadiance: { min: 0, max: 0.5, step: 0.005 },
     starRadiance: { min: 0, max: 100, step: 0.5 },
     waveRadiance: { min: 0, max: 10, step: 0.05 },
-    threadRadiance: { min: 0, max: 5, step: 0.01 },
+    sparkRadiance: { min: 0, max: 60, step: 0.5 },
     fieldRadius: { min: 2, max: 200, step: 1 },
     particleSize: { min: 0.01, max: 1, step: 0.01 },
     pairLife: { min: 0.3, max: 10, step: 0.1 },
@@ -260,14 +239,10 @@ export const driftParams: DriftParams = registerParams(
     bloomStrength: { min: 0, max: 3, step: 0.01 },
     bloomRadius: { min: 0, max: 1, step: 0.01 },
     bloomThreshold: { min: 0, max: 4, step: 0.01 },
-    crawlStart: { min: 0, max: 60, step: 0.5 },
-    crawlGap: { min: 0.5, max: 20, step: 0.25 },
-    crawlTravel: { min: 1, max: 40, step: 0.5 },
-    crawlElTop: { min: 10, max: 89, step: 1 },
-    crawlElBottom: { min: 0, max: 60, step: 1 },
-    crawlHoldEl: { min: 0, max: 89, step: 1 },
-    crawlSizeTop: { min: 0.002, max: 0.1, step: 0.001 },
-    crawlSizeBottom: { min: 0.002, max: 0.1, step: 0.001 },
+    crawlElTop: { min: 10, max: 60, step: 1 },
+    crawlSink: { min: 0, max: 20, step: 0.5 },
+    crawlHoldEl: { min: 0, max: 60, step: 1 },
+    crawlSize: { min: 0.005, max: 0.1, step: 0.001 },
     crawlMaxArc: { min: 0.3, max: 3.1, step: 0.05 },
     crawlRadiance: { min: 0, max: 10, step: 0.05 },
     crawlPocket: { min: 0, max: 1, step: 0.01 },

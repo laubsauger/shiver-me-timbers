@@ -1,9 +1,9 @@
 /**
  * Undertime pair model — "bubble-chamber cosmos" (art direction chosen 2026-10-26).
  *
- * A pair is born at a vertex; matter and antimatter leave back to back and, being of opposite charge, curl
- * in OPPOSITE senses around a shared magnetic field, spiralling inward as they lose energy — the twin-spiral
- * signature of pair production in a bubble chamber. At the end of its track each particle annihilates
+ * A pair is born at a vertex; matter and antimatter leave FORWARD in a narrow V (the momentum of the light
+ * that made them) and, being of opposite charge, curl in OPPOSITE senses around a shared magnetic field,
+ * spiralling inward as they lose energy — the twin-spiral signature of pair production in a bubble chamber. At the end of its track each particle annihilates
  * (flash + light shell, flashes.ts); a rare matter track survives as a grain.
  *
  * EXACT, STATELESS PATH. With velocity rotating at ω about the field and decaying at rate k, the in-plane
@@ -18,13 +18,14 @@
  * A PAIR'S FATE IS DECIDED AT ITS BIRTH. Density and the field's direction change over the act; a slot reads
  * them at its own birth time (clock − τ), so a living track never pops out or swings round when they change.
  *
- * THE WAVE (direction U3). A front — a plane perpendicular to the dome's front — sweeps from in front of the
- * audience, over them, to the back. A pair it reaches ends its track there and then (its annihilation is on
- * the front), and nothing is born behind it. Arrival is a pure function of the vertex, so this is stateless
- * too: the front reaches vertex x at clock waveClock0 + waveRate · waveLength · frac(x).
+ * THE WAVE (direction U3). A front of light sweeps the sky from the front horizon, over the audience, to the
+ * back, at constant angular speed, its edge ragged (`waveRag`). A pair it reaches ends its track there and
+ * then (its annihilation is ON the front, where the sky's band of light and the wave's sparks are), and
+ * nothing is born behind it. Arrival is a pure function of the vertex's direction, so this is stateless too:
+ * the front reaches direction d at clock waveClock0 + waveRate · waveLength · frac(d).
  */
 import * as THREE from 'three/webgpu';
-import { PI, asin, atan, cos, exp, float, floor, fract, hash, min, mix, normalize, pow, sin, smoothstep, sqrt, step, vec3 } from 'three/tsl';
+import { PI, acos, asin, atan, cos, exp, float, floor, fract, hash, min, mix, mx_noise_float, normalize, pow, sin, smoothstep, sqrt, step, vec3 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -50,6 +51,11 @@ export interface PairUniforms {
   tiltClock1: F;
   /** world position of the eye (the camera drifts; the text pocket and the near clearance follow it) */
   eye: V3;
+  /** the ball pairs are born in: its centre and the centre's velocity (the near layer's is the eye's) */
+  centre: V3;
+  centreVel: V3;
+  /** seed offset, so two layers of slots never share pairs */
+  layer: F;
   /** the dome frame (domeMaster.ts domeBasis) — the text pocket is defined in it */
   domeAxis: V3;
   domeFront: V3;
@@ -117,8 +123,9 @@ export interface PairSlot {
   /** per-cycle seed */
   seed: F;
   vertex: V3;
-  /** matter's launch direction (antimatter leaves along −dir) */
+  /** the pair's launch direction; matter and antimatter leave `open` rad either side of it */
   dir: V3;
+  open: F;
   v: F;
   omega: F;
   k: F;
@@ -126,6 +133,8 @@ export interface PairSlot {
   field: V3;
   /** s of track time the tracks run before they annihilate; the rest of the period is the light */
   tEnd: F;
+  /** the antimatter track's end, when it differs (U3's survivor: its matter never annihilates) */
+  tEndAnti: F;
   /** 1 when the wave front ended this track (its light is part of the front) */
   forced: F;
 }
@@ -133,13 +142,20 @@ export interface PairSlot {
 /** the field direction for a lean of `tilt` rad from the zenith toward the front (−Z) */
 const fieldOf = (tilt: F): V3 => vec3(0, cos(tilt), sin(tilt).negate());
 
-/** 0..1, how far through its sweep the wave front is when it reaches world point `x` */
-export function waveFrac(x: V3, U: PairUniforms): F {
-  return U.radius.sub(x.sub(U.eye).dot(U.domeFront)).div(U.radius.mul(2)).clamp(0, 1);
+/** the wave front's ragged edge: ±~4° of lead or lag, in patches ~35° across (shared by sky.ts and wave.ts) */
+export function waveRag(d: V3): F {
+  return mx_noise_float(d.mul(1.8)).mul(0.04);
+}
+
+/** 0..1, how far through its sweep the wave front is when it reaches direction `d` (from the eye) */
+export function waveFrac(d: V3, front: V3): F {
+  const n = normalize(d);
+  return acos(n.dot(front).clamp(-1, 1)).div(PI).add(waveRag(n)).clamp(0, 1);
 }
 
 /** lifecycle and launch parameters of pair slot `slot` (a float node) */
 export function pairSlot(slot: F, U: PairUniforms): PairSlot {
+  slot = slot.add(U.layer.mul(100003));
   const period = U.life.mul(hash(slot.mul(1.37).add(0.11)).mul(0.6).add(0.7));
   const phase = U.time.add(hash(slot.mul(2.71).add(0.33)).mul(period)).div(period);
   const cycle = floor(phase);
@@ -147,11 +163,12 @@ export function pairSlot(slot: F, U: PairUniforms): PairSlot {
   const tau = fract(phase).mul(period);
   const birth = U.time.sub(tau);
   const radius = U.radius.mul(pow(hash(seed.add(3)), float(1 / 3)).mul(0.85).add(0.15));
-  const vertex = randomDir(hash(seed.add(1)), hash(seed.add(2))).mul(radius);
+  // around `centre` where it was at this pair's birth (the near layer rides with the eye; the field does not)
+  const vertex = U.centre.sub(U.centreVel.mul(tau)).add(randomDir(hash(seed.add(1)), hash(seed.add(2))).mul(radius));
   const tilt = mix(U.tilt0, U.tilt1, smoothstep(U.tiltClock0, U.tiltClock1, birth));
   // the wave: a track the front reaches ends there; a pair is never born behind it
   const natural = period.mul(0.72);
-  const cut = U.waveClock0.add(U.waveRate.mul(U.waveLength).mul(waveFrac(vertex, U))).sub(birth);
+  const cut = U.waveClock0.add(U.waveRate.mul(U.waveLength).mul(waveFrac(vertex.sub(U.eye), U.domeFront))).sub(birth);
   const toEye = vertex.sub(U.eye);
   const alive = step(hash(seed.add(0.5)), U.density.sub(U.densityRate.mul(tau)))
     // not where the crawl is passing (the text pocket), so the text sits on darkness
@@ -166,11 +183,13 @@ export function pairSlot(slot: F, U: PairUniforms): PairSlot {
     seed,
     vertex,
     dir: randomDir(hash(seed.add(4)), hash(seed.add(5))),
+    open: hash(seed.add(9)).mul(0.2).add(0.25),
     v: U.speed.mul(hash(seed.add(6)).mul(1.4).add(0.6)),
     omega: U.curl.mul(hash(seed.add(7)).mul(1.2).add(0.6)),
     k: U.drag.mul(hash(seed.add(8)).mul(0.8).add(0.6)),
     field: fieldOf(tilt),
     tEnd: min(natural, cut.max(0.02)),
+    tEndAnti: min(natural, cut.max(0.02)),
     forced: step(cut, natural),
   };
 }
@@ -182,38 +201,47 @@ export interface HeroUniforms {
   vertex: V3;
   dir: V3;
   field: V3;
+  open: F;
   v: F;
   omega: F;
   k: F;
   tEnd: F;
+  /** defaults to tEnd */
+  tEndAnti?: F;
+  /** s the light lingers after the annihilation */
+  linger?: F;
 }
 
-/** U0's hero pair: one scripted slot, the same tracks and light as every other pair */
+/** a scripted pair (U0's hero, U3's survivor): one slot, the same tracks and light as every other pair */
 export function heroSlot(H: HeroUniforms): PairSlot {
   return {
     tau: H.time.sub(H.birth),
-    // the light lingers 3.5 s after the annihilation (flashes.ts `left`)
-    period: H.tEnd.add(3.5),
+    // the light lingers after the annihilation (flashes.ts `left`)
+    period: (H.tEndAnti ? min(H.tEnd, H.tEndAnti) : H.tEnd).add(H.linger ?? 3.5),
     alive: float(1),
     seed: float(17.31),
     vertex: H.vertex,
     dir: H.dir,
+    open: H.open,
     v: H.v,
     omega: H.omega,
     k: H.k,
     field: H.field,
     tEnd: H.tEnd,
+    tEndAnti: H.tEndAnti ?? H.tEnd,
     forced: float(1),
   };
 }
 
 /**
- * Position of a particle of charge q (±1) at track time τ (clamped to the track's end by the caller).
- * Antimatter launches along −dir; the field component of the launch drifts and decays like the in-plane part.
+ * Position of a particle of charge q (±1) at track time τ (clamped to the track's end by the caller). The
+ * two launch `open` rad either side of dir, across the field (so the V opens in the plane they curl in);
+ * the field component of the launch drifts and decays like the in-plane part.
  */
 export function trackPosition(P: PairSlot, q: F, tau: F): V3 {
   const field = P.field;
-  const d = P.dir.mul(q); // back to back
+  const side = normalize(field.cross(P.dir));
+  const d = P.dir.mul(cos(P.open)).add(side.mul(q.mul(sin(P.open))));
   const par = d.dot(field);
   const perp = d.sub(field.mul(par));
   const u = perp.normalize();
@@ -235,13 +263,27 @@ type Vec3 = [number, number, number];
 const dot = (a: Vec3, b: Vec3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
 /** CPU twin of `trackPosition` (the hero's annihilation points, for the sky's light shells; tests) */
-export function trackPositionCpu(
-  P: { vertex: Vec3; dir: Vec3; field: Vec3; v: number; omega: number; k: number },
-  q: number,
-  tau: number,
-): Vec3 {
+export interface PairCpu {
+  vertex: Vec3;
+  dir: Vec3;
+  field: Vec3;
+  open: number;
+  v: number;
+  omega: number;
+  k: number;
+}
+
+const crossCpu = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+function launchCpu(P: PairCpu, q: number): Vec3 {
+  const s = crossCpu(P.field, P.dir);
+  const sl = Math.hypot(s[0], s[1], s[2]) || 1;
+  return [0, 1, 2].map((i) => P.dir[i] * Math.cos(P.open) + (s[i] / sl) * q * Math.sin(P.open)) as Vec3;
+}
+
+export function trackPositionCpu(P: PairCpu, q: number, tau: number): Vec3 {
   const f = P.field;
-  const d: Vec3 = [P.dir[0] * q, P.dir[1] * q, P.dir[2] * q];
+  const d = launchCpu(P, q);
   const par = dot(d, f);
   const perp: Vec3 = [d[0] - f[0] * par, d[1] - f[1] * par, d[2] - f[2] * par];
   const pl = Math.hypot(perp[0], perp[1], perp[2]) || 1;
@@ -250,4 +292,9 @@ export function trackPositionCpu(
   const [x, y] = spiralCpu(tau, P.v * pl, P.omega, P.k, q);
   const drift = (P.v * par * (1 - Math.exp(-P.k * tau))) / P.k;
   return [0, 1, 2].map((i) => P.vertex[i] + u[i] * x + w[i] * y + f[i] * drift) as Vec3;
+}
+
+/** where track q converges as τ → ∞ (its spiral's end point); the survivor is aimed with it */
+export function spiralEndCpu(P: PairCpu, q: number): Vec3 {
+  return trackPositionCpu(P, q, 60 / Math.max(1e-3, P.k));
 }

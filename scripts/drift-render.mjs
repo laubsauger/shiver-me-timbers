@@ -10,9 +10,12 @@
  *
  *   node scripts/drift-render.mjs --size 2048 --fps 30 [--from 0] [--to <s>] [--lanes N]
  *        [--out out/drift/<name>.mp4] [--codec x264|prores] [--port 5288]
- *        [--crf 12] [--preset slow] [--inflight 3] [--queue 8] [--keep]
+ *        [--crf 12] [--preset slow] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5]
  *
- *   --to       default: the act's end, asked of the page (beatStarts(driftParams).total)
+ *   --blur     motion-blur sub-frames per frame (1 = none; 8 for masters), averaged in linear HDR
+ *   --shutter  fraction of the frame interval the shutter is open (0.5 = 180°)
+ *
+ *   --to       default: the show's end, asked of the page (__drift.total)
  *   --codec    x264 → .mp4 (libx264, ~cores/N threads per lane) · prores → .mov (ProRes 422 HQ on VideoToolbox)
  *   --port     the Vite dev server of THIS render. Started here on its own port with no file watcher and no HMR,
  *              so an edit saved mid-render (or anyone's HMR) cannot reload a lane and restart its range; an
@@ -60,6 +63,8 @@ const PRESET = arg('preset', 'slow');
 const INFLIGHT = Math.max(1, Math.floor(num('inflight', 3)));
 const QUEUE = Math.max(0, Math.floor(num('queue', 8)));
 const KEEP = argv.includes('--keep');
+const BLUR = Math.max(1, Math.floor(num('blur', 1)));
+const SHUTTER = num('shutter', 0.5);
 /** no lane progress for this long = a hung lane (the first frame includes boot and shader compile) */
 const STALL_MS = 180_000;
 if (CODEC !== 'x264' && CODEC !== 'prores') throw new Error(`--codec ${CODEC}: x264 | prores`);
@@ -149,8 +154,8 @@ async function main() {
     const adapter = await navigator.gpu?.requestAdapter();
     const info = adapter?.info;
     if (!('__drift' in window)) return { error: 'no WebGPU in this browser (the page showed its gate)' };
-    const [{ beatStarts }, { driftParams }] = await Promise.all([import('/src/drift/undertime/timeline.ts'), import('/src/params/drift.ts')]);
-    return { total: beatStarts(driftParams).total, gpu: `${info?.vendor}/${info?.architecture}${info?.isFallbackAdapter ? ' FALLBACK' : ''}` };
+    // the show's end (every act on one clock), as the page reports it
+    return { total: window.__drift.total, gpu: `${info?.vendor}/${info?.architecture}${info?.isFallbackAdapter ? ' FALLBACK' : ''}` };
   });
   if (probed.error) throw new Error(probed.error);
   await probeBrowser.close();
@@ -245,7 +250,7 @@ async function main() {
       });
       const q = new URLSearchParams({
         size: String(SIZE), fps: String(FPS), from: String(l.from), to: String(l.to), shot: l.shot, group,
-        sink: sinkUrls[i], inflight: String(INFLIGHT),
+        sink: sinkUrls[i], inflight: String(INFLIGHT), blur: String(BLUR), shutter: String(SHUTTER),
       });
       await page.goto(`${base}/drift.html?record&lane&${q}`);
     }),

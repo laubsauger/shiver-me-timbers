@@ -21,10 +21,9 @@
  * brightness: a receding grain becomes a fainter point instead of a flickering sub-pixel one.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, PI, abs, attribute, cameraPosition, clamp, cos, cross, exp, float, floor, hash, instanceIndex, length, max, min, mix, normalize, pow, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, PI, abs, attribute, clamp, cos, exp, float, hash, instanceIndex, length, max, min, mix, pow, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { billboardMesh, eyeFacing } from './billboard';
-import { stripGeometry } from './tracks';
 import { buildWeb, placeGrains, rng, type Web } from './web';
 
 type F = THREE.Node<'float'>;
@@ -32,11 +31,11 @@ type V3 = THREE.Node<'vec3'>;
 
 /**
  * Which levels exist for a zoom of `decades`: level D fills the sky at the end and level D + 1 is arriving,
- * so the grains need levels 0..D+1, the threads the web levels around the end, the stars those two.
+ * so the grains need levels 0..D+1 and the stars those two.
  */
-export function grainLevels(decades: number): { count: number; threads: number[]; stars: number[] } {
+export function grainLevels(decades: number): { count: number; stars: number[] } {
   const D = Math.max(1, Math.round(decades));
-  return { count: D + 2, threads: [D - 1, D, D + 1], stars: [D, D + 1] };
+  return { count: D + 2, stars: [D, D + 1] };
 }
 
 /** share of a level's grains that lie on its web: level 0 is the wave's scatter, the web emerges above it */
@@ -54,8 +53,6 @@ export interface GrainUniforms extends PocketUniforms {
   reveal: F;
   /** 0..1 the zoom's progress in decades (0 until it starts, 1 after one decade): fills level 0 out */
   fill: F;
-  /** 0..1 how far the web's threads have emerged */
-  web: F;
   heroGrain: F;
   stars: F;
   radius: F;
@@ -66,6 +63,20 @@ export interface GrainUniforms extends PocketUniforms {
   /** the grains' colour (matter warmed toward starlight) */
   warm: V3;
   star: V3;
+}
+
+/**
+ * World positions of the star levels' knots at the END of the pull-back (scale 10^−decades): where Act 2's
+ * galaxies open (drift/getTheDrift/galaxies.ts), so the first stars become the first galaxies in place.
+ */
+export function finalKnots(decades: number, pivot: [number, number, number], radius: number): Array<{ pos: [number, number, number]; level: number }> {
+  const D = Math.max(1, Math.round(decades));
+  return grainLevels(decades).stars.flatMap((L) =>
+    levelWeb(L).knots.map((k) => {
+      const s = radius * 10 ** (L - D);
+      return { pos: [pivot[0] + k[0] * s, pivot[1] + k[1] * s, pivot[2] + k[2] * s] as [number, number, number], level: L };
+    }),
+  );
 }
 
 /** pattern space → world for level L at world scale s */
@@ -122,9 +133,10 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
   const appear = info.w;
   const present = smoothstep(appear, appear.add(0.02), share).mul(levelPresence(L, U));
   // knots brighter than the threads between them, voids dimmest, so the structure reads
-  const weight = mix(mix(float(0.55), float(0.5), step(0.25, kind)), float(1.3), step(0.75, kind)).mul(mix(float(1), float(1.6), step(L, 0.5)));
+  const weight = mix(mix(float(0.45), float(0.8), step(0.25, kind)), float(1.6), step(0.75, kind)).mul(mix(float(1), float(0.6), step(L, 0.5)));
   const wanted = U.size.mul(pow(float(10), L)).mul(U.scale).mul(info.z.mul(0.8).add(0.6)).mul(mix(float(1), float(0.6), step(0.25, kind)));
-  const f = floored(wanted, dist, U);
+  // a grain is a point of light, never a disc: capped at ~0.15° (a near disc reads as out-of-focus dirt)
+  const f = floored(min(wanted, dist.mul(0.0026)), dist, U);
   // a few grains on the web ignite with the knots: the first stars are many, not one per knot
   const ignites = step(0.955, info.z).mul(step(0.25, kind));
   const t0 = info.w.mul(0.8).add(0.1);
@@ -133,6 +145,8 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
     .mul(weight)
     .mul(f.coverage)
     .mul(lit.mul(9).add(1))
+    // the web steps back a little as its stars come up, so the stars and the signature carry the end
+    .mul(float(1).sub(U.stars.mul(0.3).mul(float(1).sub(lit))))
     // dim (not gone) behind the crawl; never one across the eye (a grain within ~15 of its sizes is a blur)
     .mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.85)))
     .mul(smoothstep(wanted.mul(12), wanted.mul(40), dist));
@@ -147,71 +161,6 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
   const mesh = billboardMesh(material, per * levels, 'undertime-grains');
   instanced(mesh, 'grainPos', gPos, 3);
   instanced(mesh, 'grainInfo', gInfo, 4);
-  return mesh;
-}
-
-/**
- * The web's threads: a faint ribbon along every filament of the web levels, under the grains that lie on
- * it — what makes the structure read as a web at a glance rather than a scatter. Bowed, never straight;
- * clumped along its length; emerging through the pull-back (`web`).
- */
-export function createThreads(U: GrainUniforms, threadRadiance: F, decades: number): THREE.InstancedMesh {
-  const levels = grainLevels(decades).threads;
-  const a: number[] = [];
-  const c: number[] = [];
-  const b: number[] = [];
-  for (const L of levels) {
-    const w = levelWeb(L);
-    for (const fl of w.filaments) {
-      a.push(...w.knots[fl.a], L);
-      c.push(...fl.c);
-      b.push(...w.knots[fl.b]);
-    }
-  }
-  const S = attribute<'float'>('trackS', 'float');
-  const side = attribute<'float'>('trackSide', 'float');
-  const A4 = attribute<'vec4'>('threadA', 'vec4');
-  const L = A4.w;
-  const k = float(instanceIndex);
-  const A = toWorld(A4.xyz, L, U);
-  const C = toWorld(attribute<'vec3'>('threadC', 'vec3'), L, U);
-  const B = toWorld(attribute<'vec3'>('threadB', 'vec3'), L, U);
-  const u1 = float(1).sub(S);
-  const pos = A.mul(u1.mul(u1)).add(C.mul(u1.mul(S).mul(2))).add(B.mul(S.mul(S)));
-  const tangent = C.sub(A).mul(u1).add(B.sub(C).mul(S));
-  const toEye = pos.sub(cameraPosition);
-  const across = normalize(cross(normalize(tangent), normalize(toEye)));
-  const dist = toEye.length();
-  // gas, not wire: a wide soft ribbon (its cross-section is a gaussian, so it reads as a glow)
-  const wanted = U.radius.mul(pow(float(10), L)).mul(U.scale).mul(0.012);
-  const f = floored(wanted, dist, U);
-  // a thread passing close to the eye would be a wide smear across the dome: only far ones are drawn;
-  // and a level shrinking into the pivot loses its threads first (a small web there reads as a cage)
-  const far = smoothstep(wanted.mul(8), wanted.mul(25), dist).mul(smoothstep(0.15, 0.5, pow(float(10), L).mul(U.scale)));
-  const clump = hash(floor(S.mul(11)).add(k.mul(5.3))).mul(0.5).add(0.5);
-  const ends = smoothstep(0, 0.08, S).mul(smoothstep(1, 0.92, S));
-  const alpha = levelPresence(L, U)
-    .mul(U.web)
-    .mul(far)
-    .mul(clump)
-    .mul(ends)
-    .mul(f.coverage)
-    .mul(float(1).sub(pocketMask(toEye, U).mul(0.85)))
-    .mul(hash(k.mul(1.9).add(0.4)).mul(0.6).add(0.4));
-  const material = additive('undertime-threads');
-  material.positionNode = pos.add(across.mul(side.mul(f.size)));
-  material.colorNode = Fn(() => {
-    const glow = exp(side.mul(side).mul(4).negate()).sub(0.018).max(0);
-    // the web's gas glows cooler than the warm grains on it: violet-blue, warming toward the knots
-    const gas = mix(vec3(0.42, 0.4, 0.9), mix(U.warm, vec3(0.9, 0.5, 0.75), 0.4), float(1).sub(S.mul(2).sub(1).abs()).oneMinus().pow(2));
-    return vec4(gas.mul(threadRadiance).mul(alpha).mul(glow), 1);
-  })();
-  const mesh = new THREE.InstancedMesh(stripGeometry(24), material, a.length / 4);
-  instanced(mesh, 'threadA', new Float32Array(a), 4);
-  instanced(mesh, 'threadC', new Float32Array(c), 3);
-  instanced(mesh, 'threadB', new Float32Array(b), 3);
-  mesh.frustumCulled = false;
-  mesh.name = 'undertime-threads';
   return mesh;
 }
 
@@ -251,7 +200,7 @@ export function createStars(U: GrainUniforms, decades: number): THREE.InstancedM
   const on = smoothstep(t0, t0.add(0.05), U.stars);
   const catchFlare = exp(U.stars.sub(t0.add(0.03)).div(0.04).pow(2).negate()).mul(1.5);
   const bright = hash(seed.add(2.9)).pow(2).mul(0.8).add(0.2);
-  const alpha = lit.mul(on.add(catchFlare.mul(on))).mul(bright).mul(levelPresence(L, U)).mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.6)));
+  const alpha = lit.mul(on.add(catchFlare.mul(on))).mul(bright).mul(levelPresence(L, U)).mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.75)));
   // a point, not a disc: constant angular size whatever the distance
   const dist = pos.sub(U.eye).length();
   const size = dist.mul(STAR_HALF * 2);
@@ -271,17 +220,20 @@ export function createStars(U: GrainUniforms, decades: number): THREE.InstancedM
 }
 
 /**
- * The hero grain: in front and up, the thing that remained. Warm, with a slow breath so it reads as
- * present rather than painted; it recedes with the pull-back like any grain, and is the first star to light.
+ * The hero grain: in front and up, the thing that remained — where the first light was and where the
+ * survivor's matter track came to rest (scripted.ts). Amber, with a slow breath so it reads as present rather
+ * than painted; it recedes with the pull-back like any grain, and is the last star to light.
  */
 export function createHeroGrain(U: GrainUniforms): THREE.InstancedMesh {
   const dist = U.pivot.sub(U.eye).length();
-  const breath = sin(U.time.mul(PI.mul(2 * 0.2))).mul(0.06).add(1);
-  const wanted = U.size.mul(1.6).mul(U.scale);
+  const breath = sin(U.time.mul(PI.mul(2 * 0.2))).mul(0.1).add(1);
+  // a core of about half a degree, whatever its distance
+  const wanted = min(U.size.mul(1.6).mul(U.scale), dist.mul(0.009));
   const f = floored(wanted, dist, U);
   // it keeps a little more presence than a plain grain while receding: the eye follows it into the web
   const grain = U.heroGrain.mul(max(f.coverage, min(float(1), U.scale.mul(40)).mul(0.25))).mul(breath);
-  const ignite = smoothstep(0.02, 0.07, U.stars);
+  // it is the LAST star to light, above the signature: first light, the remainder and the last star are one place
+  const ignite = smoothstep(0.88, 0.96, U.stars);
   const material = additive('undertime-hero-grain');
   // big enough quad for the star it becomes
   const size = max(f.size.mul(3), dist.mul(STAR_HALF * 2 * 1.4).mul(ignite));

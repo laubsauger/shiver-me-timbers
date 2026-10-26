@@ -43,8 +43,7 @@ export interface TrackUniforms {
   anti: V3;
 }
 
-/** a strip of `segments` quads with `trackS` ∈ [0, 1] along it and `trackSide` = ±1 across (grains.ts reuses it) */
-export function stripGeometry(segments: number): THREE.BufferGeometry {
+function stripGeometry(segments: number): THREE.BufferGeometry {
   const n = (segments + 1) * 2;
   const s = new Float32Array(n);
   const side = new Float32Array(n);
@@ -73,7 +72,7 @@ export function createTracks(slots: number, segments: number, U: TrackUniforms, 
   const isAnti = float(instanceIndex.mod(2));
   const q = float(1).sub(isAnti.mul(2)); // +1 matter, −1 antimatter
   const P = slotOf(slot);
-  const tEnd = P.tEnd;
+  const tEnd = mix(P.tEnd, P.tEndAnti, isAnti);
   const head = min(P.tau, tEnd);
   const ts = max(head.sub(U.tail.mul(float(1).sub(S))), 0);
   const pos = trackPosition(P, q, ts);

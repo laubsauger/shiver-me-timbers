@@ -23,7 +23,11 @@ import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
 import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
-import { beatStarts, eyePath, undertimeState } from './drift/undertime/timeline';
+import { beatStarts, eyePath, heroGrainPosition, undertimeState } from './drift/undertime/timeline';
+import { finalKnots } from './drift/undertime/grains';
+import { getTheDriftParams } from './params/getTheDrift';
+import { createArrival } from './drift/getTheDrift/act';
+import type { ArrivalState } from './drift/getTheDrift/timeline';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
 import { undertimeCrawl } from './drift/undertime/crawlText';
@@ -108,18 +112,21 @@ async function boot(): Promise<void> {
     const grid = new THREE.Mesh(new THREE.SphereGeometry(20, 36, 18), new THREE.MeshBasicNodeMaterial({ color: 0x406080, wireframe: true, side: THREE.BackSide }));
     scene.add(grid);
   }
-  const { total } = beatStarts(p);
+  // THE SHOW: the acts on one clock. Get the Drift starts `overlap` s before Undertime ends (the web's knots
+  // open into galaxies under the fading signature), from where Undertime leaves the eye
+  const { total: act1 } = beatStarts(p);
+  const p2 = getTheDriftParams;
+  const act2Start = act1 - p2.overlap;
+  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(p.zoomDecades, heroGrainPosition(p), p.fieldRadius), p.domeTilt);
+  scene.add(arrival.group);
+  const total = act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({
-    start: p.crawlStart,
-    gap: p.crawlGap,
-    travel: p.crawlTravel,
     elTop: p.crawlElTop,
-    elBottom: p.crawlElBottom,
+    sink: p.crawlSink,
     holdEl: p.crawlHoldEl,
-    sizeTop: p.crawlSizeTop,
-    sizeBottom: p.crawlSizeBottom,
+    size: p.crawlSize,
     fade: 3,
-    end: total,
+    end: act1,
     maxArc: p.crawlMaxArc,
   });
   const crawl = new CrawlOverlay(undertimeCrawl(p), crawlLayout());
@@ -154,19 +161,34 @@ async function boot(): Promise<void> {
   // the flat preview rides along with the eye (the act's camera path), keeping the look the user dragged to
   const eyeWas = new THREE.Vector3();
   /** put the world into the state of act time `at` — the one place a frame's content is decided */
+  let act2: ArrivalState | null = null;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
-    eye.position.set(...eyePath(at, p));
+    const t2 = at - act2Start;
+    act2 = t2 >= 0 ? arrival.update(t2, eye.position) : null;
+    if (!act2) eye.position.set(...eyePath(at, p));
+    // Undertime hands its world over to the galaxies, then leaves the scene
+    const k = Math.min(1, Math.max(0, t2 / (p2.overlap + 2)));
+    const fade = 1 - k * k * (3 - 2 * k);
+    field.group.visible = fade > 0;
+    arrival.group.visible = t2 >= 0;
     const moved = eye.position.clone().sub(eyeWas);
     camera.position.add(moved);
     controls.target.add(moved);
     eyeWas.copy(eye.position);
-    field.update(state, at, eye.position);
+    field.update(state, at, eye.position, fade);
+    // Get the Drift arrives at the Sun from galaxy distances: the near clip must follow the scale
+    const near = act2 ? Math.max(1e-7, Math.min(0.05, act2.f * 0.02)) : 0.05;
+    dome.setNear(near);
+    if (camera.near !== Math.min(near, 0.02)) {
+      camera.near = Math.min(near, 0.02);
+      camera.updateProjectionMatrix();
+    }
     dome.setFaceSize(faceOverride ?? p.domeFace);
     Object.assign(crawl.layout, crawlLayout());
-    crawl.lines = undertimeCrawl(p);
+    crawl.phrases = undertimeCrawl(p);
     crawl.draw(at);
-    const band = crawlBand(at, crawl.lines, crawl.layout);
+    const band = crawlBand(at, crawl.phrases, crawl.layout);
     field.setPocket({ lo: band.lo, hi: band.hi, az: p.crawlPocketAz, strength: band.strength * p.crawlPocket }, p.domeTilt);
     return state;
   };
@@ -179,9 +201,27 @@ async function boot(): Promise<void> {
     overlayRadiance: p.crawlRadiance,
   });
   let masterSize = 1024;
+  const setPixelAngle = (rad: number): void => {
+    field.setPixelAngle(rad);
+    arrival.setPixelAngle(rad);
+  };
   const renderMaster = (): void => {
-    field.setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
+    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
     dome.render(renderer, scene, eye, p.domeTilt, masterSize, look());
+  };
+  /** one recorded frame: the master of time `at`, motion-blurred over `shutter` s with `samples` sub-frames */
+  const frame = (at: number, shutter: number, samples: number): void => {
+    if (samples <= 1) {
+      prepare(at);
+      renderMaster();
+      return;
+    }
+    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
+    for (let i = 0; i < samples; i++) {
+      prepare(at + shutter * ((i + 0.5) / samples - 0.5));
+      dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, 1 / samples, i === 0);
+    }
+    dome.presentAccumulated(renderer, look());
   };
 
   const draw = (): void => {
@@ -196,7 +236,7 @@ async function boot(): Promise<void> {
       flatBloom.radius.value = p.bloomRadius;
       flatBloom.threshold.value = p.bloomThreshold;
       renderer.toneMappingExposure = p.exposure;
-      field.setPixelAngle(((camera.fov * Math.PI) / 180) / (size.y * renderer.getPixelRatio()));
+      setPixelAngle(((camera.fov * Math.PI) / 180) / (size.y * renderer.getPixelRatio()));
       flatPipeline.render();
     } else {
       // square master, centred and letterboxed, at the drawing buffer's own resolution
@@ -208,9 +248,13 @@ async function boot(): Promise<void> {
     }
     guides.update(view === 'dome' && guidesOn, p.domeTilt);
     if (hud) {
+      const a2 = act2 as ArrivalState | null;
+      const where = a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
       hud.textContent =
-        `${state.beat.padEnd(10)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
-        `view ${view}   pairs ${state.pairDensity.toFixed(2)}  glow ${state.glow.toFixed(2)}  clock ×${state.clockRate.toFixed(2)}  wave ${state.wave.toFixed(2)}  grains ${state.grains.toFixed(2)}  zoom ×${(1 / state.scale).toFixed(0)}  stars ${state.stars.toFixed(2)}`;
+        `${where.padEnd(26)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
+        (a2 && t >= act1
+          ? `view ${view}   distance ×${a2.f.toExponential(1)}  volume ${a2.volume.toFixed(2)}  local stars ${a2.local.toFixed(2)}  sun ${a2.sunStar.toFixed(2)}`
+          : `view ${view}   pairs ${state.pairDensity.toFixed(2)}  glow ${state.glow.toFixed(2)}  clock ×${state.clockRate.toFixed(2)}  wave ${state.wave.toFixed(2)}  grains ${state.grains.toFixed(2)}  zoom ×${(1 / state.scale).toFixed(0)}  stars ${state.stars.toFixed(2)}`);
     }
   };
 
@@ -233,7 +277,7 @@ async function boot(): Promise<void> {
     try {
       return await recordDomeMaster(
         { to: total, ...o, size, onProgress: (n, of) => { recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
-        { renderer, prepare, renderMaster },
+        { renderer, frame },
       );
     } finally {
       faceOverride = null;
@@ -252,6 +296,9 @@ async function boot(): Promise<void> {
     get t(): number {
       return t;
     },
+    /** s, the show's end (every act) — what scripts/drift-render.mjs renders up to */
+    total,
+    arrival,
     setTime(x: number): void {
       t = clampT(x);
     },
@@ -270,7 +317,7 @@ async function boot(): Promise<void> {
   bootReady();
   loop.start();
   if (q.has('record')) {
-    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight] — a lane of scripts/drift-render.mjs, or a one-off
+    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight&blur&shutter] — a lane of scripts/drift-render.mjs, or a one-off
     const num = (k: string, d: number): number => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
     const status = window as unknown as { __driftRecord?: { done: boolean; frames?: number; error?: string } };
     status.__driftRecord = { done: false };
@@ -284,6 +331,8 @@ async function boot(): Promise<void> {
       lane: q.has('lane'),
       sink: q.get('sink') ?? undefined,
       inFlight: num('inflight', 3),
+      blur: num('blur', 1),
+      shutter: num('shutter', 0.5),
     }).then(
       (frames) => (status.__driftRecord = { done: true, frames }),
       (e) => (status.__driftRecord = { done: true, error: String(e) }),
