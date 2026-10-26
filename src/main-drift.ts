@@ -7,7 +7,8 @@
  *   view   `flat`  a perspective preview from inside the medium (drag to look around)
  *          `dome`  the square dome master the planetarium plays (cine/domeCapture.ts), letterboxed
  *   keys   Space pause · ←/→ ±2 s (Shift ±10 s) · Home restart · V flat/dome · [ ] speed ×½/×2
- *   url    ?t=<s> start time · ?view=flat|dome · ?speed=<x> · ?paused
+ *   url    ?t=<s> start time · ?view=flat|dome · ?speed=<x> · ?paused · ?markers (dome orientation check)
+ *          ?record[&size=2048&fps=30] renders the act to the cine sink (npm run cine:sink), see drift/record.ts
  *
  * Content and treatment: /Users/flo/work/code/drift-narrative/undertime/treatment.md
  */
@@ -23,6 +24,7 @@ import { beatStarts, undertimeState } from './drift/undertime/timeline';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, type CrawlLayout } from './drift/undertime/crawl';
 import { UNDERTIME_CRAWL } from './drift/undertime/crawlText';
+import { recordDomeMaster, type DriftRecordOptions } from './drift/record';
 
 type View = 'flat' | 'dome';
 
@@ -117,11 +119,23 @@ async function boot(): Promise<void> {
   const hud = document.getElementById('drift-hud');
   const size = new THREE.Vector2();
 
-  const draw = (): void => {
-    const state = undertimeState(t, p);
-    field.update(state, t);
+  /** put the world into the state of act time `at` — the one place a frame's content is decided */
+  const prepare = (at: number): ReturnType<typeof undertimeState> => {
+    const state = undertimeState(at, p);
+    field.update(state, at);
     uGlow.value = state.glow * p.glowRadiance;
     renderer.toneMappingExposure = p.exposure;
+    dome.setFaceSize(p.domeFace);
+    Object.assign(crawl.layout, crawlLayout());
+    crawl.draw(at);
+    dome.setOverlayRadiance(p.crawlRadiance);
+    return state;
+  };
+  /** the master into whatever is bound, filling the current viewport */
+  const renderMaster = (): void => dome.render(renderer, scene, eye, p.domeTilt);
+
+  const draw = (): void => {
+    const state = prepare(t);
     renderer.getSize(size);
     renderer.setViewport(0, 0, size.x, size.y);
     renderer.setClearColor(0x000000, 1);
@@ -132,18 +146,28 @@ async function boot(): Promise<void> {
     } else {
       // square master, centred and letterboxed
       const s = Math.min(size.x, size.y);
-      dome.setFaceSize(p.domeFace);
-      Object.assign(crawl.layout, crawlLayout());
-      crawl.draw(t);
-      dome.setOverlayRadiance(p.crawlRadiance);
       renderer.setViewport((size.x - s) / 2, (size.y - s) / 2, s, s);
-      dome.render(renderer, scene, eye, p.domeTilt);
+      renderMaster();
       renderer.setViewport(0, 0, size.x, size.y);
     }
     if (hud) {
       hud.textContent =
-        `${state.beat.padEnd(10)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}\n` +
+        `${state.beat.padEnd(10)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
         `view ${view}   pairs ${state.pairDensity.toFixed(2)}  glow ${state.glow.toFixed(2)}  grains ${state.grains.toFixed(2)}  spread ×${(1 / state.scale).toFixed(0)}`;
+    }
+  };
+
+  let recording = '';
+  const record = async (o: Partial<DriftRecordOptions> = {}): Promise<number> => {
+    loop.stop();
+    try {
+      return await recordDomeMaster(
+        { to: total, ...o, onProgress: (n, of) => { recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
+        { renderer, prepare, renderMaster },
+      );
+    } finally {
+      recording = '';
+      loop.start();
     }
   };
 
@@ -172,11 +196,14 @@ async function boot(): Promise<void> {
       paused = on;
     },
     state: () => undertimeState(t, p),
+    /** offline dome-master render to the cine sink (npm run cine:sink): { size, fps, from, to, shot } */
+    record,
   };
 
   draw();
   bootReady();
   loop.start();
+  if (q.has('record')) void record({ size: Number(q.get('size') ?? 2048) || 2048, fps: Number(q.get('fps') ?? 30) || 30 });
 }
 
 void boot();
