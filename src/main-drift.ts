@@ -38,7 +38,10 @@ import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/
 import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
-import { PART_C, createSea } from './drift/wandering/sea';
+import { createSea } from './drift/wandering/sea';
+import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
+import { EARTH_R } from './drift/getTheDrift/atmosphere';
+import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
 
 type View = 'flat' | 'dome';
 
@@ -136,16 +139,28 @@ async function boot(): Promise<void> {
   const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
   const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
-  // THE SEA (drift/wandering/sea.ts), in a scene of its own: Part C's first sketch after Get the Drift, through a
-  // dip to black (the descent's hand-over, C1, is not built yet) — or, with ?sea[&hour=h], the sea test act
+  // THE SEA (drift/wandering/sea.ts), in a scene of its own: the landing's last hundred-odd metres (C1) and the
+  // rest at the raft, taken over from Get the Drift as one descent — or, with ?sea[&hour=h], the sea test act
   // alone on its own clock
   const seaQuery = new URLSearchParams(location.search);
   const seaTest = seaQuery.has('sea');
-  const sea = seaTest ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : createSea(renderer, PART_C);
-  const seaStart = seaTest ? 0 : act2Start + arrival.total;
+  /** s the eye rests at the raft after Get the Drift's landing ends */
+  const HOLD = 25;
+  const sea = seaTest
+    ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
+    : createSea(renderer, { drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.seaFrom), total: arrival.total + HOLD - arrival.seaFrom });
+  const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
   const total = seaStart + sea.total;
-  /** s each side of the cut into the sea the picture dips to black over */
-  const DIP = 1.5;
+  /** s the hand-over into the sea's scene crossfades over: both scenes summed in HDR, each at its own exposure */
+  const XF = 3;
+  // through the landing Act 2 eases into the sea's look — its adaptation to the light where the sea takes over,
+  // and its grade — so the crossfade only swaps what is drawn
+  const handSun = arrival.seaDrive(arrival.seaFrom, arrival.seaFrom).sun;
+  const handSky = skyIrradiance(EARTH_R, handSun);
+  const seaAdapt = adaptation(0.2126 * handSky[0] + 0.7152 * handSky[1] + 0.0722 * handSky[2]);
+  const landingFrom = driftBeats(p2).starts.landing;
+  /** the sea acts' grade: a camera's contrast and colour over AgX's flat curve */
+  const SEA_GRADE: [number, number] = [1.2, 1.12];
   const crawlLayout = (): CrawlLayout => ({
     elTop: p.crawlElTop,
     sink: p.crawlSink,
@@ -171,7 +186,7 @@ async function boot(): Promise<void> {
     return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
   };
   // the crawl lives in master space, so it shows in the dome view only
-  // (the sea acts: a camera's contrast and colour over AgX's flat curve — references/sea-golden-hour-sky)
+  // (the sea acts: SEA_GRADE — references/sea-golden-hour-sky)
   const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: true });
 
   const q = new URLSearchParams(location.search);
@@ -202,27 +217,30 @@ async function boot(): Promise<void> {
   // the flat preview rides along with the eye (the act's camera path), keeping the look the user dragged to
   const eyeWas = new THREE.Vector3();
   /** put the world into the state of act time `at` — the one place a frame's content is decided */
-  let act2: ArrivalState | null = null;
-  /** this frame is the sea's; and the dip to black about the cut into it (1 = none) */
-  let seaNow = false;
-  let dip = 1;
+  let act2: (ArrivalState & { altitude: number }) | null = null;
+  /** this frame's share of the sea's scene (0 before the hand-over, 1 after), its eye; and Act 2's exposure
+   * and near plane */
+  let seaK = 0;
+  const seaEye = new THREE.Object3D();
+  let actExposure = 1;
+  let actNear = 0.05;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
-    seaNow = at >= seaStart;
-    dip = seaTest ? 1 : Math.min(1, Math.abs(at - seaStart) / DIP);
-    dip = dip * dip * (3 - 2 * dip);
-    if (seaNow) {
-      sea.update(at - seaStart, eye, renderer);
-      dome.setGrade(1.2, 1.12);
-      dome.setNear(0.05);
-      dome.setFar(sea.far);
-      dome.setFaceSize(faceOverride ?? p.domeFace);
+    const x = seaTest ? 1 : Math.min(1, Math.max(0, (at - seaStart) / XF));
+    seaK = x * x * (3 - 2 * x);
+    dome.setFaceSize(faceOverride ?? p.domeFace);
+    if (seaK > 0) sea.update(at - seaStart, seaEye, renderer);
+    if (seaK >= 1) {
+      dome.setGrade(...SEA_GRADE);
       return state;
     }
-    dome.setGrade(1, 1);
-    dome.setFar(1e6);
     const t2 = at - act2Start;
-    act2 = t2 >= 0 ? arrival.update(t2, eye.position) : null;
+    const g = Math.min(1, Math.max(0, (t2 - landingFrom) / (arrival.seaFrom - landingFrom)));
+    const look = g * g * (3 - 2 * g);
+    actExposure = 1 + (seaAdapt - 1) * look;
+    dome.setGrade(1 + (SEA_GRADE[0] - 1) * look, 1 + (SEA_GRADE[1] - 1) * look);
+    eye.quaternion.identity();
+    act2 = t2 >= 0 ? arrival.update(t2, eye.position, eye.quaternion) : null;
     if (!act2) eye.position.set(...eyePath(at, p));
     // Undertime hands its world over to the galaxies, then leaves the scene
     const k = Math.min(1, Math.max(0, t2 / (p2.overlap + 2)));
@@ -238,34 +256,40 @@ async function boot(): Promise<void> {
     field.update(state, at, eye.position, fade, webKeep);
     // Get the Drift arrives at the Sun from galaxy distances: the near clip must follow the scale
     // (and once the planet is there, the nearest thing is its atmosphere, a thousand km off: 1e-4 of a unit)
-    const near = act2 ? (act2.earth > 0 ? 1e-4 : Math.max(1e-7, Math.min(0.05, act2.f * 0.02))) : 0.05;
-    dome.setNear(near);
+    // (and as the landing comes down to the water, a few hundredths of the height)
+    const near = act2 ? (act2.earth > 0 ? Math.min(1e-4, Math.max(1e-9, act2.altitude * 0.03)) : Math.max(1e-7, Math.min(0.05, act2.f * 0.02))) : 0.05;
+    actNear = near;
     if (camera.near !== Math.min(near, 0.02)) {
       camera.near = Math.min(near, 0.02);
       camera.updateProjectionMatrix();
     }
-    dome.setFaceSize(faceOverride ?? p.domeFace);
     Object.assign(crawl.layout, crawlLayout());
     crawl.phrases = undertimeCrawl(p);
     crawl.draw(at);
     field.setPocket(pocketAt(at), p.domeTilt);
     return state;
   };
-  /** the master into whatever is bound, filling the current viewport */
-  const look = (): DomeLook => ({
-    exposure: p.exposure * (seaNow ? sea.exposure : 1) * dip,
+  /** how the master is presented (`exposure` on top of the show's) */
+  const look = (exposure: number): DomeLook => ({
+    exposure: p.exposure * exposure,
     bloomStrength: p.bloomStrength,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,
-    overlayRadiance: seaNow ? 0 : p.crawlRadiance,
+    overlayRadiance: seaK >= 1 ? 0 : p.crawlRadiance,
   });
-  // the sea's sky is a background node, which never forces a clear: with autoClear off the faces kept the
-  // last frame's colour and depth
-  const stage = (draw: (s: THREE.Scene) => void): void => {
-    if (!seaNow) return draw(scene);
-    renderer.autoClear = true;
-    draw(sea.scene);
-    renderer.autoClear = false;
+  /** the prepared frame's scenes into the dome's accumulator with `weight`, shared out by the hand-over (each
+   * scene's own exposure in its share, so present with `look(1)`) */
+  const accumulate = (weight: number, first: boolean): void => {
+    if (seaK < 1) {
+      dome.setNear(actNear);
+      dome.setFar(1e6);
+      dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, weight * (1 - seaK) * actExposure, first);
+    }
+    if (seaK > 0) {
+      dome.setNear(0.05);
+      dome.setFar(sea.far);
+      dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * sea.exposure, first && seaK >= 1);
+    }
   };
   let masterSize = 1024;
   const setPixelAngle = (rad: number): void => {
@@ -275,7 +299,14 @@ async function boot(): Promise<void> {
   };
   const renderMaster = (): void => {
     setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
-    stage((s) => dome.render(renderer, s, eye, p.domeTilt, masterSize, look()));
+    if (seaK <= 0) {
+      dome.setNear(actNear);
+      dome.setFar(1e6);
+      dome.render(renderer, scene, eye, p.domeTilt, masterSize, look(actExposure));
+      return;
+    }
+    accumulate(1, true);
+    dome.presentAccumulated(renderer, look(1));
   };
   /** one recorded frame: the master of time `at`, motion-blurred over `shutter` s with `samples` sub-frames */
   const frame = (at: number, shutter: number, samples: number): void => {
@@ -289,9 +320,9 @@ async function boot(): Promise<void> {
     }
     for (let i = 0; i < samples; i++) {
       prepare(at + shutter * ((i + 0.5) / samples - 0.5));
-      stage((s) => dome.accumulate(renderer, s, eye, p.domeTilt, masterSize, 1 / samples, i === 0));
+      accumulate(1 / samples, i === 0);
     }
-    dome.presentAccumulated(renderer, look());
+    dome.presentAccumulated(renderer, look(1));
   };
 
   const draw = (): void => {
@@ -319,7 +350,7 @@ async function boot(): Promise<void> {
     guides.update(view === 'dome' && guidesOn, p.domeTilt);
     if (hud) {
       const a2 = act2 as ArrivalState | null;
-      const where = seaNow ? 'the sea · part C sketch' : a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
+      const where = seaK >= 1 ? 'the sea · C1 landing' : seaK > 0 ? 'the sea · hand-over' : a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
       hud.textContent =
         `${where.padEnd(26)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
         (a2 && t >= act1

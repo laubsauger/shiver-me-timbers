@@ -22,7 +22,7 @@
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import { domeBasis, type Vec3 } from '../../cine/domeMaster';
 
-export const BEATS = ['galaxies', 'ours', 'band', 'sun', 'earth', 'timewave', 'lights', 'overshoot', 'flood', 'drift2'] as const;
+export const BEATS = ['galaxies', 'ours', 'band', 'sun', 'earth', 'timewave', 'lights', 'overshoot', 'flood', 'drift2', 'landing'] as const;
 export type Beat = (typeof BEATS)[number] | 'end';
 
 const clamp01 = (x: number): number => Math.min(1, Math.max(0, x));
@@ -127,16 +127,16 @@ export interface ArrivalState {
  * Speed, not position, is what the audience feels: drawn this way it has no kinks (no jolts) and no dips at
  * the keys, which a spline through positions gave. Returned: the distance covered by time t.
  */
-function journey(ts: number[], speeds: number[]): (t: number) => number {
+function journey(ts: number[], speeds: number[], weight: (t: number) => number = () => 1): (t: number) => number {
   const t0 = ts[0];
   const t1 = ts[ts.length - 1];
   const dt = 0.02;
   const n = Math.ceil((t1 - t0) / dt) + 1;
   const acc = new Float64Array(n + 1);
   for (let i = 1; i <= n; i++) {
-    const a = t0 + (i - 1) * dt;
+    const a = t0 + (i - 1) * dt + dt / 2;
     // midpoint rule (the curve is smooth)
-    acc[i] = acc[i - 1] + monotone(ts, speeds, a + dt / 2) * dt;
+    acc[i] = acc[i - 1] + monotone(ts, speeds, a) * weight(a) * dt;
   }
   return (t: number): number => {
     const x = (Math.min(Math.max(t, t0), t1) - t0) / dt;
@@ -163,16 +163,29 @@ function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; ear
   // TOWARD THE EARTH AND DOWN TO IT (e-folds of altitude per second, scaled to land over the spiral on time):
   // the approach under the comfort cap, a slow sink from a high orbit through the time waves and the night,
   // faster through the flood
+  // ... and on through the landing (C1) down to the raft, at rest only there
   const e = starts.earth;
   const end = starts.drift2 + p.drift2;
-  const ets = [e - 3, e + 2, e + 9, e + 17, e + 25, e + 31, e + 38, e + 48, starts.flood - 6, starts.flood + 12, end - 12, end];
-  const ev = [0, 0.1, 0.24, 0.28, 0.34, 0.3, 0.12, 0.022, 0.014, 0.07, 0.085, 0];
-  const e0 = journey(ets, ev);
+  const land = end + p.landing;
+  const L = p.landing;
+  const ets = [e - 3, e + 2, e + 9, e + 17, e + 25, e + 31, e + 38, e + 48, starts.flood - 6, starts.flood + 12, end - 6, end + 0.25 * L, end + 0.55 * L, end + 0.8 * L, land];
+  const ev = [0, 0.1, 0.24, 0.28, 0.34, 0.3, 0.12, 0.022, 0.014, 0.07, 0.09, 0.1, 0.24, 0.16, 0];
+  // two anchors (Drift-2 ends over the galaxy at `driftAltitude`, the landing at the raft): one scale before,
+  // one after, blended smoothly across Drift-2's end so the speed stays smooth — solved for both
+  const w = (t: number): number => smooth((t - end + 8) / 16);
+  const before = journey(ets, ev, (t) => 1 - w(t));
+  const after = journey(ets, ev, w);
   const far = (EARTH_RADIUS + p.orbitAltitude) * p.earthFar - EARTH_RADIUS;
-  const eScale = Math.log(far / p.driftAltitude) / e0(end);
+  const A1 = Math.log(far / p.driftAltitude);
+  const A2 = Math.log(far / LANDED);
+  // s1·b(end) + s2·a(end) = A1;  s1·b(land) + s2·a(land) = A2
+  const [b1, a1, b2, a2] = [before(end), after(end), before(land), after(land)];
+  const det = b1 * a2 - a1 * b2;
+  const s1 = (A1 * a2 - a1 * A2) / det;
+  const s2 = (b1 * A2 - A1 * b2) / det;
   const made = {
     galaxy: (t: number): number => -g0(t) * gScale,
-    earth: (t: number): number => far * Math.exp(-e0(t) * eScale),
+    earth: (t: number): number => far * Math.exp(-(before(t) * s1 + after(t) * s2)),
   };
   journeys.clear();
   journeys.set(key, made);
@@ -245,8 +258,109 @@ export const ARRIVED = 1.6;
 /** s the planet sinks by `dawnSink` over, from its arrival, as the day breaks on it */
 const DAWN_SINK_S = 20;
 
+/** Mm: the eye's height over the water at the raft (a few metres, just above a deck) */
+export const LANDED = 3e-6;
+/** how fast the landing's ground track closes on the raft against the height it comes down (see landingTrack) */
+const TRACK_Q = 2;
+/** m east, north of the field's centre: where the eye comes down, in an arm of the debris galaxy (the raft
+ * floats beside it: wandering/sea.ts) */
+export const EYE_AT: [number, number] = [-2200, 900];
+
+/**
+ * THE GATHERING POINT, where Drift-2's debris galaxy floats (its centre), and the tangent frame there: the
+ * point a ray at gatherEl straight ahead meets the planet at Drift-2's end (the planet only translates
+ * until then, so it stays put on it). `up` is the planet's normal there, `front` the dome's front laid into
+ * the tangent plane (the heading the landing levels out on), `east`, `north` complete the frame.
+ */
+export interface GatherFrame {
+  up: Vec3;
+  east: Vec3;
+  north: Vec3;
+  front: Vec3;
+}
+const gatherCache = new Map<string, GatherFrame>();
+export function gatherFrame(p: GetTheDriftParams, tiltDeg: number): GatherFrame {
+  const key = JSON.stringify(p) + tiltDeg;
+  const hit = gatherCache.get(key);
+  if (hit) return hit;
+  const { starts } = beatStarts(p);
+  const endT = starts.drift2 + p.drift2;
+  const endPlace = earthPlace0(endT, p, tiltDeg);
+  const c = endPlace.centreDir.map((x) => x * endPlace.distance) as Vec3;
+  const ray = domeDir(p.gatherEl, 0, tiltDeg);
+  const b = dot(ray, c);
+  const t = b - Math.sqrt(Math.max(0, b * b - dot(c, c) + EARTH_RADIUS * EARTH_RADIUS));
+  const up = norm([ray[0] * t - c[0], ray[1] * t - c[1], ray[2] * t - c[2]]);
+  const east = norm(cross(up, [0, 1, 0]));
+  const north = cross(east, up);
+  const f0 = domeDir(0, 0, tiltDeg);
+  const front = norm(add(f0, up, -dot(f0, up)));
+  const made = { up, east, north, front };
+  gatherCache.clear();
+  gatherCache.set(key, made);
+  return made;
+}
+
+/**
+ * The landing (C1): from Drift-2's end the eye glides down over the debris galaxy to the raft (`landingTrack`:
+ * the eye's ground position, m east and north of the field's centre, and its height, m). Its ground
+ * track runs from where Drift-2 left it to the raft, steered by the height: with u the e-folds come down,
+ * the share of the way still to go is (1 + qu)·e^(−qu) — it sets off gently, and the ground's apparent
+ * motion (speed over height, ∝ u·e^(−(q−1)u)·u̇) rises and dies away with the descent, never stopping before
+ * it does. The planet places itself under it; a short blend across Drift-2's end joins the two without a kink.
+ */
+export function landingTrack(t: number, p: GetTheDriftParams, tiltDeg: number): { east: number; north: number; alt: number } {
+  const { starts } = beatStarts(p);
+  const endT = starts.drift2 + p.drift2;
+  const g = gatherFrame(p, tiltDeg);
+  const alt = earthAltitude(t, p);
+  // where Drift-2 left the eye's ground track (tangent coordinates at the gathering point)
+  const before = earthPlace0(endT, p, tiltDeg);
+  const eyeAt = before.centreDir.map((x) => -x * before.distance) as Vec3;
+  const g0 = [dot(eyeAt, g.east) * 1e6, dot(eyeAt, g.north) * 1e6];
+  const u = Math.max(0, Math.log(earthAltitude(endT, p)) - Math.log(alt));
+  const k = 1 - (1 + TRACK_Q * u) * Math.exp(-TRACK_Q * u);
+  return { east: g0[0] + (EYE_AT[0] - g0[0]) * k, north: g0[1] + (EYE_AT[1] - g0[1]) * k, alt: alt * 1e6 };
+}
+
+function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
+  const g = gatherFrame(p, tiltDeg);
+  const tr = landingTrack(t, p, tiltDeg);
+  const onPlanet = norm(add(add(g.up.map((x) => x * EARTH_RADIUS) as Vec3, g.east, tr.east * 1e-6), g.north, tr.north * 1e-6));
+  const eye = onPlanet.map((x) => x * (EARTH_RADIUS + tr.alt * 1e-6)) as Vec3;
+  const d = Math.hypot(eye[0], eye[1], eye[2]);
+  return { centreDir: eye.map((x) => -x / d) as Vec3, distance: d };
+}
+
+/** the eye's turn over the landing: from Act 2's framing (none) to level at the raft, looking ahead */
+export function landingTurn(t: number, p: GetTheDriftParams, tiltDeg: number): { k: number; up: Vec3; front: Vec3 } {
+  const { starts } = beatStarts(p);
+  const endT = starts.drift2 + p.drift2;
+  const g = gatherFrame(p, tiltDeg);
+  return { k: smooth((t - endT + 4) / (p.landing * 0.85)), up: g.up, front: g.front };
+}
+
 /** where the planet is (centre direction, distance) at act time t — everything but the Sun */
 function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
+  const { starts } = beatStarts(p);
+  const endT = starts.drift2 + p.drift2;
+  if (t <= endT - BLEND) return earthPlace0(t, p, tiltDeg);
+  const land = landingPlace(t, p, tiltDeg);
+  if (t >= endT + BLEND) return land;
+  const w = smooth((t - endT + BLEND) / (2 * BLEND));
+  const was = earthPlace0(t, p, tiltDeg);
+  const pa = was.centreDir.map((x) => x * was.distance);
+  const pb = land.centreDir.map((x) => x * land.distance);
+  const c = [0, 1, 2].map((i) => pa[i] + (pb[i] - pa[i]) * w) as Vec3;
+  const d = Math.hypot(c[0], c[1], c[2]);
+  return { centreDir: c.map((x) => x / d) as Vec3, distance: d };
+}
+
+/** s each side of Drift-2's end the two placements are blended over */
+const BLEND = 5;
+
+/** where the planet is up to Drift-2's end: the approach, the slide, the limb across the front */
+function earthPlace0(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
   const { starts } = beatStarts(p);
   const distance = EARTH_RADIUS + earthAltitude(t, p);
   const radius = (Math.asin(Math.min(1, EARTH_RADIUS / distance)) * 180) / Math.PI;
@@ -288,6 +402,9 @@ function monotone(xs: number[], ys: number[], x: number): number {
   const h11 = u ** 3 - u ** 2;
   return h00 * ys[i] + h10 * h * m[i] + h01 * ys[i + 1] + h11 * h * m[i + 1];
 }
+
+/** deg: the Sun over the horizon at the raft when the landing ends */
+const MORNING_SUN = 11;
 
 export interface SunDay {
   /** unit pole the Sun's day turns about, and its start (where the arrival left it) */
@@ -344,11 +461,19 @@ export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
   let top = 0;
   for (let th = 0; th < set; th += step) if (dot(at(th), up) > dot(at(top), up)) top = th;
   const D = Math.PI / 180;
+  // and where the day ends, at the raft: a low morning Sun, MORNING_SUN over the horizon there (no second
+  // sunset after the night of the lights)
+  const local = gatherFrame(p, tiltDeg).up;
+  let morning = rise + 8 * D;
+  for (let th = rise + 8 * D; th < 2 * Math.PI; th += step) {
+    morning = th;
+    if (dot(at(th), local) >= Math.sin(MORNING_SUN * D)) break;
+  }
   return {
     pole: sign > 0 ? pole : (pole.map((x) => -x) as Vec3),
     start,
-    times: [starts.earth + ARRIVED * p.earthApproach, starts.timewave + 6, tSet, tRise, starts.drift2 + p.drift2],
-    angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, rise + 4 * D, 2 * Math.PI],
+    times: [starts.earth + ARRIVED * p.earthApproach, starts.timewave + 6, tSet, tRise, starts.landing + p.landing],
+    angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, rise + 4 * D, morning],
   };
 }
 

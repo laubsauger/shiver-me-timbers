@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { ARRIVED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { ARRIVED, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, landingTrack, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -94,6 +94,40 @@ describe('Get the Drift arrival', () => {
     }
     expect(slowest).toBeGreaterThan(0.008);
     expect(jolt).toBeLessThan(0.12);
+  });
+
+  it('lands as one glide: down to the raft the eye never parks or lurches, and only settles a deck above the water', () => {
+    // A descent that stops gliding forward while it is still coming down reads as two shots spliced together
+    // (the v6 notes): the ground's apparent motion (speed over height) and the descent (e-folds of height per
+    // second) must change smoothly from Drift-2's end to the raft, and the motion only dies away as the eye
+    // settles at the deck's height.
+    const endT = starts.drift2 + p.drift2;
+    const h = 0.1;
+    const height = (t: number): number => earthPose(t, p, tilt).distance - 6.371;
+    const flow = (t: number): number => {
+      const a = landingTrack(t, p, tilt);
+      const b = landingTrack(t + h, p, tilt);
+      return Math.hypot(b.east - a.east, b.north - a.north) / a.alt / h;
+    };
+    const descent = (t: number): number => Math.abs(Math.log(height(t + h)) - Math.log(height(t))) / h;
+    const motion = (t: number): number => Math.max(flow(t), descent(t));
+    let jolt = 0;
+    let fastest = 0;
+    let slowest = Infinity;
+    let was = motion(endT - 6);
+    for (let t = endT - 6; t < total; t += h) {
+      const now = motion(t);
+      jolt = Math.max(jolt, Math.abs(now - was) / h);
+      fastest = Math.max(fastest, flow(t));
+      if (height(t) > LANDED * 1.2) slowest = Math.min(slowest, now);
+      was = now;
+    }
+    expect(jolt).toBeLessThan(0.12);
+    // (the ground's flow under the same comfort cap as the flight's e-folds)
+    expect(fastest).toBeLessThan(0.35);
+    expect(slowest).toBeGreaterThan(0.05);
+    expect(height(total) / LANDED).toBeCloseTo(1, 2);
+    expect(motion(total - h)).toBeLessThan(1e-3);
   });
 
   describe('Earth', () => {

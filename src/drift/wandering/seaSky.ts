@@ -9,7 +9,7 @@
  * irradiance for the ambient, and the colour along the horizon for the haze the water and land melt into.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, acos, cameraPosition, cubeTexture, exp, float, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
+import { Fn, If, acos, cameraPosition, cubeTexture, exp, float, max, min, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
 import { REFLECTED, cirrus, cloudMarch, type CloudData, type CloudUniforms } from './clouds';
 import {
@@ -140,6 +140,30 @@ const STAR_CONTRAST = 0.002;
 /** m: the marine haze between the eye and a cloud (its light falls to 1/e over this) */
 const CLOUD_HAZE = 18000;
 
+/** the far sea's mean-square wave slope: Cox–Munk's clean surface, 0.003 + 0.00512·U, at the glass preset's
+ * 1 m/s (weather/presets.ts; sea.ts) */
+const FAR_SLOPE2 = 0.003 + 0.00512 * 1;
+/** the far sea's glitter at most, against the Sun's disc (the glint's peak, past what the eye resolves) */
+const FAR_GLINT_MAX = 0.5;
+
+/** CPU: the sky's irradiance (linear) on an up-facing surface at radius r0 (Mm), Sun toward `sun` (y up):
+ * ∫ L cosθ dω over 8 rings × 16 bearings */
+export function skyIrradiance(r0: number, sun: THREE.Vector3): Rgb {
+  const E: Rgb = [0, 0, 0];
+  const d = new THREE.Vector3();
+  for (let i = 0; i < 8; i++) {
+    const el = ((i + 0.5) / 8) * (Math.PI / 2);
+    for (let j = 0; j < 16; j++) {
+      const az = ((j + 0.5) / 16) * Math.PI * 2;
+      d.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+      const L = radianceCpu(r0, d, sun, 32);
+      const w = Math.sin(el) * Math.cos(el) * (Math.PI / 2 / 8) * ((Math.PI * 2) / 16);
+      for (let k = 0; k < 3; k++) E[k] += L[k] * w;
+    }
+  }
+  return E;
+}
+
 export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms }): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R) };
   const S = u.sun as unknown as V3;
@@ -174,6 +198,25 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     return SUN_TINT.mul(sunDisc(acos(d.dot(S).clamp(-1, 1)))).mul(sunlight(eyeR, d.y, GROUND)) as V3;
   };
 
+  // THE FAR SEA: below the horizon, past the ocean's rim (~4.6 km; from 150 m up the horizon is 44 km off), the
+  // rays meet the planet — water, which mirrors the sky above it by Fresnel (nearly all of it, this grazing) and
+  // carries the Sun's glitter road on to the horizon (Cox–Munk: the share of wave facets tilted to reflect it,
+  // the grazing view's masking with them), all under the air between
+  const farSea = (d: V3, light: V3, T: V3): V3 => {
+    const cv = d.y.negate().max(1e-3);
+    const fresnel = float(0.02).add(cv.oneMinus().pow(5).mul(0.98));
+    const sky = scatter(o, vec3(d.x, cv, d.z), C, S, GROUND).light;
+    const h = normalize(S.sub(d));
+    const hy = h.y.max(1e-3);
+    const tan2 = h.x.mul(h.x).add(h.z.mul(h.z)).div(hy.mul(hy));
+    const facets = exp(tan2.div(-FAR_SLOPE2)).div(Math.PI * FAR_SLOPE2);
+    // Smith's masking for the view (Beckmann, rational fit)
+    const a = cv.div(max(cv.mul(cv).oneMinus(), 1e-6).sqrt()).div(Math.sqrt(FAR_SLOPE2));
+    const lam = select(a.lessThan(1.6), a.mul(a).mul(0.396).sub(a.mul(1.259)).add(1).div(a.mul(a).mul(2.181).add(a.mul(3.535))), float(0));
+    const glint = min(facets.mul(fresnel).mul(SUN_E).div(cv.mul(hy.mul(hy).mul(hy.mul(hy))).mul(4)).div(lam.add(1)), sunDisc(float(0)).mul(FAR_GLINT_MAX));
+    return light.add(T.mul(sky.mul(fresnel).add(SUN_TINT.mul(sunlight(eyeR, S.y, GROUND)).mul(glint)))) as V3;
+  };
+
   const material = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false, fog: false });
   material.colorNode = Fn(() => {
     const d = normalize(positionWorld.sub(cameraPosition));
@@ -181,7 +224,11 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    return vec4(withClouds(light.add(sun).add(starsAlong(d, T, hitGround, light)) as V3, light, d), 1);
+    const colour = withClouds(light.add(sun).add(starsAlong(d, T, hitGround, light)) as V3, light, d).toVar();
+    If(hitGround, () => {
+      colour.assign(farSea(d, light, T).add(SUN_TINT.mul(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r)))));
+    });
+    return vec4(colour, 1);
   })();
   material.name = 'drift-sea-sky';
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 48), material);
@@ -216,18 +263,8 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
       lastR = r0;
       sunColour.setRGB(...sunlightCpu(r0, sun.y));
       // irradiance on an up-facing surface: ∫ L cosθ dω over the sky (8 rings × 16 bearings)
-      const E = [0, 0, 0];
+      const E = skyIrradiance(r0, sun);
       const H = [0, 0, 0];
-      for (let i = 0; i < 8; i++) {
-        const el = ((i + 0.5) / 8) * (Math.PI / 2);
-        for (let j = 0; j < 16; j++) {
-          const az = ((j + 0.5) / 16) * Math.PI * 2;
-          d.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
-          const L = radianceCpu(r0, d, sun, 32);
-          const w = Math.sin(el) * Math.cos(el) * (Math.PI / 2 / 8) * ((Math.PI * 2) / 16);
-          for (let k = 0; k < 3; k++) E[k] += L[k] * w;
-        }
-      }
       for (let j = 0; j < 16; j++) {
         const az = ((j + 0.5) / 16) * Math.PI * 2;
         d.set(Math.sin(az) * Math.cos(0.01), Math.sin(0.01), Math.cos(az) * Math.cos(0.01));

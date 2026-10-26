@@ -27,6 +27,8 @@ type V3 = THREE.Node<'vec3'>;
 /** Mm (1000 km) */
 export const EARTH_R = 6.371;
 export const ATMOS = 0.1;
+/** how hard the air's samples crowd toward an eye inside it (scatter) */
+const CROWD = 3;
 export const H_RAY = 0.008;
 export const H_MIE = 0.0012;
 /** scattering per Mm at sea level (and the numbers, for CPU twins) */
@@ -157,7 +159,7 @@ export const sunGlare = (r: F): F => exp(r.div(0.008).negate()).mul(4).add(exp(r
 /**
  * The air's light along a ray from o in direction d (unit), planet centre C, toward the Sun S (unit): the
  * single-scattered sunlight it gathers out to space or to the ground, and its transmittance. 32 steps,
- * jittered per pixel (banding becomes fine grain).
+ * jittered per pixel (banding becomes fine grain). From inside the air the steps crowd toward the eye (CROWD).
  */
 export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: V3; T: V3; hitGround: THREE.Node<'bool'> } {
   const atm = sphereHit(o, d, C, EARTH_R + ATMOS);
@@ -166,7 +168,12 @@ export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: 
   const hitGround = gnd.t1.greaterThan(gnd.t0).and(gnd.t0.greaterThan(0));
   const t1 = select(hitGround, gnd.t0, atm.t1);
   const STEPS = 32;
-  const ds = t1.sub(t0).max(0).div(STEPS);
+  const L = t1.sub(t0).max(0);
+  // from inside the air (the descent, the sea) a ray's light comes mostly from its first tens of km — a level
+  // ray from the sea is out of the marine haze ~120 km along a ~1100 km path, where even steps (35 km each) left
+  // the jitter a halftone in the sky: the samples crowd toward the eye, at u^k of the way, weighted by the
+  // Jacobian k·u^(k−1); from space (k = 1) they run even, as they always have
+  const k = smoothstep(EARTH_R + ATMOS, EARTH_R + ATMOS * 0.3, length(o.sub(C))).mul(CROWD - 1).add(1);
   const inR = vec3(0).toVar();
   const inM = vec3(0).toVar();
   const odR = float(0).toVar();
@@ -182,7 +189,9 @@ export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: 
   const jitter = fract(fract(screenCoordinate.x.mul(0.06711056).add(screenCoordinate.y.mul(0.00583715))).mul(52.9829189));
   If(t1.greaterThan(t0), () => {
     Loop(STEPS, ({ i }) => {
-      const p = o.add(d.mul(t0.add(float(i).add(jitter).mul(ds))));
+      const u = float(i).add(jitter).div(STEPS);
+      const ds = L.mul(k).mul(u.max(1e-4).pow(k.sub(1))).div(STEPS);
+      const p = o.add(d.mul(t0.add(L.mul(u.pow(k)))));
       const r = length(p.sub(C));
       const h = r.sub(EARTH_R).max(0);
       const rR = exp(h.div(H_RAY).negate()).mul(ds);

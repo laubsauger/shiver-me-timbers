@@ -250,9 +250,12 @@ export function createEarth(): Earth {
       const m = driftMatter(n, D, fp, EARTH_R);
       matter.assign(vec2(m.turbid, m.slick));
     });
-    // Drift-2: the flood's sediment wound into the eddy tints the water itself (turbid water: olive-brown)
-    const sediment = vec3(0.065, 0.058, 0.034);
-    const albedo = mix(mix(water, sediment, matter.x.mul(0.85)), landAlbedo, land);
+    // Drift-2: the debris mats (weathered wood and wrack: brighter than open water in diffuse light, dark only
+    // in the glint, which they do not mirror) across the arms, bright scum and foam along their inner edges —
+    // as floating debris fields read from the air, against the silty flood water
+    const mats = vec3(0.25, 0.2, 0.14);
+    const foam = vec3(0.6, 0.57, 0.52);
+    const albedo = mix(mix(mix(water, mats, matter.x.mul(0.9)), foam, matter.y.mul(0.6)), landAlbedo, land);
 
     // sunlight at the terrain's height, under the clouds' shadows
     const sun = sunlight(float(EARTH_R).add(e.max(0).mul(1e-6 * RELIEF)), muS).toVar();
@@ -279,7 +282,7 @@ export function createEarth(): Earth {
     const fresnel = pow(float(1).sub(v.dot(h).max(0)), 5).mul(0.98).add(0.02);
     const smith = (m: F): F => m.mul(2).div(m.add(sqrt(a2.add(float(1).sub(a2).mul(m.mul(m))))));
     // floating matter kills the glint where it lies; its specks catch the Sun
-    const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade);
+    const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade).mul(float(1).sub(matter.x.mul(0.85)));
     // the sky in the water: Fresnel at grazing angles
     const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land));
     // the lights of the night side, dimmed and spread by the cloud over them

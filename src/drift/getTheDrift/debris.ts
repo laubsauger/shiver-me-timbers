@@ -1,23 +1,15 @@
 /**
- * Drift-2 (direction-part-b.md, B5): what the flood lifted — wood, wrack, the silt of drowned fields —
- * floating on the new sea and gathered by the currents into slow spirals, like galaxies on the water. The
- * film's one shape again: Drift-1's pair spirals, the galaxies, now the sea.
+ * Drift-2 (direction-part-b.md, B5; the storyboard's shot 07): what the flood lifted — wood, wrack, relics,
+ * the silt of drowned fields — floating on the new sea, gathered into a galaxy of debris: Act 2's own spiral
+ * arms on the water (debrisField.ts lays out the pieces; this is how the sea's colour carries them from afar,
+ * where a piece is far below a pixel). The film's one shape again: Drift-1's pair spirals, the galaxies, now
+ * the sea.
  *
- * Seen from tens of km up, floating matter is not objects but a TRACER: streaks and filaments drawn out by
- * the flow, as in the satellite images of plankton blooms swirling in the Baltic's eddies. So it is a layer
- * of the sea's surface (earth.ts mixes it into the water's colour), not particles.
- *
- * STATELESS SHEAR. The matter starts as patches (washed off the coasts, fbm). The eddy turns faster near its
- * centre than far out (Ω ∝ 1/(r + r0)), and a passive tracer in such a flow is just its first pattern
- * unwound: what is at (r, θ) now was at (r, θ − Ω(r)·τ). The differential rotation shears every patch into
- * a trailing spiral filament — the same winding that draws a galaxy's arms — and any frame is a pure
- * function of τ. The filaments thin as the shear grows; their noise fades its octaves finer than the pixel
- * (the shear counted in), so they never shimmer.
- *
- * Coordinates: the tangent plane at the gathering point (Mm), east and north there.
+ * Coordinates: the tangent plane at the gathering point, east and north there.
  */
 import * as THREE from 'three/webgpu';
-import { atan, cos, float, length, mx_noise_float, sin, smoothstep, vec2, vec3 } from 'three/tsl';
+import { atan, cos, exp, float, floor, int, length, log, mix, pow, sin, smoothstep, uint, vec2 } from 'three/tsl';
+import { ARM_COUNT, ARM_PHASE, ARM_SHARP, ARM_WIND, CLUMP_BIG, CLUMP_SMALL, CORE, DEBRIS_RADIUS, DEBRIS_SPIN, DISK } from './debrisField';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -33,57 +25,64 @@ export interface DriftUniforms {
   north: V3;
 }
 
-/** rad/s the eddy's core turns at (its rim much slower) */
-const SPIN = 0.075;
-/** the eddy: centred on the gathering point, its radius (Mm) — one spiral, clearly read (several overlapped
- * the land and each other and said less) */
-const EDDY = { x: 0, y: 0, r: 0.07, s: 1 };
-
-/** fbm in the plane (Mm), octaves finer than `fp` (Mm) faded out */
-function fbm2(x: F, y: F, f0: number, octaves: number, fp: F, seed: number): F {
-  let sum: F = float(0);
-  let f = f0;
-  let a = 1;
-  for (let i = 0; i < octaves; i++) {
-    const w = float(1).sub(smoothstep(0.25, 0.5, fp.mul(f)));
-    sum = sum.add(mx_noise_float(vec3(x.mul(f), y.mul(f), seed + i * 1.7)).mul(a).mul(w)) as F;
-    f *= 2.07;
-    a *= 0.55;
-  }
-  return sum;
-}
-
 /**
- * The eddy as the satellites see one (unit surface normal n): the flood's sediment swirled into the water
- * (`turbid`, 0..1: a soft change of the water's own colour) and the SLICKS — lines where floating matter
- * gathers and calms the small ripples (`slick`, 0..1: the sea's glint runs tighter and brighter along them,
- * the way eddies show in sunglint photographs). No opaque layer: the sea itself carries the spiral.
- * `fp` is the pixel's footprint on the unit sphere, `R` the planet's radius (Mm).
+ * The field as the sea's own colour carries it from afar (unit surface normal n): the floating matter's
+ * density (`turbid`, 0..1: the water browned by wood, wrack and silt along the arms, densest in the core) and
+ * the SLICKS (`slick`, 0..1: thin lines on the arms' inner edges where the matter calms the small ripples, so
+ * the glint runs bright along them). The same pattern as the pieces (debrisField.ts: Act 2's galaxy arms, the
+ * same clumps from the same hash), turning with them. `fp` is the pixel's footprint on the unit sphere, `R` the
+ * planet's radius (Mm).
  */
 export function driftMatter(n: V3, U: DriftUniforms, fp: F, R: number): { turbid: F; slick: F } {
   const flat = n.sub(U.up.mul(n.dot(U.up)));
-  const x = flat.dot(U.east).mul(R);
-  const y = flat.dot(U.north).mul(R);
-  const fpm = fp.mul(R);
-  const e = EDDY;
-  const dx = x.sub(e.x);
-  const dy = y.sub(e.y);
-  const r = length(vec2(dx, dy));
-  const q = r.div(e.r);
-  const omega = float(SPIN * e.s).div(q.add(0.25));
-  // unwound: where this water was when the flood let go
-  const th = atan(dy, dx).sub(omega.mul(U.time));
-  const ux = cos(th).mul(r);
-  const uy = sin(th).mul(r);
-  // the shear (rad of winding per unit ln r) thins everything it winds: the noise fades sooner
-  const shear = float(SPIN * Math.abs(e.s)).mul(q).div(q.add(0.25).mul(q.add(0.25))).mul(U.time);
-  const fine = fpm.mul(shear.add(1));
-  // the sediment: broad, soft plumes wound into arms; the eddy's rim fades into the open sea
-  const plume = fbm2(ux, uy, 22, 6, fine, 7.7);
-  const turbid = smoothstep(-0.35, 0.45, plume).mul(smoothstep(2.4, 0.3, q)).mul(U.presence) as F;
-  // the slicks: thin lines where a finer field crosses zero, wound into spiral filaments
-  const field = fbm2(ux, uy, 70, 7, fine, 3.1);
-  const ridge = float(1).sub(field.abs().mul(5)).max(0);
-  const slick = ridge.mul(ridge).mul(ridge).mul(smoothstep(2.0, 0.3, q)).mul(U.presence) as F;
+  // metres east and north of the field's centre (debrisField.ts: x, z), turned back by the field's own slow turn
+  const xe = flat.dot(U.east).mul(R * 1e6);
+  const zs = flat.dot(U.north).mul(R * 1e6);
+  // (the pieces' group turns by +spin·t about y: undo it)
+  const turn = U.time.mul(DEBRIS_SPIN);
+  const x = xe.mul(cos(turn)).sub(zs.mul(sin(turn)));
+  const z = xe.mul(sin(turn)).add(zs.mul(cos(turn)));
+  const fpm = fp.mul(R * 1e6);
+  const r = length(vec2(x, z)).div(DEBRIS_RADIUS);
+  const theta = atan(z.negate(), x);
+  const arm = (lag: number, sharp: number): F =>
+    pow(cos(theta.sub(log(r.max(0.02)).mul(ARM_WIND)).mul(ARM_COUNT).add(ARM_PHASE + lag)).mul(0.5).add(0.5), float(sharp)) as F;
+  // the clumps (fine scale faded where it is finer than the pixel)
+  const fine = float(1).sub(smoothstep(CLUMP_SMALL * 0.5, CLUMP_SMALL, fpm));
+  const big = valueNoiseNode(x.div(CLUMP_BIG), z.div(CLUMP_BIG), 31);
+  const small = mix(float(0.5), valueNoiseNode(x.div(CLUMP_SMALL), z.div(CLUMP_SMALL), 83), fine);
+  const clump = pow(big.mul(0.6).add(small.mul(0.4)), float(1.6));
+  const core = exp(r.div(-CORE)).mul(2.2);
+  const disk = exp(r.div(-DISK));
+  const rim = float(1).sub(smoothstep(0.9, 1.15, r));
+  const density = core.add(disk.mul(arm(0, ARM_SHARP).mul(smoothstep(0.05, 0.16, r)).mul(clump.mul(1.4).add(0.2)).mul(1.6).add(0.12))).mul(rim);
+  const turbid = smoothstep(0.15, 0.9, density).mul(U.presence) as F;
+  const slick = arm(-0.7, 14).mul(smoothstep(0.08, 0.22, r)).mul(rim).mul(disk.mul(1.5).min(1)).mul(U.presence) as F;
   return { turbid, slick };
+}
+
+/** debrisField.ts valueNoise in the shader: the same integer hash, so the same clumps */
+function hashNode(i: THREE.Node<'int'>, j: THREE.Node<'int'>, seed: number): F {
+  let h = uint(i).mul(uint(73856093)).bitXor(uint(j).mul(uint(19349663))).bitXor(uint(seed));
+  h = h.bitXor(h.shiftRight(uint(13))).mul(uint(1274126177));
+  h = h.bitXor(h.shiftRight(uint(16)));
+  return float(h).div(4294967295) as F;
+}
+
+function valueNoiseNode(x: F, y: F, seed: number): F {
+  const xf = floor(x);
+  const yf = floor(y);
+  const xi = int(xf);
+  const yi = int(yf);
+  const u = x.sub(xf);
+  const v = y.sub(yf);
+  const su = u.mul(u).mul(float(3).sub(u.mul(2)));
+  const sv = v.mul(v).mul(float(3).sub(v.mul(2)));
+  const h00 = hashNode(xi, yi, seed);
+  const h10 = hashNode(xi.add(1), yi, seed);
+  const h01 = hashNode(xi, yi.add(1), seed);
+  const h11 = hashNode(xi.add(1), yi.add(1), seed);
+  const a = mix(h00, h10, su);
+  const b = mix(h01, h11, su);
+  return mix(a, b, sv) as F;
 }

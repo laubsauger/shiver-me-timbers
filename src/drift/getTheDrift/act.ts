@@ -8,16 +8,23 @@ import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import type { Vec3 } from '../../cine/domeMaster';
-import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, type ArrivalState } from './timeline';
+import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, ourGalaxy, type ArrivalState } from './timeline';
+import type { SeaDrive } from '../wandering/sea';
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
 import { OUR_LOOK, createGalaxies, galaxyField, type GalaxyAtlas, type GalaxySpec } from './galaxies';
 import { createMilkyWay } from './milkyWay';
+import { DEBRIS_SPIN, createDebrisField, debrisPieces } from './debrisField';
+import { EARTH_R, SUN_E } from './atmosphere';
+import { skyIrradiance, sunlightCpu } from '../wandering/seaSky';
 
 /** rad/s the sky wheels at over Earth, and the s it eases in over */
 const SKY_TURN = (0.5 * Math.PI) / 180;
 const SKY_EASE = 8;
+/** m: the eye's height the sea's scene takes over at (main-drift crossfades there) — low enough that the sea's
+ * own ocean and pieces carry the view, high enough that the hand-over is still part of the descent */
+const SEA_FROM_ALT = 150;
 
 const smoothstep01 = (x: number): number => {
   const k = Math.min(1, Math.max(0, x));
@@ -28,11 +35,20 @@ export interface ArrivalAct {
   readonly group: THREE.Group;
   /** s, the act's length */
   readonly total: number;
+  /** act s the landing comes down through SEA_FROM_ALT, where the sea's scene takes over */
+  readonly seaFrom: number;
   /** resolves once the Earth's maps are loaded (a render must wait for it) */
   readonly ready: Promise<void>;
-  /** put the act into the state of its time t; returns the state and writes the eye into `eye` */
-  update(t: number, eye: THREE.Vector3): ArrivalState;
+  /** put the act into the state of its time t; returns the state (and the eye's height over the water, Mm) and
+   * writes the eye into `eye`, its turn (the landing's levelling out) into `turn` */
+  update(t: number, eye: THREE.Vector3, turn: THREE.Quaternion): ArrivalState & { altitude: number };
   setPixelAngle(rad: number): void;
+  /**
+   * The landing as the sea's scene takes it over (wandering/sea.ts): the eye, its turn and the Sun at act
+   * time t, in the frame of Drift-2's debris galaxy (metres: x east, y above the mean sea, z north of its
+   * centre); the clouds form from `formFrom` (act s) on
+   */
+  seaDrive(t: number, formFrom: number): SeaDrive;
   dispose(): void;
 }
 
@@ -53,17 +69,28 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const sun = new THREE.Vector3();
   const waveOrigin = new THREE.Vector3();
 
-  // Drift-2's spirals sit on the water in front of the audience: the point a ray at gatherEl straight ahead
-  // meets the planet at the act's end (the planet only translates, so it stays put on it)
+  // Drift-2's debris galaxy floats at the gathering point (timeline.ts gatherFrame), in its tangent frame
   const { starts } = beatStarts(p);
-  const end = earthPose(starts.drift2 + p.drift2, p, tiltDeg);
-  const c = end.centreDir.map((x) => x * end.distance) as Vec3;
-  const ray = domeDir(p.gatherEl, 0, tiltDeg);
-  const b = ray[0] * c[0] + ray[1] * c[1] + ray[2] * c[2];
-  const hit = b - Math.sqrt(Math.max(0, b * b - (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) + EARTH_RADIUS * EARTH_RADIUS));
-  const up = new THREE.Vector3(ray[0] * hit - c[0], ray[1] * hit - c[1], ray[2] * hit - c[2]).normalize();
-  const east = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize();
-  const north = new THREE.Vector3().crossVectors(east, up);
+  const gf = gatherFrame(p, tiltDeg);
+  const up = new THREE.Vector3(...gf.up);
+  const east = new THREE.Vector3(...gf.east);
+  const north = new THREE.Vector3(...gf.north);
+  // the landing levels the eye out over it: level (its up the planet's), heading the dome's front
+  const levelFront = new THREE.Vector3(...gf.front);
+  const level = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(levelFront, up), up, levelFront.clone().negate()),
+  );
+  const none = new THREE.Quaternion();
+  // from the planet's scene into the debris galaxy's frame (the sea's: x east, y up, z north)
+  const toField = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, north)).invert();
+  // where the descent comes down through SEA_FROM_ALT (its height falls all the way)
+  let lo = starts.landing;
+  let hi = starts.landing + p.landing;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (landingTrack(mid, p, tiltDeg).alt > SEA_FROM_ALT) lo = mid;
+    else hi = mid;
+  }
   // WHERE ON EARTH (direction.md: "a high angle POV looking eastward"): the matter gathers over the
   // drowned Po plain between Padua and Rovigo (~5–10 m up today), the view heading east. The flood flies
   // ~1300 km east to it, so we arrive over the Bay of Biscay: France below, the Alps, Italy and the Adriatic
@@ -93,14 +120,33 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   // the debris lifts off the drowned coasts late in the flood
   const lift = starts.flood + p.flood * 0.55;
   let pixelAngle = 0.0015;
+  // Drift-2's pieces (debrisField.ts), anchored at the gathering point in its tangent frame (x east, y up,
+  // z north), metres scaled to the scene's Mm; the same field the sea's scene floats at the raft
+  const du = {
+    sun: uniform(new THREE.Vector3()),
+    sunLight: uniform(new THREE.Vector3()),
+    skyLight: uniform(new THREE.Vector3()),
+    presence: uniform(0),
+    pixelAngle: uniform(0.0015),
+    metres: uniform(1e-6),
+  };
+  const debris = createDebrisField(debrisPieces(), du as unknown as Parameters<typeof createDebrisField>[1]);
+  const field = new THREE.Group();
+  field.add(debris);
+  field.scale.setScalar(1e-6);
+  field.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, north));
+  group.add(field);
+  const sunLocal = new THREE.Vector3();
 
   return {
     group,
     total: beatStarts(p).total,
+    seaFrom: hi,
     ready: earth.ready,
-    update(t, eye) {
+    update(t, eye, turn) {
       const s = arrivalState(t, p);
       eye.set(...arrivalEye(t, p, g));
+      turn.slerpQuaternions(none, level, landingTurn(t, p, tiltDeg).k);
       u.time.value = t;
       // our galaxy's far disc hands over to its volume; the other galaxies dim once we are inside its
       // dust and stars (they are still there, faintly, through the gaps)
@@ -115,7 +161,12 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       const glare = smoothstep01((e.radiusDeg - 3) / 45) * s.earth;
       // (the volume takes over from the far disc while still a few radii out; the field dims only once we
       // are inside the disk, among its near stars)
-      u.field.value = (1 - 0.92 * s.local) * (1 - glare);
+      // down in the sunlit air the day sky hides the stars (from ~60 km down to ~15 km, as the Sun clears the
+      // horizon below us)
+      const sunUp = -(e.sun[0] * e.centreDir[0] + e.sun[1] * e.centreDir[1] + e.sun[2] * e.centreDir[2]);
+      const day = smoothstep01((sunUp + 0.05) / 0.2) * smoothstep01((0.06 - (e.distance - EARTH_RADIUS)) / 0.045);
+      const night = 1 - 0.97 * day;
+      u.field.value = (1 - 0.92 * s.local) * (1 - glare) * night;
       centre.set(...e.centreDir).multiplyScalar(e.distance).add(eye);
       sun.set(...e.sun);
       earth.group.visible = s.earth > 0;
@@ -133,16 +184,46 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
         clear: smoothstep01((t - starts.flood - 0.35 * p.flood) / (0.65 * p.flood + p.drift2 * 0.3)),
       };
       earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
+      // the pieces: where the gathering point is now (the planet only translates), turning with the field, lit by
+      // the same air as the sea there
+      field.visible = drift.presence > 0;
+      if (field.visible) {
+        field.position.copy(centre).addScaledVector(up, EARTH_RADIUS);
+        debris.rotation.y = DEBRIS_SPIN * drift.time;
+        du.presence.value = drift.presence;
+        du.pixelAngle.value = pixelAngle;
+        du.sun.value.copy(sun);
+        sunLocal.set(sun.dot(east), sun.dot(up), sun.dot(north));
+        const sl = sunlightCpu(EARTH_R, sunLocal.y);
+        du.sunLight.value.set(sl[0], sl[1], sl[2]).multiplyScalar(SUN_E / Math.PI);
+        const sky = skyIrradiance(EARTH_R, sunLocal);
+        du.skyLight.value.set(sky[0], sky[1], sky[2]).multiplyScalar(1 / Math.PI);
+      }
       milky.update({
-        volume: s.volume * (1 - 0.4 * glare), local: s.local * (1 - 0.55 * glare), sunStar: s.sunStar * (1 - handover),
+        volume: s.volume * (1 - 0.4 * glare) * night, local: s.local * (1 - 0.55 * glare) * night, sunStar: s.sunStar * (1 - handover),
         radiance: p.volumeRadiance, pixelAngle, eye,
         occluder: { centre, radius: s.earth > 0 ? EARTH_RADIUS * 1.003 : 0 },
         skyTurn,
       });
-      return s;
+      return { ...s, altitude: e.distance - EARTH_RADIUS };
     },
     setPixelAngle(rad) {
       pixelAngle = rad;
+    },
+    seaDrive(t, formFrom) {
+      const tr = landingTrack(t, p, tiltDeg);
+      const e = earthPose(t, p, tiltDeg);
+      const s3 = new THREE.Vector3(...e.sun);
+      const fx = levelFront.dot(east);
+      const fz = levelFront.dot(north);
+      return {
+        eye: new THREE.Vector3(tr.east, tr.alt, tr.north),
+        yaw: Math.atan2(-fx, -fz),
+        turn: new THREE.Quaternion().slerpQuaternions(none, level, landingTurn(t, p, tiltDeg).k).premultiply(toField),
+        sun: new THREE.Vector3(s3.dot(east), s3.dot(up), s3.dot(north)).normalize(),
+        driftTime: Math.max(0, t - lift),
+        clouds: smoothstep01((t - formFrom) / 25),
+      };
     },
     dispose() {
       galaxies.geometry.dispose();
