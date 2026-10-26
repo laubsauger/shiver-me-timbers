@@ -222,14 +222,12 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   sunMat.colorNode = Fn(() => {
     const q = uv().sub(0.5).mul(2);
     const rr2 = q.length();
-    // core (pixel-sized at first), a glare that grows with brightness, and a faint long cross
+    // core (pixel-sized at first) and a glare that grows with brightness (no cross: thin spikes read as a
+    // graphic, not as light)
     const px = u.pixelAngle.div(0.06);
     const core = exp(rr2.div(px.mul(1.5)).pow(2).negate());
     const glare = exp(rr2.div(0.18).pow(2).negate()).mul(0.02).add(exp(rr2.div(0.05).pow(2).negate()).mul(0.08));
-    const cross = exp(abs(q.x).div(px).pow(2).negate()).mul(exp(abs(q.y).mul(5).negate()))
-      .add(exp(abs(q.y).div(px).pow(2).negate()).mul(exp(abs(q.x).mul(5).negate())))
-      .mul(0.01);
-    return vec4(vec3(1, 0.93, 0.8).mul(sunFlux).mul(core.add(glare).add(cross)).mul(float(1).sub(smoothstep(0.85, 1, rr2))), 1);
+    return vec4(vec3(1, 0.93, 0.8).mul(sunFlux).mul(core.add(glare)).mul(float(1).sub(smoothstep(0.85, 1, rr2))), 1);
   })();
   sunMat.name = 'drift-sun-star';
   const sunStar = billboardMesh(sunMat, 1, 'drift-sun-star');

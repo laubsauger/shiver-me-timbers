@@ -76,9 +76,14 @@ export function driftMatter(n: V3, U: DriftUniforms, fp: F, R: number): { cover:
   // the shear (rad of winding per unit ln r) thins the filaments: their noise fades sooner
   const shear = float(SPIN * Math.abs(e.s)).mul(q).div(q.add(0.25).mul(q.add(0.25))).mul(U.time);
   const fine = fpm.mul(shear.add(1));
-  // patches of debris (~2–10 km) with streaky detail; the eddy's rim fades softly into open water
-  const patches = fbm2(ux, uy, 120, 7, fine, 3.1);
-  const cover = smoothstep(0.02, 0.3, patches).mul(smoothstep(1.7, 0.3, q)).mul(U.presence).clamp(0, 1) as F;
+  // floating matter collects in LINES (windrows, the swirls of a bloom): where the field crosses zero, a thin
+  // ridge, which the shear winds into spiral filaments; a faint film between them; the eddy's rim fades
+  // softly into open water
+  const field = fbm2(ux, uy, 90, 7, fine, 3.1);
+  const ridge = float(1).sub(field.abs().mul(4)).max(0);
+  const lines = ridge.mul(ridge).mul(ridge);
+  const film = smoothstep(-0.2, 0.35, field).mul(0.18);
+  const cover = lines.mul(0.85).add(film).mul(smoothstep(1.7, 0.3, q)).mul(U.presence).clamp(0, 1) as F;
   // the specks: ~100 m cells, one floating thing in some where there is matter
   const cell = floor(vec3(x, y, 0).mul(9000));
   const h = hash(cell.x.add(cell.y.mul(311)));

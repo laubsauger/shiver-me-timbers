@@ -26,10 +26,9 @@ export interface GetTheDriftParams {
   overshoot: number;
   flood: number;
   drift2: number;
-  /** Mm, the height the flood beat comes down to; deg, the limb's elevation there */
-  floodAltitude: number;
+  /** deg, the limb's elevation through the flood and Drift-2's glide down; Mm, the height it ends at over
+   * the debris spiral */
   floodLimbEl: number;
-  /** Mm, the height Drift-2 comes down to over the debris spirals */
   driftAltitude: number;
   /** deg, dome elevation (straight ahead) of the point the floating matter gathers round, at Drift-2's end */
   gatherEl: number;
@@ -88,7 +87,6 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     overshoot: 10,
     flood: 24,
     drift2: 20,
-    floodAltitude: 0.12,
     floodLimbEl: 38,
     driftAltitude: 0.03,
     gatherEl: 22,
@@ -128,7 +126,6 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     overshoot: { min: 0, max: 60, step: 0.5 },
     flood: { min: 1, max: 60, step: 0.5 },
     drift2: { min: 0, max: 60, step: 0.5 },
-    floodAltitude: { min: 0.005, max: 2, step: 0.005 },
     floodLimbEl: { min: 0, max: 60, step: 1 },
     driftAltitude: { min: 0.001, max: 1, step: 0.001 },
     gatherEl: { min: 0, max: 50, step: 1 },

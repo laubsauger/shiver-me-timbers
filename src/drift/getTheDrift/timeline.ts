@@ -191,16 +191,16 @@ function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreD
   // dome while its centre goes below the dome's edge
   const beside = domeDir(p.approachEl - 23, p.approachAz + 85, tiltDeg);
   const below = domeDir(p.limbEl - finalRadius - p.dawnSink * dawn, 0, tiltDeg);
-  // the flood: from the night we come down lower over a coast (an eased descent by translation)
-  const fk = ramped(clamp01((t - starts.flood) / Math.max(1e-6, p.flood)), 0.3, 0.3);
-  const altitude = p.orbitAltitude * Math.exp(Math.log(p.floodAltitude / p.orbitAltitude) * fk);
-  const low = EARTH_RADIUS + altitude;
-  const dip = (Math.acos(EARTH_RADIUS / low) * 180) / Math.PI;
+  // the flood and Drift-2: ONE eased glide from the orbit down to the water — forward and down at once (the
+  // planet's centre keeps sinking below the front as it comes closer), no stop and dive: through the flood
+  // we pass the "tectonic" heights (~100 km) watching the sea rise, and settle low over the spiral
+  const descent = Math.max(1e-6, p.flood + p.drift2);
+  const dk = ramped(clamp01((t - starts.flood) / descent), 0.25, 0.3);
+  const altitude = p.orbitAltitude * Math.exp(Math.log(p.driftAltitude / p.orbitAltitude) * dk);
+  const dip = (Math.acos(EARTH_RADIUS / (EARTH_RADIUS + altitude)) * 180) / Math.PI;
   const lowCentre = domeDir(p.floodLimbEl - (90 - dip), 0, tiltDeg);
   if (t <= starts.flood) return { centreDir: slerp(beside, below, smooth((k - 0.3) / 0.7)), distance };
-  // Drift-2: on down toward the water, eased
-  const dk = ramped(clamp01((t - starts.drift2) / Math.max(1e-6, p.drift2)), 0.3, 0.4);
-  return { centreDir: slerp(below, lowCentre, fk), distance: EARTH_RADIUS + altitude * Math.exp(Math.log(p.driftAltitude / p.floodAltitude) * dk) };
+  return { centreDir: slerp(below, lowCentre, smooth(dk / 0.6)), distance: EARTH_RADIUS + altitude };
 }
 
 const rotateAbout = (v: Vec3, a: Vec3, th: number): Vec3 => {

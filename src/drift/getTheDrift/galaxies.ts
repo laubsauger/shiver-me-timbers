@@ -78,6 +78,10 @@ export function loadGalaxyAtlas(base = `${import.meta.env.BASE_URL}drift/galaxie
 
 /** the atlas tiles' brightest part is 1: their light against the analytic model's */
 const ATLAS_GAIN = 0.9;
+/** the galaxy quad spans ±EXTENT radii (the outer disk fades by then) */
+const EXTENT = 1.5;
+/** rad, half the width of a galaxy's opening flash */
+const FLASH_HALF = 0.02;
 
 /** OUR galaxy's model parameters (the volume reads the same ones) */
 export const OUR_LOOK = { arms: 2, wind: 1 / Math.tan((13 * Math.PI) / 180), phase: 0.6, seed: 3.7, elliptical: 0 };
@@ -211,21 +215,25 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
   const BY = up0.mul(cos(T4.w)).sub(side0.mul(sin(T4.w)));
   const QX = mix(BX, X, planar);
   const QY = mix(BY, Y, planar);
-  // open from a point of light: the galaxy grows into its shape in its own moment, with a brief flash as it
-  // catches (a light pop, not a sprite appearing)
+  // OPENING (the first stars at the web's knots becoming galaxies): a point of light catches with a brief
+  // flash — drawn at a fixed angular size, so it shows however small the galaxy still is — and the galaxy
+  // grows out of it over a few seconds at its full surface brightness (its light rises with its area,
+  // smoothly from nothing)
   const appear = N4.w.mul(0.6);
-  const grow = mix(smoothstep(appear, appear.add(0.4), U.open), float(1), isOurs);
-  const pop = exp(U.open.sub(appear.add(0.06)).div(0.05).pow(2).negate()).mul(float(1).sub(isOurs));
-  const R = C4.w.mul(grow.mul(0.95).add(0.05));
+  const size = mix(smoothstep(appear.add(0.02), appear.add(0.42), U.open), float(1), isOurs);
+  const lit = mix(smoothstep(appear, appear.add(0.05), U.open), float(1), isOurs);
+  const pop = exp(U.open.sub(appear.add(0.03)).div(0.04).pow(2).negate()).mul(float(1).sub(isOurs));
+  const R = C4.w.mul(size).max(C4.w.mul(0.002));
+  const dist = cameraPosition.sub(centreW).length();
+  // the quad holds the galaxy, or the flash's glow while the galaxy is still smaller than it
+  const half = max(R.mul(EXTENT), dist.mul(FLASH_HALF).mul(step(0.001, pop).mul(float(1).sub(isOurs))));
   const corner = attribute<'vec3'>('position', 'vec3');
-  const EXTENT = 1.5; // the quad spans ±1.5 radii (the outer disk fades by then)
-  const pos = centreW.add(QX.mul(corner.x.mul(2 * EXTENT).mul(R))).add(QY.mul(corner.y.mul(2 * EXTENT).mul(R)));
+  const pos = centreW.add(QX.mul(corner.x.mul(2).mul(half))).add(QY.mul(corner.y.mul(2).mul(half)));
   const cosI = abs(toEye.dot(N));
   // a disc seen at a slant packs its light into less area (capped: edge-on is a bright needle, not a line)
   const gain = mix(float(1), min(float(1).div(max(cosI, 0.15)), 3), planar);
-  const present = mix(U.field, U.ours, isOurs).mul(grow);
+  const present = mix(U.field, U.ours, isOurs).mul(lit);
   // a galaxy narrower than a few pixels is a point of light: keep it from vanishing between pixels
-  const dist = cameraPosition.sub(centreW).length();
   const tiny = clamp(R.div(dist.mul(U.pixelAngle).mul(3)), 0, 1);
 
   const material = new THREE.NodeMaterial();
@@ -235,19 +243,24 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
   material.blending = THREE.AdditiveBlending;
   material.positionNode = pos;
   material.colorNode = Fn(() => {
-    const q = uv().sub(0.5).mul(2 * EXTENT);
+    // the galaxy's own coordinates: ±EXTENT radii across, wherever the quad is larger (the flash)
+    const k = half.div(R.mul(EXTENT));
+    const g = uv().sub(0.5).mul(k).add(0.5);
+    const inside = step(0, g.x).mul(step(g.x, 1)).mul(step(0, g.y)).mul(step(g.y, 1));
+    const q = g.sub(0.5).mul(2 * EXTENT);
     const face = galaxyFace(vec2(q.x, q.y), { arms: L4.x, wind: L4.y, phase: L4.z, seed, elliptical });
     const edge = float(1).sub(smoothstep(1.1, EXTENT, q.length()));
     const model = face.light.mul(exp(face.tau.negate())).mul(edge);
     // the atlas: tile (col, row), v = 0 at its top row
     const col = atlasTile.sub(atlasTile.div(atlas.cols).floor().mul(atlas.cols));
     const row = atlasTile.div(atlas.cols).floor();
-    const st = vec2(col.add(uv().x).div(atlas.cols), row.add(float(1).sub(uv().y)).div(atlas.rows));
+    const st = vec2(col.add(g.x.clamp(0, 1)).div(atlas.cols), row.add(float(1).sub(g.y.clamp(0, 1))).div(atlas.rows));
     const real = texture(atlas.texture, st).rgb.mul(ATLAS_GAIN);
-    const r = uv().sub(0.5).mul(2).length();
-    const flash = vec3(0.85, 0.9, 1).mul(exp(r.div(0.12).pow(2).negate()).mul(pop).mul(6));
-    const light = mix(real, model, isOurs).mul(gain).mul(X4.w);
-    return vec4(light.mul(present).add(flash.mul(mix(U.field, float(0), isOurs))).mul(U.radiance).mul(tiny.mul(0.7).add(0.3)), 1);
+    const light = mix(real, model, isOurs).mul(gain).mul(X4.w).mul(inside);
+    // the flash: a hot point and a soft halo, in angle (the quad's half-width is FLASH_HALF rad then)
+    const a = uv().sub(0.5).mul(2).length().mul(half.div(dist.mul(FLASH_HALF)));
+    const flash = vec3(0.82, 0.88, 1).mul(exp(a.div(0.05).pow(2).negate()).mul(8).add(exp(a.div(0.25).pow(2).negate()).mul(0.6))).mul(pop).mul(X4.w);
+    return vec4(light.mul(present).mul(tiny.mul(0.7).add(0.3)).add(flash.mul(U.field)).mul(U.radiance), 1);
   })();
   material.name = 'drift-galaxies';
 

@@ -291,7 +291,9 @@ export function createEarth(): Earth {
     const width = max(float(1.5), slope.mul(metres).mul(0.5));
     const dry = smoothstep(width.negate(), width, above);
     const land = float(1).sub(lcw.z).mul(dry).toVar();
-    const flooded = float(1).sub(lcw.z).mul(float(1).sub(dry));
+    // the new sea over what was land: by the measured elevation (continuous across the old coast — the
+    // satellite water mask is binary and would draw the old coastline across the sea as a hard edge)
+    const flooded = smoothstep(-30, 4, e).mul(float(1).sub(dry));
     const N = normalize(n.sub(t1.mul(g1).add(t2.mul(g2)).mul(RELIEF).mul(land)));
 
     // land: the young world bare, life rolling over it in waves, the ice (lifeLayers.ts). Its bare rock is
@@ -488,10 +490,10 @@ export function createEarth(): Earth {
     // the glare is the eye's (or lens's) response to the whole disc: it goes as the disc sets behind the limb
     const aboveLimb = acos(eyeUp.dot(S).negate().clamp(-1, 1)).sub(asin(float(EARTH_R).div(eyeR)));
     const seen = pastEarth(S).mul(smoothstep(-SUN_ANG, SUN_ANG, aboveLimb));
-    const glare = exp(r.div(0.01).negate()).mul(5).add(exp(r.div(0.045).negate()).mul(0.22)).add(exp(r.div(0.15).negate()).mul(0.02));
-    const rays = exp(abs(q.x).div(max(u.pixelAngle.div(QUAD / 2), 0.002)).negate()).mul(exp(abs(q.y).mul(14).negate()))
-      .add(exp(abs(q.y).div(max(u.pixelAngle.div(QUAD / 2), 0.002)).negate()).mul(exp(abs(q.x).mul(14).negate())))
-      .mul(0.25);
+    // the glare of a bright disc through optics: a tight bloom, a wider soft halo and a faint veil — no
+    // spikes or stars (a precise cross or star reads as a graphic, not as light)
+    const glare = exp(r.div(0.008).negate()).mul(4).add(exp(r.div(0.035).negate()).mul(0.35)).add(exp(r.div(0.16).negate()).mul(0.035));
+    const rays = float(0);
     const fade = float(1).sub(smoothstep(0.6, 1, q.length()));
     const light = pastEarth(normalize(positionWorld.sub(cameraPosition))).mul(disc).add(seen.mul(glare.add(rays)));
     return vec4(vec3(1, 0.95, 0.86).mul(light).mul(fade).mul(u.sunPresence), 1);
