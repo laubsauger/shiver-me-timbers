@@ -34,8 +34,9 @@ export interface PairUniforms {
   /** the field clock (timeline.ts fieldClock), not act time */
   time: F;
   density: F;
-  /** d density / d clock right now — a slot reads the density of its own birth */
-  densityRate: F;
+  /** what a slot reads at its own BIRTH (field clock): x the density then, yzw the text pocket then
+   * (lo, hi, strength) — a baked table (field.ts), so a pair's fate never changes while it lives */
+  birthTable: (clock: F) => THREE.Node<'vec4'>;
   life: F;
   radius: F;
   speed: F;
@@ -56,6 +57,8 @@ export interface PairUniforms {
   centreVel: V3;
   /** seed offset, so two layers of slots never share pairs */
   layer: F;
+  /** 1: no pair of this layer is born while any text is up (the near layer's spirals span the dome) */
+  textAvoid: F;
   /** the dome frame (domeMaster.ts domeBasis) — the text pocket is defined in it */
   domeAxis: V3;
   domeFront: V3;
@@ -83,15 +86,20 @@ export type PocketUniforms = Pick<PairUniforms, 'domeAxis' | 'domeFront' | 'dome
  * enough that the eye never finds an outline. A hard-edged region reads as a cut-out box on a dome.
  */
 export function pocketMask(dir: V3, U: PocketUniforms): F {
+  return pocketMaskAt(dir, U, U.pocketLo, U.pocketHi, U.pocket);
+}
+
+/** `pocketMask` for a given band (rad) and strength — the pocket as it was at some other time */
+export function pocketMaskAt(dir: V3, U: PocketUniforms, lo: F, hi: F, strength: F): F {
   const d = normalize(dir);
   const el = asin(d.dot(U.domeAxis).clamp(-1, 1));
   const az = atan(d.dot(U.domeRight), d.dot(U.domeFront));
-  const centre = U.pocketLo.add(U.pocketHi).mul(0.5);
-  const halfEl = U.pocketHi.sub(U.pocketLo).mul(0.5).max(0.05);
+  const centre = lo.add(hi).mul(0.5);
+  const halfEl = hi.sub(lo).mul(0.5).max(0.05);
   const dEl = el.sub(centre).div(halfEl);
   const dAz = az.div(U.pocketAz.max(0.05));
   const r = sqrt(dEl.mul(dEl).add(dAz.mul(dAz)));
-  return float(1).sub(smoothstep(0.4, 1.6, r)).mul(U.pocket);
+  return float(1).sub(smoothstep(0.4, 1.6, r)).mul(strength);
 }
 
 /** CPU twin of the in-plane spiral: [along u, along w] at time τ (tests) */
@@ -118,8 +126,10 @@ export interface PairSlot {
   tau: F;
   /** this cycle's length, s */
   period: F;
-  /** 1 while the slot is alive this cycle */
+  /** 1 while the slot is alive this cycle (decided at its birth) */
   alive: F;
+  /** 0..1 brightness under the text pocket NOW: a pair already alive where text arrives fades, never pops */
+  dim: F;
   /** per-cycle seed */
   seed: F;
   vertex: V3;
@@ -170,9 +180,11 @@ export function pairSlot(slot: F, U: PairUniforms): PairSlot {
   const natural = period.mul(0.72);
   const cut = U.waveClock0.add(U.waveRate.mul(U.waveLength).mul(waveFrac(vertex.sub(U.eye), U.domeFront))).sub(birth);
   const toEye = vertex.sub(U.eye);
-  const alive = step(hash(seed.add(0.5)), U.density.sub(U.densityRate.mul(tau)))
-    // not where the crawl is passing (the text pocket), so the text sits on darkness
-    .mul(float(1).sub(pocketMask(toEye, U)))
+  const atBirth = U.birthTable(birth);
+  const alive = step(hash(seed.add(0.5)), atBirth.x)
+    // not born where the text is (or is about to be): the text sits on darkness
+    .mul(float(1).sub(pocketMaskAt(toEye, U, atBirth.y, atBirth.z, atBirth.w)))
+    .mul(float(1).sub(U.textAvoid.mul(atBirth.w)))
     .mul(step(0, cut))
     // nothing is born right on top of the audience: a pair across the eye is a smear over half the dome
     .mul(smoothstep(1.2, 3, toEye.length()));
@@ -180,6 +192,7 @@ export function pairSlot(slot: F, U: PairUniforms): PairSlot {
     tau,
     period,
     alive,
+    dim: float(1).sub(pocketMask(toEye, U).mul(0.85)),
     seed,
     vertex,
     dir: randomDir(hash(seed.add(4)), hash(seed.add(5))),
@@ -219,6 +232,7 @@ export function heroSlot(H: HeroUniforms): PairSlot {
     // the light lingers after the annihilation (flashes.ts `left`)
     period: (H.tEndAnti ? min(H.tEnd, H.tEndAnti) : H.tEnd).add(H.linger ?? 3.5),
     alive: float(1),
+    dim: float(1),
     seed: float(17.31),
     vertex: H.vertex,
     dir: H.dir,

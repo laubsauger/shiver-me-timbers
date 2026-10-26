@@ -30,6 +30,7 @@ import { createArrival } from './drift/getTheDrift/act';
 import type { ArrivalState } from './drift/getTheDrift/timeline';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
+import type { TextPocket } from './drift/undertime/field';
 import { undertimeCrawl } from './drift/undertime/crawlText';
 import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/record';
 import { DomeGuides } from './drift/domeGuides';
@@ -81,7 +82,11 @@ async function boot(): Promise<void> {
   const flatPipeline = new THREE.RenderPipeline(renderer);
   flatPipeline.outputNode = flatPass.add(flatBloom);
 
-  const field = createUndertimeField(p);
+  // the text pocket at act time `at`: the sky the text occupies, and — so the field has cleared before a
+  // phrase arrives — the sky it is ABOUT to occupy, its strength rising over the 3 s before (set below,
+  // once the crawl exists; the field bakes it into each pair's birth)
+  let pocketAt: (at: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 });
+  const field = createUndertimeField(p, (at) => pocketAt(at));
   scene.add(field.group);
   // ?markers: orientation check for the dome master — front red, right green, zenith blue, back yellow.
   // In the master, red must sit at the bottom, green at the right, blue at the centre, yellow at the top.
@@ -130,6 +135,20 @@ async function boot(): Promise<void> {
     maxArc: p.crawlMaxArc,
   });
   const crawl = new CrawlOverlay(undertimeCrawl(p), crawlLayout());
+  pocketAt = (at) => {
+    const now = crawlBand(at, crawl.phrases, crawl.layout);
+    let lo = now.strength > 0 ? now.lo : Infinity;
+    let hi = now.strength > 0 ? now.hi : -Infinity;
+    let strength = now.strength;
+    for (const dt of [0.5, 1, 1.5, 2, 2.5, 3]) {
+      const b = crawlBand(at + dt, crawl.phrases, crawl.layout);
+      if (b.strength <= 0) continue;
+      lo = Math.min(lo, b.lo);
+      hi = Math.max(hi, b.hi);
+      strength = Math.max(strength, b.strength * (1 - dt / 3.5));
+    }
+    return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
+  };
   // the crawl lives in master space, so it shows in the dome view only
   const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
 
@@ -189,8 +208,7 @@ async function boot(): Promise<void> {
     Object.assign(crawl.layout, crawlLayout());
     crawl.phrases = undertimeCrawl(p);
     crawl.draw(at);
-    const band = crawlBand(at, crawl.phrases, crawl.layout);
-    field.setPocket({ lo: band.lo, hi: band.hi, az: p.crawlPocketAz, strength: band.strength * p.crawlPocket }, p.domeTilt);
+    field.setPocket(pocketAt(at), p.domeTilt);
     return state;
   };
   /** the master into whatever is bound, filling the current viewport */

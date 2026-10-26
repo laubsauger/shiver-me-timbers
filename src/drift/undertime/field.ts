@@ -8,7 +8,7 @@
  * scrubbing is free, and re-rendering frame 412 gives back frame 412.
  */
 import * as THREE from 'three/webgpu';
-import { float, uniform } from 'three/tsl';
+import { float, int, ivec2, textureLoad, uniform } from 'three/tsl';
 import type { DriftParams } from '../../params/drift';
 import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, type UndertimeState } from './timeline';
 import { heroSlot, pairSlot, trackPositionCpu, type PairUniforms } from './pairModel';
@@ -45,12 +45,51 @@ export interface UndertimeField {
   dispose(): void;
 }
 
-export function createUndertimeField(p: DriftParams): UndertimeField {
+/** texels of the birth table (field.ts BIRTH TABLE): ~0.05 s of field clock each over the act */
+const BIRTH_N = 2048;
+
+/**
+ * BIRTH TABLE. A pair's fate is decided at its birth: whether it exists (the density then) and whether it
+ * was born where the text is or is about to be (the pocket then). Both change through the act, and the GPU
+ * cannot evaluate the timeline at an arbitrary past moment, so they are baked here against the FIELD clock
+ * (what a slot's birth is measured in) into a small float texture, rebaked whenever the inputs change.
+ * Without it, an extrapolated guess flipped living pairs on and off whenever the density curve turned.
+ */
+function bakeBirthTable(p: DriftParams, pocketAt: (t: number) => TextPocket, data: Float32Array): number {
+  const { total } = beatStarts(p);
+  const end = total + 10;
+  const clockMax = fieldClock(end, p);
+  const D = Math.PI / 180;
+  for (let j = 0; j < BIRTH_N; j++) {
+    const c = (j / (BIRTH_N - 1)) * clockMax;
+    // the act time whose field clock is c (the clock is monotonic)
+    let lo = 0;
+    let hi = end;
+    for (let k = 0; k < 30; k++) {
+      const m = (lo + hi) / 2;
+      if (fieldClock(m, p) < c) lo = m;
+      else hi = m;
+    }
+    const t = (lo + hi) / 2;
+    const pk = pocketAt(t);
+    data.set([undertimeState(t, p).pairDensity, pk.lo * D, pk.hi * D, pk.strength], j * 4);
+  }
+  return clockMax;
+}
+
+export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 })): UndertimeField {
+  const birthData = new Float32Array(BIRTH_N * 4);
+  const birthTex = new THREE.DataTexture(birthData, BIRTH_N, 1, THREE.RGBAFormat, THREE.FloatType);
+  birthTex.minFilter = THREE.NearestFilter;
+  birthTex.magFilter = THREE.NearestFilter;
+  const birthMax = uniform(1);
+  let birthKey = '';
+  const birthTable = (clock: F): THREE.Node<'vec4'> =>
+    textureLoad(birthTex, ivec2(int(clock.div(birthMax).clamp(0, 1).mul(BIRTH_N - 1)), int(0))) as THREE.Node<'vec4'>;
   const u = {
     time: uniform(0),
     actTime: uniform(0),
     density: uniform(1),
-    densityRate: uniform(0),
     flashGain: uniform(1),
     haze: uniform(1),
     radius: uniform(p.fieldRadius),
@@ -66,8 +105,8 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
     eyeVel: uniform(new THREE.Vector3()),
     origin: uniform(new THREE.Vector3()),
     still: uniform(new THREE.Vector3()),
-    nearRadius: uniform(6),
-    nearSpeed: uniform(p.trackSpeed * 2.5),
+    nearRadius: uniform(9),
+    nearSpeed: uniform(p.trackSpeed * 1.3),
     domeAxis: uniform(new THREE.Vector3(0, 1, 0)),
     domeFront: uniform(new THREE.Vector3(0, 0, -1)),
     domeRight: uniform(new THREE.Vector3(1, 0, 0)),
@@ -126,9 +165,9 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
   const anti = v3(u.anti);
   const light = v3(u.light);
   const pair: PairUniforms = {
-    time: u.time, density: u.density, densityRate: u.densityRate, life: u.life, radius: u.radius, speed: u.speed, curl: u.curl, drag: u.drag,
+    time: u.time, density: u.density, birthTable, life: u.life, radius: u.radius, speed: u.speed, curl: u.curl, drag: u.drag,
     tilt0: u.tilt0, tilt1: u.tilt1, tiltClock0: u.tiltClock0, tiltClock1: u.tiltClock1, eye: v3(u.eye),
-    centre: v3(u.origin), centreVel: v3(u.still), layer: float(0),
+    centre: v3(u.origin), centreVel: v3(u.still), layer: float(0), textAvoid: float(0),
     domeAxis: v3(u.domeAxis), domeFront: v3(u.domeFront), domeRight: v3(u.domeRight),
     pocketLo: u.pocketLo, pocketHi: u.pocketHi, pocketAz: u.pocketAz, pocket: u.pocket,
     waveClock0: u.waveClock0, waveRate: u.waveRate, waveLength: u.waveLength,
@@ -137,7 +176,7 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
   // NEAR LAYER: a handful of pairs at a few metres, born around the eye and riding with it — they give the
   // boil its scale (big, fast, thick tracks sweeping a quarter of the dome over the fine far field)
   const NEAR_SLOTS = 12;
-  const nearPair: PairUniforms = { ...pair, radius: u.nearRadius, speed: u.nearSpeed, centre: v3(u.eye), centreVel: v3(u.eyeVel), layer: float(1) };
+  const nearPair: PairUniforms = { ...pair, radius: u.nearRadius, speed: u.nearSpeed, centre: v3(u.eye), centreVel: v3(u.eyeVel), layer: float(1), textAvoid: float(1) };
   const nearOf = (slot: F) => pairSlot(slot, nearPair);
 
   const trackU: TrackUniforms = { tail: u.tail, width: u.width, pixelAngle: u.pixelAngle, radiance: u.trackRadiance, matter, anti };
@@ -157,8 +196,9 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
     sparkLead: float(0.01),
   };
   const flashes = createFlashes(p.pairSlots, flashU, slotOf);
-  const nearTracks = createTracks(NEAR_SLOTS, 96, { ...trackU, width: u.width.mul(3.5) }, nearOf, 'undertime-near-tracks');
-  const nearFlashes = createFlashes(NEAR_SLOTS, flashU, nearOf, 'undertime-near-flashes');
+  // near: thicker, not brighter — they are already big; a near flash at full strength is a flashbulb
+  const nearTracks = createTracks(NEAR_SLOTS, 96, { ...trackU, width: u.width.mul(2.5), radiance: u.trackRadiance.mul(0.6) }, nearOf, 'undertime-near-tracks');
+  const nearFlashes = createFlashes(NEAR_SLOTS, { ...flashU, coreRadiance: u.coreRadiance.mul(0.35), hazeRadiance: u.hazeRadiance.mul(0.4) }, nearOf, 'undertime-near-flashes');
 
   // ---------------------------------------------------------------- the scripted pairs (scripted.ts)
   const H0 = heroPair(p);
@@ -217,9 +257,13 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
       u.time.value = state.clock;
       u.actTime.value = t;
       u.density.value = state.pairDensity;
-      // the density a slot was born with: d density / d clock, from the timeline either side of t
-      const e = 0.05;
-      u.densityRate.value = (undertimeDensity(t + e) - undertimeDensity(t - e)) / (2 * e) / Math.max(1e-3, state.clockRate);
+      // rebake the birth table when anything it depends on changed (the params; the text it reads via pocketAt)
+      const key = JSON.stringify(p) + JSON.stringify(pocketAt(starts.cool + 3)) + JSON.stringify(pocketAt(starts.remain + 3));
+      if (key !== birthKey) {
+        birthKey = key;
+        birthMax.value = bakeBirthTable(p, pocketAt, birthData);
+        birthTex.needsUpdate = true;
+      }
       u.flashGain.value = state.flashGain;
       u.haze.value = state.glow;
       u.radius.value = p.fieldRadius;
@@ -272,7 +316,7 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
       // the survivor's matter becomes the hero grain: its track fades as the grain comes up
       u.survAlive.value = 1 - state.heroGrain;
       u.eyeVel.value.set(...eyeVelocity(t));
-      u.nearSpeed.value = p.trackSpeed * 2.5;
+      u.nearSpeed.value = p.trackSpeed * 1.3;
       sky.setShell(t - (H.birth + HERO_TRACK_END), p.heroShellSpeed, p.heroShellRadiance);
       sky.setWave(state.wave, u.domeFront.value, p.waveRadiance);
       sky.setLight(u.light.value);
@@ -318,7 +362,4 @@ export function createUndertimeField(p: DriftParams): UndertimeField {
     return [(b[0] - a[0]) / 0.1, (b[1] - a[1]) / 0.1, (b[2] - a[2]) / 0.1];
   }
 
-  function undertimeDensity(at: number): number {
-    return undertimeState(at, p).pairDensity;
-  }
 }

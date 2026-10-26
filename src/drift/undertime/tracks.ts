@@ -80,7 +80,7 @@ export function createTracks(slots: number, segments: number, U: TrackUniforms, 
   const tangent = normalize(ahead.sub(pos));
   const across = normalize(cross(tangent, normalize(pos.sub(cameraPosition))));
   // born fast, gone once the track has ended and its annihilation has begun
-  const fade = smoothstep(0, 0.06, P.tau).mul(float(1).sub(smoothstep(tEnd, tEnd.add(P.period.mul(0.12)), P.tau))).mul(P.alive);
+  const fade = smoothstep(0, 0.06, P.tau).mul(float(1).sub(smoothstep(tEnd, tEnd.add(P.period.mul(0.12)), P.tau))).mul(P.alive).mul(P.dim);
   // MINIMUM PROJECTED WIDTH (the trick src/core/minWidth.ts uses for ropes): never thinner than ~2 px — the
   // finest line that survives a dome projector's blend — and the widening paid back as coverage, so a far
   // track is a faint continuous line instead of a dashed, shimmering one

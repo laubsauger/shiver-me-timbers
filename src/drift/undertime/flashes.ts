@@ -63,11 +63,11 @@ export function createFlashes(slots: number, U: FlashUniforms, slotOf: (slot: F)
   const shellA = float(1).sub(shellK).pow(2).mul(after).mul(step(hash(P.seed.add(kind.mul(3.7))), 0.15));
   const hazeA = smoothstep(0, 0.12, dt).mul(float(1).sub(smoothstep(left.mul(0.4), left, dt))).mul(after);
 
-  const size = isSpark.mul(U.coreSize.mul(0.6))
+  const size = isSpark.mul(U.coreSize.mul(1.1))
     .add(isCore.mul(U.coreSize.mul(dt.max(0).mul(3).add(1))))
     .add(isShell.mul(U.shellSpeed.mul(dt.max(0)).add(0.02)))
     .add(isHaze.mul(U.hazeSize.mul(smoothstep(0, left, dt).mul(0.6).add(0.4)).mul(mix(float(1), float(1.15), P.forced))));
-  const alpha = isSpark.mul(sparkA).add(isCore.mul(coreA)).add(isShell.mul(shellA)).add(isHaze.mul(hazeA)).mul(P.alive);
+  const alpha = isSpark.mul(sparkA).add(isCore.mul(coreA)).add(isShell.mul(shellA)).add(isHaze.mul(hazeA)).mul(P.alive).mul(P.dim);
 
   const material = new THREE.NodeMaterial();
   material.transparent = true;
@@ -83,7 +83,7 @@ export function createFlashes(slots: number, U: FlashUniforms, slotOf: (slot: F)
     const soft = float(1).sub(r).pow(1.6);
     const tint = select(anti.greaterThan(0.5), U.anti, U.matter) as V3;
     // the birth spark: a needle-sharp core in a tight halo (the hero's first point of light is this)
-    const sparkC = U.light.mul(U.coreRadiance).mul(float(1).sub(r).pow(10).mul(1.5).add(disc.mul(0.15)));
+    const sparkC = U.light.mul(U.coreRadiance).mul(float(1).sub(r).pow(14).mul(2.2).add(float(1).sub(r).pow(4).mul(0.12)));
     const hot = mix(float(1), float(1.6), P.forced);
     const coreC = mix(U.light, tint, 0.25).mul(U.coreRadiance.mul(U.flashGain).mul(hot)).mul(disc);
     const shellC = mix(U.light, vec3(0.72, 0.62, 1), 0.5).mul(U.shellRadiance.mul(U.flashGain)).mul(ring);
