@@ -146,17 +146,24 @@ let vite = null;
 let tearingDown = null;
 const teardown = () =>
   (tearingDown ??= (async () => {
-    await Promise.allSettled(browsers.map((b) => b.close()));
-    // SIGTERM: a sink finalises any clip still open as _FAILED (it never got its /endshot)
+    // the sinks first (SIGTERM: a sink finalises any clip still open as _FAILED, it never got its /endshot),
+    // then the browsers — closing a page that holds the GPU can hang, and must not keep the sinks alive
     await Promise.allSettled(
       sinks.map((s) => (s.exitCode !== null ? Promise.resolve() : new Promise((r) => (s.once('exit', r), s.kill('SIGTERM'))))),
     );
-    await vite?.close();
+    await Promise.race([Promise.allSettled(browsers.map((b) => b.close())), new Promise((r) => setTimeout(r, 8000))]);
+    await Promise.race([vite?.close(), new Promise((r) => setTimeout(r, 3000))]);
     releaseLock();
   })());
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     console.error(`\n[render] ${sig} — stopping lanes`);
+    // a deadline: whatever still hangs after 15 s is killed, the lock released, and we leave
+    setTimeout(() => {
+      for (const k of sinks) if (k.exitCode === null) k.kill('SIGKILL');
+      releaseLock();
+      process.exit(130);
+    }, 15000).unref();
     void teardown().then(() => process.exit(130));
   });
 }
