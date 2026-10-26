@@ -69,12 +69,11 @@ import {
 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
-import { latLon, loadEarthMaps, mapCoords, sampleBoth, wrappedGrad, type GeoFrame } from './earthMaps';
+import { GLOBAL_ELEV_TEXEL, latLon, loadEarthMaps, mapCoords, sampleBoth, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
 import type { LifeState } from './life';
 
 type F = THREE.Node<'float'>;
-type V2 = THREE.Node<'vec2'>;
 type V3 = THREE.Node<'vec3'>;
 type V4 = THREE.Node<'vec4'>;
 
@@ -247,12 +246,12 @@ export function createEarth(): Earth {
     const { lat, lon } = latLon(n, G);
     return { lat, ...mapCoords(lat, lon.sub(shift)) };
   };
-  const elevation = (c: ReturnType<typeof coords>, g: { dx: V2; dy: V2 }): F => sampleBoth(maps.regionElevation, maps.globalElevation, c, g).x as F;
-  const lcwAt = (c: ReturnType<typeof coords>, g: { dx: V2; dy: V2 }): V4 => sampleBoth(maps.regionLcw, maps.globalLcw, c, g);
+  const elevation = (c: ReturnType<typeof coords>, fp: F): F => sampleBoth(maps.regionElevation, maps.globalElevation, c, fp, GLOBAL_ELEV_TEXEL).x as F;
+  const lcwAt = (c: ReturnType<typeof coords>, fp: F): V4 => sampleBoth(maps.regionLcw, maps.globalLcw, c, fp);
   /** cloud cover 0..1 at unit normal n (on the cloud shell), the data's own plus sub-km texture at its edges */
-  const cloudAt = (n: V3, g: { dx: V2; dy: V2 }, fp: F): F => {
+  const cloudAt = (n: V3, fp: F): F => {
     const c = coords(n, u.cloudShift);
-    const a = lcwAt(c, g).y;
+    const a = lcwAt(c, fp).y;
     const cover = a.mul(a);
     // the data is ~1 km and soft: below it, fbm erodes the edges and textures the decks, then the edges
     // are sharpened (cloud from orbit has crisp edges); thin haze keeps half its cover
@@ -272,19 +271,18 @@ export function createEarth(): Earth {
     const t1 = sunward(n, muS).toVar();
     const t2 = cross(n, t1);
     const c = coords(n);
-    const g = wrappedGrad(c.global);
-    const real = sampleBoth(maps.regionAlbedo, maps.globalAlbedo, c, g).rgb.toVar();
-    const lcw = lcwAt(c, g).toVar();
+    const real = sampleBoth(maps.regionAlbedo, maps.globalAlbedo, c, fp).rgb.toVar();
+    const lcw = lcwAt(c, fp).toVar();
     const sea = seaLevel(L);
     // the measured elevation, with sub-pixel detail in the lowlands once the sea moves (a fractal flood line)
-    const e0 = elevation(c, g).toVar();
+    const e0 = elevation(c, fp).toVar();
     const lowDetail = fbm(n.add(vec3(-4, 9, 2)), 3000, 6, 0.5, fp).mul(7).mul(smoothstep(LOWLAND_M, 20, e0)).mul(smoothstep(0, 0.03, L.sea));
     const e = e0.add(lowDetail).toVar();
     // relief: the elevation one footprint (at least ~1 km) along the Sun's azimuth and across it
     const eps = max(fp, 0.8 * KM).toVar();
     const metres = eps.mul(6371000);
-    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), g).sub(e0).div(metres).toVar();
-    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), g).sub(e0).div(metres).toVar();
+    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), fp).sub(e0).div(metres).toVar();
+    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), fp).sub(e0).div(metres).toVar();
     const slope = sqrt(g1.mul(g1).add(g2.mul(g2)));
     // land above the sea now: the colour's own coast, and the risen sea over the measured elevation
     const above = e.sub(sea);
@@ -299,7 +297,7 @@ export function createEarth(): Earth {
     const mirror = (x: F): F => float(1).sub(abs(fract(x.mul(0.5)).mul(2).sub(1))) as F;
     const { lat, lon } = latLon(n, G);
     const desert = mapCoords(mirror(lat.sub(18).div(12)).mul(12).add(18) as F, mirror(lon.add(12).div(41)).mul(41).sub(12) as F);
-    const bare = sampleBoth(maps.regionAlbedo, maps.globalAlbedo, desert, g).rgb;
+    const bare = sampleBoth(maps.regionAlbedo, maps.globalAlbedo, desert, fp).rgb;
     const landAlbedo = lifeAlbedo(n, real, bare, e, lat, L);
     // water: deep navy, teal over the shallow shelves; the new sea over drowned land is silty
     const depth = sea.sub(e).max(0).add(step(0, e).mul(lcw.z).mul(200));
@@ -318,8 +316,8 @@ export function createEarth(): Earth {
     const sun = sunlight(float(EARTH_R).add(e.max(0).mul(1e-6 * RELIEF)), muS).toVar();
     const tanZ = sqrt(float(1).sub(muS.mul(muS)).max(0)).div(muS.max(0.08));
     const shadowAt = normalize(n.add(t1.mul(tanZ.mul(CLOUD_H / EARTH_R))));
-    const overhead = cloudAt(n, g, max(fp, 2 * KM));
-    const shade = float(1).sub(cloudAt(shadowAt, g, max(fp, 2 * KM)).mul(0.85));
+    const overhead = cloudAt(n, max(fp, 2 * KM));
+    const shade = float(1).sub(cloudAt(shadowAt, max(fp, 2 * KM)).mul(0.85));
     const diffuse = mix(muS, N.dot(S), land).max(0);
     // skylight: a little blue fill on the day side (none on the night side)
     const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.06));
@@ -354,11 +352,10 @@ export function createEarth(): Earth {
   const cloudMat = new THREE.MeshBasicNodeMaterial();
   cloudMat.transparent = true;
   cloudMat.depthWrite = false;
-  // from a few hundred km up the depth buffer cannot resolve the shell's 7 km above the ground at the limb:
-  // the shell is biased toward the eye (by far less than the planet, so its far side stays hidden)
-  cloudMat.polygonOffset = true;
-  cloudMat.polygonOffsetFactor = -2;
-  cloudMat.polygonOffsetUnits = -64;
+  // no depth test: from a few hundred km up the depth buffer cannot resolve the shell's 7 km above the
+  // ground at the limb, and the shader shades the nearest point along the pixel's own ray anyway (the
+  // ground's hit, below), whichever of the sphere's faces runs it
+  cloudMat.depthTest = false;
   cloudMat.colorNode = Fn(() => {
     const rc = EARTH_R + CLOUD_H;
     // the shell's own hit loses its precision with distance (from a planet's width away it lands on the
@@ -375,16 +372,10 @@ export function createEarth(): Earth {
     const muV = n.dot(v).max(1e-3);
     const muS = n.dot(S);
     const fp = footprint(t, muV).toVar();
-    const c = coords(n, u.cloudShift);
-    const g = wrappedGrad(c.global);
-    const cover = cloudAt(n, g, fp).toVar();
-    // embossed toward the Sun: cover as a height field (~2 km of relief), its slope along the light
-    const eps = max(fp, 2 * KM);
-    const cover1 = cloudAt(normalize(n.add(sunward(n, muS).mul(eps))), g, fp);
-    const slope = cover1.sub(cover).div(eps).mul(2 * KM).clamp(-1.5, 1.5);
-    const ndl = muS.sub(sqrt(float(1).sub(muS.mul(muS)).max(0)).mul(slope)).div(sqrt(slope.mul(slope).add(1)));
-    // thick cloud scatters light round into its shaded side; forward scattering lights it against the Sun
-    const wrap = ndl.mul(0.65).add(0.35).max(0);
+    const cover = cloudAt(n, fp).toVar();
+    // the deck's own brightness (the VIIRS day's) carries its relief; thick cloud scatters light round into
+    // its shaded side (wrap), forward scattering lights it against the Sun
+    const wrap = muS.mul(0.65).add(0.35).max(0);
     const gm = 0.55;
     const fwd = float(1 - gm * gm).div(pow(float(1 + gm * gm).sub(d.dot(S).mul(2 * gm)), 1.5)).mul(0.08);
     const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.08));
@@ -392,7 +383,7 @@ export function createEarth(): Earth {
     // thin cloud is darker as well as clearer; at night the towns below light its underside
     const thick = cover.mul(0.6).add(0.4);
     const below = coords(n);
-    const glow = nightLights(n, lcwAt(below, { dx: g.dx.mul(12), dy: g.dy.mul(12) }).x, float(1), L, float(1)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
+    const glow = nightLights(n, lcwAt(below, fp.mul(12)).x, float(1), L, float(1)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
     // the light falls off as the Sun gets low: the terminator a soft ramp, not a gold-edged line
     const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
     const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);

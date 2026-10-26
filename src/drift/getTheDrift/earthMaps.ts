@@ -12,7 +12,7 @@
  * lon 0° lat 0°, of lon 90°E) — the planet only translates, so they are fixed.
  */
 import * as THREE from 'three/webgpu';
-import { abs, asin, atan, dFdx, dFdy, float, fract, min, mix, select, smoothstep, texture, vec2 } from 'three/tsl';
+import { asin, atan, float, log2, min, mix, smoothstep, texture, vec2 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -21,6 +21,10 @@ type V4 = THREE.Node<'vec4'>;
 
 export const REGION = { lon0: -25, lon1: 45, lat0: 18, lat1: 68, w: 7000, h: 5000 };
 const GLOBAL_ELEV = { w: 4096, h: 2048 };
+/** rad on the sphere one texel spans: the region's maps, the global colour / lights / clouds, its elevation */
+const REGION_TEXEL = (((REGION.lon1 - REGION.lon0) / REGION.w) * Math.PI) / 180;
+const GLOBAL_TEXEL = (2 * Math.PI) / 8192;
+export const GLOBAL_ELEV_TEXEL = (2 * Math.PI) / GLOBAL_ELEV.w;
 const DEG = 180 / Math.PI;
 
 export interface GeoFrame {
@@ -144,29 +148,12 @@ export function mapCoords(lat: F, lon: F): { region: V2; global: V2; w: F } {
   return { region, global, w: smoothstep(0, 1.5, edge) as F };
 }
 
-/**
- * Screen-space gradients for a texture coordinate that wraps in u (the global maps' date line): the smaller
- * of the gradients of u and of u shifted half a turn, so the seam does not jump to the coarsest mip.
- */
-export function wrappedGrad(uv: V2): { dx: V2; dy: V2 } {
-  const pick = (a: F, b: F): F => select(abs(a).lessThan(abs(b)), a, b) as F;
-  const shifted = fract(uv.x.add(0.5));
-  return {
-    dx: vec2(pick(dFdx(uv.x), dFdx(shifted)), dFdx(uv.y)),
-    dy: vec2(pick(dFdy(uv.x), dFdy(shifted)), dFdy(uv.y)),
-  };
-}
-
-/**
- * A map pair sampled at the two levels and blended. `dx`/`dy` are the screen gradients of the GLOBAL
- * coordinate (the region's follow by the ratio of the two scales); `shift` moves the sample (deg, e.g. the
- * clouds' drift).
- */
-export function sampleBoth(regionTex: THREE.Texture, globalTex: THREE.Texture, c: { region: V2; global: V2; w: F }, g: { dx: V2; dy: V2 }): V4 {
-  const sx = 360 / (REGION.lon1 - REGION.lon0);
-  const sy = 180 / (REGION.lat1 - REGION.lat0);
-  const k = vec2(sx, sy);
-  const r = texture(regionTex, c.region).grad(g.dx.mul(k), g.dy.mul(k));
-  const gl = texture(globalTex, c.global).grad(g.dx, g.dy);
+export function sampleBoth(regionTex: THREE.Texture, globalTex: THREE.Texture, c: { region: V2; global: V2; w: F }, fp: F, globalTexel: number = GLOBAL_TEXEL): V4 {
+  // the mip level from the pixel's footprint on the ground (fp, rad), not from screen derivatives: the
+  // same on every cube face (derivatives taken in the shaders' loops are undefined, and differed across a
+  // face seam), and free of the date line's jump
+  const level = (texel: number): F => log2(fp.div(texel).max(1)) as F;
+  const r = texture(regionTex, c.region).level(level(REGION_TEXEL));
+  const gl = texture(globalTex, c.global).level(level(globalTexel));
   return mix(gl, r, c.w) as unknown as V4;
 }
