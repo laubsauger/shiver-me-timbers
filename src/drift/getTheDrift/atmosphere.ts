@@ -48,17 +48,21 @@ export const OZONE_H = 0.025;
 export const OZONE_W = 0.015;
 /** multiple scattering: its share against single scattering (isotropic), and how far below the horizon (rad)
  * the sunlight feeding it fades out */
-export const MS_GAIN = 0.5;
+export const MS_GAIN = 0.15;
 export const MS_SOFT = 0.16;
+export const MARINE_AEROSOL = 3;
 export const MS_FEED_H = 0.03;
 
-/** which air: with ozone, and how much multiple scattering */
+/** which air: with ozone, how much multiple scattering, and its aerosol (haze) against the clean air's */
 export interface Air {
   ozone: boolean;
   ms: number;
+  mie: number;
 }
-export const ORBIT: Air = { ozone: false, ms: 0 };
-export const GROUND: Air = { ozone: true, ms: MS_GAIN };
+export const ORBIT: Air = { ozone: false, ms: 0, mie: 1 };
+/** tropical marine air carries several times the clean air's aerosol: its forward scattering is what holds
+ * the glow after sunset down on the horizon (references/sea-dusk-twilight) */
+export const GROUND: Air = { ozone: true, ms: MS_GAIN, mie: MARINE_AEROSOL };
 
 /** ray / sphere: [near, far] distances (far < near when it misses) */
 export function sphereHit(o: V3, d: V3, c: V3, r: number | F): { t0: F; t1: F } {
@@ -118,7 +122,7 @@ function ozoneColumn(r: F, mu: F): F {
 
 /** optical depth (per channel) of the air along a ray from radius r at cos-zenith μ out to space */
 export const opticalDepth = (r: F, mu: F, air: Air = ORBIT): V3 => {
-  const od = BETA_R.mul(column(r, mu, H_RAY)).add(column(r, mu, H_MIE).mul(BETA_M * 1.1));
+  const od = BETA_R.mul(column(r, mu, H_RAY)).add(column(r, mu, H_MIE).mul(BETA_M * air.mie * 1.1));
   return air.ozone ? od.add(OZONE.mul(ozoneColumn(r, mu))) : od;
 };
 
@@ -187,7 +191,7 @@ export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: 
       odR.addAssign(rR.mul(0.5));
       odM.addAssign(rM.mul(0.5));
       if (air.ozone) odO.addAssign(rO.mul(0.5));
-      const ext = BETA_R.mul(odR).add(vec3(BETA_M * 1.1).mul(odM));
+      const ext = BETA_R.mul(odR).add(vec3(BETA_M * air.mie * 1.1).mul(odM));
       const toEye = exp((air.ozone ? ext.add(OZONE.mul(odO)) : ext).negate());
       // the Sun's light here, through the air above (analytic), none in the planet's shadow
       const muS = p.sub(C).dot(S).div(r);
@@ -205,9 +209,9 @@ export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: 
       if (air.ozone) odO.addAssign(rO.mul(0.5));
     });
   });
-  const single = inR.mul(BETA_R).mul(phaseR).add(inM.mul(BETA_M).mul(phaseM));
-  const light = (air.ms > 0 ? single.add(msR.mul(BETA_R).add(msM.mul(BETA_M)).mul(air.ms / (4 * Math.PI))) : single).mul(SUN_E);
-  const ext = BETA_R.mul(odR).add(vec3(BETA_M * 1.1).mul(odM));
+  const single = inR.mul(BETA_R).mul(phaseR).add(inM.mul(BETA_M * air.mie).mul(phaseM));
+  const light = (air.ms > 0 ? single.add(msR.mul(BETA_R).add(msM.mul(BETA_M * air.mie)).mul(air.ms / (4 * Math.PI))) : single).mul(SUN_E);
+  const ext = BETA_R.mul(odR).add(vec3(BETA_M * air.mie * 1.1).mul(odM));
   const T = exp((air.ozone ? ext.add(OZONE.mul(odO)) : ext).negate());
   return { light, T, hitGround: hitGround as THREE.Node<'bool'> };
 }

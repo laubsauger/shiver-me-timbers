@@ -12,8 +12,8 @@ import * as THREE from 'three/webgpu';
 import { Fn, acos, cameraPosition, cubeTexture, float, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
 import {
-  BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_GAIN, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
-  GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight,
+  BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
+  GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
 } from '../getTheDrift/atmosphere';
 
 type V3 = THREE.Node<'vec3'>;
@@ -53,29 +53,30 @@ const smooth = (a: number, b: number, x: number): number => {
 };
 
 /** CPU twin of atmosphere.ts: transmittance from radius r (Mm) at cos-zenith μ out to space */
-export function transmittance(r: number, mu: number): Rgb {
+export function transmittance(r: number, mu: number, air: Air = GROUND): Rgb {
   const cr = chapmanColumn(r, mu, H_RAY);
-  const cm = chapmanColumn(r, mu, H_MIE) * BETA_M * 1.1;
-  const co = ozoneColumnCpu(r, mu);
+  const cm = chapmanColumn(r, mu, H_MIE) * BETA_M * air.mie * 1.1;
+  const co = air.ozone ? ozoneColumnCpu(r, mu) : 0;
   return [0, 1, 2].map((k) => Math.exp(-(BETA_R_RGB[k] * cr + cm + OZONE_RGB[k] * co))) as Rgb;
 }
 
-export function sunlightCpu(r: number, mu: number): Rgb {
+export function sunlightCpu(r: number, mu: number, air: Air = GROUND): Rgb {
   const dip = Math.sqrt(Math.max(0, r - EARTH_R) * (2 / EARTH_R));
   const k = smooth(-SUN_ANG, SUN_ANG, Math.asin(Math.max(-1, Math.min(1, mu))) + dip);
-  const t = transmittance(r, mu);
+  const t = transmittance(r, mu, air);
   return [t[0] * k, t[1] * k, t[2] * k];
 }
 
-function skylightCpu(r: number, mu: number): Rgb {
+function skylightCpu(r: number, mu: number, air: Air): Rgb {
   const dip = Math.sqrt(Math.max(0, r - EARTH_R) * (2 / EARTH_R));
   const k = smooth(-MS_SOFT, 0.02, Math.asin(Math.max(-1, Math.min(1, mu))) + dip);
-  const t = transmittance(Math.max(r + 0.003, EARTH_R + MS_FEED_H), Math.max(mu, Math.sin(-(dip + 0.003))));
+  const t = transmittance(Math.max(r + 0.003, EARTH_R + MS_FEED_H), Math.max(mu, Math.sin(-(dip + 0.003))), air);
   return [t[0] * k, t[1] * k, t[2] * k];
 }
 
 /** CPU twin of `scatter`: the sky's radiance toward d (unit, y up) from radius r0 on the +y axis */
-export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, steps = 48): Rgb {
+export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, steps = 48, air: Air = GROUND): Rgb {
+  const mie = BETA_M * air.mie;
   const b = r0 * d.y;
   const c = r0 * r0;
   const discTop = b * b - c + ATMOS_TOP * ATMOS_TOP;
@@ -105,10 +106,10 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
     odM += rM * 0.5;
     odO += rO * 0.5;
     const muS = (px * S.x + py * S.y + pz * S.z) / r;
-    const sun = sunlightCpu(r, muS);
-    const sky = skylightCpu(r, muS);
+    const sun = sunlightCpu(r, muS, air);
+    const sky = skylightCpu(r, muS, air);
     for (let k = 0; k < 3; k++) {
-      const toEye = Math.exp(-(BETA_R_RGB[k] * odR + BETA_M * 1.1 * odM + OZONE_RGB[k] * odO));
+      const toEye = Math.exp(-(BETA_R_RGB[k] * odR + mie * 1.1 * odM + (air.ozone ? OZONE_RGB[k] * odO : 0)));
       inR[k] += toEye * sun[k] * rR;
       inM[k] += toEye * sun[k] * rM;
       msR[k] += toEye * sky[k] * rR;
@@ -122,8 +123,8 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
   const phaseR = (3 / (16 * Math.PI)) * (1 + mu * mu);
   const g2 = MIE_G * MIE_G;
   const phaseM = ((3 * (1 - g2)) / (8 * Math.PI * (2 + g2))) * (1 + mu * mu) / Math.pow(1 + g2 - 2 * MIE_G * mu, 1.5);
-  const iso = MS_GAIN / (4 * Math.PI);
-  return [0, 1, 2].map((k) => (inR[k] * BETA_R_RGB[k] * phaseR + inM[k] * BETA_M * phaseM + (msR[k] * BETA_R_RGB[k] + msM[k] * BETA_M) * iso) * SUN_E) as Rgb;
+  const iso = air.ms / (4 * Math.PI);
+  return [0, 1, 2].map((k) => (inR[k] * BETA_R_RGB[k] * phaseR + inM[k] * mie * phaseM + (msR[k] * BETA_R_RGB[k] + msM[k] * mie) * iso) * SUN_E) as Rgb;
 }
 
 /** the baked galaxy's light against Act 2's (seen from space at exposure 1): the eye opens ~ADAPT_MAX at night */

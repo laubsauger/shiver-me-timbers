@@ -31,7 +31,7 @@
  * eye's rotation applied to the camera-local dome direction.
  */
 import * as THREE from 'three/webgpu';
-import { cubeTexture, mix, texture, toneMapping, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { cubeTexture, mix, texture, toneMapping, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { domeMasterDirectionNode } from './domeMaster';
 
@@ -47,6 +47,11 @@ export interface DomeCaptureOptions {
   overlay?: THREE.Texture;
   /** baked into the shader; AgX keeps saturated emitters cleaner than ACES */
   toneMapping?: THREE.ToneMapping;
+  /**
+   * Optional grade after the tone map: saturation about the luminance, and contrast as a power about mid
+   * grey (a camera's curve; AgX alone is flat). Absent, the present pass is exactly the tone map.
+   */
+  grade?: { saturation: number; contrast: number };
 }
 
 export interface DomeLook {
@@ -113,7 +118,14 @@ export class DomeCapture {
       lit = mix(lit, layer.rgb.mul(this.uOverlayRadiance), layer.a);
     }
     const present = this.material('dome-present');
-    present.fragmentNode = vec4(toneMapping(opts.toneMapping ?? THREE.AgXToneMapping, this.uExposure, lit.mul(inside)).rgb, 1);
+    const mapped = toneMapping(opts.toneMapping ?? THREE.AgXToneMapping, this.uExposure, lit.mul(inside)).rgb;
+    let graded = mapped;
+    if (opts.grade) {
+      const luma = mapped.dot(vec3(0.2126, 0.7152, 0.0722));
+      const saturated = mix(vec3(luma), mapped, opts.grade.saturation).max(0);
+      graded = saturated.div(0.18).pow(vec3(opts.grade.contrast)).mul(0.18).min(1);
+    }
+    present.fragmentNode = vec4(graded, 1);
     this.presentQuad = new THREE.QuadMesh(present);
   }
 

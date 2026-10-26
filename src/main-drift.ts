@@ -165,7 +165,8 @@ async function boot(): Promise<void> {
     return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
   };
   // the crawl lives in master space, so it shows in the dome view only
-  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
+  // (the sea acts: a camera's contrast and colour over AgX's flat curve — references/sea-golden-hour-sky)
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: sea ? { saturation: 1.2, contrast: 1.12 } : undefined });
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;
