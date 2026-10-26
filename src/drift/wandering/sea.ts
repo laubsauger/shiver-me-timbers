@@ -26,6 +26,7 @@ import { causticsParams } from '../../params/caustics';
 import { createArchipelago, generateIslandSites } from '../../island/archipelago';
 import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
+import { weatherPresets } from '../../weather/presets';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky } from './seaSky';
 import { bakeNightSky } from './nightSky';
@@ -96,6 +97,10 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
   const archipelago = createArchipelago({ seed: SEED, sites: [site] });
   scene.add(archipelago.group);
 
+  // a calm sea (direction.md: the swell lifts and sets the raft down; the game's default is a working sea,
+  // Hs ~2.8 m): the game's calm preset — a light breeze over a long low ground swell. Set before the
+  // spectrum is built, never changed during the act
+  Object.assign(oceanParams, weatherPresets.calm.ocean);
   const ocean = createOceanSim(SEED);
   const surface = new OceanSurface(ocean, undefined, undefined, {
     sunLight: sky.sunLight,

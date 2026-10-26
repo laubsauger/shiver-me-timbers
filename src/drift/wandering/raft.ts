@@ -4,7 +4,7 @@
  *
  * In the game the raft's pose is physics (buoyancy integrated step by step), which a frame rendered on its
  * own cannot reproduce. Here it is a pure function of time instead: the sea's height (CpuOcean) under its
- * log contact points, averaged over the last fraction of a second (a raft does not follow every ripple), fitted
+ * log contact points, averaged over the last second or so (a raft does not follow every ripple), fitted
  * with a plane — heave from its mean, pitch and roll from its slopes. The logs' centreline is the waterline
  * (raftParams.logAxisY = 0), so the heave is the raft's height.
  *
@@ -28,7 +28,7 @@ import { shipFlagParams, shipMaterialParams } from '../../params/ship';
 import { refreshShipMaterials } from '../../ship/pieceMaterials';
 
 /** s the sea's height is averaged over, and how many instants */
-const SETTLE = 0.6;
+const SETTLE = 1.2;
 const SAMPLES = 5;
 
 export interface RaftProp {
