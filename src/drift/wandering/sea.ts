@@ -31,6 +31,9 @@ import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky } from './seaSky';
 import { bakeNightSky } from './nightSky';
 import { createRaft } from './raft';
+import { CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
+import { sunlightCpu } from './seaSky';
+import { EARTH_R } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
 import { SUN_E } from '../getTheDrift/atmosphere';
 
@@ -48,6 +51,10 @@ const ISLAND_DISTANCE = 650;
 const ISLAND_LEFT_OF_SUN = 35;
 /** s into the act the sandpipers take off */
 const FLOCK_START = 5;
+/** the clouds: how much sky the field covers, and the wind that carries it (m/s, rad on the xz plane) */
+const CLOUD_COVER = 0.32;
+const WIND = 7;
+const WIND_DIR = 0.6;
 /** m: the raft ahead of the eye, and to its right */
 const RAFT_AHEAD = 9;
 const RAFT_RIGHT = 1.5;
@@ -82,7 +89,21 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
   const sun = new THREE.Vector3(...sunDirection(hour, skyParams.latitude));
   const yaw = Math.atan2(-sun.x, -sun.z);
   const front = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  const seaSky = createSeaSky(FAR * 0.8, bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0)));
+  // the clouds: a fair-weather cumulus field drifting on the wind (clouds.ts)
+  const cloudData = loadClouds();
+  const cu = {
+    time: uniform(0),
+    wind: uniform(new THREE.Vector2(Math.cos(WIND_DIR) * WIND, Math.sin(WIND_DIR) * WIND)),
+    coverage: uniform(CLOUD_COVER),
+    sun: uniform(new THREE.Vector3()),
+    sunBase: uniform(new THREE.Vector3()),
+    sunTop: uniform(new THREE.Vector3()),
+    ambient: uniform(new THREE.Vector3()),
+  };
+  const seaSky = createSeaSky(FAR * 0.8, bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0)), {
+    data: cloudData,
+    uniforms: cu as unknown as CloudUniforms,
+  });
   scene.add(seaSky.mesh);
   let hemi: THREE.HemisphereLight | undefined;
   scene.traverse((o) => {
@@ -150,7 +171,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
     get exposure() {
       return seaSky.exposure;
     },
-    ready,
+    ready: Promise.all([ready, cloudData.ready]).then(() => undefined),
     setPixelAngle(rad) {
       fu.pixelAngle.value = rad;
     },
@@ -164,6 +185,15 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
       // the water and the sand below), the haze at the horizon
       seaSky.update(eye.position, sun);
+      cu.time.value = t;
+      cu.sun.value.copy(sun);
+      const atCloud = (h: number, v: THREE.Vector3): void => {
+        const c = sunlightCpu(EARTH_R + h * 1e-6, sun.y);
+        v.set(c[0], c[1], c[2]).multiplyScalar(SUN_E / Math.PI);
+      };
+      atCloud(CLOUD_BASE, cu.sunBase.value);
+      atCloud(CLOUD_TOP, cu.sunTop.value);
+      cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       sky.sunLight.color.copy(seaSky.sunColour);
       sky.sunLight.intensity = SUN_E;
       if (hemi) {

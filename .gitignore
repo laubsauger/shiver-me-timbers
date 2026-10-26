@@ -51,3 +51,7 @@ public/drift/earth/
 public/drift/web/
 # the galaxy atlas is built from Hubble images (scripts/drift-galaxy-atlas.py)
 public/drift/galaxies/
+# the sandpipers' flight is baked (scripts/drift-flock-bake.py), and the clouds' noise volumes
+# (scripts/drift-cloud-noise.py)
+public/drift/flock/
+public/drift/clouds/

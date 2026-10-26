@@ -9,8 +9,9 @@
  * irradiance for the ambient, and the colour along the horizon for the haze the water and land melt into.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, acos, cameraPosition, cubeTexture, float, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
+import { Fn, acos, cameraPosition, cubeTexture, exp, float, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
+import { cloudMarch, type CloudData, type CloudUniforms } from './clouds';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
@@ -133,7 +134,10 @@ const NIGHT_GAIN = 1 / 14;
  * the night's millionfold fall into a few stops, so their light alone would show them by day) */
 const STAR_CONTRAST = 0.002;
 
-export function createSeaSky(radius: number, night?: NightSky): SeaSky {
+/** m: the marine haze between the eye and a cloud (its light falls to 1/e over this) */
+const CLOUD_HAZE = 18000;
+
+export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms }): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R) };
   const S = u.sun as unknown as V3;
   const eyeR = u.eyeR as unknown as THREE.Node<'float'>;
@@ -163,7 +167,12 @@ export function createSeaSky(radius: number, night?: NightSky): SeaSky {
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    return vec4(light.add(sun).add(starsAlong(d, T, hitGround, light)), 1);
+    const behind = light.add(sun).add(starsAlong(d, T, hitGround, light));
+    if (!clouds) return vec4(behind, 1);
+    // the clouds over the sky by their opacity; the haze in front of them takes them into the sky's own colour
+    const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms);
+    const k = exp(c.dist.div(-CLOUD_HAZE));
+    return vec4(mix(behind, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha), 1);
   })();
   material.name = 'drift-sea-sky';
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 48), material);
