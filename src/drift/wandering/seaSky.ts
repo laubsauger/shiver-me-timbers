@@ -47,6 +47,9 @@ const ADAPT_REF = 0.4;
 const ADAPT = 0.5;
 const ADAPT_MAX = 14;
 
+/** the exposure the eye opens to under a sky of this irradiance (luminance, linear) */
+export const adaptation = (lum: number): number => Math.min(ADAPT_MAX, Math.pow(ADAPT_REF / Math.max(lum, 1e-9), ADAPT));
+
 type Rgb = [number, number, number];
 const smooth = (a: number, b: number, x: number): number => {
   const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -234,7 +237,7 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
       irradiance.setRGB(E[0], E[1], E[2]);
       horizon.setRGB(H[0], H[1], H[2]);
       const lum = 0.2126 * E[0] + 0.7152 * E[1] + 0.0722 * E[2];
-      exposure = Math.min(ADAPT_MAX, Math.pow(ADAPT_REF / Math.max(lum, 1e-9), ADAPT));
+      exposure = adaptation(lum);
     },
   };
 }
