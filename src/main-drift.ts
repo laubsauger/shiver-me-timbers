@@ -178,7 +178,8 @@ async function boot(): Promise<void> {
     eyeWas.copy(eye.position);
     field.update(state, at, eye.position, fade);
     // Get the Drift arrives at the Sun from galaxy distances: the near clip must follow the scale
-    const near = act2 ? Math.max(1e-7, Math.min(0.05, act2.f * 0.02)) : 0.05;
+    // (and once the planet is there, the nearest thing is its atmosphere, a thousand km off: 1e-4 of a unit)
+    const near = act2 ? (act2.earth > 0 ? 1e-4 : Math.max(1e-7, Math.min(0.05, act2.f * 0.02))) : 0.05;
     dome.setNear(near);
     if (camera.near !== Math.min(near, 0.02)) {
       camera.near = Math.min(near, 0.02);

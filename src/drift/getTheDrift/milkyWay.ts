@@ -50,7 +50,16 @@ type V3 = THREE.Node<'vec3'>;
 
 export interface MilkyWay {
   readonly group: THREE.Group;
-  update(o: { volume: number; local: number; sunStar: number; radiance: number; pixelAngle: number; eye: THREE.Vector3 }): void;
+  update(o: {
+    volume: number;
+    local: number;
+    sunStar: number;
+    radiance: number;
+    pixelAngle: number;
+    eye: THREE.Vector3;
+    /** a planet in front of the sky (Earth): what lies behind it is hidden; radius 0 = none */
+    occluder: { centre: THREE.Vector3; radius: number };
+  }): void;
   dispose(): void;
 }
 
@@ -71,8 +80,17 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
     radiance: uniform(1),
     pixelAngle: uniform(0.0015),
     sun: uniform(new THREE.Vector3(...g.sun)),
+    occCentre: uniform(new THREE.Vector3()),
+    occRadius: uniform(0),
   };
   const v3 = (x: unknown): V3 => x as V3;
+  /** 1 where direction d from the eye is NOT blocked by the occluding planet */
+  const clear = (d: V3): THREE.Node<'float'> => {
+    const oc = v3(u.occCentre).sub(cameraPosition);
+    const b = oc.dot(d);
+    const m2 = oc.dot(oc).sub(b.mul(b));
+    return float(1).sub(step(m2, u.occRadius.mul(u.occRadius)).mul(step(0, b)));
+  };
   const look = { arms: float(OUR_LOOK.arms), wind: float(OUR_LOOK.wind), phase: float(OUR_LOOK.phase), seed: float(OUR_LOOK.seed), elliptical: float(0) };
 
   // ------------------------------------------------------------------ the volume
@@ -123,7 +141,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
         });
       });
     });
-    return vec4(light.mul(u.radiance).mul(u.volume), 1);
+    return vec4(light.mul(u.radiance).mul(u.volume).mul(clear(d)), 1);
   })();
   material.name = 'drift-milky-way';
   const sky = new THREE.Mesh(new THREE.SphereGeometry(400, 96, 48), material);
@@ -167,7 +185,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   starMat.colorNode = Fn(() => {
     const rr2 = length(uv().sub(0.5)).mul(2);
     const core = exp(rr2.div(0.32).pow(2).negate());
-    return vec4(tint.mul(flux).mul(core).mul(u.local).mul(0.25), 1);
+    return vec4(tint.mul(flux).mul(core).mul(u.local).mul(0.25).mul(clear(normalize(toStar))), 1);
   })();
   starMat.name = 'drift-local-stars';
   const stars = billboardMesh(starMat, COUNT, 'drift-local-stars');
@@ -207,6 +225,8 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
       u.volume.value = o.volume;
       u.local.value = o.local;
       u.sunStar.value = o.sunStar;
+      u.occCentre.value.copy(o.occluder.centre);
+      u.occRadius.value = o.occluder.radius;
       u.radiance.value = o.radiance;
       u.pixelAngle.value = o.pixelAngle;
       sky.position.copy(o.eye);

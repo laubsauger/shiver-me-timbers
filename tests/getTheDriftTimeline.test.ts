@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { arrivalEye, arrivalState, beatStarts, domeDir, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -63,5 +63,52 @@ describe('Get the Drift arrival', () => {
     // the zenith lies close to the plane (leaned by bandLean only)
     const zenith = domeDir(90, 0, tilt);
     expect(Math.abs(dot(zenith, g.normal))).toBeLessThan(Math.sin(((p.bandLean + 5) * Math.PI) / 180));
+  });
+
+  describe('Earth', () => {
+    const deg = (a: number[], b: number[]) => (Math.acos(Math.max(-1, Math.min(1, dot(a, b)))) * 180) / Math.PI;
+    const h = 1 / 30;
+
+    it('comes in under the comfort cap and slides across the sky no faster than 6°/s', () => {
+      let rate = 0;
+      let slide = 0;
+      for (let t = starts.earth; t < starts.earth + p.earth; t += h) {
+        const a = earthPose(t, p, tilt);
+        const b = earthPose(t + h, p, tilt);
+        rate = Math.max(rate, Math.abs(Math.log(b.distance) - Math.log(a.distance)) / h);
+        slide = Math.max(slide, deg(a.centreDir, b.centreDir) / h);
+      }
+      expect(rate).toBeLessThan(0.35);
+      expect(slide).toBeLessThan(6);
+    });
+
+    it('never passes in front of the Sun on the way in, and leaves it clear of the limb', () => {
+      for (let t = starts.earth; t < starts.earth + p.earthApproach; t += 0.1) {
+        const e = earthPose(t, p, tilt);
+        expect(deg(e.centreDir, e.sun) - e.radiusDeg, `at ${t.toFixed(1)} s`).toBeGreaterThan(1);
+      }
+      const arrived = earthPose(starts.earth + p.earthApproach, p, tilt);
+      const clear = deg(arrived.centreDir, arrived.sun) - arrived.radiusDeg;
+      expect(clear).toBeGreaterThan(1);
+      expect(clear).toBeLessThan(30);
+    });
+
+    it('puts the dawn on the planet: the terminator crosses the visible face (lit and dark both in view)', () => {
+      const e = earthPose(starts.earth + p.earthApproach, p, tilt);
+      const toEye = e.centreDir.map((x) => -x);
+      // the sub-eye point is in night, but the Sun lights part of the visible hemisphere
+      const sunElAtSubEye = 90 - deg(toEye, e.sun);
+      expect(sunElAtSubEye).toBeLessThan(0);
+      expect(sunElAtSubEye).toBeGreaterThan(-60);
+    });
+
+    it('starts as a point near the Sun and ends with its limb across the front of the dome', () => {
+      const first = earthPose(starts.earth, p, tilt);
+      expect(first.radiusDeg).toBeLessThan(0.2);
+      expect(deg(first.centreDir, first.sun)).toBeLessThan(30);
+      const last = earthPose(starts.earth + p.earthApproach, p, tilt);
+      const limbTop = 90 - deg(last.centreDir, domeDir(90, 0, tilt)) + last.radiusDeg;
+      expect(limbTop).toBeCloseTo(p.limbEl, 0);
+    });
   });
 });
