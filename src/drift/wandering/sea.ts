@@ -16,6 +16,7 @@
  * sea, turned to face the low sun.
  */
 import * as THREE from 'three/webgpu';
+import { uniform } from 'three/tsl';
 import { createSky } from '../../sky';
 import { skyParams } from '../../params/sky';
 import { createOceanSim, oceanParams } from '../../ocean';
@@ -25,6 +26,7 @@ import { causticsParams } from '../../params/caustics';
 import { createArchipelago, generateIslandSites } from '../../island/archipelago';
 import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
+import { createFlock, loadFlock, type FlockUniforms } from './flock';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -38,6 +40,8 @@ const FAR = 12000;
 /** the island: m away, and deg to the left of the sun */
 const ISLAND_DISTANCE = 650;
 const ISLAND_LEFT_OF_SUN = 35;
+/** s into the act the sandpipers take off */
+const FLOCK_START = 5;
 
 export interface SeaAct {
   readonly scene: THREE.Scene;
@@ -46,8 +50,11 @@ export interface SeaAct {
   readonly total: number;
   /** the tone map's exposure (ACES, as the game's skyParams.exposure) */
   readonly exposure: number;
+  /** resolves once its data (the flock's keys) is loaded */
+  readonly ready: Promise<void>;
   /** put the sea into the state of time t and the eye where it watches from */
   update(t: number, eye: THREE.Object3D, renderer: THREE.WebGPURenderer): void;
+  setPixelAngle(rad: number): void;
 }
 
 export function createSea(): SeaAct {
@@ -95,6 +102,24 @@ export function createSea(): SeaAct {
   });
   const cpu = new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum);
 
+  // the sandpipers (W4), startled FLOCK_START s into the act; the bake's front turned to the dome's front
+  const flockData = loadFlock();
+  const fu = {
+    time: uniform(0),
+    origin: uniform(new THREE.Vector3(0, 0, 0)),
+    basis: uniform(new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationY(yaw))),
+    sun: uniform(new THREE.Vector3()),
+    eye: uniform(new THREE.Vector3()),
+    pixelAngle: uniform(0.0015),
+    presence: uniform(1),
+  };
+  // (its shader bakes the key count in: built once the keys are loaded)
+  const ready = flockData.ready.then(() => {
+    const flock = createFlock(flockData, fu as unknown as FlockUniforms);
+    flock.frustumCulled = false;
+    scene.add(flock);
+  });
+
   // the surface reads one camera: a proxy at the eye with the faces' field and far plane
   const proxy = new THREE.PerspectiveCamera(90, 1, 0.05, FAR);
   const windDir: [number, number] = [Math.cos(oceanParams.windDirection), Math.sin(oceanParams.windDirection)];
@@ -103,6 +128,10 @@ export function createSea(): SeaAct {
     scene,
     far: FAR,
     total: 60,
+    ready,
+    setPixelAngle(rad) {
+      fu.pixelAngle.value = rad;
+    },
     exposure: skyParams.exposure,
     update(t, eye, renderer) {
       eye.position.set(0, EYE_HEIGHT, 0);
@@ -128,6 +157,9 @@ export function createSea(): SeaAct {
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
       surface.update(proxy, t, sky.sunDirection);
+      fu.time.value = t - FLOCK_START;
+      fu.sun.value.copy(sky.sunDirection);
+      fu.eye.value.copy(eye.position);
     },
   };
 }

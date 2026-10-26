@@ -255,6 +255,7 @@ async function boot(): Promise<void> {
   const setPixelAngle = (rad: number): void => {
     field.setPixelAngle(rad);
     arrival.setPixelAngle(rad);
+    sea?.setPixelAngle(rad);
   };
   const renderMaster = (): void => {
     setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
@@ -342,6 +343,7 @@ async function boot(): Promise<void> {
 
   // the Earth's maps (~150 MB of satellite data) load in the background; nothing may be captured before
   await arrival.ready;
+  await sea?.ready;
   (window as unknown as Record<string, unknown>).__drift = {
     app,
     /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */
