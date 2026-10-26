@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <title>The Drift</title>
+    <link rel="icon" type="image/png" href="/assets/branding/favicon.png" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+      #app canvas {
+        display: block;
+      }
+      #drift-hud {
+        position: fixed;
+        left: 12px;
+        bottom: 10px;
+        font: 12px/1.45 ui-monospace, Menlo, monospace;
+        color: rgba(220, 228, 255, 0.75);
+        pointer-events: none;
+        white-space: pre;
+        text-shadow: 0 1px 2px #000;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="drift-hud"></div>
+    <script type="module" src="/src/main-drift.ts"></script>
+  </body>
+</html>
