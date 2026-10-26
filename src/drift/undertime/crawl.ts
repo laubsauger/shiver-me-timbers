@@ -76,6 +76,25 @@ export function crawlPlacement(t: number, i: number, n: number, line: CrawlLine,
   return alpha > 0 ? { el, size, alpha } : null;
 }
 
+/**
+ * The sky the crawl occupies at act time t: elevation band (deg) spanning every visible line plus a margin of
+ * about one text height, and how present the text is (max alpha). Drives the field's text pocket.
+ */
+export function crawlBand(t: number, lines: readonly CrawlLine[], L: CrawlLayout): { lo: number; hi: number; strength: number } {
+  let lo = Infinity;
+  let hi = -Infinity;
+  let strength = 0;
+  lines.forEach((line, i) => {
+    const at = crawlPlacement(t, i, lines.length, line, L);
+    if (!at) return;
+    const textDeg = at.size * 180; // master width spans 180° across the diameter
+    lo = Math.min(lo, at.el - textDeg * 1.2 - 3);
+    hi = Math.max(hi, at.el + textDeg * 1.2 + 3);
+    strength = Math.max(strength, at.alpha);
+  });
+  return strength > 0 ? { lo, hi, strength } : { lo: 0, hi: 0, strength: 0 };
+}
+
 export class CrawlOverlay {
   readonly texture: THREE.CanvasTexture;
   private readonly ctx: CanvasRenderingContext2D;
@@ -85,7 +104,7 @@ export class CrawlOverlay {
     private readonly lines: readonly CrawlLine[],
     readonly layout: CrawlLayout,
     size = 2048,
-    private readonly fonts = { body: '300 {px}px Georgia, "Times New Roman", serif', signature: 'italic 300 {px}px Georgia, "Times New Roman", serif' },
+    private readonly fonts = { body: '400 {px}px Georgia, "Times New Roman", serif', signature: 'italic 400 {px}px Georgia, "Times New Roman", serif' },
   ) {
     this.size = size;
     const canvas = document.createElement('canvas');
@@ -112,6 +131,10 @@ export class CrawlOverlay {
       const R = ((90 - at.el) / 90) * c; // master radius of this elevation circle
       ctx.font = (line.signature ? this.fonts.signature : this.fonts.body).replace('{px}', px.toFixed(1));
       ctx.fillStyle = line.signature ? `rgba(255,214,150,${at.alpha})` : `rgba(236,240,255,${at.alpha})`;
+      // a soft dark halo behind every glyph: whatever the field does behind the text, the letterforms keep
+      // their own edge (the overlay is mixed over the frame by its alpha, so the halo darkens what is behind)
+      ctx.shadowColor = `rgba(0,0,0,${0.85 * at.alpha})`;
+      ctx.shadowBlur = px * 0.55;
       let chars = [...line.text];
       let widths = chars.map((ch) => ctx.measureText(ch).width);
       let total = widths.reduce((a, b) => a + b, 0);

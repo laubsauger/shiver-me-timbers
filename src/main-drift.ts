@@ -15,19 +15,22 @@
  * Content and treatment: /Users/flo/work/code/drift-narrative/undertime/treatment.md
  */
 import * as THREE from 'three/webgpu';
-import { color, uniform } from 'three/tsl';
+import { pass } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { webgpuAvailable, renderGatePage } from './core/gate';
 import { App } from './core/app';
 import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
-import { DomeCapture } from './cine/domeCapture';
+import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
 import { beatStarts, undertimeState } from './drift/undertime/timeline';
 import { createUndertimeField } from './drift/undertime/field';
-import { CrawlOverlay, type CrawlLayout } from './drift/undertime/crawl';
+import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
 import { UNDERTIME_CRAWL } from './drift/undertime/crawlText';
-import { recordDomeMaster, type DriftRecordOptions } from './drift/record';
+import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/record';
 import { DomeGuides } from './drift/domeGuides';
+import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
+import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 
 type View = 'flat' | 'dome';
 
@@ -39,10 +42,14 @@ async function boot(): Promise<void> {
     return;
   }
   const p = driftParams;
+  // ?trace: three records where each node was created, so a TSL error names our line, not its own
+  if (new URLSearchParams(location.search).has('trace')) (THREE.Node as unknown as { captureStackTrace: boolean }).captureStackTrace = true;
   const app = await App.create(root, { antialias: true });
   const { renderer, scene, camera, controls } = app;
   scene.fog = null;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  // AgX keeps saturated emitters (the cyan and magenta tracks) cleaner than ACES; the dome present pass
+  // bakes the same operator in (cine/domeCapture.ts)
+  renderer.toneMapping = THREE.AgXToneMapping;
   renderer.autoClear = false;
 
   // flat preview: look around from (almost) the field's centre
@@ -62,8 +69,13 @@ async function boot(): Promise<void> {
   const eye = new THREE.Object3D();
   scene.add(eye);
 
-  const uGlow = uniform(0);
-  scene.backgroundNode = color(new THREE.Color(p.lightColor)).mul(uGlow);
+  // deep black: the dome fills with light only where light is released (flashes.ts haze), never a fill
+  scene.background = new THREE.Color(0x000000);
+  // flat preview gets the same bloom as the master, through a pipeline (it tone-maps on output)
+  const flatPass = pass(scene, camera);
+  const flatBloom = bloom(flatPass, p.bloomStrength, p.bloomRadius, p.bloomThreshold);
+  const flatPipeline = new THREE.RenderPipeline(renderer);
+  flatPipeline.outputNode = flatPass.add(flatBloom);
 
   const field = createUndertimeField(p);
   scene.add(field.group);
@@ -81,6 +93,20 @@ async function boot(): Promise<void> {
       m.position.copy(pos);
       scene.add(m);
     }
+    // seam probe: two rings straddling the top/back cube-face boundary (world elevation 45° toward +Z):
+    // left = plain mesh oriented on the CPU, right = the eye-facing billboard shader. Both must stay whole.
+    const ringMat = (): THREE.MeshBasicNodeMaterial => new THREE.MeshBasicNodeMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    const cpuRing = new THREE.Mesh(new THREE.RingGeometry(2.6, 3, 64), ringMat());
+    cpuRing.position.set(-4, 8, 8);
+    cpuRing.lookAt(0, 0, 0);
+    scene.add(cpuRing);
+    const gpuMat = ringMat();
+    gpuMat.positionNode = eyeFacing(vec3(4, 8, 8), float(6));
+    gpuMat.colorNode = vec4(vec3(step(0.43, length(uv().sub(0.5))).mul(step(length(uv().sub(0.5)), 0.5))), 1);
+    scene.add(billboardMesh(gpuMat, 1, 'seam-probe'));
+    // a lat/long grid around the eye: any cube face mirrored or rotated in the lookup breaks its lines at a seam
+    const grid = new THREE.Mesh(new THREE.SphereGeometry(20, 36, 18), new THREE.MeshBasicNodeMaterial({ color: 0x406080, wireframe: true, side: THREE.BackSide }));
+    scene.add(grid);
   }
   const { total } = beatStarts(p);
   const crawlLayout = (): CrawlLayout => ({
@@ -129,16 +155,26 @@ async function boot(): Promise<void> {
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
     field.update(state, at);
-    uGlow.value = state.glow * p.glowRadiance;
-    renderer.toneMappingExposure = p.exposure;
-    dome.setFaceSize(p.domeFace);
+    dome.setFaceSize(faceOverride ?? p.domeFace);
     Object.assign(crawl.layout, crawlLayout());
     crawl.draw(at);
-    dome.setOverlayRadiance(p.crawlRadiance);
+    const band = crawlBand(at, UNDERTIME_CRAWL, crawl.layout);
+    field.setPocket({ lo: band.lo, hi: band.hi, az: p.crawlPocketAz, strength: band.strength * p.crawlPocket }, p.domeTilt);
     return state;
   };
   /** the master into whatever is bound, filling the current viewport */
-  const renderMaster = (): void => dome.render(renderer, scene, eye, p.domeTilt);
+  const look = (): DomeLook => ({
+    exposure: p.exposure,
+    bloomStrength: p.bloomStrength,
+    bloomRadius: p.bloomRadius,
+    bloomThreshold: p.bloomThreshold,
+    overlayRadiance: p.crawlRadiance,
+  });
+  let masterSize = 1024;
+  const renderMaster = (): void => {
+    field.setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
+    dome.render(renderer, scene, eye, p.domeTilt, masterSize, look());
+  };
 
   const draw = (): void => {
     const state = prepare(t);
@@ -148,10 +184,16 @@ async function boot(): Promise<void> {
     renderer.clear();
     if (view === 'flat') {
       controls.update();
-      renderer.render(scene, camera);
+      flatBloom.strength.value = p.bloomStrength;
+      flatBloom.radius.value = p.bloomRadius;
+      flatBloom.threshold.value = p.bloomThreshold;
+      renderer.toneMappingExposure = p.exposure;
+      field.setPixelAngle(((camera.fov * Math.PI) / 180) / (size.y * renderer.getPixelRatio()));
+      flatPipeline.render();
     } else {
-      // square master, centred and letterboxed
+      // square master, centred and letterboxed, at the drawing buffer's own resolution
       const s = Math.min(size.x, size.y);
+      masterSize = Math.round(s * renderer.getPixelRatio());
       renderer.setViewport((size.x - s) / 2, (size.y - s) / 2, s, s);
       renderMaster();
       renderer.setViewport(0, 0, size.x, size.y);
@@ -164,20 +206,6 @@ async function boot(): Promise<void> {
     }
   };
 
-  let recording = '';
-  const record = async (o: Partial<DriftRecordOptions> = {}): Promise<number> => {
-    loop.stop();
-    try {
-      return await recordDomeMaster(
-        { to: total, ...o, onProgress: (n, of) => { recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
-        { renderer, prepare, renderMaster },
-      );
-    } finally {
-      recording = '';
-      loop.start();
-    }
-  };
-
   const loop = new GameLoop(
     () => {},
     (_alpha, frameDt) => {
@@ -186,8 +214,31 @@ async function boot(): Promise<void> {
     },
   );
 
+  let recording = '';
+  let faceOverride: number | null = null;
+  const record = async (o: Partial<DriftRecordOptions> = {}): Promise<number> => {
+    loop.stop(); // nothing else draws while a take runs (Loom suspends its previews for the same reason)
+    const size = o.size ?? 2048;
+    faceOverride = faceSizeFor(size);
+    const previewSize = masterSize;
+    masterSize = size;
+    try {
+      return await recordDomeMaster(
+        { to: total, ...o, size, onProgress: (n, of) => { recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
+        { renderer, prepare, renderMaster },
+      );
+    } finally {
+      faceOverride = null;
+      masterSize = previewSize;
+      recording = '';
+      loop.start();
+    }
+  };
+
   (window as unknown as Record<string, unknown>).__drift = {
     app,
+    /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */
+    params: p,
     dome,
     field,
     get t(): number {
@@ -210,7 +261,26 @@ async function boot(): Promise<void> {
   draw();
   bootReady();
   loop.start();
-  if (q.has('record')) void record({ size: Number(q.get('size') ?? 2048) || 2048, fps: Number(q.get('fps') ?? 30) || 30 });
+  if (q.has('record')) {
+    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight] — a lane of scripts/drift-render.mjs, or a one-off
+    const num = (k: string, d: number): number => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
+    const status = window as unknown as { __driftRecord?: { done: boolean; frames?: number; error?: string } };
+    status.__driftRecord = { done: false };
+    record({
+      size: num('size', 2048),
+      fps: num('fps', 30),
+      from: num('from', 0),
+      to: num('to', total),
+      shot: q.get('shot') ?? undefined,
+      group: q.get('group') ?? undefined,
+      lane: q.has('lane'),
+      sink: q.get('sink') ?? undefined,
+      inFlight: num('inflight', 3),
+    }).then(
+      (frames) => (status.__driftRecord = { done: true, frames }),
+      (e) => (status.__driftRecord = { done: true, error: String(e) }),
+    );
+  }
 }
 
 void boot();
