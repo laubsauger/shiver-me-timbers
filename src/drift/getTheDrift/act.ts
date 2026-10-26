@@ -39,10 +39,10 @@ export interface ArrivalAct {
 /** `atlas` must be loaded (its tiles' kinds pick the field's galaxies) */
 export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos: Vec3; level: number }>, tiltDeg: number, atlas: GalaxyAtlas): ArrivalAct {
   const g = ourGalaxy(p, e0, tiltDeg);
-  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0, brightness: 1, tile: -1, planar: true, roll: 0 };
+  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0.12, brightness: 1, tile: -1, planar: true, roll: 0 };
   const specs = galaxyField(knots, ours, [e0, g.sun], p.galaxySize, atlas.galaxies);
   const skyTurn = new THREE.Matrix3();
-  const u = { open: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
+  const u = { time: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
   const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> }, atlas);
   const milky = createMilkyWay(g, p.marchSteps);
   const earth = createEarth();
@@ -101,7 +101,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
     update(t, eye) {
       const s = arrivalState(t, p);
       eye.set(...arrivalEye(t, p, g));
-      u.open.value = s.open;
+      u.time.value = t;
       // our galaxy's far disc hands over to its volume; the other galaxies dim once we are inside its
       // dust and stars (they are still there, faintly, through the gaps)
       u.ours.value = 1 - s.volume;
@@ -147,6 +147,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
     dispose() {
       galaxies.geometry.dispose();
       (galaxies.material as THREE.Material).dispose();
+      for (const c of galaxies.children) ((c as THREE.Mesh).material as THREE.Material).dispose();
       milky.dispose();
       earth.dispose();
     },

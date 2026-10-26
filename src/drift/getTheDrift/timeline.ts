@@ -103,8 +103,6 @@ export function ourGalaxy(p: GetTheDriftParams, e0: Vec3, tiltDeg: number): OurG
 export interface ArrivalState {
   beat: Beat;
   u: number;
-  /** 0..1 the web's knots opening into galaxies */
-  open: number;
   /** 0..1 our galaxy as a volume around us (1 − this is its far impostor) */
   volume: number;
   /** 0..1 the stars near the Sun point (parallax field inside the disk) */
@@ -144,7 +142,6 @@ export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {
   return {
     beat,
     u,
-    open: smooth(t / (p.overlap + 3)),
     // the volume takes over from the impostor while still ~3 radii out: closer than ~1.5 radii the flat
     // impostor would wrap under the eye and show its plane's horizon as an edge
     volume: smooth((Math.log(1 / f) - 0.4) / 1.0),
