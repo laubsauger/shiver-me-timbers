@@ -128,6 +128,9 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
 
 /** the baked galaxy's light against Act 2's (seen from space at exposure 1): the eye opens ~ADAPT_MAX at night */
 const NIGHT_GAIN = 1 / 14;
+/** sky luminance at which the stars show at half strength: a bright sky hides them (the dome's scale squeezes
+ * the night's millionfold fall into a few stops, so their light alone would show them by day) */
+const STAR_CONTRAST = 0.002;
 
 export function createSeaSky(radius: number, night?: NightSky): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R) };
@@ -137,12 +140,15 @@ export function createSeaSky(radius: number, night?: NightSky): SeaSky {
   const C = vec3(0, 0, 0);
   const toGalaxy = uniform(night ? night.toGalaxy : new THREE.Matrix3());
   // the galaxy behind the air, dimmed along the ray (none below the horizon)
-  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>): V3 =>
-    night ? (cubeTexture(night.texture, toGalaxy.mul(d)).rgb.mul(T).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3) : vec3(0);
+  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>, sky: V3): V3 => {
+    if (!night) return vec3(0);
+    const seen = float(STAR_CONTRAST).div(sky.dot(vec3(0.2126, 0.7152, 0.0722)).add(STAR_CONTRAST));
+    return cubeTexture(night.texture, toGalaxy.mul(d)).rgb.mul(T).mul(seen).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3;
+  };
   const dome = (dir: V3): V3 => {
     const d = normalize(dir);
     const air = scatter(o, d, C, S, GROUND);
-    return air.light.add(starsAlong(d, air.T, air.hitGround)) as V3;
+    return air.light.add(starsAlong(d, air.T, air.hitGround, air.light)) as V3;
   };
   const sunTerm = (dir: V3): V3 => {
     const d = normalize(dir);
@@ -156,7 +162,7 @@ export function createSeaSky(radius: number, night?: NightSky): SeaSky {
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    return vec4(light.add(sun).add(starsAlong(d, T, hitGround)), 1);
+    return vec4(light.add(sun).add(starsAlong(d, T, hitGround, light)), 1);
   })();
   material.name = 'drift-sea-sky';
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 48), material);

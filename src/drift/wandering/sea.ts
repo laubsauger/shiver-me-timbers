@@ -29,6 +29,7 @@ import { raftSeaParams } from '../../params/seaPhysics';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky } from './seaSky';
 import { bakeNightSky } from './nightSky';
+import { createRaft } from './raft';
 import { sunDirection } from '../../sky/sunCycle';
 import { SUN_E } from '../getTheDrift/atmosphere';
 
@@ -46,6 +47,9 @@ const ISLAND_DISTANCE = 650;
 const ISLAND_LEFT_OF_SUN = 35;
 /** s into the act the sandpipers take off */
 const FLOCK_START = 5;
+/** m: the raft ahead of the eye, and to its right */
+const RAFT_AHEAD = 9;
+const RAFT_RIGHT = 1.5;
 
 export interface SeaAct {
   readonly scene: THREE.Scene;
@@ -106,6 +110,9 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
     if ((o as THREE.Mesh).isMesh) o.receiveShadow = true;
   });
   const cpu = new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum);
+  // the raft (C1–C3), RAFT_AHEAD m in front of the eye, sailing toward the low sun
+  const raft = createRaft((x, z, t) => cpu.heightAt(x, z, t));
+  scene.add(raft.group);
 
   // the sandpipers (W4), startled FLOCK_START s into the act; the bake's front turned to the dome's front
   const flockData = loadFlock();
@@ -173,6 +180,11 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
         },
         (x, z) => cpu.heightAt(x, z, t),
       );
+      const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+      raft.update(t, front.x * RAFT_AHEAD - front.z * RAFT_RIGHT, front.z * RAFT_AHEAD + front.x * RAFT_RIGHT, yaw + Math.PI, {
+        sun: lum(seaSky.sunColour),
+        sky: Math.min(1, lum(seaSky.irradiance) / 0.4),
+      });
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
       surface.update(proxy, t, sun);
