@@ -61,6 +61,9 @@ export interface FlockUniforms {
   pixelAngle: F;
   /** 0..1 */
   presence: F;
+  /** the light on a bird: the sunlight's radiance on a white surface facing it, and the sky's (linear) */
+  sunLight: V3;
+  skyLight: V3;
 }
 
 /** Catmull–Rom through four keys */
@@ -117,8 +120,10 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
     const q = uv().sub(0.5).mul(2);
     // a swept wedge: wings wide at the body, tapering; a short tail
     const wing = float(1).sub(smoothstep(0.55, 1, q.x.abs().add(q.y.mul(0.6).abs().mul(q.x.abs().mul(1.4).add(0.3)))));
-    const back = vec3(0.05, 0.045, 0.04);
-    const belly = vec3(0.95, 0.9, 0.82).mul(2.2);
+    // albedos, lit by the scene's own light: a dark back in the sky's light, a white belly in the Sun's when it
+    // is turned to it (a Sun below the horizon lights nothing)
+    const back = vec3(0.09, 0.08, 0.07).mul(U.skyLight.add(U.sunLight.mul(0.25)));
+    const belly = vec3(0.85, 0.82, 0.76).mul(U.skyLight.add(U.sunLight.mul(shows.mul(1.6))));
     const c = mix(back, belly, shows);
     const a = wing.mul(min(coverage.mul(1.4), 1)).mul(U.presence).mul(smoothstep(0.02, 0.4, flying.add(0.3)));
     return vec4(c, a);

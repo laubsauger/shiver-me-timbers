@@ -27,6 +27,9 @@ import { createArchipelago, generateIslandSites } from '../../island/archipelago
 import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
+import { createSeaSky } from './seaSky';
+import { sunDirection } from '../../sky/sunCycle';
+import { SUN_E } from '../getTheDrift/atmosphere';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -48,7 +51,7 @@ export interface SeaAct {
   readonly far: number;
   /** s, the test act's length */
   readonly total: number;
-  /** the tone map's exposure (ACES, as the game's skyParams.exposure) */
+  /** the eye's adaptation to the light (multiplies the show's exposure) */
   readonly exposure: number;
   /** resolves once its data (the flock's keys) is loaded */
   readonly ready: Promise<void>;
@@ -57,29 +60,30 @@ export interface SeaAct {
   setPixelAngle(rad: number): void;
 }
 
-export function createSea(): SeaAct {
+/** `hour`: the time of day the act holds (default golden hour) */
+export function createSea(o: { hour?: number } = {}): SeaAct {
+  const hour = o.hour ?? HOUR;
   const scene = new THREE.Scene();
   scene.name = 'drift-sea';
   // the sky retints it every update; the ocean and the island melt into its colour at range
   scene.fog = new THREE.Fog(0xa1e7ff, 700, 4500);
-  skyParams.timeOfDay = HOUR;
+  skyParams.timeOfDay = hour;
+  // the game's sky rig for its lights (the sun and the ambient the island and the ocean are built to read);
+  // what they are set to, and the sky itself, come from Act 2's air (seaSky.ts): one sky from orbit to sea
   const sky = createSky({ scene });
-  // the sky's shading takes its view ray as world position minus camera position, which holds only on a
-  // sphere centred on the camera; three r186 draws `scene.backgroundNode` on a unit sphere at the world
-  // ORIGIN, so from the eye every ray pointed the same way and the sky came out one flat colour. Drawn here
-  // on a sphere that follows the eye instead
-  const skyMaterial = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false, fog: false });
-  skyMaterial.colorNode = scene.backgroundNode as THREE.Node<'vec3'>;
   scene.backgroundNode = null;
-  const skyDome = new THREE.Mesh(new THREE.SphereGeometry(FAR * 0.8, 64, 32), skyMaterial);
-  skyDome.renderOrder = -1;
-  skyDome.frustumCulled = false;
-  scene.add(skyDome);
+  const seaSky = createSeaSky(FAR * 0.8);
+  scene.add(seaSky.mesh);
+  let hemi: THREE.HemisphereLight | undefined;
+  scene.traverse((o) => {
+    if ((o as THREE.HemisphereLight).isHemisphereLight) hemi = o as THREE.HemisphereLight;
+  });
   // no caustics bound in this page: neutral without the warning
   causticsParams.enabled = false;
   oceanSurfaceParams.radialLodPixels = 0;
 
-  const sun = sky.sunDirection.clone();
+  // the Sun's own direction (the rig's key turns to the Moon at night)
+  const sun = new THREE.Vector3(...sunDirection(hour, skyParams.latitude));
   // the dome's front toward the sun's bearing
   const yaw = Math.atan2(-sun.x, -sun.z);
   const bearing = yaw + (ISLAND_LEFT_OF_SUN * Math.PI) / 180;
@@ -90,8 +94,8 @@ export function createSea(): SeaAct {
   const ocean = createOceanSim(SEED);
   const surface = new OceanSurface(ocean, undefined, undefined, {
     sunLight: sky.sunLight,
-    skyDomeColor: sky.skyDomeColor,
-    skySunTerm: sky.skySunTerm,
+    skyDomeColor: seaSky.dome,
+    skySunTerm: seaSky.sunTerm,
     seabed: archipelago.seabed,
     // the dome's cube target is half-float, as the game's HDR scene target
     hdrSceneTarget: true,
@@ -112,6 +116,8 @@ export function createSea(): SeaAct {
     eye: uniform(new THREE.Vector3()),
     pixelAngle: uniform(0.0015),
     presence: uniform(1),
+    sunLight: uniform(new THREE.Vector3()),
+    skyLight: uniform(new THREE.Vector3()),
   };
   // (its shader bakes the key count in: built once the keys are loaded)
   const ready = flockData.ready.then(() => {
@@ -128,19 +134,32 @@ export function createSea(): SeaAct {
     scene,
     far: FAR,
     total: 60,
+    get exposure() {
+      return seaSky.exposure;
+    },
     ready,
     setPixelAngle(rad) {
       fu.pixelAngle.value = rad;
     },
-    exposure: skyParams.exposure,
     update(t, eye, renderer) {
       eye.position.set(0, EYE_HEIGHT, 0);
       eye.rotation.set(0, yaw, 0);
       eye.updateMatrixWorld();
-      skyDome.position.copy(eye.position);
-      skyParams.timeOfDay = HOUR;
+      skyParams.timeOfDay = hour;
       sky.setShadowFocus(0, 0, 0);
-      sky.update(HOUR);
+      sky.update(hour);
+      // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
+      // the water and the sand below), the haze at the horizon
+      seaSky.update(eye.position, sun);
+      // (never exactly black: the ocean normalises the key's colour for its hue, and 0/0 drew a white band)
+      sky.sunLight.color.setRGB(Math.max(seaSky.sunColour.r, 1e-4), Math.max(seaSky.sunColour.g, 1e-4), Math.max(seaSky.sunColour.b, 1e-4));
+      sky.sunLight.intensity = SUN_E;
+      if (hemi) {
+        hemi.color.copy(seaSky.irradiance);
+        hemi.groundColor.copy(seaSky.irradiance).multiplyScalar(0.15);
+        hemi.intensity = 1;
+      }
+      (scene.fog as THREE.Fog).color.copy(seaSky.horizon);
       ocean.update(renderer, t);
       archipelago.update(
         {
@@ -148,7 +167,7 @@ export function createSea(): SeaAct {
           windDir,
           windStrength: 0.4,
           swell: ocean.heightRms * 2,
-          sunDirection: sky.sunDirection,
+          sunDirection: sun,
           hazeColor: (scene.fog as THREE.Fog).color,
           cameraPosition: eye.position,
         },
@@ -156,9 +175,14 @@ export function createSea(): SeaAct {
       );
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
-      surface.update(proxy, t, sky.sunDirection);
+      // the water's specular follows the key light: the Sun, or once it is down the rig's (the Moon) — a Sun
+      // below the horizon still lit wave backs into a bright band a few degrees under it
+      surface.update(proxy, t, sun.y > -0.01 ? sun : sky.sunDirection);
       fu.time.value = t - FLOCK_START;
-      fu.sun.value.copy(sky.sunDirection);
+      fu.sun.value.copy(sun);
+      // radiance of a white surface: the Sun's E·T/π facing it, the sky's irradiance/π
+      fu.sunLight.value.set(seaSky.sunColour.r, seaSky.sunColour.g, seaSky.sunColour.b).multiplyScalar(SUN_E / Math.PI);
+      fu.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       fu.eye.value.copy(eye.position);
     },
   };

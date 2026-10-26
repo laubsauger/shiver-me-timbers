@@ -137,7 +137,8 @@ async function boot(): Promise<void> {
   const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
   // ?sea: the sea-level test act (drift/wandering/sea.ts) in a scene of its own, on its own clock
-  const sea = new URLSearchParams(location.search).has('sea') ? createSea() : null;
+  const seaQuery = new URLSearchParams(location.search);
+  const sea = seaQuery.has('sea') ? createSea({ hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : null;
   const total = sea ? sea.total : act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({
     elTop: p.crawlElTop,
@@ -164,8 +165,7 @@ async function boot(): Promise<void> {
     return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
   };
   // the crawl lives in master space, so it shows in the dome view only
-  // (the sea's sky and water are the game's, tuned under ACES at its exposure: sky.ts configureRenderer)
-  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, toneMapping: sea ? THREE.ACESFilmicToneMapping : undefined });
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;
@@ -237,7 +237,7 @@ async function boot(): Promise<void> {
   };
   /** the master into whatever is bound, filling the current viewport */
   const look = (): DomeLook => ({
-    exposure: sea ? sea.exposure : p.exposure,
+    exposure: p.exposure * (sea ? sea.exposure : 1),
     bloomStrength: p.bloomStrength,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,

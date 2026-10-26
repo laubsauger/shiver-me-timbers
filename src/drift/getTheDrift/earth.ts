@@ -25,7 +25,7 @@
  * WHY THE SUNLIGHT IS ANALYTIC: at dawn every light path is grazing, where a few uniform march steps get the
  * optical depth (and so the colour) badly wrong. The column of air along a ray in an exponential atmosphere
  * is a Chapman function: √(πx/2)·erfcx(√(x/2)·μ) with a rational erfcx, and the tangent-point identity below
- * the horizon (`chapmanColumn`, held to numeric integration by tests/earthChapman.test.ts). It gives the
+ * the horizon (atmosphere.ts `chapmanColumn`, held to numeric integration by tests/earthChapman.test.ts). It gives the
  * ground's and clouds' sunlight, warm at the terminator, the extinction toward the eye (a far glint
  * reddens) and the Sun's own colour in the limb.
  *
@@ -50,13 +50,11 @@ import {
   fract,
   length,
   max,
-  min,
   mix,
   mx_noise_float,
   normalize,
   positionWorld,
   pow,
-  screenCoordinate,
   select,
   smoothstep,
   sqrt,
@@ -71,30 +69,16 @@ import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
 import { GLOBAL_ELEV_TEXEL, latLon, loadEarthMaps, mapCoords, sampleBoth, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
+import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, sunDisc, sunGlare, sunlight, towardEye } from './atmosphere';
+export { EARTH_R };
 import type { LifeState } from './life';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 type V4 = THREE.Node<'vec4'>;
 
-/** Mm (1000 km) */
-export const EARTH_R = 6.371;
-const ATMOS = 0.1;
-const H_RAY = 0.008;
-const H_MIE = 0.0012;
-/** scattering per Mm at sea level */
-const BETA_R = vec3(5.8, 13.5, 33.1);
-const BETA_M = 6;
-const MIE_G = 0.76;
 /** Mm, the cloud tops */
 const CLOUD_H = 0.007;
-/** the Sun's irradiance (linear): a white surface facing it is SUN_E / π */
-const SUN_E = 7;
-/** rad, the Sun's angular radius */
-const SUN_ANG = 0.00465;
-/** e^(y²)·erfc(y) ≈ (1 + c·y) / (1 + (a + c)·y + √π·c·y²) for y ≥ 0, within 0.4 % */
-const ERFCX_A = 1.09;
-const ERFCX_C = 0.6;
 const KM = 1 / 6371;
 /** the night side's moonlit ambient, against the Sun's light */
 const MOONLIGHT = 0.035;
@@ -121,55 +105,6 @@ export interface Earth {
   }): void;
   dispose(): void;
 }
-
-/** ray / sphere: [near, far] distances (far < near when it misses) */
-export function sphereHit(o: V3, d: V3, c: V3, r: number | F): { t0: F; t1: F } {
-  const oc = o.sub(c);
-  const b = oc.dot(d);
-  const rr = typeof r === 'number' ? float(r * r) : r.mul(r);
-  const disc = b.mul(b).sub(oc.dot(oc)).add(rr);
-  const s = sqrt(disc.max(0));
-  const miss = disc.lessThan(0);
-  return { t0: select(miss, float(1), b.negate().sub(s)) as F, t1: select(miss, float(-1), b.negate().add(s)) as F };
-}
-
-/**
- * Mm of sea-level-density air along a ray from radius r (Mm) at cos-zenith μ out to space, scale height H.
- * Below the horizon (μ < 0) the ray passes a tangent point: twice the horizontal column there, less the
- * column behind us. Whether the ray hits the ground is the caller's business. The CPU twin of `column`.
- */
-export function chapmanColumn(r: number, mu: number, H: number): number {
-  const x = r / H;
-  const y = Math.sqrt(x / 2) * Math.abs(mu);
-  const erfcx = (1 + ERFCX_C * y) / (1 + (ERFCX_A + ERFCX_C) * y + Math.sqrt(Math.PI) * ERFCX_C * y * y);
-  const above = Math.exp(-(r - EARTH_R) / H) * Math.sqrt((Math.PI * x) / 2) * erfcx;
-  if (mu >= 0) return H * above;
-  const rt = r * Math.sqrt(1 - mu * mu);
-  return H * (Math.sqrt((2 * Math.PI * rt) / H) * Math.exp(Math.min(60, -(rt - EARTH_R) / H)) - above);
-}
-
-function column(r: F, mu: F, H: number): F {
-  const x = r.div(H);
-  const y = sqrt(x.mul(0.5)).mul(abs(mu));
-  const erfcx = y.mul(ERFCX_C).add(1).div(y.mul(y).mul(Math.sqrt(Math.PI) * ERFCX_C).add(y.mul(ERFCX_A + ERFCX_C)).add(1));
-  const above = exp(r.sub(EARTH_R).div(-H)).mul(sqrt(x.mul(Math.PI / 2))).mul(erfcx);
-  const rt = r.mul(sqrt(float(1).sub(mu.mul(mu)).max(0)));
-  const through = sqrt(rt.mul((2 * Math.PI) / H)).mul(exp(min(rt.sub(EARTH_R).div(-H), 60)));
-  return select(mu.lessThan(0), through.sub(above), above).mul(H) as F;
-}
-
-/** optical depth (per channel) of the air along a ray from radius r at cos-zenith μ out to space */
-const opticalDepth = (r: F, mu: F): V3 => BETA_R.mul(column(r, mu, H_RAY)).add(column(r, mu, H_MIE).mul(BETA_M * 1.1));
-
-/** the Sun's light reaching radius r at cos-zenith μ (white = 1): through the air, and set behind the horizon */
-function sunlight(r: F, mu: F): V3 {
-  // the horizon dips by √(2h/R) at height h; the Sun's disc makes the setting a fade
-  const dip = sqrt(r.sub(EARTH_R).max(0).mul(2 / EARTH_R));
-  return exp(opticalDepth(r, mu).negate()).mul(smoothstep(-SUN_ANG, SUN_ANG, asin(mu.clamp(-1, 1)).add(dip)));
-}
-
-/** transmittance from a point at radius r up to the eye: the ray's cos-zenith μ there, μe at the eye (radius re) */
-const towardEye = (r: F, mu: F, re: F, mue: F): V3 => exp(opticalDepth(r, mu).sub(opticalDepth(re, mue)).max(0).negate());
 
 const LACUNARITY = 2.03;
 
@@ -422,44 +357,7 @@ export function createEarth(): Earth {
   atmMat.blendSrc = THREE.OneFactor;
   atmMat.blendDst = THREE.OneMinusSrcAlphaFactor;
   atmMat.colorNode = Fn(() => {
-    const o = cameraPosition;
-    const d = normalize(positionWorld.sub(o));
-    const atm = sphereHit(o, d, C, EARTH_R + ATMOS);
-    const gnd = sphereHit(o, d, C, EARTH_R);
-    const t0 = atm.t0.max(0);
-    const hitGround = gnd.t1.greaterThan(gnd.t0).and(gnd.t0.greaterThan(0));
-    const t1 = select(hitGround, gnd.t0, atm.t1);
-    const STEPS = 32;
-    const ds = t1.sub(t0).max(0).div(STEPS);
-    const inR = vec3(0).toVar();
-    const inM = vec3(0).toVar();
-    const odR = float(0).toVar();
-    const odM = float(0).toVar();
-    const mu = d.dot(S);
-    const phaseR = float(3).div(PI.mul(16)).mul(mu.mul(mu).add(1));
-    const g2 = MIE_G * MIE_G;
-    const phaseM = float(3 * (1 - g2)).div(PI.mul(8 * (2 + g2))).mul(mu.mul(mu).add(1)).div(pow(float(1 + g2).sub(mu.mul(2 * MIE_G)), float(1.5)));
-    // a per-pixel jitter of the samples turns banding into fine grain
-    const jitter = fract(fract(screenCoordinate.x.mul(0.06711056).add(screenCoordinate.y.mul(0.00583715))).mul(52.9829189));
-    If(t1.greaterThan(t0), () => {
-      Loop(STEPS, ({ i }) => {
-        const p = o.add(d.mul(t0.add(float(i).add(jitter).mul(ds))));
-        const r = length(p.sub(C));
-        const h = r.sub(EARTH_R).max(0);
-        const rR = exp(h.div(H_RAY).negate()).mul(ds);
-        const rM = exp(h.div(H_MIE).negate()).mul(ds);
-        odR.addAssign(rR.mul(0.5));
-        odM.addAssign(rM.mul(0.5));
-        // the Sun's light here, through the air above (analytic), none in the planet's shadow
-        const att = exp(BETA_R.mul(odR).add(vec3(BETA_M * 1.1).mul(odM)).negate()).mul(sunlight(r, p.sub(C).dot(S).div(r)));
-        inR.addAssign(att.mul(rR));
-        inM.addAssign(att.mul(rM));
-        odR.addAssign(rR.mul(0.5));
-        odM.addAssign(rM.mul(0.5));
-      });
-    });
-    const light = inR.mul(BETA_R).mul(phaseR).add(inM.mul(BETA_M).mul(phaseM)).mul(SUN_E);
-    const T = exp(BETA_R.mul(odR).add(vec3(BETA_M * 1.1).mul(odM)).negate());
+    const { light, T, hitGround } = scatter(cameraPosition, normalize(positionWorld.sub(cameraPosition)), C, S);
     // over the ground the haze is held back: from a few hundred km up nearly every view is grazing, and the
     // full haze flattens the planet to a pale disc. The limb, seen against space, keeps all of it and dims
     // the stars behind it.
@@ -495,17 +393,15 @@ export function createEarth(): Earth {
   sunMat.colorNode = Fn(() => {
     const q = uv().sub(0.5).mul(2);
     const r = q.length().mul(QUAD / 2); // rad from the Sun's centre
-    const disc = smoothstep(0.0052, 0.0042, r).mul(60);
+    const disc = sunDisc(r);
     // the glare is the eye's (or lens's) response to the whole disc: it goes as the disc sets behind the limb
     const aboveLimb = acos(eyeUp.dot(S).negate().clamp(-1, 1)).sub(asin(float(EARTH_R).div(eyeR)));
     const seen = pastEarth(S).mul(smoothstep(-SUN_ANG, SUN_ANG, aboveLimb));
-    // the glare of a bright disc through optics: a tight bloom, a wider soft halo and a faint veil — no
-    // spikes or stars (a precise cross or star reads as a graphic, not as light)
-    const glare = exp(r.div(0.008).negate()).mul(4).add(exp(r.div(0.035).negate()).mul(0.35)).add(exp(r.div(0.16).negate()).mul(0.035));
+    const glare = sunGlare(r);
     const rays = float(0);
     const fade = float(1).sub(smoothstep(0.6, 1, q.length()));
     const light = pastEarth(normalize(positionWorld.sub(cameraPosition))).mul(disc).add(seen.mul(glare.add(rays)));
-    return vec4(vec3(1, 0.95, 0.86).mul(light).mul(fade).mul(u.sunPresence), 1);
+    return vec4(SUN_TINT.mul(light).mul(fade).mul(u.sunPresence), 1);
   })();
   sunMat.name = 'drift-earth-sun';
   const sun = billboardMesh(sunMat, 1, 'drift-earth-sun');
