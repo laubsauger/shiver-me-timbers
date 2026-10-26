@@ -59,6 +59,8 @@ export interface MilkyWay {
     eye: THREE.Vector3;
     /** a planet in front of the sky (Earth): what lies behind it is hidden; radius 0 = none */
     occluder: { centre: THREE.Vector3; radius: number };
+    /** the sky's turn about the eye (world from sky) */
+    skyTurn: THREE.Matrix3;
   }): void;
   dispose(): void;
 }
@@ -84,6 +86,9 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
     sun: uniform(new THREE.Vector3(...g.sun)),
     occCentre: uniform(new THREE.Vector3()),
     occRadius: uniform(0),
+    /** the sky's turn about the eye (the time-lapse over Earth): world → sky, and its inverse */
+    skyToWorld: uniform(new THREE.Matrix3()),
+    worldToSky: uniform(new THREE.Matrix3()),
   };
   const v3 = (x: unknown): V3 => x as V3;
   /** 1 where direction d from the eye is NOT blocked by the occluding planet */
@@ -103,7 +108,8 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   material.depthTest = false;
   material.blending = THREE.AdditiveBlending;
   material.colorNode = Fn(() => {
-    const d = normalize(positionWorld.sub(cameraPosition));
+    const dWorld = normalize(positionWorld.sub(cameraPosition));
+    const d = u.worldToSky.mul(dWorld);
     const rel = cameraPosition.sub(v3(u.centre)).div(u.radius);
     const o = vec3(rel.dot(v3(u.X)), rel.dot(v3(u.Y)), rel.dot(v3(u.N)));
     const dl = vec3(d.dot(v3(u.X)), d.dot(v3(u.Y)), d.dot(v3(u.N)));
@@ -145,7 +151,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
         });
       });
     });
-    return vec4(light.mul(u.radiance).mul(u.volume).mul(clear(d)), 1);
+    return vec4(light.mul(u.radiance).mul(u.volume).mul(clear(dWorld)), 1);
   })();
   material.name = 'drift-milky-way';
   const sky = new THREE.Mesh(new THREE.SphereGeometry(400, 96, 48), material);
@@ -176,7 +182,9 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   }
   const S = attribute<'vec4'>('starLocal', 'vec4');
   const k = float(instanceIndex);
-  const toStar = S.xyz.sub(cameraPosition);
+  // turned with the sky about the eye
+  const starPos = cameraPosition.add(u.skyToWorld.mul(S.xyz.sub(cameraPosition)));
+  const toStar = starPos.sub(cameraPosition);
   const dist = toStar.length();
   // flux falls with distance squared, normalised to a star a little out in the neighbourhood (so the sky
   // holds thousands of visible points); capped as one passes close
@@ -191,7 +199,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   starMat.depthWrite = false;
   starMat.side = THREE.DoubleSide;
   starMat.blending = THREE.AdditiveBlending;
-  starMat.positionNode = eyeFacing(S.xyz, quad.mul(step(0.0005, u.local)));
+  starMat.positionNode = eyeFacing(starPos, quad.mul(step(0.0005, u.local)));
   starMat.colorNode = Fn(() => {
     const rr2 = length(uv().sub(0.5)).mul(2);
     const core = exp(rr2.div(0.32).pow(2).negate());
@@ -239,6 +247,8 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
       u.occRadius.value = o.occluder.radius;
       u.radiance.value = o.radiance;
       u.pixelAngle.value = o.pixelAngle;
+      u.skyToWorld.value.copy(o.skyTurn);
+      u.worldToSky.value.copy(o.skyTurn).transpose();
       sky.position.copy(o.eye);
     },
     dispose() {

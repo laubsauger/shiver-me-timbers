@@ -115,6 +115,8 @@ export interface GalaxyUniforms {
   field: F;
   radiance: F;
   pixelAngle: F;
+  /** the sky's turn about the eye (world from sky) */
+  skyTurn: THREE.Node<'mat3'>;
 }
 
 export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms): THREE.InstancedMesh {
@@ -136,8 +138,10 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms): THREE.In
   const isOurs = step(float(attribute<'float'>('galaxyIndex', 'float')), 0.5);
   const elliptical = step(999, L4.w);
   const seed = L4.w.sub(elliptical.mul(1000));
-  const N = normalize(N4.xyz);
-  const X = normalize(X4.xyz);
+  // turned with the sky about the eye
+  const centreW = cameraPosition.add(U.skyTurn.mul(C4.xyz.sub(cameraPosition)));
+  const N = normalize(U.skyTurn.mul(N4.xyz));
+  const X = normalize(U.skyTurn.mul(X4.xyz));
   const Y = N.cross(X);
   // open from a point: the disc grows and brightens in its own moment
   const appear = N4.w.mul(0.6);
@@ -145,13 +149,13 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms): THREE.In
   const R = C4.w.mul(grow.mul(0.95).add(0.05));
   const corner = attribute<'vec3'>('position', 'vec3');
   const EXTENT = 1.5; // the quad spans ±1.5 radii (the outer disk fades by then)
-  const pos = C4.xyz.add(X.mul(corner.x.mul(2 * EXTENT).mul(R))).add(Y.mul(corner.y.mul(2 * EXTENT).mul(R)));
-  const toEye = normalize(cameraPosition.sub(C4.xyz));
+  const pos = centreW.add(X.mul(corner.x.mul(2 * EXTENT).mul(R))).add(Y.mul(corner.y.mul(2 * EXTENT).mul(R)));
+  const toEye = normalize(cameraPosition.sub(centreW));
   const cosI = abs(toEye.dot(N));
   const gain = min(float(1).div(max(cosI, 0.12)), 4);
   const present = mix(U.field, U.ours, isOurs).mul(grow);
   // a galaxy narrower than a few pixels is a point of light: keep it from vanishing between pixels
-  const dist = cameraPosition.sub(C4.xyz).length();
+  const dist = cameraPosition.sub(centreW).length();
   const tiny = clamp(R.div(dist.mul(U.pixelAngle).mul(3)), 0, 1);
 
   const material = new THREE.NodeMaterial();

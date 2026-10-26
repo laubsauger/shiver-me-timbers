@@ -104,7 +104,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     centreEl: 14,
     sunRadius: 0.55,
     driftKeep: 0.72,
-    insideKeep: 4e-4,
+    insideKeep: 6e-3,
     earthApproach: 25,
     earthFar: 700,
     orbitAltitude: 0.45,

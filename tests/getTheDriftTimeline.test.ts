@@ -43,16 +43,18 @@ describe('Get the Drift arrival', () => {
     expect(peak).toBeLessThan(0.35);
   });
 
-  it('is inside the disk (within its thickness) and still for the band', () => {
+  it('is inside the disk (within its thickness) for the band, drifting on through the near stars', () => {
     const h = 0.02 * p.ourRadius;
     for (const k of [0.1, 0.5, 0.9]) {
       const e = arrivalEye(starts.band + p.band * k, p, g);
       const z = dot([e[0] - g.centre[0], e[1] - g.centre[1], e[2] - g.centre[2]], g.normal);
       expect(Math.abs(z)).toBeLessThan(h);
     }
-    const a = arrivalEye(starts.band + 1, p, g);
-    const b = arrivalEye(starts.band + 2, p, g);
-    expect(dist(a, b)).toBeLessThan(1e-6);
+    // a still sky reads as a frozen frame on the dome: the eye keeps moving, by a sizable share of the
+    // spacing of the near stars (~0.003 radii) every second, so they pass with parallax
+    const a = arrivalEye(starts.band + 3, p, g);
+    const b = arrivalEye(starts.band + 4, p, g);
+    expect(dist(a, b)).toBeGreaterThan(0.003 * p.ourRadius * 0.2);
   });
 
   it('lays the band over the audience: the galactic centre low in front, the plane through the zenith', () => {
@@ -102,10 +104,17 @@ describe('Get the Drift arrival', () => {
       expect(sunElAtSubEye).toBeGreaterThan(-60);
     });
 
-    it('starts as a point near the Sun and ends with its limb across the front of the dome', () => {
+    it('starts as a point showing its sunlit side, never leaves the dome, and ends with its limb across the front', () => {
       const first = earthPose(starts.earth, p, tilt);
       expect(first.radiusDeg).toBeLessThan(0.2);
-      expect(deg(first.centreDir, first.sun)).toBeLessThan(30);
+      // a point near the Sun shows its night side: a dark dot, not "a blue point" — a third or more sunlit
+      expect((1 - Math.cos((deg(first.centreDir, first.sun) * Math.PI) / 180)) / 2).toBeGreaterThan(0.3);
+      // while it slides to the front its top stays well up on the dome (it must not dip under the edge)
+      const zenith = domeDir(90, 0, tilt);
+      for (let t = starts.earth; t <= starts.earth + p.earthApproach; t += 0.25) {
+        const e = earthPose(t, p, tilt);
+        expect(90 - deg(e.centreDir, zenith) + e.radiusDeg, `top of the planet at ${t.toFixed(2)}`).toBeGreaterThan(8);
+      }
       const last = earthPose(starts.earth + p.earthApproach, p, tilt);
       const limbTop = 90 - deg(last.centreDir, domeDir(90, 0, tilt)) + last.radiusDeg;
       expect(limbTop).toBeCloseTo(p.limbEl, 0);

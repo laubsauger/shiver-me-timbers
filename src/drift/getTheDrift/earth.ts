@@ -322,7 +322,7 @@ export function createEarth(): Earth {
     const shade = float(1).sub(cloudAt(shadowAt, g, max(fp, 2 * KM)).mul(0.85));
     const diffuse = mix(muS, N.dot(S), land).max(0);
     // skylight: a little blue fill on the day side (none on the night side)
-    const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.06, 0.3, muS).mul(0.05));
+    const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.06));
     const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky)).mul(SUN_E / Math.PI);
     // glint: GGX on the open water, its roughness by wind patches; Fresnel and the long grazing paths make
     // it swell and redden toward the terminator
@@ -354,12 +354,23 @@ export function createEarth(): Earth {
   const cloudMat = new THREE.MeshBasicNodeMaterial();
   cloudMat.transparent = true;
   cloudMat.depthWrite = false;
-  // no depth test: the shader finds the shell's nearest point along the pixel's own ray (always in front of
-  // the ground), and from a few hundred km up the depth buffer cannot resolve 7 km at the limb
-  cloudMat.depthTest = false;
+  // from a few hundred km up the depth buffer cannot resolve the shell's 7 km above the ground at the limb:
+  // the shell is biased toward the eye (by far less than the planet, so its far side stays hidden)
+  cloudMat.polygonOffset = true;
+  cloudMat.polygonOffsetFactor = -2;
+  cloudMat.polygonOffsetUnits = -64;
   cloudMat.colorNode = Fn(() => {
     const rc = EARTH_R + CLOUD_H;
-    const { t, d, n } = onSphere(rc);
+    // the shell's own hit loses its precision with distance (from a planet's width away it lands on the
+    // sunlit far side); the ground's hit is held to it, and the shell's only serves the rays grazing above
+    // the limb, which miss the ground
+    const shell = onSphere(rc);
+    const ground = onSphere(EARTH_R);
+    const g0 = sphereHit(cameraPosition, ground.d, C, EARTH_R);
+    const hitsGround = g0.t1.greaterThan(g0.t0);
+    const d = shell.d;
+    const t = select(hitsGround, ground.t, shell.t) as F;
+    const n = normalize(select(hitsGround, ground.n, shell.n)) as V3;
     const v = d.negate();
     const muV = n.dot(v).max(1e-3);
     const muS = n.dot(S);
@@ -376,14 +387,19 @@ export function createEarth(): Earth {
     const wrap = ndl.mul(0.65).add(0.35).max(0);
     const gm = 0.55;
     const fwd = float(1 - gm * gm).div(pow(float(1 + gm * gm).sub(d.dot(S).mul(2 * gm)), 1.5)).mul(0.08);
-    const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.06, 0.3, muS).mul(0.08));
+    const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.08));
     const T = towardEye(float(rc), muV, eyeR, eyeUp.dot(v));
     // thin cloud is darker as well as clearer; at night the towns below light its underside
     const thick = cover.mul(0.6).add(0.4);
     const below = coords(n);
     const glow = nightLights(n, lcwAt(below, { dx: g.dx.mul(12), dy: g.dy.mul(12) }).x, float(1), L, float(1)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
-    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);
-    return vec4(col.mul(u.presence), cover.mul(0.96).mul(u.presence));
+    // the light falls off as the Sun gets low: the terminator a soft ramp, not a gold-edged line
+    const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
+    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);
+    // while the planet is small the shell is left out: its shading is unreliable at those distances (and a
+    // cloud deck a few pixels across is better carried by the disc's own colour)
+    const big = smoothstep(40, 120, asin(float(EARTH_R).div(eyeR).min(1)).div(P));
+    return vec4(col.mul(u.presence), cover.mul(0.96).mul(u.presence).mul(big));
   })();
   cloudMat.name = 'drift-earth-clouds';
   const clouds = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R + CLOUD_H, 192, 96), cloudMat);

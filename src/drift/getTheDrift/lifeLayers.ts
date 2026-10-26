@@ -81,7 +81,8 @@ export function nightLights(n: V3, v: F, land: F, L: LifeUniforms, fp: F): V3 {
   // the regions wake at different times
   const wake = mx_noise_float(n.mul(22).add(3.1)).mul(0.1);
   const level = float(1.05).sub(stage.sub(1).div(2).clamp(0, 1).mul(1.15)).sub(L.overshoot.mul(0.25)).add(wake);
-  const on = smoothstep(level.sub(0.12), level.add(0.02), v);
+  // (nothing before the villages' stage: at stage 0 the brightest cores would pass the level)
+  const on = smoothstep(level.sub(0.12), level.add(0.02), v).mul(smoothstep(1, 1.3, stage));
   // within a ~1 km pixel: the streets' own grain, where it can show
   const grain = mx_noise_float(n.mul(16000)).mul(0.7).mul(float(1).sub(smoothstep(0.25, 0.5, fp.mul(16000)))).add(1);
   const radiance = v.mul(v).mul(on).mul(grain).mul(L.overshoot.mul(0.9).add(1));

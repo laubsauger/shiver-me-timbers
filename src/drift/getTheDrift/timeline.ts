@@ -137,9 +137,10 @@ export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {
   const rampIn = clamp01(p.galaxies / approachLen) * 1.25;
   const lnKeep = Math.log(p.insideKeep);
   let lnF = lnKeep * ramped(x, Math.min(0.6, rampIn), 0.12);
-  // the sun beat: on toward the Sun point, eased at both ends
-  const sunK = clamp01((t - starts.sun) / Math.max(1e-6, p.sun));
-  lnF += Math.log(0.05) * ramped(sunK, 0.25, 0.25);
+  // the band and sun beats: on through the Sun's neighbourhood toward the Sun point, eased at both ends —
+  // the near stars stream past (a still sky here reads as a frozen frame)
+  const cruiseK = clamp01((t - starts.band) / Math.max(1e-6, p.band + p.sun));
+  lnF += Math.log(0.047) * ramped(cruiseK, 0.25, 0.25);
   const f = Math.exp(lnF);
   return {
     beat,
@@ -148,7 +149,7 @@ export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {
     // the volume takes over from the impostor while still ~3 radii out: closer than ~1.5 radii the flat
     // impostor would wrap under the eye and show its plane's horizon as an edge
     volume: smooth((Math.log(1 / f) - 0.4) / 1.0),
-    local: smooth((Math.log(1 / f) - 4.5) / 2.5),
+    local: smooth((Math.log(1 / f) - 3) / 2),
     f,
     sunStar: smooth((t - starts.sun) / Math.max(1e-6, p.sun * 0.7)),
     earth: smooth((t - starts.earth + 1) / 2),
@@ -193,8 +194,10 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
   const distance = final * Math.exp(Math.log(p.earthFar) * (1 - ramped(k, 0.15, 0.3)));
   const finalRadius = (Math.asin(EARTH_RADIUS / final) * 180) / Math.PI;
   const dawn = smooth((t - starts.earth - p.earthApproach) / Math.max(1e-6, p.earth - p.earthApproach));
-  // it first shows a little to the Sun's right, a thin sunlit crescent
-  const beside = domeDir(p.approachEl - 8, p.approachAz + 24, tiltDeg);
+  // it first shows front right, a third of it sunlit (a point beside the Sun would show its night side:
+  // a dark dot, not a blue one), and it slides down to the front only once it is big enough to stay on the
+  // dome while its centre goes below the dome's edge
+  const beside = domeDir(p.approachEl - 23, p.approachAz + 85, tiltDeg);
   const below = domeDir(p.limbEl - finalRadius - p.dawnSink * dawn, 0, tiltDeg);
   // THE DAWN, as a time-lapse: the Sun climbs from where the arrival left it, and the terminator sweeps
   // across the planet toward the audience (orbital motion would also turn the stars; we keep them still).
@@ -209,7 +212,7 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
   const low = EARTH_RADIUS + altitude;
   const dip = (Math.acos(EARTH_RADIUS / low) * 180) / Math.PI;
   const lowCentre = domeDir(p.floodLimbEl - (90 - dip), 0, tiltDeg);
-  let centreDir = slerp(beside, below, smooth((k - 0.1) / 0.85));
+  let centreDir = slerp(beside, below, smooth((k - 0.3) / 0.7));
   let dist = distance;
   if (t > starts.flood) {
     centreDir = slerp(below, lowCentre, fk);

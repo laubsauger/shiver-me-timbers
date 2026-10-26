@@ -15,6 +15,15 @@ import { lifeState } from './life';
 import { OUR_LOOK, createGalaxies, galaxyField, type GalaxySpec } from './galaxies';
 import { createMilkyWay } from './milkyWay';
 
+/** rad/s the sky wheels at over Earth, and the s it eases in over */
+const SKY_TURN = (0.5 * Math.PI) / 180;
+const SKY_EASE = 8;
+
+const smoothstep01 = (x: number): number => {
+  const k = Math.min(1, Math.max(0, x));
+  return k * k * (3 - 2 * k);
+};
+
 export interface ArrivalAct {
   readonly group: THREE.Group;
   /** s, the act's length */
@@ -31,8 +40,9 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const g = ourGalaxy(p, e0, tiltDeg);
   const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0, brightness: 1 };
   const specs = galaxyField(knots, ours, [e0, g.sun], p.galaxySize);
-  const u = { open: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015) };
-  const galaxies = createGalaxies(specs, u);
+  const skyTurn = new THREE.Matrix3();
+  const u = { open: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
+  const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> });
   const milky = createMilkyWay(g, p.marchSteps);
   const earth = createEarth();
   const group = new THREE.Group();
@@ -64,7 +74,21 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const rgt = new THREE.Vector3().crossVectors(front, up);
   const h = (p.heading * Math.PI) / 180;
   const geoNorth = front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h));
-  earth.setGeo(geoFrameAt(p.gatherLat, p.gatherLon, up, geoNorth));
+  const geo = geoFrameAt(p.gatherLat, p.gatherLon, up, geoNorth);
+  earth.setGeo(geo);
+  // over Earth the sky wheels slowly about the planet's axis (a time-lapse, as in orbital footage): it eases
+  // in from the Earth beat's start to SKY_TURN rad/s; the planet stays put
+  const turnStart = starts.earth;
+  const turnAt = (t: number): number => {
+    const x = t - turnStart;
+    if (x <= 0) return 0;
+    // ∫ of a rate easing in over SKY_EASE s (smoothstep): closed form
+    const e = Math.min(x, SKY_EASE);
+    const k = e / SKY_EASE;
+    const eased = SKY_EASE * (k * k * k - 0.5 * k * k * k * k);
+    return SKY_TURN * (eased + Math.max(0, x - SKY_EASE));
+  };
+  const turn4 = new THREE.Matrix4();
   // the debris lifts off the drowned coasts late in the flood
   const lift = starts.flood + p.flood * 0.55;
   let pixelAngle = 0.0015;
@@ -80,11 +104,15 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       // our galaxy's far disc hands over to its volume; the other galaxies dim once we are inside its
       // dust and stars (they are still there, faintly, through the gaps)
       u.ours.value = 1 - s.volume;
-      u.field.value = (1 - 0.92 * s.volume) * (1 - s.earth);
-      u.radiance.value = p.galaxyRadiance;
-      u.pixelAngle.value = pixelAngle;
-      // Earth: the planet comes to the eye (earthPose); its Sun takes over from the Milky Way's Sun star
+      skyTurn.setFromMatrix4(turn4.makeRotationAxis(geo.north, turnAt(t)));
+      u.skyTurn.value.copy(skyTurn);
+      // Earth: the planet comes to the eye (earthPose); its Sun takes over from the Milky Way's Sun star over
+      // a few seconds (a quick swap reads as a flash). As the sunlit planet grows the sky steps back — the
+      // eye (and a camera) loses the faint stars — but only as fast as the planet grows, never as a cut
       const e = earthPose(t, p, tiltDeg);
+      const handover = smoothstep01((t - starts.earth + 1) / 5);
+      const glare = smoothstep01((e.radiusDeg - 3) / 45) * s.earth;
+      u.field.value = (1 - 0.92 * s.volume) * (1 - glare);
       centre.set(...e.centreDir).multiplyScalar(e.distance).add(eye);
       sun.set(...e.sun);
       earth.group.visible = s.earth > 0;
@@ -98,12 +126,12 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       waveOrigin.set(eye.x + ahead[0] * hitT - centre.x, eye.y + ahead[1] * hitT - centre.y, eye.z + ahead[2] * hitT - centre.z).normalize();
       const L = lifeState(t, p);
       const drift = { up, east, north, time: Math.max(0, t - lift), presence: Math.min(1, Math.max(0, (t - lift) / 6)) };
-      earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: s.earth, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
+      earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
       milky.update({
-        // with a sunlit planet in view the sky steps back (the eye — and a camera — would lose the faint stars)
-        volume: s.volume * (1 - 0.5 * s.earth), local: s.local * (1 - 0.65 * s.earth), sunStar: s.sunStar * (1 - s.earth),
+        volume: s.volume * (1 - 0.4 * glare), local: s.local * (1 - 0.55 * glare), sunStar: s.sunStar * (1 - handover),
         radiance: p.volumeRadiance, pixelAngle, eye,
         occluder: { centre, radius: s.earth > 0 ? EARTH_RADIUS * 1.003 : 0 },
+        skyTurn,
       });
       return s;
     },
