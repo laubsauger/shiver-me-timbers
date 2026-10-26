@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { ARRIVED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -67,6 +67,35 @@ describe('Get the Drift arrival', () => {
     expect(Math.abs(dot(zenith, g.normal))).toBeLessThan(Math.sin(((p.bandLean + 5) * Math.PI) / 180));
   });
 
+  // ONE journey (user, 2026-10-26): moves that each eased to rest and then started again read as clips stitched
+  // together, "docking" and reorienting. From the first seconds to Drift-2 the camera is never parked — into
+  // the galaxy, toward the Earth, down to it, or the planet turning in the view — and its speed never jumps.
+  it('moves the whole way, without parking and without jolts', () => {
+    const h = 0.1;
+    const zoom = (t: number): number => {
+      const a = arrivalState(t, p);
+      const b = arrivalState(t + h, p);
+      const galaxy = Math.abs(Math.log(b.f) - Math.log(a.f)) / h;
+      const ea = earthPose(t, p, tilt);
+      const eb = earthPose(t + h, p, tilt);
+      // (the planet's motion counts as much as the planet shows: it fades in over two seconds)
+      const earth = (a.earth * Math.abs(Math.log(eb.distance - 6.371) - Math.log(ea.distance - 6.371))) / h;
+      const turn = (a.earth * (Math.acos(Math.min(1, dot(ea.centreDir, eb.centreDir))) * 180) / Math.PI) / h;
+      return Math.max(galaxy, earth, turn / 30);
+    };
+    let slowest = Infinity;
+    let jolt = 0;
+    let was = zoom(8);
+    for (let t = 8; t < starts.drift2 + p.drift2 - 6; t += h) {
+      const now = zoom(t);
+      slowest = Math.min(slowest, now);
+      jolt = Math.max(jolt, Math.abs(now - was) / h);
+      was = now;
+    }
+    expect(slowest).toBeGreaterThan(0.008);
+    expect(jolt).toBeLessThan(0.12);
+  });
+
   describe('Earth', () => {
     const deg = (a: number[], b: number[]) => (Math.acos(Math.max(-1, Math.min(1, dot(a, b)))) * 180) / Math.PI;
     const h = 1 / 30;
@@ -89,14 +118,15 @@ describe('Get the Drift arrival', () => {
         const e = earthPose(t, p, tilt);
         expect(deg(e.centreDir, e.sun) - e.radiusDeg, `at ${t.toFixed(1)} s`).toBeGreaterThan(1);
       }
-      const arrived = earthPose(starts.earth + p.earthApproach, p, tilt);
+      // (arrived: slid to the front, 1.6 approaches in)
+      const arrived = earthPose(starts.earth + ARRIVED * p.earthApproach, p, tilt);
       const clear = deg(arrived.centreDir, arrived.sun) - arrived.radiusDeg;
       expect(clear).toBeGreaterThan(1);
       expect(clear).toBeLessThan(30);
     });
 
     it('puts the dawn on the planet: the terminator crosses the visible face (lit and dark both in view)', () => {
-      const e = earthPose(starts.earth + p.earthApproach, p, tilt);
+      const e = earthPose(starts.earth + ARRIVED * p.earthApproach, p, tilt);
       const toEye = e.centreDir.map((x) => -x);
       // the sub-eye point is in night, but the Sun lights part of the visible hemisphere
       const sunElAtSubEye = 90 - deg(toEye, e.sun);
@@ -115,9 +145,11 @@ describe('Get the Drift arrival', () => {
         const e = earthPose(t, p, tilt);
         expect(90 - deg(e.centreDir, zenith) + e.radiusDeg, `top of the planet at ${t.toFixed(2)}`).toBeGreaterThan(8);
       }
-      const last = earthPose(starts.earth + p.earthApproach, p, tilt);
+      // once it has slid to the front (1.6 approaches in), its limb lies across the front, sinking with the dawn
+      const last = earthPose(starts.earth + ARRIVED * p.earthApproach, p, tilt);
       const limbTop = 90 - deg(last.centreDir, domeDir(90, 0, tilt)) + last.radiusDeg;
-      expect(limbTop).toBeCloseTo(p.limbEl, 0);
+      expect(limbTop).toBeGreaterThan(p.limbEl - p.dawnSink - 0.5);
+      expect(limbTop).toBeLessThan(p.limbEl + 0.5);
     });
   });
 });

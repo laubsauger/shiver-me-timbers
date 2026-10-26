@@ -8,10 +8,16 @@
  * and its plane runs from the front over the zenith to the back (the band arcs over the audience), leaned a
  * little so it is not a ruler-straight meridian.
  *
- * CAMERA. One straight approach E0 → T, exponential in distance (constant optic flow, as the pull-back of
- * Undertime): f = |E − T| / |E0 − T| falls under a trapezoid rate profile — a long ease-in through the
- * galaxies beat (we drift among them), a constant rate diving into the disk, an ease-out to rest inside it.
- * The peak rate is held under the comfort cap by tests/getTheDriftTimeline.test.ts.
+ * CAMERA. ONE JOURNEY, never at rest from the galaxy cluster down to the water (user, 2026-10-26: the moves
+ * that each eased to rest and then started again read as clips stitched together). Two zooms, each a smooth
+ * monotone curve of log distance through a few anchors, overlapping where one hands over to the other:
+ *   - into the galaxy: f = |E − T| / |E0 − T| along the straight approach E0 → T (exponential in distance:
+ *     constant optic flow), at rest only at the very start; it slows to a drift as the Earth comes in;
+ *   - toward the Earth and down to it: the altitude, from the planet as a point beside the Sun to orbit, a
+ *     slow descent through the time waves and the night, faster through the flood and over the spiral.
+ * The planet's place in the view follows from the altitude and where its limb sits on the dome, so it turns
+ * while the zoom goes on, never in a stop of its own. tests/getTheDriftTimeline.test.ts holds the rates under
+ * the comfort caps and the motion above a floor.
  */
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import { domeBasis, type Vec3 } from '../../cine/domeMaster';
@@ -115,6 +121,69 @@ export interface ArrivalState {
   earth: number;
 }
 
+/**
+ * A journey's progress from its SPEED: `rate` is drawn as a smooth curve through (time, speed) keys (a
+ * monotone cubic, so its peaks are round and it never overshoots below zero) and integrated into a table.
+ * Speed, not position, is what the audience feels: drawn this way it has no kinks (no jolts) and no dips at
+ * the keys, which a spline through positions gave. Returned: the distance covered by time t.
+ */
+function journey(ts: number[], speeds: number[]): (t: number) => number {
+  const t0 = ts[0];
+  const t1 = ts[ts.length - 1];
+  const dt = 0.02;
+  const n = Math.ceil((t1 - t0) / dt) + 1;
+  const acc = new Float64Array(n + 1);
+  for (let i = 1; i <= n; i++) {
+    const a = t0 + (i - 1) * dt;
+    // midpoint rule (the curve is smooth)
+    acc[i] = acc[i - 1] + monotone(ts, speeds, a + dt / 2) * dt;
+  }
+  return (t: number): number => {
+    const x = (Math.min(Math.max(t, t0), t1) - t0) / dt;
+    const i = Math.min(n - 1, Math.floor(x));
+    return acc[i] + (acc[i + 1] - acc[i]) * (x - i);
+  };
+}
+
+const journeys = new Map<string, { galaxy: (t: number) => number; earth: (t: number) => number }>();
+function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; earth: (t: number) => number } {
+  const key = JSON.stringify(p);
+  const hit = journeys.get(key);
+  if (hit) return hit;
+  const { starts } = beatStarts(p);
+  // INTO THE GALAXY (e-folds of distance per second, scaled below to reach the Sun point on time): a slow
+  // start among the galaxies, the dive into the disk, on through the Sun's neighbourhood, slowing as the Earth
+  // comes in and takes the motion over — never below a drift until the planet is growing in view
+  const past = p.galaxies + p.ours + p.band + p.sun;
+  const gts = [0, 8, p.galaxies + 2, p.galaxies + p.ours, past - 4, past + 8, past + 18, past + 30];
+  const gv = [0, 0.05, 0.14, 0.19, 0.17, 0.13, 0.06, 0];
+  const g0 = journey(gts, gv);
+  const lnSun = Math.log(p.insideKeep) + Math.log(0.047);
+  const gScale = -lnSun / g0(past);
+  // TOWARD THE EARTH AND DOWN TO IT (e-folds of altitude per second, scaled to land over the spiral on time):
+  // the approach under the comfort cap, a slow sink from a high orbit through the time waves and the night,
+  // faster through the flood
+  const e = starts.earth;
+  const end = starts.drift2 + p.drift2;
+  const ets = [e - 3, e + 2, e + 9, e + 17, e + 25, e + 31, e + 38, e + 48, starts.flood - 6, starts.flood + 12, end - 12, end];
+  const ev = [0, 0.1, 0.24, 0.28, 0.34, 0.3, 0.12, 0.022, 0.014, 0.07, 0.085, 0];
+  const e0 = journey(ets, ev);
+  const far = (EARTH_RADIUS + p.orbitAltitude) * p.earthFar - EARTH_RADIUS;
+  const eScale = Math.log(far / p.driftAltitude) / e0(end);
+  const made = {
+    galaxy: (t: number): number => -g0(t) * gScale,
+    earth: (t: number): number => far * Math.exp(-e0(t) * eScale),
+  };
+  journeys.clear();
+  journeys.set(key, made);
+  return made;
+}
+
+/** ln f, the approach into our galaxy (journeysFor) */
+function galaxyZoom(t: number, p: GetTheDriftParams): number {
+  return journeysFor(p).galaxy(t);
+}
+
 export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {
   const { starts, total } = beatStarts(p);
   let beat: Beat = 'end';
@@ -128,17 +197,7 @@ export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {
     }
   }
   void total;
-  const approachLen = p.galaxies + p.ours;
-  const x = clamp01(t / Math.max(1e-6, approachLen));
-  // most of the galaxies beat is the slow start of the approach; ease out inside the disk
-  const rampIn = clamp01(p.galaxies / approachLen) * 1.25;
-  const lnKeep = Math.log(p.insideKeep);
-  let lnF = lnKeep * ramped(x, Math.min(0.6, rampIn), 0.12);
-  // the band and sun beats: on through the Sun's neighbourhood toward the Sun point, eased at both ends —
-  // the near stars stream past (a still sky here reads as a frozen frame)
-  const cruiseK = clamp01((t - starts.band) / Math.max(1e-6, p.band + p.sun));
-  lnF += Math.log(0.047) * ramped(cruiseK, 0.25, 0.25);
-  const f = Math.exp(lnF);
+  const f = Math.exp(galaxyZoom(t, p));
   return {
     beat,
     u,
@@ -174,30 +233,34 @@ const slerp = (a: Vec3, b: Vec3, k: number): Vec3 => {
   return norm([a[0] * ka + b[0] * kb, a[1] * ka + b[1] * kb, a[2] * ka + b[2] * kb]);
 };
 
-/** where the planet is (centre direction, distance) at act time t: the approach, the dawn's sink, the flood's
- * and Drift-2's descent — everything but the Sun */
+/** Mm above the sea at act time t (journeysFor): from the point beside the Sun, through orbit, the flood's
+ * "tectonic" heights (~100 km, watching the sea rise), to `driftAltitude` over the spiral */
+function earthAltitude(t: number, p: GetTheDriftParams): number {
+  return journeysFor(p).earth(t);
+}
+
+/** in `earthApproach`s from the Earth beat's start: the planet has slid to the front, its limb across it, and
+ * the Sun's day begins (the dawn) */
+export const ARRIVED = 1.6;
+/** s the planet sinks by `dawnSink` over, from its arrival, as the day breaks on it */
+const DAWN_SINK_S = 20;
+
+/** where the planet is (centre direction, distance) at act time t — everything but the Sun */
 function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
   const { starts } = beatStarts(p);
-  const final = EARTH_RADIUS + p.orbitAltitude;
-  const k = clamp01((t - starts.earth) / Math.max(1e-6, p.earthApproach));
-  const distance = final * Math.exp(Math.log(p.earthFar) * (1 - ramped(k, 0.15, 0.3)));
-  const finalRadius = (Math.asin(EARTH_RADIUS / final) * 180) / Math.PI;
-  const dawn = smooth((t - starts.earth - p.earthApproach) / Math.max(1e-6, p.earth - p.earthApproach));
-  // it first shows front right, a third of it sunlit (a point beside the Sun would show its night side:
-  // a dark dot, not a blue one), and it slides down to the front only once it is big enough to stay on the
-  // dome while its centre goes below the dome's edge
+  const distance = EARTH_RADIUS + earthAltitude(t, p);
+  const radius = (Math.asin(Math.min(1, EARTH_RADIUS / distance)) * 180) / Math.PI;
+  const dawn = smooth((t - starts.earth - ARRIVED * p.earthApproach) / DAWN_SINK_S);
+  // where its limb sits: across the front, sinking a little through the dawn, a little lower over the flood
+  const flood = smooth((t - starts.flood) / Math.max(1e-6, 0.6 * (p.flood + p.drift2)));
+  const limb = (p.limbEl - p.dawnSink * dawn) * (1 - flood) + p.floodLimbEl * flood;
+  const below = domeDir(limb - radius, 0, tiltDeg);
+  // it first shows front right, a third of it sunlit (a point beside the Sun would show its night side: a
+  // dark dot, not a blue one), and slides down to the front while it grows — big enough by then to stay on
+  // the dome while its centre goes below the dome's edge
   const beside = domeDir(p.approachEl - 23, p.approachAz + 85, tiltDeg);
-  const below = domeDir(p.limbEl - finalRadius - p.dawnSink * dawn, 0, tiltDeg);
-  // the flood and Drift-2: ONE eased glide from the orbit down to the water — forward and down at once (the
-  // planet's centre keeps sinking below the front as it comes closer), no stop and dive: through the flood
-  // we pass the "tectonic" heights (~100 km) watching the sea rise, and settle low over the spiral
-  const descent = Math.max(1e-6, p.flood + p.drift2);
-  const dk = ramped(clamp01((t - starts.flood) / descent), 0.25, 0.3);
-  const altitude = p.orbitAltitude * Math.exp(Math.log(p.driftAltitude / p.orbitAltitude) * dk);
-  const dip = (Math.acos(EARTH_RADIUS / (EARTH_RADIUS + altitude)) * 180) / Math.PI;
-  const lowCentre = domeDir(p.floodLimbEl - (90 - dip), 0, tiltDeg);
-  if (t <= starts.flood) return { centreDir: slerp(beside, below, smooth((k - 0.3) / 0.7)), distance };
-  return { centreDir: slerp(below, lowCentre, smooth(dk / 0.6)), distance: EARTH_RADIUS + altitude };
+  const slide = smooth((t - starts.earth) / (ARRIVED * p.earthApproach));
+  return { centreDir: slerp(beside, below, slide), distance };
 }
 
 const rotateAbout = (v: Vec3, a: Vec3, th: number): Vec3 => {
@@ -284,7 +347,7 @@ export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
   return {
     pole: sign > 0 ? pole : (pole.map((x) => -x) as Vec3),
     start,
-    times: [starts.earth + p.earthApproach, starts.timewave, tSet, tRise, starts.drift2 + p.drift2],
+    times: [starts.earth + ARRIVED * p.earthApproach, starts.timewave + 6, tSet, tRise, starts.drift2 + p.drift2],
     angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, rise + 4 * D, 2 * Math.PI],
   };
 }
