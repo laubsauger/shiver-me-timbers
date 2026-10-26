@@ -150,7 +150,10 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
     // dim (not gone) behind the crawl; never one across the eye (a grain within ~15 of its sizes is a blur)
     .mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.85)))
     .mul(smoothstep(wanted.mul(12), wanted.mul(40), dist));
-  const tint = mix(U.warm, mix(vec3(0.75, 0.85, 1), U.star, hash(j.mul(0.37))), lit);
+  // the field reads as starlight-to-be, not dust: mostly cool white, a share warm; only the hero grain
+  // (createHeroGrain) is the act's amber
+  const base = mix(vec3(0.72, 0.8, 1), mix(vec3(1, 0.93, 0.85), U.warm, 0.5), hash(j.mul(0.53)).mul(0.6));
+  const tint = mix(base, mix(vec3(0.75, 0.85, 1), U.star, hash(j.mul(0.37))), lit);
 
   const material = additive('undertime-grains');
   material.positionNode = eyeFacing(pos, f.size.mul(step(0.0005, alpha)));

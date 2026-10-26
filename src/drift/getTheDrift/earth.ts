@@ -69,6 +69,8 @@ import {
   vec4,
 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from '../undertime/billboard';
+import { lifeAlbedo, nightLights, seaRise, type LifeUniforms } from './lifeLayers';
+import type { LifeState } from './life';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -95,7 +97,16 @@ const KM = 1 / 6371;
 
 export interface Earth {
   readonly group: THREE.Group;
-  update(o: { centre: THREE.Vector3; sun: THREE.Vector3; presence: number; sunPresence: number; pixelAngle: number; eye: THREE.Vector3 }): void;
+  update(o: {
+    centre: THREE.Vector3;
+    sun: THREE.Vector3;
+    presence: number;
+    sunPresence: number;
+    pixelAngle: number;
+    eye: THREE.Vector3;
+    /** Part B (life.ts): the time-wave layers, the lights, the flood; omitted = the young world */
+    life?: LifeState & { waveOrigin: THREE.Vector3; axis: THREE.Vector3 };
+  }): void;
   dispose(): void;
 }
 
@@ -219,11 +230,13 @@ function cloudDensity(n: V3, fp: F): F {
   // fronts: long thin bands along a warped noise's zero line, inside the wet systems
   const front = float(1).sub(smoothstep(0, 0.07, abs(mx_noise_float(q.add(w.mul(1.5)).mul(2.3).add(vec3(9.1, 0, 3))))));
   // cumulus / stratocumulus cells (~40 km), faded to their mean where the cells shrink below the footprint
-  const cells = mix(float(0.45), mx_worley_noise_float(q.mul(160), 0.9, 0), lod(float(160), fp));
+  // stratocumulus / cumulus cells — small (~10 km), many: a field with texture, not big puffs
+  const cells = mix(float(0.45), mx_worley_noise_float(q.mul(600), 0.9, 0), lod(float(600), fp));
   const detail = fbm(q.add(vec3(3, 7, 1)), 40, 8, 0.55, fp);
   return wet.mul(1.5).add(front.mul(0.55).mul(smoothstep(-0.25, 0.1, wet))).add(float(0.45).sub(cells).mul(0.55)).add(detail.mul(0.55)).sub(0.42);
 }
-const cloudCover = (density: F): F => smoothstep(0, 0.3, density);
+// crisp edges: cloud from orbit reads as sharp-edged white sheets, not soft balls
+const cloudCover = (density: F): F => smoothstep(0, 0.12, density);
 
 export function createEarth(): Earth {
   const u = {
@@ -232,6 +245,14 @@ export function createEarth(): Earth {
     presence: uniform(0),
     sunPresence: uniform(0),
     pixelAngle: uniform(0.0015),
+  };
+  const lu = {
+    fields: uniform(0), forests: uniform(0), ice: uniform(1), lights: uniform(0), overshoot: uniform(0), sea: uniform(0),
+    waveOrigin: uniform(new THREE.Vector3(0, 0, 1)), axis: uniform(new THREE.Vector3(0, 1, 0)),
+  };
+  const L: LifeUniforms = {
+    fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
+    waveOrigin: lu.waveOrigin as unknown as V3, axis: lu.axis as unknown as V3,
   };
   const C = u.centre as unknown as V3;
   const S = u.sun as unknown as V3;
@@ -268,7 +289,8 @@ export function createEarth(): Earth {
     const q = n.add(mx_noise_vec3(n.mul(1.1).add(vec3(2.7, 5.1, 0.4))).mul(0.3)).toVar();
     const cont = fbm(q, 1.3, 4, 0.5, fp);
     const r0 = roughness(q, fp);
-    const s = cont.add(r0.detail.mul(DETAIL_AMP)).sub(SEA).toVar();
+    // the flood (Part B) raises the sea: the land's shape is measured against the risen sea level
+    const s = cont.add(r0.detail.mul(DETAIL_AMP)).sub(SEA).sub(seaRise(L)).toVar();
     const landK = select(s.greaterThan(0), float(1), float(0));
     const belt = smoothstep(0.72, 0.96, float(1).sub(abs(mx_noise_float(q.mul(1.9).add(vec3(5.3, 2, 8)))))).mul(smoothstep(0, 0.06, s)).toVar();
     const km0 = reliefKm(r0, belt).toVar();
@@ -289,7 +311,10 @@ export function createEarth(): Earth {
     const rock = mix(basalt, weathered, smoothstep(-0.12, 0.12, prov.add(r0.detail.mul(0.25))));
     const lowland = float(1).sub(smoothstep(0.004, 0.05, s.add(r0.detail.mul(0.02)))).mul(smoothstep(-0.4, 0.2, oxide.add(prov)));
     const ground = mix(rock, vec3(0.44, 0.38, 0.3), lowland.mul(0.85));
-    const landAlbedo = mix(ground, vec3(0.04, 0.036, 0.034), smoothstep(0.08, 0.35, slope).mul(0.6)).mul(r0.detail.mul(0.6).add(1).clamp(0.6, 1.4));
+    const youngLand = mix(ground, vec3(0.04, 0.036, 0.034), smoothstep(0.08, 0.35, slope).mul(0.6)).mul(r0.detail.mul(0.6).add(1).clamp(0.6, 1.4));
+    // Part B: life rolls over the young land in waves (fields, forests), the ice caps settle and shrink
+    const wet = smoothstep(-0.3, 0.4, oxide.negate().add(lowland.mul(0.8)));
+    const landAlbedo = lifeAlbedo(n, s, float(0), wet, youngLand, L);
     // water: deep blue-black, teal over the shelves, paler over the shallowest sand
     const depth = s.negate().max(0);
     const water = mix(vec3(0.003, 0.009, 0.02), vec3(0.01, 0.045, 0.05), exp(depth.div(-0.018))).add(vec3(0.03, 0.06, 0.045).mul(exp(depth.div(-0.003))));
@@ -318,7 +343,10 @@ export function createEarth(): Earth {
     const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(coast)).mul(shade);
     // the sky in the water: Fresnel at grazing angles
     const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(coast));
-    const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E));
+    // the lights of the night side (camps → villages → cities; drowned under the risen sea), under the clouds
+    const night = float(1).sub(smoothstep(-0.12, 0.04, muS));
+    const lights = nightLights(n, s, float(0), L, fp).mul(night).mul(shade.mul(0.7).add(0.3)).mul(coast);
+    const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E)).add(lights);
     const T = towardEye(float(EARTH_R), muV, eyeR, eyeUp.dot(v));
     return vec4(out.mul(T).mul(u.presence), 1);
   })();
@@ -345,7 +373,7 @@ export function createEarth(): Earth {
       // embossed toward the Sun: density as a height field (~3 km of relief), its slope along the light
       const eps = max(fp, 1.5 * KM);
       const dens1 = cloudDensity(normalize(n.add(sunward(n, muS).mul(eps))), fp);
-      const slope = dens1.sub(dens).div(eps).mul(3 * KM).clamp(-3, 3);
+      const slope = dens1.sub(dens).div(eps).mul(1 * KM).clamp(-1.5, 1.5);
       const ndl = muS.sub(sqrt(float(1).sub(muS.mul(muS)).max(0)).mul(slope)).div(sqrt(slope.mul(slope).add(1)));
       // thick cloud scatters light round into its shaded side; forward scattering lights it against the Sun
       const wrap = ndl.mul(0.65).add(0.35).max(0);
@@ -489,6 +517,17 @@ export function createEarth(): Earth {
   return {
     group,
     update(o) {
+      const l = o.life;
+      lu.fields.value = l?.fields ?? 0;
+      lu.forests.value = l?.forests ?? 0;
+      lu.ice.value = l?.ice ?? 1;
+      lu.lights.value = l?.lights ?? 0;
+      lu.overshoot.value = l?.overshoot ?? 0;
+      lu.sea.value = l?.sea ?? 0;
+      if (l) {
+        lu.waveOrigin.value.copy(l.waveOrigin);
+        lu.axis.value.copy(l.axis);
+      }
       u.centre.value.copy(o.centre);
       u.sun.value.copy(o.sun).normalize();
       u.presence.value = o.presence;

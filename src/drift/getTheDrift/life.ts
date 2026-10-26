@@ -46,7 +46,8 @@ export function lifeState(t: number, p: GetTheDriftParams): LifeState {
     forests: smooth((wave - 0.35) / 0.65),
     ice: 1 - 0.4 * smooth(wave) - 0.35 * smooth(over),
     // the Sun sets in the first third of the lights beat; the lights come up as it goes
-    lights: 3 * smooth((lights - 0.2) / 0.8) + 0.4 * smooth(over),
+    // the lights grow through the night and past the balance; the flood drowns and empties them
+    lights: (3 * smooth((lights - 0.2) / 0.8) + 0.4 * smooth(over)) * (1 - smooth(flood / 0.8)),
     overshoot: smooth(over),
     sea: smooth(flood / 0.85),
     dusk: smooth(lights / 0.3) * (1 - smooth((flood - 0.55) / 0.45)),

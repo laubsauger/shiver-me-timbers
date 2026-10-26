@@ -43,8 +43,8 @@ export function createDebris(count: number, U: DebrisUniforms): THREE.InstancedM
   const vort = new Float32Array(VORTICES * 4);
   for (let v = 0; v < VORTICES; v++) {
     const a = r() * Math.PI * 2;
-    const d = v === 0 ? 0 : 0.03 + r() * 0.09;
-    vort.set([Math.cos(a) * d, Math.sin(a) * d, 0.012 + r() * 0.03, (r() < 0.5 ? -1 : 1) * (0.5 + r() * 0.6)], v * 4);
+    const d = v === 0 ? 0 : 0.06 + r() * 0.16;
+    vort.set([Math.cos(a) * d, Math.sin(a) * d, 0.03 + r() * 0.07, (r() < 0.5 ? -1 : 1) * (0.5 + r() * 0.6)], v * 4);
   }
   const info = new Float32Array(count * 4);
   for (let i = 0; i < count; i++) {
@@ -71,7 +71,8 @@ export function createDebris(count: number, U: DebrisUniforms): THREE.InstancedM
   const rad = I.z.mul(size).add(hash(k.mul(1.7)).mul(size.mul(0.08)));
   const theta0 = I.y.div(7).mul(PI.mul(2)).add(hash(vIndex.mul(3.1)).mul(6.28)).add(hash(k.mul(2.3)).sub(0.5).mul(0.25));
   // differential rotation: the inner water turns faster, winding each streak into a trailing arm
-  const omega = spin.mul(0.9).div(rad.div(size).add(0.15));
+  // slow enough that a streak winds into two or three arms over the beat (fast winding draws rings)
+  const omega = spin.mul(0.12).div(rad.div(size).add(0.25));
   const theta = theta0.add(omega.mul(U.time));
   const x = cx.add(cos(theta).mul(rad));
   const y = cy.add(sin(theta).mul(rad));
@@ -88,7 +89,7 @@ export function createDebris(count: number, U: DebrisUniforms): THREE.InstancedM
   const day = smoothstep(-0.05, 0.2, n.dot(U.sun));
   const toEye = normalize(cameraPosition.sub(pos));
   const glint = pow(max(U.sun.add(toEye).normalize().dot(n), 0), float(300)).mul(step(0.92, kind)).mul(30);
-  const wanted = float(0.00006).mul(hash(k.mul(4.4)).mul(1.5).add(0.5));
+  const wanted = float(0.00015).mul(hash(k.mul(4.4)).mul(1.5).add(0.5));
   const drawn = max(wanted, U.pixelAngle.mul(1.2).mul(dist));
   const coverage = wanted.div(drawn).pow(2).mul(40).min(1);
   const alpha = U.presence.mul(smoothstep(0, 0.05, I.z.sub(0.02))).mul(coverage);
@@ -101,7 +102,7 @@ export function createDebris(count: number, U: DebrisUniforms): THREE.InstancedM
   material.colorNode = Fn(() => {
     const q = clamp(length(uv().sub(0.5)).mul(2), 0, 1);
     const light = colour.mul(day.mul(0.9).add(0.02)).add(vec3(1, 0.9, 0.7).mul(glint));
-    return vec4(light.mul(alpha).mul(exp(q.mul(2.5).pow(2).negate())).mul(1.2), 1);
+    return vec4(light.mul(alpha).mul(exp(q.mul(2.5).pow(2).negate())).mul(2.4), 1);
   })();
   material.name = 'drift-debris';
   const mesh = billboardMesh(material, count, 'drift-debris');

@@ -194,7 +194,7 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
   const finalRadius = (Math.asin(EARTH_RADIUS / final) * 180) / Math.PI;
   const dawn = smooth((t - starts.earth - p.earthApproach) / Math.max(1e-6, p.earth - p.earthApproach));
   // it first shows a little to the Sun's right, a thin sunlit crescent
-  const beside = domeDir(p.approachEl + 3, p.approachAz + 24, tiltDeg);
+  const beside = domeDir(p.approachEl - 8, p.approachAz + 24, tiltDeg);
   const below = domeDir(p.limbEl - finalRadius - p.dawnSink * dawn, 0, tiltDeg);
   // THE DAWN, as a time-lapse: the Sun climbs from where the arrival left it, and the terminator sweeps
   // across the planet toward the audience (orbital motion would also turn the stars; we keep them still).
@@ -209,7 +209,7 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
   const low = EARTH_RADIUS + altitude;
   const dip = (Math.acos(EARTH_RADIUS / low) * 180) / Math.PI;
   const lowCentre = domeDir(p.floodLimbEl - (90 - dip), 0, tiltDeg);
-  let centreDir = slerp(beside, below, smooth((k - 0.3) / 0.65));
+  let centreDir = slerp(beside, below, smooth((k - 0.1) / 0.85));
   let dist = distance;
   if (t > starts.flood) {
     centreDir = slerp(below, lowCentre, fk);

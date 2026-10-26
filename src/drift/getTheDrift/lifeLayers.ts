@@ -13,7 +13,7 @@
  *   sea       the sea level the surface floods to (elevation units of earth.ts's height field)
  */
 import * as THREE from 'three/webgpu';
-import { abs, float, floor, fract, hash, max, mix, mx_noise_float, smoothstep, vec3 } from 'three/tsl';
+import { abs, exp, float, floor, fract, hash, max, mix, mx_noise_float, pow, smoothstep, step, vec3 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -62,32 +62,58 @@ export function lifeAlbedo(n: V3, e: F, sea: F, wet: F, base: V3, L: LifeUniform
 }
 
 /**
- * Night lights (emission, linear) at surface normal n. Zero by day: earth.ts multiplies by its own night
- * factor. Settlements sit on a jittered grid of cells on the sphere; a cell is inhabited where it is low,
- * near the coast and temperate; stage by stage more of them light, brighter and wider.
+ * Night lights (emission, linear), after the satellite and ISS imagery of Earth at night: cities are CLUSTERS
+ * of many fine sodium-amber points, densest and whitest at their cores and thinning outward; their sizes
+ * follow a steep power law (a few big cities, many towns); a faint rural speckle between them; thin threads
+ * of road joining them. Zero by day (earth.ts multiplies by its night factor).
+ *
+ * Two scales of cells on the sphere: CITY cells (~45 km) each may host a city of its own size, and FINE
+ * cells (~2.5 km) that light when they fall inside a city's extent (with a probability falling off from its
+ * core) or, rarely, as a rural light. Where a fine cell is smaller than ~2 pixels (`fp`, the pixel footprint
+ * on the unit sphere) the points are replaced by their average — no shimmer, no grit.
+ *
+ * Stages (L.lights): camps 0–1 are the rural speckle alone; villages 1–2 light the small cities' cores; cities
+ * 2–3 grow every cluster to its full extent; the overshoot merges and whitens them. Drowned under the sea.
  */
-export function nightLights(n: V3, e: F, sea: F, L: LifeUniforms): V3 {
+export function nightLights(n: V3, e: F, sea: F, L: LifeUniforms, fp: F = float(0)): V3 {
   const height = e.sub(sea);
-  const habitable = smoothstep(0, 0.02, height).mul(smoothstep(0.22, 0.02, height)).mul(smoothstep(0.75, 0.45, abs(n.dot(L.axis))));
-  // cells ~ 60 km across; a settlement at each cell's jittered centre
-  const p = n.mul(110);
-  const cell = floor(p);
-  const f = fract(p);
-  const h = hash(cell.x.add(cell.y.mul(157)).add(cell.z.mul(113)));
-  const at = vec3(hash(h.add(0.1)), hash(h.add(0.2)), hash(h.add(0.3))).mul(0.6).add(0.2);
-  const d = f.sub(at).length();
+  const lowland = smoothstep(0, 0.008, height).mul(smoothstep(0.2, 0.03, height)).mul(smoothstep(0.85, 0.55, abs(n.dot(L.axis))));
+  const region = smoothstep(0.5, 0.8, mx_noise_float(n.mul(6).add(3.7)).mul(0.5).add(0.5).add(smoothstep(0.05, 0, height).mul(0.25)));
   const stage = L.lights;
-  // which cells are lit at this stage (the same cells keep their light as it grows)
-  const lit = smoothstep(h.add(0.05), h, stage.mul(0.33).mul(habitable.mul(1.4)));
-  // camps are sparks; villages are small glows; cities spread and run along the coast
-  const size = mix(float(0.04), float(0.22), smoothstep(1, 3, stage)).add(L.overshoot.mul(0.18));
-  const point = smoothstep(size, size.mul(0.3), d);
-  // the networks: a faint web between lit cells in the city stage
-  const web = mx_noise_float(n.mul(70)).mul(0.5).add(0.5);
-  const roads = smoothstep(0.03, 0, abs(web.sub(0.5))).mul(smoothstep(2, 3, stage)).mul(habitable).mul(0.25);
-  const warm = mix(vec3(1, 0.6, 0.25), vec3(1, 0.85, 0.6), smoothstep(1, 3, stage));
-  const harsh = mix(warm, vec3(0.95, 0.95, 1), L.overshoot.mul(0.6));
-  const glow = point.mul(lit).add(roads).mul(max(stage.sub(0.2), 0)).mul(L.overshoot.mul(1.5).add(1));
+  // ---- cities: one may sit in each ~45 km cell, at a random point, its size from a steep power law
+  const pc = n.mul(140);
+  const cc = floor(pc);
+  const hc = hash(cc.x.add(cc.y.mul(157)).add(cc.z.mul(113)));
+  const centre = cc.add(vec3(hash(hc.add(0.1)), hash(hc.add(0.2)), hash(hc.add(0.3)))).div(140);
+  const isCity = step(hash(hc.add(0.7)), region.mul(lowland).mul(0.55));
+  const big = pow(hash(hc.add(0.9)), float(3)); // most small, a few big
+  // a city's radius (unit sphere) grows with the stage: cores in the village stage, full in the city stage
+  const grow = smoothstep(1, 2, stage).mul(0.35).add(smoothstep(2, 3, stage).mul(0.65)).add(L.overshoot.mul(0.6));
+  const radius = big.mul(0.009).add(0.0015).mul(grow);
+  const dc = n.sub(centre).length();
+  const inCity = isCity.mul(exp(dc.div(radius.max(1e-5)).pow(2).negate()));
+  // ---- fine lights: ~2.5 km cells, lit inside a city (denser to its core) or rarely in the countryside
+  const pf = n.mul(2500);
+  const cf = floor(pf);
+  const hf = hash(cf.x.add(cf.y.mul(311)).add(cf.z.mul(197)));
+  const at = vec3(hash(hf.add(0.1)), hash(hf.add(0.2)), hash(hf.add(0.3))).mul(0.8).add(0.1);
+  const df = fract(pf).sub(at).length();
+  const rural = lowland.mul(region.mul(0.7).add(0.3)).mul(0.035).mul(smoothstep(0.2, 1, stage));
+  const chance = inCity.mul(0.85).add(rural);
+  const on = step(hf, chance);
+  const brightness = hash(hf.add(0.5)).pow(2).mul(1.5).add(0.25).mul(inCity.mul(2).add(0.6));
+  const point = exp(df.div(0.18).pow(2).negate());
+  // LOD: where a fine cell is under ~2 px, its average (its probability × brightness × a point's area)
+  const fine = smoothstep(2 / 2500, 1 / 2500, fp);
+  const glow = mix(chance.mul(brightness).mul(0.1), on.mul(point).mul(brightness), fine);
+  // the cores' diffuse glow (too dense to resolve), whiter
+  const core = inCity.pow(3).mul(big.mul(2).add(0.5)).mul(0.6);
+  // road threads between towns: thin, faint, only once there are cities
+  const web = mx_noise_float(n.mul(400)).mul(0.5).add(0.5);
+  const roads = smoothstep(0.015, 0, abs(web.sub(0.5))).mul(lowland).mul(region).mul(smoothstep(2, 3, stage)).mul(0.06);
+  const sodium = vec3(1, 0.55, 0.2);
+  const white = mix(vec3(1, 0.85, 0.65), vec3(0.92, 0.95, 1), L.overshoot);
+  const light = sodium.mul(glow.add(roads)).add(white.mul(core));
   // drowned: under the risen sea the lights are out
-  return harsh.mul(glow).mul(0.6).mul(smoothstep(-0.002, 0.004, height));
+  return light.mul(max(stage, 0).min(1)).mul(L.overshoot.mul(0.8).add(1)).mul(smoothstep(-0.002, 0.004, height)).mul(0.6);
 }

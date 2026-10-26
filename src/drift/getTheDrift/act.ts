@@ -11,6 +11,7 @@ import type { Vec3 } from '../../cine/domeMaster';
 import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, ourGalaxy, type ArrivalState } from './timeline';
 import { createEarth } from './earth';
 import { createDebris } from './debris';
+import { lifeState } from './life';
 import { OUR_LOOK, createGalaxies, galaxyField, type GalaxySpec } from './galaxies';
 import { createMilkyWay } from './milkyWay';
 
@@ -37,6 +38,10 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   group.add(galaxies, milky.group, earth.group);
   const centre = new THREE.Vector3();
   const sun = new THREE.Vector3();
+  const waveOrigin = new THREE.Vector3();
+  // the planet's spin axis runs across the view (left–right, leaned): we look down onto the temperate and
+  // tropical latitudes, the ice caps sit at the left and right limbs (looking down a pole, all is ice)
+  const planetAxis = new THREE.Vector3(1, 0.35, 0.2).normalize();
 
   // Drift-2's spirals sit on the water in front of the audience as the flood ends: the point a ray at 14°
   // elevation straight ahead meets the planet then (the planet only translates, so it stays put on it)
@@ -82,7 +87,16 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       centre.set(...e.centreDir).multiplyScalar(e.distance).add(eye);
       sun.set(...e.sun);
       earth.group.visible = s.earth > 0;
-      earth.update({ centre, sun, presence: s.earth, sunPresence: s.earth, pixelAngle, eye });
+      // Part B: the life layers; the time waves start at the planet's limb straight ahead
+      const ahead = domeDir(p.limbEl - 4, 0, tiltDeg);
+      const oc = [eye.x - centre.x, eye.y - centre.y, eye.z - centre.z];
+      const bb = ahead[0] * oc[0] + ahead[1] * oc[1] + ahead[2] * oc[2];
+      const cc = oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2] - EARTH_RADIUS * EARTH_RADIUS;
+      const disc = bb * bb - cc;
+      const hitT = disc > 0 ? -bb - Math.sqrt(disc) : -bb;
+      waveOrigin.set(eye.x + ahead[0] * hitT - centre.x, eye.y + ahead[1] * hitT - centre.y, eye.z + ahead[2] * hitT - centre.z).normalize();
+      const L = lifeState(t, p);
+      earth.update({ centre, sun, presence: s.earth, sunPresence: s.earth, pixelAngle, eye, life: { ...L, waveOrigin, axis: planetAxis } });
       du.time.value = Math.max(0, t - lift);
       du.presence.value = Math.min(1, Math.max(0, (t - lift) / 5));
       du.centre.value.copy(centre);

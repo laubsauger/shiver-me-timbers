@@ -150,7 +150,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   sky.name = 'drift-milky-way';
 
   // ------------------------------------------------------------------ the stars near the Sun point
-  const COUNT = 30000;
+  const COUNT = 14000;
   const r = rng(9001);
   const H = 0.035; // star scale height (radii), a little thicker than the gas: the band has width
   const NEAR = 0.09; // radius (radii) of the neighbourhood drawn as points
@@ -171,7 +171,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   // flux falls with distance squared, normalised to a star a little out in the neighbourhood (so the sky
   // holds thousands of visible points); capped as one passes close
   const spacing = 0.003 * g.radius;
-  const D0 = 0.022 * g.radius;
+  const D0 = 0.014 * g.radius;
   const flux = min(S.w.mul(float(D0).div(dist.max(spacing * 0.15)).pow(2)), 60);
   const quad = dist.mul(u.pixelAngle).mul(4);
   const temp = fract(k.mul(0.61803398875));
