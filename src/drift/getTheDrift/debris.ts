@@ -17,7 +17,7 @@
  * Coordinates: the tangent plane at the gathering point (Mm), east and north there.
  */
 import * as THREE from 'three/webgpu';
-import { atan, cos, float, floor, hash, length, mx_noise_float, sin, smoothstep, step, vec2, vec3 } from 'three/tsl';
+import { atan, cos, float, length, mx_noise_float, sin, smoothstep, vec2, vec3 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -54,11 +54,13 @@ function fbm2(x: F, y: F, f0: number, octaves: number, fp: F, seed: number): F {
 }
 
 /**
- * The floating matter at unit surface normal n: `cover` 0..1 (how much of the water's surface it hides) and
- * `specks` (sunlit floating things too small to see but for their glints). `fp` is the pixel's footprint on
- * the unit sphere, `R` the planet's radius (Mm).
+ * The eddy as the satellites see one (unit surface normal n): the flood's sediment swirled into the water
+ * (`turbid`, 0..1: a soft change of the water's own colour) and the SLICKS — lines where floating matter
+ * gathers and calms the small ripples (`slick`, 0..1: the sea's glint runs tighter and brighter along them,
+ * the way eddies show in sunglint photographs). No opaque layer: the sea itself carries the spiral.
+ * `fp` is the pixel's footprint on the unit sphere, `R` the planet's radius (Mm).
  */
-export function driftMatter(n: V3, U: DriftUniforms, fp: F, R: number): { cover: F; specks: F } {
+export function driftMatter(n: V3, U: DriftUniforms, fp: F, R: number): { turbid: F; slick: F } {
   const flat = n.sub(U.up.mul(n.dot(U.up)));
   const x = flat.dot(U.east).mul(R);
   const y = flat.dot(U.north).mul(R);
@@ -69,25 +71,19 @@ export function driftMatter(n: V3, U: DriftUniforms, fp: F, R: number): { cover:
   const r = length(vec2(dx, dy));
   const q = r.div(e.r);
   const omega = float(SPIN * e.s).div(q.add(0.25));
-  // unwound: where this water was when the matter lifted
+  // unwound: where this water was when the flood let go
   const th = atan(dy, dx).sub(omega.mul(U.time));
   const ux = cos(th).mul(r);
   const uy = sin(th).mul(r);
-  // the shear (rad of winding per unit ln r) thins the filaments: their noise fades sooner
+  // the shear (rad of winding per unit ln r) thins everything it winds: the noise fades sooner
   const shear = float(SPIN * Math.abs(e.s)).mul(q).div(q.add(0.25).mul(q.add(0.25))).mul(U.time);
   const fine = fpm.mul(shear.add(1));
-  // floating matter collects in LINES (windrows, the swirls of a bloom): where the field crosses zero, a thin
-  // ridge, which the shear winds into spiral filaments; a faint film between them; the eddy's rim fades
-  // softly into open water
-  const field = fbm2(ux, uy, 90, 7, fine, 3.1);
-  const ridge = float(1).sub(field.abs().mul(4)).max(0);
-  const lines = ridge.mul(ridge).mul(ridge);
-  const film = smoothstep(-0.2, 0.35, field).mul(0.18);
-  const cover = lines.mul(0.85).add(film).mul(smoothstep(1.7, 0.3, q)).mul(U.presence).clamp(0, 1) as F;
-  // the specks: ~100 m cells, one floating thing in some where there is matter
-  const cell = floor(vec3(x, y, 0).mul(9000));
-  const h = hash(cell.x.add(cell.y.mul(311)));
-  const resolved = smoothstep(2 / 9000, 0.7 / 9000, fpm);
-  const specks = step(h, cover.mul(0.3)).mul(resolved).add(cover.mul(0.3).mul(float(1).sub(resolved)));
-  return { cover, specks: specks as F };
+  // the sediment: broad, soft plumes wound into arms; the eddy's rim fades into the open sea
+  const plume = fbm2(ux, uy, 22, 6, fine, 7.7);
+  const turbid = smoothstep(-0.35, 0.45, plume).mul(smoothstep(2.4, 0.3, q)).mul(U.presence) as F;
+  // the slicks: thin lines where a finer field crosses zero, wound into spiral filaments
+  const field = fbm2(ux, uy, 70, 7, fine, 3.1);
+  const ridge = float(1).sub(field.abs().mul(5)).max(0);
+  const slick = ridge.mul(ridge).mul(ridge).mul(smoothstep(2.0, 0.3, q)).mul(U.presence) as F;
+  return { turbid, slick };
 }

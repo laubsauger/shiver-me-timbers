@@ -243,12 +243,14 @@ async function boot(): Promise<void> {
   };
   /** one recorded frame: the master of time `at`, motion-blurred over `shutter` s with `samples` sub-frames */
   const frame = (at: number, shutter: number, samples: number): void => {
+    // the pixel size BEFORE the scene is prepared: the acts copy it into their shaders as they update, so set
+    // after, a lane's first frame drew with the preview's pixel size (pixel-floored stars a frame too bright)
+    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
     if (samples <= 1) {
       prepare(at);
       renderMaster();
       return;
     }
-    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
     for (let i = 0; i < samples; i++) {
       prepare(at + shutter * ((i + 0.5) / samples - 0.5));
       dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, 1 / samples, i === 0);

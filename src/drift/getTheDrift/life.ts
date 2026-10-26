@@ -48,7 +48,8 @@ export function lifeState(t: number, p: GetTheDriftParams): LifeState {
     // the Sun sets in the first third of the lights beat; the lights come up as it goes
     // the lights grow through the night and past the balance; the flood drowns the low ones (the shader)
     // and the rest falter
-    lights: (3 * smooth((lights - 0.2) / 0.8) + 0.4 * smooth(over)) * (1 - 0.5 * smooth(flood / 0.8)),
+    // (from the first dusk: the Sun sets at 0.4 of the beat, the fires come up as it goes)
+    lights: (3 * smooth((lights - 0.15) / 0.85) + 0.4 * smooth(over)) * (1 - 0.5 * smooth(flood / 0.8)),
     overshoot: smooth(over),
     sea: smooth(flood / 0.85),
     // the flood begins in the night (the coastal lights go out as the water reaches them) and the dawn

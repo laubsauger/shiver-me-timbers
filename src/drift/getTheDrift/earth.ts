@@ -96,6 +96,8 @@ const SUN_ANG = 0.00465;
 const ERFCX_A = 1.09;
 const ERFCX_C = 0.6;
 const KM = 1 / 6371;
+/** the night side's moonlit ambient, against the Sun's light */
+const MOONLIGHT = 0.035;
 
 export interface Earth {
   readonly group: THREE.Group;
@@ -311,10 +313,11 @@ export function createEarth(): Earth {
     const matter = vec2(0).toVar();
     If(D.presence.greaterThan(0.001).and(n.dot(D.up).greaterThan(0.998)), () => {
       const m = driftMatter(n, D, fp, EARTH_R);
-      matter.assign(vec2(m.cover, m.specks));
+      matter.assign(vec2(m.turbid, m.slick));
     });
-    const afloat = matter.x.mul(float(1).sub(land));
-    const albedo = mix(mix(water, vec3(0.15, 0.14, 0.11), afloat), landAlbedo, land);
+    // Drift-2: the flood's sediment wound into the eddy tints the water itself (turbid water: olive-brown)
+    const sediment = vec3(0.065, 0.058, 0.034);
+    const albedo = mix(mix(water, sediment, matter.x.mul(0.85)), landAlbedo, land);
 
     // sunlight at the terrain's height, under the clouds' shadows
     const sun = sunlight(float(EARTH_R).add(e.max(0).mul(1e-6 * RELIEF)), muS).toVar();
@@ -325,23 +328,27 @@ export function createEarth(): Earth {
     const diffuse = mix(muS, N.dot(S), land).max(0);
     // skylight: a little blue fill on the day side (none on the night side)
     const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.06));
-    const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky)).mul(SUN_E / Math.PI);
+    // the night side is not black: a faint moonlit ambient (the ISS night photographs show the ground and
+    // the clouds dimly, cool grey)
+    const night = float(1).sub(smoothstep(-0.2, 0.03, muS));
+    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT).mul(night);
+    const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky).add(moon)).mul(SUN_E / Math.PI);
     // glint: GGX on the open water, its roughness by wind patches; Fresnel and the long grazing paths make
     // it swell and redden toward the terminator
     const h = normalize(S.add(v));
-    const a = mix(float(0.07), float(0.22), smoothstep(-0.35, 0.35, fbm(n.add(vec3(1, 4, 2)), 14, 4, 0.5, fp)));
+    // (along the eddy's slicks the floating matter calms the ripples: a smoother, brighter glint)
+    const a = mix(float(0.07), float(0.22), smoothstep(-0.35, 0.35, fbm(n.add(vec3(1, 4, 2)), 14, 4, 0.5, fp))).mul(float(1).sub(matter.y.mul(0.75)));
     const a2 = a.mul(a);
     const nh = n.dot(h).max(0);
     const ggx = a2.div(PI.mul(pow(nh.mul(nh).mul(a2.sub(1)).add(1), 2)));
     const fresnel = pow(float(1).sub(v.dot(h).max(0)), 5).mul(0.98).add(0.02);
     const smith = (m: F): F => m.mul(2).div(m.add(sqrt(a2.add(float(1).sub(a2).mul(m.mul(m))))));
     // floating matter kills the glint where it lies; its specks catch the Sun
-    const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade).mul(float(1).sub(afloat.mul(0.85)))
-      .add(matter.y.mul(float(1).sub(land)).mul(muS.max(0)).mul(0.25));
+    const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade);
     // the sky in the water: Fresnel at grazing angles
     const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land));
     // the lights of the night side, dimmed and spread by the cloud over them
-    const night = float(1).sub(smoothstep(-0.12, 0.04, muS));
+    // the lights come up behind the terminator as the dusk deepens (a gradient that follows it, not a switch)
     const lights = nightLights(n, lcw.x, land, L, fp).mul(night).mul(float(1).sub(overhead.mul(0.75)));
     const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E)).add(lights);
     const T = towardEye(float(EARTH_R), muV, eyeR, eyeUp.dot(v));
@@ -390,7 +397,9 @@ export function createEarth(): Earth {
     const glow = nightLights(n, lcwAt(below, fp.mul(12)).x, float(1), L, float(1)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
     // the light falls off as the Sun gets low: the terminator a soft ramp, not a gold-edged line
     const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
-    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);
+    // (the clouds a little dimmer than the ground's moonlight would make them: they read as cut-outs otherwise)
+    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT * 0.25).mul(float(1).sub(smoothstep(-0.2, 0.03, muS)));
+    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).add(moon).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);
     // while the planet is small the shell is left out: its shading is unreliable at those distances (and a
     // cloud deck a few pixels across is better carried by the disc's own colour)
     const big = smoothstep(40, 120, asin(float(EARTH_R).div(eyeR).min(1)).div(P));
