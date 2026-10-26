@@ -56,6 +56,8 @@ export interface DriftParams {
   waveRadiance: number;
   /** linear radiance of the wave front's sparks (U3) */
   sparkRadiance: number;
+  /** 1: the event grammar (photon collisions, looping pairs, plasma); 0: the spiral tracks (look-dev A/B) */
+  grammar: number;
   /** concurrent pair slots; each draws two tracks and seven light sprites */
   pairSlots: number;
   /** quads per track ribbon */
@@ -154,6 +156,7 @@ export const driftParams: DriftParams = registerParams(
     starRadiance: 40,
     waveRadiance: 0.6,
     sparkRadiance: 8,
+    grammar: 1,
     pairSlots: 2600,
     trackSegments: 40,
     trackTail: 2,

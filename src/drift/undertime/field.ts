@@ -19,6 +19,11 @@ import { createFlashes, type FlashUniforms } from './flashes';
 import { createUndertimeSky } from './sky';
 import { createWaveSparks } from './wave';
 import { createGrains, createHeroGrain, createStars, type GrainUniforms } from './grains';
+import { eventLights, generatePairs, type PairEvent } from './events';
+import { createLoopSprites, createLoopTrails } from './loops';
+import { createMist, type Mist } from './mist';
+import { DUST_LIGHTS, createDust } from './dust';
+import { createBursts, type Burst } from './burst';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -75,6 +80,74 @@ function bakeBirthTable(p: DriftParams, pocketAt: (t: number) => TextPocket, dat
     data.set([undertimeState(t, p).pairDensity, pk.lo * D, pk.hi * D, pk.strength], j * 4);
   }
   return clockMax;
+}
+
+/**
+ * The act's pairs. U0 is one HERO event at the first-light spot, its loop plane facing the audience: two
+ * photons converge on it from the left and right of the dome, and its two loops open up and out like the
+ * classic picture. From the arising on, the field: births at the rate the timeline's density sets, around
+ * the eye as it drifts, never right on top of it, never where the text is (or is about to be); loops last
+ * longer as the field clock slows (time slows as it cools).
+ */
+function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): PairEvent[] {
+  const { starts } = beatStarts(p);
+  const g = heroGrainPosition(p);
+  const eye0 = eyePath(p.heroBirth, p);
+  const view = [g[0] - eye0[0], g[1] - eye0[1], g[2] - eye0[2]] as [number, number, number];
+  const vl = Math.hypot(...view);
+  const vd = view.map((x) => x / vl) as [number, number, number];
+  const b = domeBasis(p.domeTilt);
+  const upDot = b.axis[0] * vd[0] + b.axis[1] * vd[1] + b.axis[2] * vd[2];
+  const up = b.axis.map((x, i) => x - vd[i] * upDot) as [number, number, number];
+  const ul = Math.hypot(...up);
+  const axis = up.map((x) => x / ul) as [number, number, number];
+  const across = [vd[1] * axis[2] - vd[2] * axis[1], vd[2] * axis[0] - vd[0] * axis[2], vd[0] * axis[1] - vd[1] * axis[0]] as [number, number, number];
+  // the hero's loop plane leans away from the audience (55°) and its axis leans off vertical (30°): two
+  // loops seen in depth, as ellipses — face-on they would draw a symbol (a heart), not an event
+  const rot = (v: number[], k: number[], a: number): [number, number, number] => {
+    const c = Math.cos(a);
+    const sn = Math.sin(a);
+    const kd = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    const kx = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
+    return [0, 1, 2].map((i) => v[i] * c + kx[i] * sn + k[i] * kd * (1 - c)) as [number, number, number];
+  };
+  const axisLeaned = rot(axis, vd, (30 * Math.PI) / 180);
+  const acrossLeaned = rot(across, vd, (30 * Math.PI) / 180);
+  const heroAxis = rot(axisLeaned, acrossLeaned, (55 * Math.PI) / 180);
+  const hero: PairEvent = {
+    birth: p.heroBirth, loop: 3.8, vertex: g, axis: heroAxis, across: acrossLeaned, open: 0.42, radius: 4.5, energy: 1, gamma: acrossLeaned,
+    spiral: 0, drift: 0, arc: 2 * Math.PI - 0.84, meets: 1, burst: 3.2,
+  };
+  const PEAK = 70;
+  const D = Math.PI / 180;
+  const field = generatePairs(
+    {
+      seed: 4711,
+      rate: (t) => (t < starts.arise ? 0 : PEAK * undertimeState(t, p).pairDensity),
+      from: starts.arise,
+      to: starts.wave + p.wave,
+      centre: (t) => eyePath(t, p),
+      radius: p.fieldRadius * 0.8,
+      eye: (t) => eyePath(t, p),
+      clearance: 2.5,
+      loopRadius: [0.8, 2.8],
+      loopTime: [2.2, 3.8],
+    },
+    PEAK,
+  ).filter((e) => {
+    // not born in (or about to be in) the text's sky
+    const pk = pocketAt(e.birth);
+    if (pk.strength <= 0.05) return true;
+    const eye = eyePath(e.birth, p);
+    const v = [e.vertex[0] - eye[0], e.vertex[1] - eye[1], e.vertex[2] - eye[2]];
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    const el = Math.asin((v[0] * b.axis[0] + v[1] * b.axis[1] + v[2] * b.axis[2]) / l) / D;
+    const az = Math.atan2(v[0] * b.right[0] + v[1] * b.right[1] + v[2] * b.right[2], v[0] * b.front[0] + v[1] * b.front[1] + v[2] * b.front[2]) / D;
+    return !(el > pk.lo - 6 && el < pk.hi + 6 && Math.abs(az) < pk.az + 8);
+  });
+  // time slows as it cools: a loop born then lasts longer
+  for (const e of field) e.loop /= Math.max(0.3, undertimeState(e.birth, p).clockRate);
+  return [hero, ...field];
 }
 
 export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 })): UndertimeField {
@@ -245,14 +318,64 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
   const stars = createStars(grainU, p.zoomDecades);
   const heroGrain = createHeroGrain(grainU);
 
+  // ---------------------------------------------------------------- the event grammar (production-design.md)
+  // light makes matter, matter makes light: photon collisions, looping pairs that meet and annihilate, in a
+  // plasma lit by them. `grammar` 1 is this; 0 keeps the spiral tracks for comparison during look-dev.
+  // the events are built on the first update: they avoid the text, and the text exists only once the show has
+  // wired its crawl (pocketAt)
+  let events: PairEvent[] = [];
+  const loopU = {
+    time: u.actTime, pixelAngle: u.pixelAngle, fog: uniform(0.03), matter, anti, light,
+    trailRadiance: uniform(3), beadRadiance: uniform(1.5), flashRadiance: uniform(1),
+  };
+  let mist: Mist | null = null;
+  let loopSprites: THREE.InstancedMesh | null = null;
+  let loopTrails: THREE.InstancedMesh | null = null;
+  let bursts: Burst | null = null;
+  // the cloud chamber's side light: cool white from the front-left, high
+  const keyDir = (() => {
+    const b = domeBasis(p.domeTilt);
+    const e = (50 * Math.PI) / 180;
+    const az = (-60 * Math.PI) / 180;
+    return new THREE.Vector3(...[0, 1, 2].map((i) => Math.cos(e) * (Math.cos(az) * b.front[i] + Math.sin(az) * b.right[i]) + Math.sin(e) * b.axis[i])).normalize();
+  })();
+  const mistU = {
+    time: u.actTime, pixelAngle: u.pixelAngle, key: v3(uniform(keyDir)), keyColour: v3(uniform(new THREE.Color(0.8, 0.88, 1))),
+    matter, anti, radiance: uniform(1.2), life: uniform(0.7),
+  };
+  const dustU = { time: u.actTime, pixelAngle: u.pixelAngle, centre: v3(u.eye), radius: uniform(26), density: uniform(1), radiance: uniform(2) };
+  const dust = p.grammar ? createDust(110000, dustU) : null;
+
   const group = new THREE.Group();
   group.name = 'undertime-field';
-  group.add(sky.mesh, tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain);
+  if (dust) group.add(dust.mesh, sparks, grains, stars, heroGrain);
+  else group.add(sky.mesh, tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain);
 
   const vx = (a: [number, number, number]): THREE.Vector3 => new THREE.Vector3(...a);
   return {
     group,
     update(state, t, eye, fade = 1) {
+      if (dust && !mist) {
+        events = undertimeEvents(p, pocketAt);
+        mist = createMist(events, mistU, true);
+        loopTrails = createLoopTrails(events, loopU);
+        loopSprites = createLoopSprites(events, loopU);
+        bursts = createBursts(events, { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1) });
+        group.add(loopTrails, mist.mesh, loopSprites, bursts.mesh);
+      }
+      if (dust) {
+        // the plasma: dense and dark in the cold open, glowing with the boil, thinning to clear as it cools
+        const { starts: st } = beatStarts(p);
+        const cool = Math.min(1, Math.max(0, (t - st.cool) / Math.max(1e-6, p.cool)));
+        const thin = 1 - cool * cool * (3 - 2 * cool);
+        const density = 0.9 * thin * (1 - Math.min(1, Math.max(0, (t - st.wave) / Math.max(1e-6, p.wave))));
+        const lights = eventLights(events, t, [eye.x, eye.y, eye.z], DUST_LIGHTS);
+        dust.setLights(lights);
+        // the dust thins as the field fills (with many lights it would light everywhere: a grey wash)
+        dustU.density.value = (0.25 + 0.75 * density) * (1 - 0.7 * state.pairDensity);
+        mist?.setLights(lights);
+        loopU.fog.value = 0.012 * density;
+      }
       const { starts } = beatStarts(p);
       u.time.value = state.clock;
       u.actTime.value = t;
@@ -349,7 +472,10 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
     },
     dispose() {
       sky.dispose();
-      for (const m of [tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain]) {
+      dust?.dispose();
+      mist?.dispose();
+      bursts?.dispose();
+      for (const m of [tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain,  ...(loopSprites ? [loopSprites] : []), ...(loopTrails ? [loopTrails] : [])]) {
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();
       }
