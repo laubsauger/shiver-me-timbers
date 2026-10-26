@@ -42,6 +42,7 @@ import type { PairEvent } from './events';
 import { rng } from './web';
 import { billboardMesh, eyeFacing } from './billboard';
 import { arcPoint } from './loops';
+import { pocketMask, type PocketUniforms } from './pairModel';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -63,6 +64,8 @@ export interface MistUniforms {
   radiance: F;
   /** s, how long the mist takes to fade */
   life: F;
+  pocket: PocketUniforms;
+  eye: V3;
 }
 
 /** tileable value-noise fbm, 128², generated once (wispy alpha for the puffs) */
@@ -134,7 +137,7 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
         V.set([...e.vertex, e.energy], k * 4);
         X.set([...e.axis, (j + r()) / PUFFS], k * 4);
         Y.set([...e.across, q === 0 ? 1 : -1], k * 4);
-        Z.set([e.spiral, e.drift, e.arc, e.meets], k * 4);
+        Z.set([e.spiral, e.drift, e.arc, e.end], k * 4);
       }
   const a = attribute<'vec4'>('mistA', 'vec4');
   const v = attribute<'vec4'>('mistV', 'vec4');
@@ -211,7 +214,9 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
   const coverage = size.div(drawn).pow(2);
   // depth: far mist is seen through more of the chamber — dimmer (aerial perspective, no fog colour)
   const depth = exp(dist.div(22).negate()).mul(0.8).add(0.2);
-  const alive = presence.mul(coverage).mul(energy).mul(depth);
+  // not along the part of the path the pair never lived (the wave cut it)
+  const lived = step(uu, z.w);
+  const alive = presence.mul(coverage).mul(energy).mul(depth).mul(lived).mul(float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85)));
 
   const noise = noiseTexture();
   const material = new THREE.NodeMaterial();

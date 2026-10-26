@@ -43,7 +43,7 @@ export function createWaveSparks(count: number, U: WaveUniforms): THREE.Instance
   const alpha = flash.mul(behind).mul(bright).mul(step(age, 0.3));
   const dist = hash(i.mul(5.71)).mul(22).add(6);
   const pos = U.eye.add(d.mul(dist));
-  const quad = max(dist.mul(U.pixelAngle).mul(4), dist.mul(0.004));
+  const quad = max(dist.mul(U.pixelAngle).mul(4), dist.mul(0.014).mul(hash(i.mul(6.1)).mul(1.2).add(0.4)));
   const material = new THREE.NodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
@@ -52,7 +52,7 @@ export function createWaveSparks(count: number, U: WaveUniforms): THREE.Instance
   material.positionNode = eyeFacing(pos, quad.mul(step(0.0005, alpha)));
   material.colorNode = Fn(() => {
     const r = clamp(length(uv().sub(0.5)).mul(2), 0, 1);
-    const core = exp(r.div(0.28).pow(2).negate());
+    const core = exp(r.div(0.16).pow(2).negate()).add(exp(r.div(0.5).pow(2).negate()).mul(0.12)).mul(float(1).sub(smoothstep(0.75, 1, r)));
     return vec4(U.light.mul(U.radiance).mul(alpha).mul(core), 1);
   })();
   material.name = 'undertime-wave-sparks';

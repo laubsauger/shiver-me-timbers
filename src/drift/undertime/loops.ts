@@ -37,6 +37,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { PairEvent } from './events';
+import { pocketMask, type PocketUniforms } from './pairModel';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -54,6 +55,9 @@ export interface LoopUniforms {
   trailRadiance: F;
   beadRadiance: F;
   flashRadiance: F;
+  /** the text pocket (pairModel.ts): what is under the text NOW fades, so it reads on a calm sky */
+  pocket: PocketUniforms;
+  eye: V3;
 }
 
 /** m/s, the photons' and gammas' "speed of light" (fast against everything else, still followable) */
@@ -75,7 +79,8 @@ function packEvents(events: readonly PairEvent[]): Record<string, Float32Array> 
     y.set([...e.across, e.gamma[1] + (e.gamma[2] < 0 ? 4 : 0)], i * 4);
   });
   const z = new Float32Array(n * 4);
-  events.forEach((e, i) => z.set([e.spiral, e.drift, e.arc, e.meets], i * 4));
+  // w: the fraction of its loop the pair lives, signed: > 0 the beads meet at its end, < 0 each ends apart
+  events.forEach((e, i) => z.set([e.spiral, e.drift, e.arc, e.end * (e.meets && e.end >= 1 ? 1 : -1)], i * 4));
   return { pairA: a, pairV: v, pairX: x, pairY: y, pairZ: z };
 }
 
@@ -105,6 +110,8 @@ interface PairNodes {
   drift: F;
   arc: F;
   meets: F;
+  /** fraction of the loop it lives (the wave cuts some short) */
+  uEnd: F;
 }
 
 function pairNodes(): PairNodes {
@@ -129,7 +136,8 @@ function pairNodes(): PairNodes {
     spiral: z.x,
     drift: z.y,
     arc: z.z,
-    meets: z.w,
+    meets: step(0, z.w),
+    uEnd: z.w.abs(),
   };
 }
 
@@ -218,7 +226,7 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
   const dist = toEye.length();
   const acrossView = normalize(tangent.cross(toEye));
   // where the bead is now, and how long ago it passed this point of its path
-  const head = ease(U.time.sub(P.birth).div(P.loop));
+  const head = ease(U.time.sub(P.birth).div(P.loop).min(P.uEnd));
   const passed = step(S, head).mul(step(P.birth, U.time));
   const age = U.time.sub(timeAt(P, S)).max(0);
   // a luminous trail: the ribbon spans the GLOW (it widens a little as the energy spreads); the core is a
@@ -226,7 +234,7 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
   const glowWidth = float(0.09).add(age.mul(0.05)).mul(P.energy.mul(0.5).add(0.7));
   const drawn = max(glowWidth, U.pixelAngle.mul(3).mul(dist));
   const coverage = glowWidth.div(drawn);
-  const alpha = passed.mul(coverage);
+  const alpha = passed.mul(coverage).mul(float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85)));
   const material = additive('undertime-loop-trails');
   material.positionNode = pos.add(acrossView.mul(side.mul(drawn).mul(step(0.0005, alpha.mul(exp(age.div(2.5).negate()))))));
   material.colorNode = Fn(() => {
@@ -240,8 +248,10 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
     const breakup = mix(float(1), noise.mul(noise), smoothstep(0.9, 2.4, age));
     const tint = mix(U.matter, U.anti, step(q, 0));
     const hot = exp(age.div(0.12).negate());
-    const coreC = mix(tint, vec3(1, 0.97, 0.92), hot.mul(0.8)).mul(core).mul(exp(age.div(1.1).negate())).mul(5);
-    const glowC = tint.mul(glow).mul(exp(age.div(2.2).negate())).mul(0.35);
+    // a trail fades on its pair's own time scale: a long loop's lingers, a quick one's (the wave's) is gone
+    const tau = P.loop.mul(0.35).add(0.25).min(1.1);
+    const coreC = mix(tint, vec3(1, 0.97, 0.92), hot.mul(0.8)).mul(core).mul(exp(age.div(tau).negate())).mul(5);
+    const glowC = tint.mul(glow).mul(exp(age.div(tau.mul(2)).negate())).mul(0.35);
     return vec4(coreC.add(glowC).mul(breakup).mul(U.trailRadiance).mul(P.energy).mul(alpha).mul(exp(U.fog.mul(dist).negate())), 1);
   })();
   const mesh = new THREE.InstancedMesh(strip(128), material, events.length * 2);
@@ -262,9 +272,11 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const is = (a: number, b = a): F => step(a - 0.5, k).mul(step(k, b + 0.5));
   const sgn = float(1).sub(k.mod(2).mul(2)).negate(); // −1 / +1 alternating
   const age = U.time.sub(P.birth);
-  const since = age.sub(P.loop);
-  const endM = arcPoint(P, float(1), float(1));
-  const endA = arcPoint(P, float(-1), float(1));
+  const life = P.loop.mul(P.uEnd);
+  const since = age.sub(life);
+  const fEnd = ease(P.uEnd);
+  const endM = arcPoint(P, float(1), fEnd);
+  const endA = arcPoint(P, float(-1), fEnd);
   // photons: approaching the vertex from ±across, gone at the meeting
   const photonHead = P.vertex.add(P.across.mul(sgn.mul(C).mul(age.negate().max(0))));
   const rayKept = smoothstep(0.45, 0.6, P.energy);
@@ -277,14 +289,14 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const beadDir = arcTangent(P, bq, f);
   const fdot = float(0.85 * 1.7).mul(pow(float(1).sub(clamp(u, 0, 1)).max(1e-3), float(0.7))).add(0.15);
   const beadSpeed = P.radius.mul(exp(P.spiral.mul(P.arc).mul(f).negate())).mul(P.arc).mul(fdot).div(P.loop);
-  const beadA = step(0, age).mul(step(age, P.loop)).mul(smoothstep(0, 0.08, age));
+  const beadA = step(0, age).mul(step(age, life)).mul(smoothstep(0, 0.08, age));
   // gammas: leaving the meeting point back to back (or, for a spiral, one from each end)
   const gammaFrom = mix(endM, mix(endM, endA, is(7)), float(1).sub(P.meets));
   const gammaHead = gammaFrom.add(P.gamma.mul(sgn.mul(C).mul(since.max(0))));
   const gammaA = step(0, since).mul(exp(since.div(0.7).negate())).mul(step(since, 1.6)).mul(rayKept);
   // bursts
   const burstA = step(0, age).mul(exp(age.div(0.16).negate())).mul(step(age, 0.8));
-  const flashA = step(0, since).mul(exp(since.div(0.22).negate()).add(exp(since.div(0.9).negate()).mul(0.12))).mul(step(since, 2.5))
+  const flashA = step(0, since).mul(exp(since.div(0.22).negate()).add(exp(since.div(0.9).negate()).mul(0.04))).mul(step(since, 2.5))
     // a spiral's two flashes share the light; a loop has only the one
     .mul(mix(float(0.6), float(1), P.meets));
 
@@ -295,7 +307,8 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const flashAt = mix(endM, endA, is(8));
   const isGamma = is(6, 7);
   const centre = photonHead.mul(isPhoton).add(P.vertex.mul(isBurst)).add(bead.mul(isBead)).add(flashAt.mul(isFlash)).add(gammaHead.mul(isGamma));
-  const alpha = photonA.mul(isPhoton).add(burstA.mul(isBurst)).add(beadA.mul(isBead)).add(flashA.mul(isFlash)).add(gammaA.mul(isGamma));
+  const alpha = photonA.mul(isPhoton).add(burstA.mul(isBurst)).add(beadA.mul(isBead)).add(flashA.mul(isFlash)).add(gammaA.mul(isGamma))
+    .mul(float(1).sub(pocketMask(centre.sub(U.eye), U.pocket).mul(0.8)));
   const lightDir = P.across.mul(sgn.negate()).mul(isPhoton).add(beadDir.mul(isBead)).add(P.gamma.mul(sgn).mul(isGamma)).add(P.axis.mul(isBurst.add(isFlash)));
   const toEye = cameraPosition.sub(centre);
   const dist = toEye.length();
@@ -314,7 +327,10 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const travelled = mix(age.add(0.9).max(0), since.max(0), isGamma).mul(C).min(reach);
   const streak = travelled.mul(alongLen);
   const beadLen = beadSpeed.mul(1 / 40).mul(alongLen);
-  const width = max(px.mul(1.5), isBead.mul(0.3).add(isPhoton.add(isGamma).mul(0.035)).add(isBurst.mul(0.5)).add(isFlash.mul(1.2)));
+  // flashes and bursts are capped in APPARENT size: a near one is bright, never a blinding blob
+  const flashW = min(float(1.2), dist.mul(0.09));
+  const burstW = min(float(0.5), dist.mul(0.05));
+  const width = max(px.mul(1.5), isBead.mul(0.3).add(isPhoton.add(isGamma).mul(0.035)).add(isBurst.mul(burstW)).add(isFlash.mul(flashW)));
   const length = max(width, streak.mul(isPhoton.add(isGamma)).add(beadLen.mul(isBead)));
   const corner = attribute<'vec3'>('position', 'vec3');
   const material = additive('undertime-loop-sprites');
@@ -349,7 +365,7 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
       .add(flashC.mul(isFlash).mul(U.flashRadiance))
       .add(gammaC.mul(isGamma).mul(U.flashRadiance));
     // what is thinner than a pixel is paid back in brightness (energy kept, no shimmer)
-    const coverage = min(float(1), isBead.mul(0.3).add(isPhoton.add(isGamma).mul(0.035)).add(isBurst.mul(0.5)).add(isFlash.mul(1.2)).div(width));
+    const coverage = min(float(1), isBead.mul(0.3).add(isPhoton.add(isGamma).mul(0.035)).add(isBurst.mul(burstW)).add(isFlash.mul(flashW)).div(width));
     return vec4(c.mul(P.energy).mul(alpha).mul(coverage).mul(exp(U.fog.mul(dist).negate())), 1);
   })();
   const geometry = new THREE.PlaneGeometry(1, 1);

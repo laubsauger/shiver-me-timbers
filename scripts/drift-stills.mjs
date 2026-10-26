@@ -4,7 +4,9 @@
  * show times, PNGs to out/drift/stills/<tag>_<t>.png. For review rounds — fast and light; motion goes
  * through scripts/drift-render.mjs (low-res x264), masters only after approval.
  *
- *   node scripts/drift-stills.mjs <tag> <t> [<t> ...] [--size 768]
+ *   node scripts/drift-stills.mjs <tag> <t> [<t> ...] [--size 768] [--param key=value ...]
+ *
+ *   --param   set a live tunable (src/params/drift.ts) before rendering, e.g. --param bloomStrength=0 (A/B)
  *
  * Guards (docs/cine/drift-render.md, MACHINE GUARDS): at most 1024 px unless --allow-large; refuses to run
  * while a render holds out/drift/.render.lock; its own dev server (no watcher) and browser are closed on any
@@ -24,6 +26,10 @@ const flag = (name, fallback) => {
 };
 const SIZE = Number(flag('size', '768'));
 const positional = argv.filter((a, i) => !a.startsWith('--') && !argv[i - 1]?.startsWith('--'));
+const params = argv.flatMap((a, i) => (a === '--param' ? [argv[i + 1]] : [])).map((kv) => {
+  const [k, v] = kv.split('=');
+  return [k, Number(v)];
+});
 const [tag, ...times] = positional;
 if (!tag || times.length === 0) throw new Error('usage: drift-stills.mjs <tag> <t> [<t> ...] [--size 768]');
 if (SIZE > 1024 && !argv.includes('--allow-large')) throw new Error(`--size ${SIZE}: above 1024 needs --allow-large`);
@@ -61,10 +67,14 @@ try {
   page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 300)));
   await page.goto(`http://localhost:5293/drift.html?t=${times[0]}&paused&view=dome&guides=0`);
   await page.waitForFunction(() => '__drift' in window, null, { timeout: 60000 });
-  await page.evaluate((s) => {
-    window.__drift.params.domeFace = Math.ceil((s * 0.55) / 16) * 16;
-    document.getElementById('drift-hud').style.display = 'none';
-  }, SIZE);
+  await page.evaluate(
+    ([s, kv]) => {
+      window.__drift.params.domeFace = Math.ceil((s * 0.55) / 16) * 16;
+      for (const [k, v] of kv) window.__drift.params[k] = v;
+      document.getElementById('drift-hud').style.display = 'none';
+    },
+    [SIZE, params],
+  );
   for (const t of times) {
     await page.evaluate((x) => window.__drift.setTime(x), Number(t));
     await new Promise((r) => setTimeout(r, 1200));

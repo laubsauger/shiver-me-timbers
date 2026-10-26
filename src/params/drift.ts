@@ -172,7 +172,7 @@ export const driftParams: DriftParams = registerParams(
     shellRadiance: 0,
     hazeSize: 3,
     hazeRadiance: 0.01,
-    bloomStrength: 0.35,
+    bloomStrength: 0.12,
     bloomRadius: 0.25,
     bloomThreshold: 1.4,
     grainCount: 48000,

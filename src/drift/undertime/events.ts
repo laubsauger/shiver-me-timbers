@@ -48,6 +48,9 @@ export interface PairEvent {
   meets: number;
   /** m, the creation fireball's size (burst.ts) */
   burst: number;
+  /** 0..1 of its loop the pair lives: 1 normally; less when the wave front reaches it first (U3), and then
+   * both beads annihilate where they are instead of meeting */
+  end: number;
 }
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -91,7 +94,7 @@ export function loopPoint(e: PathEvent, q: number, u: number): Vec3 {
 }
 
 /** where bead q ends: for a loop or helix both end at the same point (where they meet) */
-export const endPoint = (e: PairEvent, q: number): Vec3 => loopPoint(e, q, 1);
+export const endPoint = (e: PairEvent, q: number): Vec3 => loopPoint(e, q, e.end);
 /** where a loop's beads meet */
 export const meetingPoint = (e: PairEvent): Vec3 => endPoint(e, 1);
 
@@ -177,6 +180,7 @@ export function generatePairs(o: EventOptions, peakRate: number): PairEvent[] {
       arc: isSpiral ? Math.PI * (2.6 + 2 * tight) : loopArc(openA),
       meets: isSpiral ? 0 : 1,
       burst: 0.25 + 0.7 * energy * energy,
+      end: 1,
     });
   }
   return out;
@@ -208,22 +212,24 @@ export function eventLights(events: readonly PairEvent[], t: number, eye: Vec3, 
   };
   for (const e of events) {
     const age = t - e.birth;
-    if (age < -0.1 || age > e.loop + 1.2) continue;
+    if (age < -0.1 || age > e.loop * e.end + 1.2) continue;
     // the creation burst
     if (age >= 0) push(e.vertex, WHITE, 6 * e.energy * Math.exp(-age / 0.18));
     // the beads, while they fly
-    if (age >= 0 && age < e.loop) {
+    const life = e.loop * e.end;
+    const meets = e.meets && e.end >= 1;
+    if (age >= 0 && age < life) {
       const u = age / e.loop;
       push(loopPoint(e, 1, u), AMBER, 0.5 * e.energy);
       push(loopPoint(e, -1, u), VIOLET, 0.5 * e.energy);
     }
     // the annihilation flash: one where a loop's beads meet, one at each end of a spiral
-    const since = age - e.loop;
-    const ends = e.meets ? [meetingPoint(e)] : [endPoint(e, 1), endPoint(e, -1)];
+    const since = age - life;
+    const ends = meets ? [meetingPoint(e)] : [endPoint(e, 1), endPoint(e, -1)];
     if (since >= 0) for (const p of ends) push(p, WHITE, (14 / ends.length) * e.energy * Math.exp(-since / 0.25));
     // the light rays in flight: photons coming in, gammas going out (they light what they pass)
     if (age > -0.9 && age < 0) for (const s of [1, -1]) push(add(e.vertex, e.across, s * PHOTON_SPEED * -age), WHITE, 1.5 * e.energy);
-    if (since > 0 && since < 1.4) for (const s of [1, -1]) push(add(e.meets ? ends[0] : ends[s > 0 ? 0 : 1], e.gamma, s * PHOTON_SPEED * since), WHITE, 1.5 * e.energy * Math.exp(-since / 0.7));
+    if (since > 0 && since < 1.4) for (const s of [1, -1]) push(add(meets ? ends[0] : ends[s > 0 ? 0 : 1], e.gamma, s * PHOTON_SPEED * since), WHITE, 1.5 * e.energy * Math.exp(-since / 0.7));
   }
   cands.sort((a, b) => b.score - a.score);
   return cands.slice(0, k).map(({ pos, colour }) => ({ pos, colour }));
