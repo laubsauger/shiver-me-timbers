@@ -57,8 +57,11 @@ function inPlane(n: Vec3, r: () => number): Vec3 {
 }
 
 /**
- * The field: a galaxy at every knot, except where it would sit on our galaxy or across our flight line.
- * Seeded, so every lane renders the same sky.
+ * The field: a galaxy at every knot, except where it would sit on our galaxy or across our flight line,
+ * and round the knots their members — after the deep fields (references: galaxy-fields-clusters): the
+ * sizes are extremely skewed (a handful large, most small smudges), clusters are concentrated (smooth warm
+ * ellipticals packed toward the centre), there are galaxies everywhere between. Seeded, so every lane
+ * renders the same sky.
  */
 export function galaxyField(knots: Array<{ pos: Vec3; level: number }>, ours: GalaxySpec, flight: [Vec3, Vec3], size: number): GalaxySpec[] {
   const r = rng(4242);
@@ -69,14 +72,13 @@ export function galaxyField(knots: Array<{ pos: Vec3; level: number }>, ours: Ga
     const t = Math.min(1, Math.max(0, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / (abl * abl)));
     return len(sub(p, [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t]));
   };
+  const gauss = (): number => Math.sqrt(-2 * Math.log(Math.max(1e-9, r()))) * Math.cos(2 * Math.PI * r());
   const out: GalaxySpec[] = [ours];
-  for (const k of knots) {
-    const radius = size * (0.45 + r() * 0.9) * (k.level > knots[0].level ? 1.6 : 1);
-    if (len(sub(k.pos, ours.centre)) < ours.radius * 2.2 + radius || clearOfFlight(k.pos) < radius * 1.8) continue;
+  const add = (centre: Vec3, radius: number, elliptical: number, brightness: number): void => {
+    if (len(sub(centre, ours.centre)) < ours.radius * 2.2 + radius || clearOfFlight(centre) < radius * 1.8) return;
     const normal = randomUnit(r);
-    const elliptical = r() < 0.25 ? 1 : 0;
     out.push({
-      centre: k.pos,
+      centre,
       normal,
       xAxis: inPlane(normal, r),
       radius: elliptical ? radius * 0.6 : radius,
@@ -86,8 +88,21 @@ export function galaxyField(knots: Array<{ pos: Vec3; level: number }>, ours: Ga
       seed: r() * 50,
       elliptical,
       appear: r(),
-      brightness: 0.6 + r() * 0.6,
+      brightness,
     });
+  };
+  for (const k of knots) {
+    // the knot's own galaxy: most modest, a few large
+    const radius = size * (0.35 + 1.3 * Math.pow(r(), 3)) * (k.level > knots[0].level ? 1.6 : 1);
+    add(k.pos, radius, r() < 0.25 ? 1 : 0, 0.6 + r() * 0.6);
+    // its members: a third of the knots are clusters, the rest have a few companions
+    const cluster = r() < 0.33;
+    const members = cluster ? 6 + Math.floor(r() * 12) : Math.floor(r() * 4);
+    for (let m = 0; m < members; m++) {
+      const spread = radius * (cluster ? 2.5 : 5);
+      const p: Vec3 = [k.pos[0] + gauss() * spread, k.pos[1] + gauss() * spread, k.pos[2] + gauss() * spread];
+      add(p, size * (0.06 + 0.3 * Math.pow(r(), 2.5)), r() < (cluster ? 0.65 : 0.3) ? 1 : 0, 0.4 + r() * 0.5);
+    }
   }
   return out;
 }

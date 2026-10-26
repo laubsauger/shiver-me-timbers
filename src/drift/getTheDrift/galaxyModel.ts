@@ -9,8 +9,10 @@
  *   disk    exponential in radius, sech² in height, ~1/50 of the radius thick
  *   arms    logarithmic spirals, m arms of pitch angle ψ: the arm phase is m·(θ − ln r / tan ψ); young blue
  *           stars along the arms, pink star-forming knots where a noise field peaks on an arm
+ *   thick   old warm stars about three times the disk's height: the band's width toward the core
  *   dust    a lane just inside each arm (dust collects on the inner edge of a density wave) and a thin dust
- *           layer through the disk mid-plane — the dark rift of the band seen from inside
+ *           layer through the disk mid-plane — the dark rift of the band seen from inside (milkyWay.ts
+ *           reddens what shines through it)
  *
  * No physical units are claimed; proportions follow a Milky Way-like barred spiral (scale length ~0.25 Rg,
  * scale height ~0.02 Rg, dust ~0.4 of the star height).
@@ -83,8 +85,12 @@ export function galaxyVolume(x: V3, g: GalaxyLook): { emit: V3; kappa: F } {
   const clumps = mx_noise_float(x.mul(vec3(14, 14, 40)).add(g.seed)).mul(0.5).add(0.5);
   const knots = pow(clumps, float(5)).mul(arm).mul(2.5);
   // star clouds: a finer mottling of the disk's light, what makes the band read as stars rather than fog
-  const clouds = pow(mx_noise_float(x.mul(vec3(70, 70, 160)).add(g.seed.add(11.1))).mul(0.5).add(0.5), float(2)).mul(1.4).add(0.3);
+  // (the Scutum and Sagittarius clouds are this, close up)
+  const clouds = pow(mx_noise_float(x.mul(vec3(70, 70, 160)).add(g.seed.add(11.1))).mul(0.5).add(0.5), float(3)).mul(2.2).add(0.15);
+  // the thick disk: old stars ~3× the thin disk's height, what gives the band its width toward the core
+  const thick = exp(r.div(0.22).negate()).mul(sech2(x.z.div(h * 3.2))).mul(0.16);
   const emit = DISK.mul(disk.mul(0.35).mul(clouds))
+    .add(BULGE.mul(thick).mul(clouds.mul(0.4).add(0.6)))
     .add(ARMS.mul(disk.mul(arm).mul(clumps.mul(0.8).add(0.4))))
     .add(KNOTS.mul(disk.mul(knots)))
     .add(BULGE.mul(bulge))

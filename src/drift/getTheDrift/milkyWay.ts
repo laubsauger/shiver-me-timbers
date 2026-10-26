@@ -63,6 +63,8 @@ export interface MilkyWay {
   dispose(): void;
 }
 
+/** dust extinction per channel relative to green (interstellar reddening: ~1/λ) */
+const REDDEN = vec3(0.72, 1, 1.38);
 /** how far the volume reaches above and below the plane, in radii (the bulge's height) */
 const SLAB = 0.2;
 const BALL = 1.3;
@@ -106,7 +108,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
     const o = vec3(rel.dot(v3(u.X)), rel.dot(v3(u.Y)), rel.dot(v3(u.N)));
     const dl = vec3(d.dot(v3(u.X)), d.dot(v3(u.Y)), d.dot(v3(u.N)));
     const light = vec3(0).toVar();
-    const T = float(1).toVar();
+    const T = vec3(1).toVar();
     // the ball
     const b = o.dot(dl);
     const c = o.dot(o).sub(BALL * BALL);
@@ -137,7 +139,9 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
           // the first ~0.05 radii around the eye is left out — or the whole sky would be a milky wash
           const near = smoothstep(0.03, 0.1, tt);
           light.addAssign(s.emit.mul(T).mul(ds).mul(near));
-          T.mulAssign(exp(s.kappa.mul(ds).negate()));
+          // dust dims blue more than red: the rift's edges brown, the band behind it warm (references:
+          // milky-way — never a blue-purple band)
+          T.mulAssign(exp(REDDEN.mul(s.kappa.mul(ds)).negate()));
         });
       });
     });
@@ -150,17 +154,23 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   sky.name = 'drift-milky-way';
 
   // ------------------------------------------------------------------ the stars near the Sun point
-  const COUNT = 14000;
+  // two populations: the neighbourhood (the bright naked-eye stars, nearly all round the sky) and, fainter
+  // and many more, the stars out to a few thousand light years in the thin disk — they crowd toward the
+  // band, as in every wide Milky Way photograph (references: milky-way, star density rising to the plane)
+  const NEARBY = 14000;
+  const DISC = 50000;
+  const COUNT = NEARBY + DISC;
   const r = rng(9001);
-  const H = 0.035; // star scale height (radii), a little thicker than the gas: the band has width
+  const H = 0.035; // star scale height (radii) of the neighbourhood, a little thicker than the gas
   const NEAR = 0.09; // radius (radii) of the neighbourhood drawn as points
   const local = new Float32Array(COUNT * 4);
   for (let i = 0; i < COUNT; i++) {
+    const disc = i >= NEARBY;
     const a = r() * Math.PI * 2;
-    const rr = Math.sqrt(r()) * NEAR;
-    const z = H * Math.atanh(Math.min(0.999999, Math.max(-0.999999, r() * 2 - 1))) * 0.5;
+    const rr = disc ? NEAR * (1 + 4 * Math.pow(r(), 0.7)) : Math.sqrt(r()) * NEAR;
+    const z = (disc ? 0.032 : H) * Math.atanh(Math.min(0.999999, Math.max(-0.999999, r() * 2 - 1))) * 0.5;
     // luminosity: many faint, few bright (a steep power law)
-    const lum = Math.pow(r(), 6) * 40 + 0.15;
+    const lum = (Math.pow(r(), 6) * 40 + 0.15) * (disc ? 2.5 : 1);
     const p = [0, 1, 2].map((k) => g.sun[k] + (g.xAxis[k] * Math.cos(a) * rr + g.yAxis[k] * Math.sin(a) * rr + g.normal[k] * z) * g.radius);
     local.set([p[0], p[1], p[2], lum], i * 4);
   }
