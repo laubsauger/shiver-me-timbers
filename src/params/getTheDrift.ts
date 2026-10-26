@@ -33,6 +33,10 @@ export interface GetTheDriftParams {
   driftAltitude: number;
   /** deg, dome elevation (straight ahead) of the point the floating matter gathers round, at Drift-2's end */
   gatherEl: number;
+  /** deg, where on Earth that point is (latitude, longitude), and the compass heading straight ahead */
+  gatherLat: number;
+  gatherLon: number;
+  heading: number;
   /** m, typical galaxy radius in the field */
   galaxySize: number;
   /** m, radius of our galaxy */
@@ -88,6 +92,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     floodLimbEl: 38,
     driftAltitude: 0.03,
     gatherEl: 22,
+    gatherLat: 45.05,
+    gatherLon: 11.9,
+    heading: 90,
     galaxySize: 1.1,
     ourRadius: 1.6,
     ourDistance: 14,
@@ -125,6 +132,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     floodLimbEl: { min: 0, max: 60, step: 1 },
     driftAltitude: { min: 0.001, max: 1, step: 0.001 },
     gatherEl: { min: 0, max: 50, step: 1 },
+    gatherLat: { min: 19, max: 67, step: 0.05 },
+    gatherLon: { min: -24, max: 44, step: 0.05 },
+    heading: { min: 0, max: 359, step: 1 },
     galaxySize: { min: 0.1, max: 5, step: 0.05 },
     ourRadius: { min: 0.2, max: 6, step: 0.05 },
     ourDistance: { min: 2, max: 60, step: 0.5 },

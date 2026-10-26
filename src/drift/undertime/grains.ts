@@ -21,7 +21,7 @@
  * brightness: a receding grain becomes a fainter point instead of a flickering sub-pixel one.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, PI, abs, attribute, clamp, cos, exp, float, hash, instanceIndex, length, max, min, mix, pow, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, PI, abs, attribute, clamp, cos, exp, float, fract, hash, instanceIndex, length, max, min, mix, pow, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { billboardMesh, eyeFacing } from './billboard';
 import { buildWeb, placeGrains, rng, type Web } from './web';
@@ -41,6 +41,11 @@ export function grainLevels(decades: number): { count: number; stars: number[] }
 /** share of a level's grains that lie on its web: level 0 is the wave's scatter, the web emerges above it */
 const webShare = (L: number): number => (L === 0 ? 0 : L === 1 ? 0.6 : 0.92);
 const levelWeb = (L: number): Web => buildWeb(1009 + L * 7919, 46);
+/** s for a grain to slide its span along the web, and the span (pattern units) */
+const FLOW_PERIOD = 14;
+const FLOW_SPAN = 0.035;
+/** the web's light, shared out over the grains (a grain carried 1 when the web was 26 000 grains of dots) */
+const GRAIN_LIGHT = 80000;
 
 export interface GrainUniforms extends PocketUniforms {
   time: F;
@@ -106,15 +111,17 @@ function instanced(mesh: THREE.InstancedMesh, name: string, data: Float32Array, 
 export function createGrains(count: number, U: GrainUniforms, decades: number): THREE.InstancedMesh {
   const levels = grainLevels(decades).count;
   const per = Math.floor(count / levels);
-  // per grain: pattern position, and (level, kind, size jitter, appear order)
+  // per grain: pattern position, (level, kind, size jitter, appear order), and the direction it drains along
   const gPos = new Float32Array(per * levels * 3);
   const gInfo = new Float32Array(per * levels * 4);
+  const gFlow = new Float32Array(per * levels * 3);
   for (let L = 0; L < levels; L++) {
-    const { pos, kind } = placeGrains(levelWeb(L), per, webShare(L), 31 + L);
+    const { pos, kind, flow } = placeGrains(levelWeb(L), per, webShare(L), 31 + L);
     const r = rng(77 + L);
     for (let i = 0; i < per; i++) {
       const j = L * per + i;
       gPos.set(pos.subarray(i * 3, i * 3 + 3), j * 3);
+      gFlow.set(flow.subarray(i * 3, i * 3 + 3), j * 3);
       gInfo.set([L, kind[i], r(), r()], j * 4);
     }
   }
@@ -124,17 +131,26 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
   const kind = info.y;
   const j = float(instanceIndex);
 
-  const wander = vec3(sin(U.time.mul(0.11).add(j)), sin(U.time.mul(0.13).add(j.mul(1.7))), cos(U.time.mul(0.09).add(j.mul(2.3)))).mul(0.25).mul(U.scale);
-  const pos = toWorld(pattern, L, U).add(wander);
+  const flow = attribute<'vec3'>('grainFlow', 'vec3');
+  const wander = vec3(sin(U.time.mul(0.11).add(j)), sin(U.time.mul(0.13).add(j.mul(1.7))), cos(U.time.mul(0.09).add(j.mul(2.3)))).mul(0.08).mul(U.scale);
+  // matter drains along the web into the knots: each grain slides a short way along its flow and fades out
+  // as another fades in behind it (a conveyor: the flow reads, nothing piles up), each on its own phase
+  const phase = fract(U.time.div(FLOW_PERIOD).add(hash(j.mul(0.71))));
+  const span = mix(float(FLOW_SPAN), float(FLOW_SPAN * 0.2), step(0.75, kind));
+  const pos = toWorld(pattern.add(flow.mul(phase.sub(0.5).mul(span))), L, U).add(wander);
+  const flowFade = mix(float(1), sin(phase.mul(PI)).mul(1.3).min(1), step(0.2, kind));
   const dist = pos.sub(U.eye).length();
 
   // level 0 appears grain by grain through U4 (a few, then a few more), and fills out as the pull-back begins
   const share = mix(U.reveal.mul(0.12), float(1), U.fill);
   const appear = info.w;
   const present = smoothstep(appear, appear.add(0.02), share).mul(levelPresence(L, U));
-  // knots brighter than the threads between them, voids dimmest, so the structure reads
-  const weight = mix(mix(float(0.45), float(0.8), step(0.25, kind)), float(1.6), step(0.75, kind)).mul(mix(float(1), float(0.6), step(L, 0.5)));
-  const wanted = U.size.mul(pow(float(10), L)).mul(U.scale).mul(info.z.mul(0.8).add(0.6)).mul(mix(float(1), float(0.6), step(0.25, kind)));
+  // knots brighter than the threads between them, the hair finer still, voids dimmest, so the structure
+  // reads; each grain's share of the light falls as there are more of them (the web's light is fixed)
+  const weight = mix(mix(mix(float(0.3), float(0.65), step(0.2, kind)), float(1), step(0.4, kind)), float(1.5), step(0.75, kind))
+    .mul(mix(float(1), float(0.6), step(L, 0.5)))
+    .mul(GRAIN_LIGHT / Math.max(1, count));
+  const wanted = U.size.mul(pow(float(10), L)).mul(U.scale).mul(info.z.mul(0.8).add(0.6)).mul(mix(float(1), float(0.35), step(0.2, kind)));
   // a grain is a point of light, never a disc: capped at ~0.15° (a near disc reads as out-of-focus dirt)
   const f = floored(min(wanted, dist.mul(0.0026)), dist, U);
   // a few grains on the web ignite with the knots: the first stars are many, not one per knot
@@ -143,6 +159,7 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
   const lit = ignites.mul(smoothstep(t0, t0.add(0.06), U.stars));
   const alpha = present
     .mul(weight)
+    .mul(flowFade)
     .mul(f.coverage)
     .mul(lit.mul(9).add(1))
     // the web steps back a little as its stars come up, so the stars and the signature carry the end
@@ -150,9 +167,11 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
     // dim (not gone) behind the crawl; never one across the eye (a grain within ~15 of its sizes is a blur)
     .mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.85)))
     .mul(smoothstep(wanted.mul(12), wanted.mul(40), dist));
-  // the field reads as starlight-to-be, not dust: mostly cool white, a share warm; only the hero grain
-  // (createHeroGrain) is the act's amber
-  const base = mix(vec3(0.72, 0.8, 1), mix(vec3(1, 0.93, 0.85), U.warm, 0.5), hash(j.mul(0.53)).mul(0.6));
+  // one palette, cool, after the simulations' log-stretched renders: voids and hair deep blue, filaments
+  // pale blue, the knots white (they saturate where the grains pile up). Level 0 — the remainder — is pale
+  // matter; only the hero grain (createHeroGrain) is the act's amber
+  const web = mix(mix(vec3(0.3, 0.4, 1), vec3(0.55, 0.68, 1), step(0.4, kind)), vec3(0.9, 0.93, 1), step(0.75, kind));
+  const base = mix(web, vec3(1, 0.92, 0.84), step(L, 0.5).mul(0.7));
   const tint = mix(base, mix(vec3(0.75, 0.85, 1), U.star, hash(j.mul(0.37))), lit);
 
   const material = additive('undertime-grains');
@@ -164,6 +183,7 @@ export function createGrains(count: number, U: GrainUniforms, decades: number): 
   const mesh = billboardMesh(material, per * levels, 'undertime-grains');
   instanced(mesh, 'grainPos', gPos, 3);
   instanced(mesh, 'grainInfo', gInfo, 4);
+  instanced(mesh, 'grainFlow', gFlow, 3);
   return mesh;
 }
 

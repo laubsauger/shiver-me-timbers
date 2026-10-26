@@ -96,47 +96,93 @@ function gauss(r: () => number): number {
   return Math.sqrt(-2 * Math.log(Math.max(1e-9, r()))) * Math.cos(2 * Math.PI * r());
 }
 
-export type GrainKind = 'scatter' | 'knot' | 'filament';
+export type GrainKind = 'scatter' | 'hair' | 'filament' | 'knot';
+
+const norm = (a: Vec3): Vec3 => {
+  const l = len(a) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
 
 /**
- * `n` grain positions for one zoom level: `webShare` of them on the web (a quarter clustered at knots, the
- * rest along filaments, denser toward the knots they drain into), the others scattered through the ball.
- * The filaments ARE these grains — no drawn tubes: a gaussian cloud about each spine reads as matter.
- * Returns positions and, per grain, 0 = scatter, 1 = knot, 0.5 = filament (the shader's brightness weight).
+ * `n` grain positions for one zoom level, after the cosmic-web simulations (drift-narrative/references,
+ * cosmic-web): `webShare` of them on the web, the others scattered thinly through the voids. On the web:
+ *
+ *   knots      compact and cuspy (two nested gaussians): where the light saturates
+ *   filaments  each joins a knot to its neighbours, a thin bright spine in a faint wider envelope, swelling
+ *              and thinning along its length, denser toward the knots it drains into
+ *   hair       the fine filaments a view without which looks fake: many short thin curved threads feeding
+ *              every knot and branching off the filaments
+ *
+ * Returns positions; per grain its kind (0 scatter, 0.25 hair, 0.5 filament, 1 knot — the shader's
+ * brightness weight); and its FLOW, the unit direction its matter drains along (toward the knot), which the
+ * shader drifts it by: the web is never static.
  */
-export function placeGrains(w: Web, n: number, webShare: number, seed: number): { pos: Float32Array; kind: Float32Array } {
+export function placeGrains(w: Web, n: number, webShare: number, seed: number): { pos: Float32Array; kind: Float32Array; flow: Float32Array } {
   const r = rng(seed);
   const pos = new Float32Array(n * 3);
   const kind = new Float32Array(n);
+  const flow = new Float32Array(n * 3);
   const lengths = w.filaments.map((f) => len(sub(w.knots[f.b], w.knots[f.a])));
   const total = lengths.reduce((a, b) => a + b, 0);
+  const pickFilament = (): number => {
+    let x = r() * total;
+    let fi = 0;
+    while (fi < lengths.length - 1 && x > lengths[fi]) x -= lengths[fi++];
+    return fi;
+  };
+  const jitter = (c: Vec3, s: number): Vec3 => [c[0] + gauss(r) * s, c[1] + gauss(r) * s, c[2] + gauss(r) * s];
   for (let i = 0; i < n; i++) {
     let p: Vec3;
     let k = 0;
-    if (r() >= webShare || w.filaments.length === 0) {
+    let f3: Vec3 = [0, 0, 0];
+    const roll = r();
+    if (roll >= webShare || w.filaments.length === 0) {
       p = inBall(r);
-    } else if (r() < 0.25) {
+    } else if (r() < 0.22) {
       const c = w.knots[Math.floor(r() * w.knots.length)];
-      const s = 0.03 + 0.03 * r();
-      p = [c[0] + gauss(r) * s, c[1] + gauss(r) * s, c[2] + gauss(r) * s];
+      p = jitter(c, r() < 0.6 ? 0.008 + 0.008 * r() : 0.025 + 0.02 * r());
+      f3 = norm(sub(c, p));
       k = 1;
-    } else {
+    } else if (r() < 0.62) {
       // a filament, chosen by length (long ones hold more grains)
-      let x = r() * total;
-      let fi = 0;
-      while (fi < lengths.length - 1 && x > lengths[fi]) x -= lengths[fi++];
+      const fi = pickFilament();
       const u = r();
       const t = r() < 0.5 ? u * u * 0.5 : 1 - u * u * 0.5; // denser toward both ends
       const f = w.filaments[fi];
       const c = filamentPoint(w, f, t);
-      // a gaussian about the spine, 1–3 % of the filament's length, swelling and thinning 3:1 along it
+      // a thin spine (0.4–1.2 % of the length, swelling and thinning 3:1 along it) in a faint envelope (3 %)
       const swell = 0.5 + 0.5 * Math.sin(t * Math.PI * 2.3 + f.c[0] * 17);
-      const s = lengths[fi] * (0.01 + 0.02 * swell);
-      p = [c[0] + gauss(r) * s, c[1] + gauss(r) * s, c[2] + gauss(r) * s];
+      const s = lengths[fi] * (r() < 0.75 ? 0.004 + 0.008 * swell : 0.03);
+      p = jitter(c, s);
+      const ahead = filamentPoint(w, f, Math.min(1, t + 0.01));
+      const tangent = norm(sub(ahead, c));
+      // drains toward the nearer end
+      f3 = t < 0.5 ? [-tangent[0], -tangent[1], -tangent[2]] : tangent;
       k = 0.5;
+    } else {
+      // hair: a short curved thread out from a knot, or branching off a filament
+      let root: Vec3;
+      if (r() < 0.6) root = w.knots[Math.floor(r() * w.knots.length)];
+      else {
+        const fi = pickFilament();
+        root = filamentPoint(w, w.filaments[fi], 0.15 + 0.7 * r());
+      }
+      // each root has a few fixed threads: the thread's direction and length are seeded by (root, thread)
+      const thread = Math.floor(r() * 7);
+      const tr = rng(Math.floor((root[0] * 7919 + root[1] * 104729 + root[2] * 1299709) * 1e4) + thread * 31);
+      const dir = norm(inBall(tr));
+      const side = perpendicular(dir, tr);
+      const length = 0.05 + 0.2 * tr();
+      const t = Math.pow(r(), 1.5);
+      const along = t * length;
+      const c: Vec3 = [0, 1, 2].map((a) => root[a] + dir[a] * along + side[a] * t * t * length * 0.35) as Vec3;
+      p = jitter(c, 0.002 + 0.004 * t);
+      f3 = norm(sub(root, c));
+      k = 0.25;
     }
     pos.set(p, i * 3);
     kind[i] = k;
+    flow.set(f3, i * 3);
   }
-  return { pos, kind };
+  return { pos, kind, flow };
 }

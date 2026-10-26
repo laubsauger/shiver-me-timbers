@@ -53,11 +53,18 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const up = new THREE.Vector3(ray[0] * hit - c[0], ray[1] * hit - c[1], ray[2] * hit - c[2]).normalize();
   const east = new THREE.Vector3().crossVectors(up, new THREE.Vector3(0, 1, 0)).normalize();
   const north = new THREE.Vector3().crossVectors(east, up);
-  // WHERE ON EARTH: the debris gathers over the drowned lowland of the north-eastern Netherlands (Drenthe,
-  // ~10–30 m up today), geographic north straight ahead. The flood flies ~1000 km north to it, so we arrive
-  // over the western Mediterranean (between the Balearics and Sardinia), the Alps and Europe toward the limb.
+  // WHERE ON EARTH (direction.md: "a high angle POV looking eastward"): the matter gathers over the
+  // drowned Po plain between Padua and Rovigo (~5–10 m up today), the view heading east. The flood flies
+  // ~1300 km east to it, so we arrive over the Bay of Biscay: France below, the Alps, Italy and the Adriatic
+  // ahead, the Balkans at the limb, the North Sea to the left, the Mediterranean and the Sahara to the
+  // right; a summer dawn rising in the north-east, front left. At 70 m the Po plain becomes a gulf between
+  // the Alps and the Apennines.
   const front = new THREE.Vector3(...domeDir(0, 0, tiltDeg));
-  earth.setGeo(geoFrameAt(52.85, 6.75, up, front));
+  front.addScaledVector(up, -front.dot(up)).normalize();
+  const rgt = new THREE.Vector3().crossVectors(front, up);
+  const h = (p.heading * Math.PI) / 180;
+  const geoNorth = front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h));
+  earth.setGeo(geoFrameAt(p.gatherLat, p.gatherLon, up, geoNorth));
   // the debris lifts off the drowned coasts late in the flood
   const lift = starts.flood + p.flood * 0.55;
   let pixelAngle = 0.0015;

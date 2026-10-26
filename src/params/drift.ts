@@ -175,7 +175,7 @@ export const driftParams: DriftParams = registerParams(
     bloomStrength: 0.12,
     bloomRadius: 0.25,
     bloomThreshold: 1.4,
-    grainCount: 26000,
+    grainCount: 400000,
     fieldRadius: 30,
     particleSize: 0.22,
     pairLife: 3.2,
