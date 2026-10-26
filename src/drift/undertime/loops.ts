@@ -231,15 +231,19 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
   const age = U.time.sub(timeAt(P, S)).max(0);
   // a luminous trail: the ribbon spans the GLOW (it widens a little as the energy spreads); the core is a
   // narrow profile inside it
-  const glowWidth = float(0.09).add(age.mul(0.05)).mul(P.energy.mul(0.5).add(0.7));
+  // (the ribbon is a little wider than the glow reads, so the glow's falloff reaches zero inside it: a glow
+  // clipped at the ribbon's edge shows as a hard band)
+  const glowWidth = float(0.09).add(age.mul(0.05)).mul(P.energy.mul(0.5).add(0.7)).mul(1.35);
   const drawn = max(glowWidth, U.pixelAngle.mul(3).mul(dist));
   const coverage = glowWidth.div(drawn);
   const alpha = passed.mul(coverage).mul(float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85)));
   const material = additive('undertime-loop-trails');
   material.positionNode = pos.add(acrossView.mul(side.mul(drawn).mul(step(0.0005, alpha.mul(exp(age.div(2.5).negate()))))));
   material.colorNode = Fn(() => {
-    const core = exp(side.mul(side).div(0.02).negate());
-    const glow = exp(side.mul(side).mul(2.5).negate());
+    const core = exp(side.mul(side).div(0.02 / 1.35 ** 2).negate());
+    // a gaussian that comes down to exactly zero at the ribbon's edge (same width as before the widening)
+    const kg = 2.5 * 1.35 ** 2;
+    const glow = exp(side.mul(side).mul(kg).negate()).sub(Math.exp(-kg)).div(1 - Math.exp(-kg)).max(0);
     // the energy fades and, as it does, the trail breaks up into fragments before it is gone
     // a smooth, LATE dissolve: the loop reads whole for a second, then thins out unevenly along its length
     const arcLen = P.radius.mul(P.arc);
