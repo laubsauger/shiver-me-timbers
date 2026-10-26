@@ -19,12 +19,18 @@
  * seam at the face edges. Put them on the master after the resample, or not at all.
  */
 import * as THREE from 'three/webgpu';
-import { cubeTexture, uniform, uv, vec2, vec4 } from 'three/tsl';
+import { cubeTexture, mix, texture, uniform, uv, vec2, vec4 } from 'three/tsl';
 import { domeMasterDirectionNode } from './domeMaster';
 
 export interface DomeCaptureOptions {
   /** px per cube face; ~0.5–0.6 × the master width is enough (each face covers 90°) */
   faceSize: number;
+  /**
+   * Optional layer drawn in MASTER space over the resampled frame (titles, a crawl): straight alpha, sRGB,
+   * same uv convention as the master (v = 0 at the bottom = front). Its radiance is set with
+   * `setOverlayRadiance`, before the tone map.
+   */
+  overlay?: THREE.Texture;
   near?: number;
   far?: number;
 }
@@ -36,6 +42,7 @@ export class DomeCapture {
   private readonly material: THREE.NodeMaterial;
   private readonly uTilt = uniform(0);
   private readonly uView = uniform(new THREE.Matrix3());
+  private readonly uOverlayRadiance = uniform(1);
 
   constructor(opts: DomeCaptureOptions) {
     this.target = new THREE.CubeRenderTarget(opts.faceSize, { type: THREE.HalfFloatType });
@@ -46,11 +53,21 @@ export class DomeCapture {
     const { dir, inside } = domeMasterDirectionNode(masterUV, this.uTilt);
     const world = this.uView.mul(dir);
     const material = (this.material = new THREE.NodeMaterial());
-    material.fragmentNode = vec4(cubeTexture(this.target.texture, world).rgb.mul(inside), 1);
+    const frame = cubeTexture(this.target.texture, world).rgb.mul(inside);
+    if (opts.overlay) {
+      const layer = texture(opts.overlay, masterUV);
+      material.fragmentNode = vec4(mix(frame, layer.rgb.mul(this.uOverlayRadiance), layer.a), 1);
+    } else {
+      material.fragmentNode = vec4(frame, 1);
+    }
     material.depthTest = false;
     material.depthWrite = false;
     material.name = 'dome-master';
     this.quad = new THREE.QuadMesh(material);
+  }
+
+  setOverlayRadiance(radiance: number): void {
+    this.uOverlayRadiance.value = radiance;
   }
 
   setFaceSize(size: number): void {

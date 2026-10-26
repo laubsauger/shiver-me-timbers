@@ -21,6 +21,8 @@ import { DomeCapture } from './cine/domeCapture';
 import { driftParams } from './params/drift';
 import { beatStarts, undertimeState } from './drift/undertime/timeline';
 import { createUndertimeField } from './drift/undertime/field';
+import { CrawlOverlay, type CrawlLayout } from './drift/undertime/crawl';
+import { UNDERTIME_CRAWL } from './drift/undertime/crawlText';
 
 type View = 'flat' | 'dome';
 
@@ -75,10 +77,25 @@ async function boot(): Promise<void> {
       scene.add(m);
     }
   }
-  const dome = new DomeCapture({ faceSize: p.domeFace });
+  const { total } = beatStarts(p);
+  const crawlLayout = (): CrawlLayout => ({
+    start: p.crawlStart,
+    gap: p.crawlGap,
+    travel: p.crawlTravel,
+    elTop: p.crawlElTop,
+    elBottom: p.crawlElBottom,
+    holdEl: p.crawlHoldEl,
+    sizeTop: p.crawlSizeTop,
+    sizeBottom: p.crawlSizeBottom,
+    fade: 3,
+    end: total,
+    maxArc: p.crawlMaxArc,
+  });
+  const crawl = new CrawlOverlay(UNDERTIME_CRAWL, crawlLayout());
+  // the crawl lives in master space, so it shows in the dome view only
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
 
   const q = new URLSearchParams(location.search);
-  const { total } = beatStarts(p);
   let t = Number(q.get('t') ?? 0) || 0;
   let speed = Number(q.get('speed') ?? 1) || 1;
   let paused = q.has('paused');
@@ -116,6 +133,9 @@ async function boot(): Promise<void> {
       // square master, centred and letterboxed
       const s = Math.min(size.x, size.y);
       dome.setFaceSize(p.domeFace);
+      Object.assign(crawl.layout, crawlLayout());
+      crawl.draw(t);
+      dome.setOverlayRadiance(p.crawlRadiance);
       renderer.setViewport((size.x - s) / 2, (size.y - s) / 2, s, s);
       dome.render(renderer, scene, eye, p.domeTilt);
       renderer.setViewport(0, 0, size.x, size.y);

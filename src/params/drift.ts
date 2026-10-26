@@ -57,6 +57,24 @@ export interface DriftParams {
   flashRadiance: number;
   /** linear radiance of the dome-wide light fill at glow = 1 */
   glowRadiance: number;
+  /** s, act time the first crawl line appears (the treatment starts it as the boil cools) */
+  crawlStart: number;
+  /** s between crawl line starts */
+  crawlGap: number;
+  /** s a line takes from mid-heaven to the horizon */
+  crawlTravel: number;
+  /** deg, crawl lines appear / leave at these elevations (front safe zone: 10–60°) */
+  crawlElTop: number;
+  crawlElBottom: number;
+  /** deg, where "the Drift" stops and holds */
+  crawlHoldEl: number;
+  /** text height as a fraction of the master width, at the top and at the bottom */
+  crawlSizeTop: number;
+  crawlSizeBottom: number;
+  /** rad, the widest a line may span in azimuth (±50° safe zone ≈ 1.75) */
+  crawlMaxArc: number;
+  /** linear radiance the crawl is composited at (before the tone map) */
+  crawlRadiance: number;
   /** deg — tilt of the dome's zenith toward the front (Horizon 18: 15) */
   domeTilt: number;
   /** px — cube face resolution for dome capture */
@@ -89,6 +107,16 @@ export const driftParams: DriftParams = registerParams(
     particleRadiance: 1.6,
     flashRadiance: 3,
     glowRadiance: 0.22,
+    crawlStart: 9,
+    crawlGap: 5,
+    crawlTravel: 14,
+    crawlElTop: 58,
+    crawlElBottom: 12,
+    crawlHoldEl: 32,
+    crawlSizeTop: 0.032,
+    crawlSizeBottom: 0.012,
+    crawlMaxArc: 1.6,
+    crawlRadiance: 1.4,
     domeTilt: 15,
     domeFace: 1024,
   },
@@ -110,6 +138,16 @@ export const driftParams: DriftParams = registerParams(
     particleRadiance: { min: 0, max: 40, step: 0.1 },
     flashRadiance: { min: 0, max: 60, step: 0.1 },
     glowRadiance: { min: 0, max: 4, step: 0.01 },
+    crawlStart: { min: 0, max: 60, step: 0.5 },
+    crawlGap: { min: 0.5, max: 20, step: 0.25 },
+    crawlTravel: { min: 1, max: 40, step: 0.5 },
+    crawlElTop: { min: 10, max: 89, step: 1 },
+    crawlElBottom: { min: 0, max: 60, step: 1 },
+    crawlHoldEl: { min: 0, max: 89, step: 1 },
+    crawlSizeTop: { min: 0.002, max: 0.1, step: 0.001 },
+    crawlSizeBottom: { min: 0.002, max: 0.1, step: 0.001 },
+    crawlMaxArc: { min: 0.3, max: 3.1, step: 0.05 },
+    crawlRadiance: { min: 0, max: 10, step: 0.05 },
     domeTilt: { min: 0, max: 30, step: 0.5 },
   },
 );
