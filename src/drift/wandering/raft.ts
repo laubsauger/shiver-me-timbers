@@ -13,6 +13,10 @@
  * night, so they are scaled here by the light that is actually there: the transmission by the sunlight
  * reaching the sea, the floor by the sky's light against the day's.
  *
+ * The sails are furled and the pennant is struck: their flutter integrates a phase from the renderer's
+ * frame clock (sailDriver.ts, flagDriver.ts), which is wall time — offline, at a few frames a second, the
+ * canvas flapped ten times too fast (a "hyperlapse"), and from frame to frame, not from show time.
+ *
  * Not yet: the ropes (a Verlet solve carried frame to frame) and the deck water (a simulation).
  */
 import * as THREE from 'three/webgpu';
@@ -47,6 +51,15 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   setActiveDeckWater(createDeckWater({ source: deckField }));
   const assembly = new ShipAssembly(blueprint, createPieceMaterialCache(createDeckFieldTexture(deckField)));
   assembly.setSailTint(raftMaterialParams.sailTint);
+  // furled as on a moored raft: the cloth gone (the shader's drop scale), the yards lowered with it
+  for (const def of blueprint) {
+    if (!def.sailStates) continue;
+    assembly.setSailState(def.id, 'furled');
+    assembly.setSailDropScale(def.id, 0);
+    assembly.setYardHoist(def.id, 0);
+  }
+  const pennant = assembly.group.getObjectByName('flag-stern');
+  if (pennant) pennant.visible = false;
   assembly.group.traverse((o) => {
     if ((o as THREE.Mesh).isMesh) {
       o.castShadow = true;

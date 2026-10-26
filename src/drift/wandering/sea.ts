@@ -64,9 +64,11 @@ const CLOUD_COVER = 0.32;
 const CIRRUS_COVER = 0.45;
 const WIND = 7;
 const WIND_DIR = 0.6;
-/** m: the raft ahead of the eye, and to its right */
-const RAFT_AHEAD = 9;
-const RAFT_RIGHT = 1.5;
+/** m: the raft ahead of the eye, and to its right — off the Sun's line (~30°), so its mast never stands in
+ * the sunset or across the glitter road; and the rad its bow turns from the Sun toward its right */
+const RAFT_AHEAD = 10;
+const RAFT_RIGHT = 6;
+const RAFT_SHEER = 0.5;
 
 export interface SeaAct {
   readonly scene: THREE.Scene;
@@ -233,7 +235,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number | (
         (x, z) => cpu.heightAt(x, z, t),
       );
       const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-      raft.update(t, front.x * RAFT_AHEAD - front.z * RAFT_RIGHT, front.z * RAFT_AHEAD + front.x * RAFT_RIGHT, yaw + Math.PI, {
+      raft.update(t, front.x * RAFT_AHEAD - front.z * RAFT_RIGHT, front.z * RAFT_AHEAD + front.x * RAFT_RIGHT, yaw + Math.PI - RAFT_SHEER, {
         sun: lum(seaSky.sunColour),
         sky: Math.min(1, lum(seaSky.irradiance) / 0.4),
       });
