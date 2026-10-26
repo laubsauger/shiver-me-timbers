@@ -11,7 +11,7 @@
 import * as THREE from 'three/webgpu';
 import { Fn, acos, cameraPosition, cubeTexture, exp, float, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
-import { cloudMarch, type CloudData, type CloudUniforms } from './clouds';
+import { REFLECTED, cloudMarch, type CloudData, type CloudUniforms } from './clouds';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
@@ -150,10 +150,17 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     const seen = float(STAR_CONTRAST).div(sky.dot(vec3(0.2126, 0.7152, 0.0722)).add(STAR_CONTRAST));
     return cubeTexture(night.texture, toGalaxy.mul(d)).rgb.mul(T).mul(seen).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3;
   };
+  // the clouds over the sky by their opacity; the haze in front of them takes them into the sky's own colour
+  const withClouds = (behind: V3, light: V3, d: V3, quality?: typeof REFLECTED): V3 => {
+    if (!clouds) return behind;
+    const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms, quality);
+    const k = exp(c.dist.div(-CLOUD_HAZE));
+    return mix(behind, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha) as V3;
+  };
   const dome = (dir: V3): V3 => {
     const d = normalize(dir);
     const air = scatter(o, d, C, S, GROUND);
-    return air.light.add(starsAlong(d, air.T, air.hitGround, air.light)) as V3;
+    return withClouds(air.light.add(starsAlong(d, air.T, air.hitGround, air.light)) as V3, air.light, d, REFLECTED);
   };
   const sunTerm = (dir: V3): V3 => {
     const d = normalize(dir);
@@ -167,12 +174,7 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    const behind = light.add(sun).add(starsAlong(d, T, hitGround, light));
-    if (!clouds) return vec4(behind, 1);
-    // the clouds over the sky by their opacity; the haze in front of them takes them into the sky's own colour
-    const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms);
-    const k = exp(c.dist.div(-CLOUD_HAZE));
-    return vec4(mix(behind, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha), 1);
+    return vec4(withClouds(light.add(sun).add(starsAlong(d, T, hitGround, light)) as V3, light, d), 1);
   })();
   material.name = 'drift-sea-sky';
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 48), material);

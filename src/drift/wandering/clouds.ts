@@ -36,10 +36,11 @@ const COVER_TILE = 30000;
 const GROUPS = 0.55;
 /** per m: extinction of the densest cloud (a mean free path of ~15 m) */
 const SIGMA = 0.065;
-const STEPS = 72;
+/** the sky's own march; the water's reflection of it can do with far less (a rough sea blurs it) */
+export const FULL = { steps: 72, lightSteps: 5, detail: true };
+export const REFLECTED = { steps: 24, lightSteps: 2, detail: false };
 /** the cores against the edges: dense enough that Beer's law cuts a crisp edge */
 const DENSE = 4;
-const LIGHT_STEPS = 5;
 
 export interface CloudData {
   shape: THREE.Data3DTexture;
@@ -95,7 +96,7 @@ const sat = (x: F): F => x.clamp(0, 1) as F;
  * The layer along a ray from the eye `o` (m, y up, sea level at y = 0) in direction d: the light it sends back
  * (linear), its opacity, and how far its light comes from (m, opacity-weighted; for the haze in front of it).
  */
-export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms): { light: V3; alpha: F; dist: F } {
+export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, quality: { steps: number; lightSteps: number; detail: boolean } = FULL): { light: V3; alpha: F; dist: F } {
   const drift = vec3(U.wind.x, 0, U.wind.y).mul(U.time);
   // the planet's surface below the eye: altitude of p ≈ |p − C| − R (C straight down)
   const C = vec3(o.x, float(-R), o.z);
@@ -142,20 +143,20 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms): { l
   const phaseSoft = hg(0.3);
   const jitter = fract(fract(screenCoordinate.x.mul(0.06711056).add(screenCoordinate.y.mul(0.00583715))).mul(52.9829189));
   If(mu.greaterThan(0).and(t1.greaterThan(t0)), () => {
-    const ds = t1.sub(t0).div(STEPS);
-    Loop(STEPS, ({ i }) => {
+    const ds = t1.sub(t0).div(quality.steps);
+    Loop(quality.steps, ({ i }) => {
       If(T.lessThan(0.01), () => {
         Break();
       });
       const t = t0.add(float(i).add(jitter).mul(ds));
       const p = o.add(d.mul(t));
-      const rho = density(p, true);
+      const rho = density(p, quality.detail);
       If(rho.greaterThan(0.002), () => {
         // the light reaching here from the Sun: the cloud between, in steps doubling from 60 m
         const od = float(0).toVar();
         let step = 60;
         let at = 30;
-        for (let k = 0; k < LIGHT_STEPS; k++) {
+        for (let k = 0; k < quality.lightSteps; k++) {
           od.addAssign(density(p.add(U.sun.mul(at)), false).mul(step * DENSE));
           at += step * 1.5;
           step *= 2;
