@@ -28,6 +28,7 @@ import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky } from './seaSky';
+import { bakeNightSky } from './nightSky';
 import { sunDirection } from '../../sky/sunCycle';
 import { SUN_E } from '../getTheDrift/atmosphere';
 
@@ -61,7 +62,7 @@ export interface SeaAct {
 }
 
 /** `hour`: the time of day the act holds (default golden hour) */
-export function createSea(o: { hour?: number } = {}): SeaAct {
+export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } = {}): SeaAct {
   const hour = o.hour ?? HOUR;
   const scene = new THREE.Scene();
   scene.name = 'drift-sea';
@@ -72,7 +73,11 @@ export function createSea(o: { hour?: number } = {}): SeaAct {
   // what they are set to, and the sky itself, come from Act 2's air (seaSky.ts): one sky from orbit to sea
   const sky = createSky({ scene });
   scene.backgroundNode = null;
-  const seaSky = createSeaSky(FAR * 0.8);
+  // the Sun's own direction (the rig's key turns to the Moon at night), and the dome's front toward its bearing
+  const sun = new THREE.Vector3(...sunDirection(hour, skyParams.latitude));
+  const yaw = Math.atan2(-sun.x, -sun.z);
+  const front = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  const seaSky = createSeaSky(FAR * 0.8, bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0)));
   scene.add(seaSky.mesh);
   let hemi: THREE.HemisphereLight | undefined;
   scene.traverse((o) => {
@@ -82,10 +87,6 @@ export function createSea(o: { hour?: number } = {}): SeaAct {
   causticsParams.enabled = false;
   oceanSurfaceParams.radialLodPixels = 0;
 
-  // the Sun's own direction (the rig's key turns to the Moon at night)
-  const sun = new THREE.Vector3(...sunDirection(hour, skyParams.latitude));
-  // the dome's front toward the sun's bearing
-  const yaw = Math.atan2(-sun.x, -sun.z);
   const bearing = yaw + (ISLAND_LEFT_OF_SUN * Math.PI) / 180;
   const site = { ...generateIslandSites(SEED)[0], position: [-Math.sin(bearing) * ISLAND_DISTANCE, -Math.cos(bearing) * ISLAND_DISTANCE] as [number, number] };
   const archipelago = createArchipelago({ seed: SEED, sites: [site] });
@@ -151,8 +152,7 @@ export function createSea(o: { hour?: number } = {}): SeaAct {
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
       // the water and the sand below), the haze at the horizon
       seaSky.update(eye.position, sun);
-      // (never exactly black: the ocean normalises the key's colour for its hue, and 0/0 drew a white band)
-      sky.sunLight.color.setRGB(Math.max(seaSky.sunColour.r, 1e-4), Math.max(seaSky.sunColour.g, 1e-4), Math.max(seaSky.sunColour.b, 1e-4));
+      sky.sunLight.color.copy(seaSky.sunColour);
       sky.sunLight.intensity = SUN_E;
       if (hemi) {
         hemi.color.copy(seaSky.irradiance);
@@ -175,9 +175,7 @@ export function createSea(o: { hour?: number } = {}): SeaAct {
       );
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
-      // the water's specular follows the key light: the Sun, or once it is down the rig's (the Moon) — a Sun
-      // below the horizon still lit wave backs into a bright band a few degrees under it
-      surface.update(proxy, t, sun.y > -0.01 ? sun : sky.sunDirection);
+      surface.update(proxy, t, sun);
       fu.time.value = t - FLOCK_START;
       fu.sun.value.copy(sun);
       // radiance of a white surface: the Sun's E·T/π facing it, the sky's irradiance/π

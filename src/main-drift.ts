@@ -138,7 +138,7 @@ async function boot(): Promise<void> {
   scene.add(arrival.group);
   // ?sea: the sea-level test act (drift/wandering/sea.ts) in a scene of its own, on its own clock
   const seaQuery = new URLSearchParams(location.search);
-  const sea = seaQuery.has('sea') ? createSea({ hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : null;
+  const sea = seaQuery.has('sea') ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : null;
   const total = sea ? sea.total : act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({
     elTop: p.crawlElTop,

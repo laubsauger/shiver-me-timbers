@@ -9,7 +9,8 @@
  * irradiance for the ambient, and the colour along the horizon for the haze the water and land melt into.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, acos, cameraPosition, float, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
+import { Fn, acos, cameraPosition, cubeTexture, float, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
+import type { NightSky } from './nightSky';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_GAIN, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight,
@@ -125,13 +126,24 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
   return [0, 1, 2].map((k) => (inR[k] * BETA_R_RGB[k] * phaseR + inM[k] * BETA_M * phaseM + (msR[k] * BETA_R_RGB[k] + msM[k] * BETA_M) * iso) * SUN_E) as Rgb;
 }
 
-export function createSeaSky(radius: number): SeaSky {
+/** the baked galaxy's light against Act 2's (seen from space at exposure 1): the eye opens ~ADAPT_MAX at night */
+const NIGHT_GAIN = 1 / 14;
+
+export function createSeaSky(radius: number, night?: NightSky): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R) };
   const S = u.sun as unknown as V3;
   const eyeR = u.eyeR as unknown as THREE.Node<'float'>;
   const o = vec3(0, eyeR, 0);
   const C = vec3(0, 0, 0);
-  const dome = (dir: V3): V3 => scatter(o, normalize(dir), C, S, GROUND).light;
+  const toGalaxy = uniform(night ? night.toGalaxy : new THREE.Matrix3());
+  // the galaxy behind the air, dimmed along the ray (none below the horizon)
+  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>): V3 =>
+    night ? (cubeTexture(night.texture, toGalaxy.mul(d)).rgb.mul(T).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3) : vec3(0);
+  const dome = (dir: V3): V3 => {
+    const d = normalize(dir);
+    const air = scatter(o, d, C, S, GROUND);
+    return air.light.add(starsAlong(d, air.T, air.hitGround)) as V3;
+  };
   const sunTerm = (dir: V3): V3 => {
     const d = normalize(dir);
     return SUN_TINT.mul(sunDisc(acos(d.dot(S).clamp(-1, 1)))).mul(sunlight(eyeR, d.y, GROUND)) as V3;
@@ -140,11 +152,11 @@ export function createSeaSky(radius: number): SeaSky {
   const material = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false, fog: false });
   material.colorNode = Fn(() => {
     const d = normalize(positionWorld.sub(cameraPosition));
-    const { light, hitGround } = scatter(o, d, C, S, GROUND);
+    const { light, T, hitGround } = scatter(o, d, C, S, GROUND);
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    return vec4(light.add(sun), 1);
+    return vec4(light.add(sun).add(starsAlong(d, T, hitGround)), 1);
   })();
   material.name = 'drift-sea-sky';
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 48), material);
