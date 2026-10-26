@@ -77,8 +77,7 @@ export class DomeGuides {
     for (let az = -safeAz; az <= safeAz; az += 2) g.lineTo(...P(safeElMin, az));
     for (let az = safeAz; az >= -safeAz; az -= 2) g.lineTo(...P(safeElMax, az));
     g.closePath();
-    g.fillStyle = 'rgba(255, 190, 90, 0.10)';
-    g.fill();
+    // outline only: a fill tints the very area being judged
     g.strokeStyle = 'rgba(255, 190, 90, 0.75)';
     g.lineWidth = px(1.5);
     g.setLineDash([]);
