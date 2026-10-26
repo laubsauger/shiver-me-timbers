@@ -2,29 +2,65 @@
  * The Drift — fulldome origin story (drift.html). Act 1 "Undertime" tunables.
  *
  * Content and treatment: /Users/flo/work/code/drift-narrative/undertime/treatment.md.
- * The beats run in this order; each value is that beat's length in seconds:
+ * Direction: drift-narrative/undertime/direction.md. The beats run in this order; each value is that
+ * beat's length in seconds:
  *
- *   boil        pairs arise and cancel so densely the dome is near white
- *   cool        the rate drops; single pairs become readable, each flash spreads light
- *   annihilate  a final wave of cancellations floods the dome with light
- *   remain      the light fades to an even glow; the leftover grains drift
- *   zoom        pull back through orders of magnitude; the grains become a sparse field
- *   gather      the grains drift together into the first points of starlight
+ *   first   black; one hero pair overhead, its light shell sweeps the dome (the first light)
+ *   arise   pairs ignite, a few then everywhere, until the dome boils
+ *   cool    time slows: fewer, slower, longer pairs; the field turns; text windows
+ *   wave    an annihilation front sweeps front → zenith → back; nothing is born behind it
+ *   remain  darkness; one warm grain in front, then a few more; text
+ *   zoom    pull back through orders of magnitude; the grains are seen to lie on a web
+ *   gather  the web's knots ignite as the first stars; the signature
  *
- * Two colours only (treatment §Visual grammar): matter and antimatter. A leftover grain keeps the
- * MATTER colour; there is no third colour for it. The flash and the dome-wide glow are light.
+ * Colour script: creation is the two charges (matter cyan, antimatter magenta) and their light (gold-white);
+ * what remains is WARM (matter tinted toward starlight, `grainWarmth`) — the first warmth on the dome is the
+ * thing that will become us; the first stars are warm and blue-white.
  *
  * Reload-scoped: `pairSlots`, `grainCount` (instance counts, baked into the draw).
  */
 import { registerParams } from './registry';
 
 export interface DriftParams {
-  boil: number;
+  first: number;
+  arise: number;
   cool: number;
-  annihilate: number;
+  wave: number;
   remain: number;
   zoom: number;
   gather: number;
+  /** field-s per act-s once cooled: how far "time slows" */
+  slowRate: number;
+  /** 0..1 pair density at the end of the cooling (what the wave front finds) */
+  coolDensity: number;
+  /** deg, field lean at the end of the cooling (it turns from `fieldTilt`) */
+  fieldTiltEnd: number;
+  /** m/s, top speed of the forward drift through the field (arise → cool) */
+  driftSpeed: number;
+  /** m, the slow approach toward the hero grain in the remain beat */
+  approach: number;
+  /** s, act time the hero pair is born (after the black) */
+  heroBirth: number;
+  /** deg / m, where the hero pair is born: front, this high, this far */
+  heroEl: number;
+  heroDist: number;
+  /** m/s, hero pair launch speed (its spirals' size) */
+  heroSpeed: number;
+  /** m/s, speed of the hero's light shells (they pass the audience) */
+  heroShellSpeed: number;
+  heroShellRadiance: number;
+  /** deg / m, where the hero grain sits in front (the zoom's pivot) */
+  heroGrainEl: number;
+  heroGrainDist: number;
+  /** 0..1, grains' colour from matter toward starlight */
+  grainWarmth: number;
+  /** linear radiance of the faint background glow the wave's light becomes */
+  afterglowRadiance: number;
+  starRadiance: number;
+  /** linear radiance of the wave front's band of light (U3) */
+  waveRadiance: number;
+  /** linear radiance of the web's threads (U5, U6) */
+  threadRadiance: number;
   /** concurrent pair slots; each draws two tracks and seven light sprites */
   pairSlots: number;
   /** quads per track ribbon */
@@ -56,7 +92,7 @@ export interface DriftParams {
   bloomStrength: number;
   bloomRadius: number;
   bloomThreshold: number;
-  /** leftover grains of matter */
+  /** leftover grains of matter, over all zoom levels */
   grainCount: number;
   /** m — pairs are scattered in a shell around the camera, this is its outer radius */
   fieldRadius: number;
@@ -64,15 +100,13 @@ export interface DriftParams {
   particleSize: number;
   /** s — one pair's life, birth to flash (jittered ±30 % per slot) */
   pairLife: number;
-  /** orders of magnitude the zoom beat pulls back through */
+  /** orders of magnitude the zoom beat pulls back through (reload-scoped: it sets the grain levels) */
   zoomDecades: number;
-  /** clusters the grains gather into */
-  clusters: number;
   matterColor: number;
   antimatterColor: number;
   /** annihilation light, the flashes and the dome-wide glow */
   lightColor: number;
-  /** first starlight in the gather beat */
+  /** first starlight */
   starColor: number;
   /** linear exposure into the ACES tone map */
   exposure: number;
@@ -109,12 +143,31 @@ export interface DriftParams {
 export const driftParams: DriftParams = registerParams(
   'drift',
   {
-    boil: 8,
-    cool: 14,
-    annihilate: 6,
+    first: 7,
+    arise: 11,
+    cool: 20,
+    wave: 7,
     remain: 10,
-    zoom: 12,
-    gather: 14,
+    zoom: 18,
+    gather: 13,
+    slowRate: 0.4,
+    coolDensity: 0.3,
+    fieldTiltEnd: 70,
+    driftSpeed: 0.35,
+    approach: 1.2,
+    heroBirth: 1.4,
+    heroEl: 50,
+    heroDist: 9,
+    heroSpeed: 9,
+    heroShellSpeed: 6,
+    heroShellRadiance: 3,
+    heroGrainEl: 52,
+    heroGrainDist: 7,
+    grainWarmth: 0.65,
+    afterglowRadiance: 0.01,
+    starRadiance: 40,
+    waveRadiance: 1.4,
+    threadRadiance: 0.06,
     pairSlots: 3000,
     trackSegments: 40,
     trackTail: 1.4,
@@ -127,51 +180,68 @@ export const driftParams: DriftParams = registerParams(
     coreSize: 0.35,
     coreRadiance: 14,
     shellSpeed: 12,
-    shellRadiance: 0.3,
+    shellRadiance: 0,
     hazeSize: 5,
     hazeRadiance: 0.02,
     bloomStrength: 0.35,
     bloomRadius: 0.25,
     bloomThreshold: 1.4,
-    grainCount: 900,
+    grainCount: 48000,
     fieldRadius: 30,
     particleSize: 0.22,
     pairLife: 2.2,
-    zoomDecades: 3,
-    clusters: 7,
+    zoomDecades: 2,
     matterColor: 0x7fd4ff,
     antimatterColor: 0xff3f8e,
-    lightColor: 0xfff1dc,
+    lightColor: 0xffe6c0,
     starColor: 0xffd394,
     exposure: 1,
     particleRadiance: 1.6,
     crawlStart: 9,
     crawlGap: 6,
-    crawlTravel: 12,
-    crawlElTop: 58,
-    crawlElBottom: 12,
+    crawlTravel: 10,
+    crawlElTop: 44,
+    crawlElBottom: 26,
     crawlHoldEl: 32,
-    crawlSizeTop: 0.036,
-    crawlSizeBottom: 0.015,
+    crawlSizeTop: 0.024,
+    crawlSizeBottom: 0.02,
     crawlMaxArc: 1.6,
     crawlRadiance: 1.4,
-    crawlPocket: 0.85,
+    crawlPocket: 1,
     crawlPocketAz: 40,
     domeTilt: 15,
     domeFace: 1024,
   },
   {
-    boil: { min: 0, max: 60, step: 0.5 },
+    first: { min: 0, max: 60, step: 0.5 },
+    arise: { min: 0, max: 60, step: 0.5 },
     cool: { min: 0, max: 60, step: 0.5 },
-    annihilate: { min: 0, max: 60, step: 0.5 },
+    wave: { min: 0.5, max: 60, step: 0.5 },
     remain: { min: 0, max: 60, step: 0.5 },
     zoom: { min: 0, max: 60, step: 0.5 },
     gather: { min: 0, max: 60, step: 0.5 },
+    slowRate: { min: 0.05, max: 1, step: 0.01 },
+    coolDensity: { min: 0, max: 1, step: 0.01 },
+    fieldTiltEnd: { min: 0, max: 90, step: 1 },
+    driftSpeed: { min: 0, max: 2, step: 0.01 },
+    approach: { min: 0, max: 5, step: 0.05 },
+    heroBirth: { min: 0, max: 6, step: 0.05 },
+    heroEl: { min: 10, max: 89, step: 1 },
+    heroDist: { min: 2, max: 30, step: 0.25 },
+    heroSpeed: { min: 0.5, max: 30, step: 0.25 },
+    heroShellSpeed: { min: 0.5, max: 30, step: 0.25 },
+    heroShellRadiance: { min: 0, max: 10, step: 0.05 },
+    heroGrainEl: { min: 10, max: 80, step: 1 },
+    heroGrainDist: { min: 2, max: 30, step: 0.25 },
+    grainWarmth: { min: 0, max: 1, step: 0.01 },
+    afterglowRadiance: { min: 0, max: 0.5, step: 0.005 },
+    starRadiance: { min: 0, max: 100, step: 0.5 },
+    waveRadiance: { min: 0, max: 10, step: 0.05 },
+    threadRadiance: { min: 0, max: 5, step: 0.01 },
     fieldRadius: { min: 2, max: 200, step: 1 },
     particleSize: { min: 0.01, max: 1, step: 0.01 },
     pairLife: { min: 0.3, max: 10, step: 0.1 },
     zoomDecades: { min: 0, max: 6, step: 0.25 },
-    clusters: { min: 1, max: 24, step: 1 },
     exposure: { min: 0.05, max: 8, step: 0.05 },
     particleRadiance: { min: 0, max: 40, step: 0.1 },
     trackTail: { min: 0.05, max: 4, step: 0.05 },

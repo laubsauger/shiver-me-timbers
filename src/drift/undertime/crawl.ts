@@ -15,6 +15,8 @@ import * as THREE from 'three/webgpu';
 
 export interface CrawlLine {
   text: string;
+  /** s, act time this line appears; without it, line i appears at `start + i · gap` */
+  at?: number;
   /** the signature line: display face, larger, stops at `holdEl` and holds */
   signature?: boolean;
 }
@@ -52,16 +54,16 @@ export interface Placement {
 }
 
 const clamp01 = (x: number): number => Math.min(1, Math.max(0, x));
-const easeOut = (x: number): number => 1 - (1 - x) * (1 - x);
 
 /** where line `i` of `n` is at act time `t`, or null if it is not on the dome */
 export function crawlPlacement(t: number, i: number, n: number, line: CrawlLine, L: CrawlLayout): Placement | null {
-  const t0 = L.start + i * L.gap;
+  const t0 = line.at ?? L.start + i * L.gap;
   if (t < t0 || t > L.end) return null;
   const k = (t - t0) / L.travel; // 0 at elTop, 1 at elBottom
   let alpha = clamp01(k * 6);
-  // decelerates as it recedes, like a crawl into depth
-  let e = easeOut(clamp01(k));
+  // constant angular speed (~1.8°/s with the defaults: moving text reads at 1–2°/s), so lines keep their
+  // spacing instead of piling into each other as an eased crawl would
+  let e = clamp01(k);
   if (line.signature) {
     // stop in ELEVATION terms, after the easing, so it settles exactly at holdEl
     e = Math.min(e, (L.elTop - L.holdEl) / (L.elTop - L.elBottom));
@@ -101,7 +103,8 @@ export class CrawlOverlay {
   private readonly size: number;
 
   constructor(
-    private readonly lines: readonly CrawlLine[],
+    /** replaceable: the placement times follow the beat lengths, which are live tunables */
+    public lines: readonly CrawlLine[],
     readonly layout: CrawlLayout,
     size = 2048,
     private readonly fonts = { body: '400 {px}px Georgia, "Times New Roman", serif', signature: 'italic 400 {px}px Georgia, "Times New Roman", serif' },

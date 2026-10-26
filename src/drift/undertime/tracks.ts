@@ -8,6 +8,7 @@
  * capture agree on the ribbon's width (they share the position, not the view direction).
  *
  * Look: a thin bright head, a tail that fades and narrows, a soft cross-section. Additive, no depth write.
+ * `slotOf` says whose tracks these are: the field's pair slots (pairModel.ts pairSlot) or the hero pair.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -25,12 +26,12 @@ import {
   smoothstep,
   vec4,
 } from 'three/tsl';
-import { pairSlot, trackPosition, type PairUniforms } from './pairModel';
+import { trackPosition, type PairSlot } from './pairModel';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 
-export interface TrackUniforms extends PairUniforms {
+export interface TrackUniforms {
   /** s of history a track shows behind its head */
   tail: F;
   /** m, ribbon half-width at the head */
@@ -40,10 +41,10 @@ export interface TrackUniforms extends PairUniforms {
   radiance: F;
   matter: V3;
   anti: V3;
-  spread: F;
 }
 
-function stripGeometry(segments: number): THREE.BufferGeometry {
+/** a strip of `segments` quads with `trackS` ∈ [0, 1] along it and `trackSide` = ±1 across (grains.ts reuses it) */
+export function stripGeometry(segments: number): THREE.BufferGeometry {
   const n = (segments + 1) * 2;
   const s = new Float32Array(n);
   const side = new Float32Array(n);
@@ -65,26 +66,27 @@ function stripGeometry(segments: number): THREE.BufferGeometry {
   return g;
 }
 
-export function createTracks(slots: number, segments: number, U: TrackUniforms): THREE.InstancedMesh {
+export function createTracks(slots: number, segments: number, U: TrackUniforms, slotOf: (slot: F) => PairSlot, name = 'undertime-tracks'): THREE.InstancedMesh {
   const S = attribute<'float'>('trackS', 'float');
   const side = attribute<'float'>('trackSide', 'float');
   const slot = float(instanceIndex.div(2));
   const isAnti = float(instanceIndex.mod(2));
   const q = float(1).sub(isAnti.mul(2)); // +1 matter, −1 antimatter
-  const P = pairSlot(slot, U);
-  const tEnd = P.period.mul(P.trackEnd);
+  const P = slotOf(slot);
+  const tEnd = P.tEnd;
   const head = min(P.tau, tEnd);
   const ts = max(head.sub(U.tail.mul(float(1).sub(S))), 0);
-  const pos = trackPosition(P, q, ts, U.field).mul(U.spread);
-  const ahead = trackPosition(P, q, ts.add(0.012), U.field).mul(U.spread);
+  const pos = trackPosition(P, q, ts);
+  const ahead = trackPosition(P, q, ts.add(0.012));
   const tangent = normalize(ahead.sub(pos));
   const across = normalize(cross(tangent, normalize(pos.sub(cameraPosition))));
   // born fast, gone once the track has ended and its annihilation has begun
   const fade = smoothstep(0, 0.06, P.tau).mul(float(1).sub(smoothstep(tEnd, tEnd.add(P.period.mul(0.12)), P.tau))).mul(P.alive);
-  // MINIMUM PROJECTED WIDTH (the trick src/core/minWidth.ts uses for ropes): never thinner than ~1.2 px, and
-  // the widening paid back as coverage, so a far track is a faint continuous line instead of a dashed one
+  // MINIMUM PROJECTED WIDTH (the trick src/core/minWidth.ts uses for ropes): never thinner than ~2 px — the
+  // finest line that survives a dome projector's blend — and the widening paid back as coverage, so a far
+  // track is a faint continuous line instead of a dashed, shimmering one
   const wanted = U.width.mul(mix(float(0.15), float(1), S));
-  const minW = U.pixelAngle.mul(0.6).mul(pos.sub(cameraPosition).length());
+  const minW = U.pixelAngle.mul(1.0).mul(pos.sub(cameraPosition).length());
   const drawn = max(wanted, minW);
   const coverage = wanted.div(drawn);
   const width = drawn.mul(fade);
@@ -102,11 +104,11 @@ export function createTracks(slots: number, segments: number, U: TrackUniforms):
     const base = select(isAnti.greaterThan(0.5), U.anti, U.matter) as V3;
     return vec4(base.mul(U.radiance.mul(body.add(tip)).mul(edge).mul(fade).mul(coverage)), 1);
   })();
-  material.name = 'undertime-tracks';
+  material.name = name;
 
   const mesh = new THREE.InstancedMesh(stripGeometry(segments), material, slots * 2);
   mesh.frustumCulled = false;
-  mesh.name = 'undertime-tracks';
+  mesh.name = name;
   return mesh;
 }
 

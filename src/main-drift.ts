@@ -23,10 +23,10 @@ import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
 import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
-import { beatStarts, undertimeState } from './drift/undertime/timeline';
+import { beatStarts, eyePath, undertimeState } from './drift/undertime/timeline';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
-import { UNDERTIME_CRAWL } from './drift/undertime/crawlText';
+import { undertimeCrawl } from './drift/undertime/crawlText';
 import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/record';
 import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
@@ -122,7 +122,7 @@ async function boot(): Promise<void> {
     end: total,
     maxArc: p.crawlMaxArc,
   });
-  const crawl = new CrawlOverlay(UNDERTIME_CRAWL, crawlLayout());
+  const crawl = new CrawlOverlay(undertimeCrawl(p), crawlLayout());
   // the crawl lives in master space, so it shows in the dome view only
   const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture });
 
@@ -151,14 +151,22 @@ async function boot(): Promise<void> {
   const hud = document.getElementById('drift-hud');
   const size = new THREE.Vector2();
 
+  // the flat preview rides along with the eye (the act's camera path), keeping the look the user dragged to
+  const eyeWas = new THREE.Vector3();
   /** put the world into the state of act time `at` — the one place a frame's content is decided */
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
-    field.update(state, at);
+    eye.position.set(...eyePath(at, p));
+    const moved = eye.position.clone().sub(eyeWas);
+    camera.position.add(moved);
+    controls.target.add(moved);
+    eyeWas.copy(eye.position);
+    field.update(state, at, eye.position);
     dome.setFaceSize(faceOverride ?? p.domeFace);
     Object.assign(crawl.layout, crawlLayout());
+    crawl.lines = undertimeCrawl(p);
     crawl.draw(at);
-    const band = crawlBand(at, UNDERTIME_CRAWL, crawl.layout);
+    const band = crawlBand(at, crawl.lines, crawl.layout);
     field.setPocket({ lo: band.lo, hi: band.hi, az: p.crawlPocketAz, strength: band.strength * p.crawlPocket }, p.domeTilt);
     return state;
   };
@@ -202,7 +210,7 @@ async function boot(): Promise<void> {
     if (hud) {
       hud.textContent =
         `${state.beat.padEnd(10)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
-        `view ${view}   pairs ${state.pairDensity.toFixed(2)}  glow ${state.glow.toFixed(2)}  grains ${state.grains.toFixed(2)}  spread ×${(1 / state.scale).toFixed(0)}`;
+        `view ${view}   pairs ${state.pairDensity.toFixed(2)}  glow ${state.glow.toFixed(2)}  clock ×${state.clockRate.toFixed(2)}  wave ${state.wave.toFixed(2)}  grains ${state.grains.toFixed(2)}  zoom ×${(1 / state.scale).toFixed(0)}  stars ${state.stars.toFixed(2)}`;
     }
   };
 
