@@ -6,7 +6,9 @@
  *
  *   view   `flat`  a perspective preview from inside the medium (drag to look around)
  *          `dome`  the square dome master the planetarium plays (cine/domeCapture.ts), letterboxed
- *   keys   Space pause · ←/→ ±2 s (Shift ±10 s) · Home restart · V flat/dome · [ ] speed ×½/×2
+ *   keys   Space pause · ←/→ ±2 s (Shift ±10 s) · Home restart · V flat/dome · G guides · [ ] speed ×½/×2
+ *   guides dome view only, a DOM layer over the master (never recorded): rings, spokes, front safe zone,
+ *          eye-level horizon of the tilted dome — drift/domeGuides.ts
  *   url    ?t=<s> start time · ?view=flat|dome · ?speed=<x> · ?paused · ?markers (dome orientation check)
  *          ?record[&size=2048&fps=30] renders the act to the cine sink (npm run cine:sink), see drift/record.ts
  *
@@ -25,6 +27,7 @@ import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, type CrawlLayout } from './drift/undertime/crawl';
 import { UNDERTIME_CRAWL } from './drift/undertime/crawlText';
 import { recordDomeMaster, type DriftRecordOptions } from './drift/record';
+import { DomeGuides } from './drift/domeGuides';
 
 type View = 'flat' | 'dome';
 
@@ -102,6 +105,8 @@ async function boot(): Promise<void> {
   let speed = Number(q.get('speed') ?? 1) || 1;
   let paused = q.has('paused');
   let view: View = q.get('view') === 'dome' ? 'dome' : 'flat';
+  let guidesOn = q.get('guides') !== '0';
+  const guides = new DomeGuides(document.body);
   const clampT = (x: number): number => Math.min(total + 5, Math.max(0, x));
 
   window.addEventListener('keydown', (e) => {
@@ -110,6 +115,7 @@ async function boot(): Promise<void> {
     else if (e.code === 'ArrowRight') t = clampT(t + (e.shiftKey ? 10 : 2));
     else if (e.code === 'Home') t = 0;
     else if (e.code === 'KeyV') view = view === 'flat' ? 'dome' : 'flat';
+    else if (e.code === 'KeyG') guidesOn = !guidesOn;
     else if (e.code === 'BracketLeft') speed /= 2;
     else if (e.code === 'BracketRight') speed *= 2;
     else return;
@@ -150,6 +156,7 @@ async function boot(): Promise<void> {
       renderMaster();
       renderer.setViewport(0, 0, size.x, size.y);
     }
+    guides.update(view === 'dome' && guidesOn, p.domeTilt);
     if (hud) {
       hud.textContent =
         `${state.beat.padEnd(10)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
