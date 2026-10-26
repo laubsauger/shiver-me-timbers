@@ -1,8 +1,9 @@
 /**
  * The Drift at sea level (drift-narrative/wandering-on/direction.md, "Engine plan"): the game's own sea — its
- * FFT ocean, its sky and one island — in a scene of its own, drawn through the dome capture. A TEST ACT
- * (`drift.html?sea`) before Part C and Act 3 are built on it: it proves the sea renders through six cube faces
- * and that every frame is a pure function of show time, in any order.
+ * FFT ocean, one island, the raft — under Act 2's own air, in a scene of its own, drawn through the dome
+ * capture. Two uses: the TEST ACT (`drift.html?sea[&hour=h]`, one hour held, the flock flying) and PART C's
+ * first sketch on the show's clock (`PART_C`: golden hour into night). Every frame is a pure function of its
+ * time, in any order.
  *
  * Built by hand rather than with the game's `buildSea`, which always adds the systems that carry state from
  * frame to frame (foam, the wake, spray, rain) or assume one camera (clouds, the planar reflection). Here:
@@ -31,7 +32,7 @@ import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky } from './seaSky';
 import { bakeNightSky } from './nightSky';
 import { createRaft } from './raft';
-import { CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
+import { CIRRUS_H, CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
 import { sunlightCpu } from './seaSky';
 import { EARTH_R } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
@@ -43,6 +44,13 @@ const SEED = 2100;
 const EYE_HEIGHT = 3;
 /** golden hour (sunCycle.ts: ~14° up in the west at latitude 15) */
 const HOUR = 17.5;
+
+/**
+ * Part C's first sketch (direction.md C2–C4, before the dolphin, the radio and the beams): seafaring from
+ * golden hour through sunset and twilight into the Milky Way night. Only the light moves faster than real
+ * time, and gently (the Sun ~0.25°/s).
+ */
+export const PART_C = { total: 80, hour: (t: number): number => 17.55 + (Math.min(Math.max(t, 0), 80) / 80) * 1.25, flock: false };
 /** m, the face cameras' far plane: past the sea's rim (~4.6 km), short enough for the depth precision the
  * ocean's refraction thickness reads */
 const FAR = 12000;
@@ -53,6 +61,7 @@ const ISLAND_LEFT_OF_SUN = 35;
 const FLOCK_START = 5;
 /** the clouds: how much sky the field covers, and the wind that carries it (m/s, rad on the xz plane) */
 const CLOUD_COVER = 0.32;
+const CIRRUS_COVER = 0.45;
 const WIND = 7;
 const WIND_DIR = 0.6;
 /** m: the raft ahead of the eye, and to its right */
@@ -62,20 +71,21 @@ const RAFT_RIGHT = 1.5;
 export interface SeaAct {
   readonly scene: THREE.Scene;
   readonly far: number;
-  /** s, the test act's length */
+  /** s, the act's length */
   readonly total: number;
   /** the eye's adaptation to the light (multiplies the show's exposure) */
   readonly exposure: number;
-  /** resolves once its data (the flock's keys) is loaded */
+  /** resolves once its data (the clouds' noise, the flock's keys) is loaded */
   readonly ready: Promise<void>;
   /** put the sea into the state of time t and the eye where it watches from */
   update(t: number, eye: THREE.Object3D, renderer: THREE.WebGPURenderer): void;
   setPixelAngle(rad: number): void;
 }
 
-/** `hour`: the time of day the act holds (default golden hour) */
-export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } = {}): SeaAct {
-  const hour = o.hour ?? HOUR;
+/** `hour`: the time of day the act holds, or follows (default golden hour); `flock`: the sandpipers fly */
+export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number | ((t: number) => number); flock?: boolean; total?: number } = {}): SeaAct {
+  const hourAt = typeof o.hour === 'function' ? o.hour : (): number => (o.hour as number | undefined) ?? HOUR;
+  const hour = hourAt(0);
   const scene = new THREE.Scene();
   scene.name = 'drift-sea';
   // the sky retints it every update; the ocean and the island melt into its colour at range
@@ -86,6 +96,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
   const sky = createSky({ scene });
   scene.backgroundNode = null;
   // the Sun's own direction (the rig's key turns to the Moon at night), and the dome's front toward its bearing
+  // at the act's start (the eye does not turn after it)
   const sun = new THREE.Vector3(...sunDirection(hour, skyParams.latitude));
   const yaw = Math.atan2(-sun.x, -sun.z);
   const front = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
@@ -99,6 +110,8 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
     sunBase: uniform(new THREE.Vector3()),
     sunTop: uniform(new THREE.Vector3()),
     ambient: uniform(new THREE.Vector3()),
+    cirrusCover: uniform(CIRRUS_COVER),
+    sunCirrus: uniform(new THREE.Vector3()),
   };
   const seaSky = createSeaSky(FAR * 0.8, bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0)), {
     data: cloudData,
@@ -154,7 +167,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
     skyLight: uniform(new THREE.Vector3()),
   };
   // (its shader bakes the key count in: built once the keys are loaded)
-  const ready = flockData.ready.then(() => {
+  const ready = o.flock === false ? Promise.resolve() : flockData.ready.then(() => {
     const flock = createFlock(flockData, fu as unknown as FlockUniforms);
     flock.frustumCulled = false;
     scene.add(flock);
@@ -167,7 +180,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
   return {
     scene,
     far: FAR,
-    total: 60,
+    total: o.total ?? 60,
     get exposure() {
       return seaSky.exposure;
     },
@@ -179,9 +192,12 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
       eye.position.set(0, EYE_HEIGHT, 0);
       eye.rotation.set(0, yaw, 0);
       eye.updateMatrixWorld();
-      skyParams.timeOfDay = hour;
+      const h = hourAt(t);
+      sun.set(...sunDirection(h, skyParams.latitude));
+      // (the sail reads the hour from skyParams for its own Sun)
+      skyParams.timeOfDay = h;
       sky.setShadowFocus(0, 0, 0);
-      sky.update(hour);
+      sky.update(h);
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
       // the water and the sand below), the haze at the horizon
       seaSky.update(eye.position, sun);
@@ -193,6 +209,7 @@ export function createSea(renderer: THREE.WebGPURenderer, o: { hour?: number } =
       };
       atCloud(CLOUD_BASE, cu.sunBase.value);
       atCloud(CLOUD_TOP, cu.sunTop.value);
+      atCloud(CIRRUS_H, cu.sunCirrus.value);
       cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       sky.sunLight.color.copy(seaSky.sunColour);
       sky.sunLight.intensity = SUN_E;

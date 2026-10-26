@@ -38,7 +38,7 @@ import { faceSizeFor, recordDomeMaster, type DriftRecordOptions } from './drift/
 import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
-import { createSea } from './drift/wandering/sea';
+import { PART_C, createSea } from './drift/wandering/sea';
 
 type View = 'flat' | 'dome';
 
@@ -136,10 +136,16 @@ async function boot(): Promise<void> {
   const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
   const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
-  // ?sea: the sea-level test act (drift/wandering/sea.ts) in a scene of its own, on its own clock
+  // THE SEA (drift/wandering/sea.ts), in a scene of its own: Part C's first sketch after Get the Drift, through a
+  // dip to black (the descent's hand-over, C1, is not built yet) — or, with ?sea[&hour=h], the sea test act
+  // alone on its own clock
   const seaQuery = new URLSearchParams(location.search);
-  const sea = seaQuery.has('sea') ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : null;
-  const total = sea ? sea.total : act2Start + arrival.total;
+  const seaTest = seaQuery.has('sea');
+  const sea = seaTest ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined }) : createSea(renderer, PART_C);
+  const seaStart = seaTest ? 0 : act2Start + arrival.total;
+  const total = seaStart + sea.total;
+  /** s each side of the cut into the sea the picture dips to black over */
+  const DIP = 1.5;
   const crawlLayout = (): CrawlLayout => ({
     elTop: p.crawlElTop,
     sink: p.crawlSink,
@@ -166,7 +172,7 @@ async function boot(): Promise<void> {
   };
   // the crawl lives in master space, so it shows in the dome view only
   // (the sea acts: a camera's contrast and colour over AgX's flat curve — references/sea-golden-hour-sky)
-  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: sea ? { saturation: 1.2, contrast: 1.12 } : undefined });
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: true });
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;
@@ -197,15 +203,24 @@ async function boot(): Promise<void> {
   const eyeWas = new THREE.Vector3();
   /** put the world into the state of act time `at` — the one place a frame's content is decided */
   let act2: ArrivalState | null = null;
+  /** this frame is the sea's; and the dip to black about the cut into it (1 = none) */
+  let seaNow = false;
+  let dip = 1;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
-    if (sea) {
-      sea.update(at, eye, renderer);
+    seaNow = at >= seaStart;
+    dip = seaTest ? 1 : Math.min(1, Math.abs(at - seaStart) / DIP);
+    dip = dip * dip * (3 - 2 * dip);
+    if (seaNow) {
+      sea.update(at - seaStart, eye, renderer);
+      dome.setGrade(1.2, 1.12);
       dome.setNear(0.05);
       dome.setFar(sea.far);
       dome.setFaceSize(faceOverride ?? p.domeFace);
       return state;
     }
+    dome.setGrade(1, 1);
+    dome.setFar(1e6);
     const t2 = at - act2Start;
     act2 = t2 >= 0 ? arrival.update(t2, eye.position) : null;
     if (!act2) eye.position.set(...eyePath(at, p));
@@ -238,16 +253,16 @@ async function boot(): Promise<void> {
   };
   /** the master into whatever is bound, filling the current viewport */
   const look = (): DomeLook => ({
-    exposure: p.exposure * (sea ? sea.exposure : 1),
+    exposure: p.exposure * (seaNow ? sea.exposure : 1) * dip,
     bloomStrength: p.bloomStrength,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,
-    overlayRadiance: sea ? 0 : p.crawlRadiance,
+    overlayRadiance: seaNow ? 0 : p.crawlRadiance,
   });
   // the sea's sky is a background node, which never forces a clear: with autoClear off the faces kept the
   // last frame's colour and depth
   const stage = (draw: (s: THREE.Scene) => void): void => {
-    if (!sea) return draw(scene);
+    if (!seaNow) return draw(scene);
     renderer.autoClear = true;
     draw(sea.scene);
     renderer.autoClear = false;
@@ -256,7 +271,7 @@ async function boot(): Promise<void> {
   const setPixelAngle = (rad: number): void => {
     field.setPixelAngle(rad);
     arrival.setPixelAngle(rad);
-    sea?.setPixelAngle(rad);
+    sea.setPixelAngle(rad);
   };
   const renderMaster = (): void => {
     setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
@@ -304,7 +319,7 @@ async function boot(): Promise<void> {
     guides.update(view === 'dome' && guidesOn, p.domeTilt);
     if (hud) {
       const a2 = act2 as ArrivalState | null;
-      const where = a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
+      const where = seaNow ? 'the sea · part C sketch' : a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
       hud.textContent =
         `${where.padEnd(26)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
         (a2 && t >= act1
@@ -344,7 +359,7 @@ async function boot(): Promise<void> {
 
   // the Earth's maps (~150 MB of satellite data) load in the background; nothing may be captured before
   await arrival.ready;
-  await sea?.ready;
+  await sea.ready;
   (window as unknown as Record<string, unknown>).__drift = {
     app,
     /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */

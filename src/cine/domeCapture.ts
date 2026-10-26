@@ -48,10 +48,11 @@ export interface DomeCaptureOptions {
   /** baked into the shader; AgX keeps saturated emitters cleaner than ACES */
   toneMapping?: THREE.ToneMapping;
   /**
-   * Optional grade after the tone map: saturation about the luminance, and contrast as a power about mid
-   * grey (a camera's curve; AgX alone is flat). Absent, the present pass is exactly the tone map.
+   * A grade after the tone map, set per frame (`setGrade`): saturation about the luminance, and contrast as a
+   * power about mid grey (a camera's curve; AgX alone is flat). Absent, the present pass is exactly the tone
+   * map and `setGrade` does nothing.
    */
-  grade?: { saturation: number; contrast: number };
+  grade?: boolean;
 }
 
 export interface DomeLook {
@@ -78,6 +79,8 @@ export class DomeCapture {
   private readonly uTilt = uniform(0);
   private readonly uView = uniform(new THREE.Matrix3());
   private readonly uExposure = uniform(1);
+  private readonly uSaturation = uniform(1);
+  private readonly uContrast = uniform(1);
   private readonly uOverlayRadiance = uniform(1);
 
   constructor(opts: DomeCaptureOptions) {
@@ -122,8 +125,8 @@ export class DomeCapture {
     let graded = mapped;
     if (opts.grade) {
       const luma = mapped.dot(vec3(0.2126, 0.7152, 0.0722));
-      const saturated = mix(vec3(luma), mapped, opts.grade.saturation).max(0);
-      graded = saturated.div(0.18).pow(vec3(opts.grade.contrast)).mul(0.18).min(1);
+      const saturated = mix(vec3(luma), mapped, this.uSaturation).max(0);
+      graded = saturated.div(0.18).pow(vec3(this.uContrast)).mul(0.18).min(1);
     }
     present.fragmentNode = vec4(graded, 1);
     this.presentQuad = new THREE.QuadMesh(present);
@@ -149,6 +152,12 @@ export class DomeCapture {
       c.near = near;
       c.updateProjectionMatrix();
     }
+  }
+
+  /** the grade for the frames that follow (see `grade`): 1, 1 is none */
+  setGrade(saturation: number, contrast: number): void {
+    this.uSaturation.value = saturation;
+    this.uContrast.value = contrast;
   }
 
   /** Far clip of the six face cameras (the sea's acts need depth precision a 1e6 far plane spends) */

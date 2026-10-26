@@ -15,6 +15,10 @@
  *
  * Geometry: the layer is a spherical shell (BASE–TOP above the sea) on the planet's curvature, so it closes on
  * the horizon; beyond MAX_DIST it has gone into the haze.
+ *
+ * Above it, a thin CIRRUS layer at CIRRUS_H (`cirrus`): one sample per ray, streaked along the wind, lit by the
+ * sunlight 8 km up — it keeps the Sun until it is ~3° down, the pink and orange after sunset the low cumulus
+ * (dark by −2°) cannot give (references/sea-golden-hour-sky, sea-dusk-twilight).
  */
 import * as THREE from 'three/webgpu';
 import { If, Loop, Break, exp, float, fract, mix, screenCoordinate, smoothstep, sqrt, texture3D, vec3 } from 'three/tsl';
@@ -26,6 +30,12 @@ type V3 = THREE.Node<'vec3'>;
 export const CLOUD_BASE = 1200;
 export const CLOUD_TOP = 2800;
 const R = 6.371e6;
+/** m above the sea: the cirrus sheet; m: its streaks' length and width */
+export const CIRRUS_H = 8000;
+const CIRRUS_LONG = 30000;
+const CIRRUS_WIDE = 6000;
+/** m: the patches the cirrus gathers in (most of the sky has none) */
+const CIRRUS_PATCH = 90000;
 /** m: beyond, the clouds have gone into the haze */
 const MAX_DIST = 45000;
 /** m: the shape volume's tile (cells ~1.5 km), the detail's, the coverage field's */
@@ -88,6 +98,9 @@ export interface CloudUniforms {
   sunTop: V3;
   /** the sky's light on the layer (irradiance / π, linear) */
   ambient: V3;
+  /** the cirrus: how much of the sky it covers (0..1), and the sunlight on it (as sunBase) */
+  cirrusCover: F;
+  sunCirrus: V3;
 }
 
 const sat = (x: F): F => x.clamp(0, 1) as F;
@@ -176,4 +189,34 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, qual
   });
   const alpha = T.oneMinus();
   return { light: light as unknown as V3, alpha: alpha as F, dist: distW.div(alpha.max(1e-4)) as F };
+}
+
+/**
+ * The cirrus sheet along a ray from the eye `o` (m) in direction d: its light, opacity and distance, from one
+ * sample where the ray meets CIRRUS_H. Streaks run along the wind; thin (an optical depth of at most ~0.6), lit
+ * mostly forward (ice scatters ahead) with the sky's light behind it.
+ */
+export function cirrus(o: V3, d: V3, data: CloudData, U: CloudUniforms): { light: V3; alpha: F; dist: F } {
+  const r0 = float(R).add(o.y);
+  const mu = d.y;
+  const k = float(CIRRUS_H).sub(o.y).mul(float(2 * R + CIRRUS_H).add(o.y));
+  const t = k.div(r0.mul(mu.max(0)).add(sqrt(r0.mul(r0).mul(mu.mul(mu)).add(k))));
+  const p = o.add(d.mul(t)).add(vec3(U.wind.x, 0, U.wind.y).mul(U.time.mul(2.5)));
+  // along and across the wind
+  const w = vec3(U.wind.x, 0, U.wind.y).normalize();
+  // warped, so the streaks bend and wander instead of running in ranks
+  const warp = texture3D(data.shape, vec3(p.x.div(45000), 0.19, p.z.div(45000))).rg.sub(0.5);
+  const along = p.x.mul(w.x).add(p.z.mul(w.z)).add(warp.x.mul(3000));
+  const across = p.z.mul(w.x).sub(p.x.mul(w.z)).add(warp.y.mul(2200));
+  const streak = texture3D(data.shape, vec3(along.div(CIRRUS_LONG), 0.71, across.div(CIRRUS_WIDE)));
+  const fine = texture3D(data.detail, vec3(along.div(CIRRUS_LONG / 9), 0.29, across.div(CIRRUS_WIDE / 6)));
+  const patch = smoothstep(0.42, 0.7, texture3D(data.shape, vec3(p.x.div(CIRRUS_PATCH), 0.53, p.z.div(CIRRUS_PATCH))).b);
+  const fibres = texture3D(data.detail, vec3(along.div(CIRRUS_LONG / 4), 0.61, across.div(CIRRUS_WIDE / 5))).g;
+  const sheet = smoothstep(U.cirrusCover.oneMinus(), U.cirrusCover.oneMinus().add(0.35), streak.g.mul(0.65).add(fine.r.mul(0.2)).add(fibres.mul(0.15))).mul(patch);
+  const tau = sheet.mul(0.6).mul(smoothstep(0, 0.02, mu)).mul(smoothstep(MAX_DIST * 3, MAX_DIST, t));
+  const cosT = d.dot(U.sun);
+  const hg = float((1 - 0.49) / (4 * Math.PI)).div(float(1.49).sub(cosT.mul(1.4)).pow(1.5));
+  const alpha = float(1).sub(exp(tau.negate()));
+  const light = U.sunCirrus.mul(hg.mul(0.8).add(0.2 / (4 * Math.PI)).mul(Math.PI)).add(U.ambient.mul(0.7)).mul(alpha);
+  return { light: light as V3, alpha: alpha as F, dist: t as F };
 }

@@ -11,7 +11,7 @@
 import * as THREE from 'three/webgpu';
 import { Fn, acos, cameraPosition, cubeTexture, exp, float, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
-import { REFLECTED, cloudMarch, type CloudData, type CloudUniforms } from './clouds';
+import { REFLECTED, cirrus, cloudMarch, type CloudData, type CloudUniforms } from './clouds';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
@@ -153,9 +153,13 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
   // the clouds over the sky by their opacity; the haze in front of them takes them into the sky's own colour
   const withClouds = (behind: V3, light: V3, d: V3, quality?: typeof REFLECTED): V3 => {
     if (!clouds) return behind;
+    // the cirrus first (it is behind the cumulus), then the cumulus over it
+    const ci = cirrus(cameraPosition, d, clouds.data, clouds.uniforms);
+    const kc = exp(ci.dist.div(-CLOUD_HAZE * 3));
+    const sky = behind.mul(ci.alpha.oneMinus()).add(ci.light.mul(kc)).add(light.mul(kc.oneMinus()).mul(ci.alpha));
     const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms, quality);
     const k = exp(c.dist.div(-CLOUD_HAZE));
-    return mix(behind, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha) as V3;
+    return mix(sky, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha) as V3;
   };
   const dome = (dir: V3): V3 => {
     const d = normalize(dir);
