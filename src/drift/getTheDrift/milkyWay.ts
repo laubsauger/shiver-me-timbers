@@ -164,6 +164,8 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   // and many more, the stars out to a few thousand light years in the thin disk — they crowd toward the
   // band, as in every wide Milky Way photograph (references: milky-way, star density rising to the plane)
   const NEARBY = 14000;
+  /** rad, a star's drawn width: 0.64 px of a 1024 dome master (576 px faces), the look the field was set at */
+  const STAR_SIGMA = (0.64 * Math.PI) / 2 / 576;
   const DISC = 50000;
   const COUNT = NEARBY + DISC;
   const r = rng(9001);
@@ -191,7 +193,12 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   const spacing = 0.003 * g.radius;
   const D0 = 0.014 * g.radius;
   const flux = min(S.w.mul(float(D0).div(dist.max(spacing * 0.15)).pow(2)), 60);
-  const quad = dist.mul(u.pixelAngle).mul(4);
+  // a star's LIGHT is set in angle, not in pixels: drawn STAR_SIGMA rad wide (or ~0.64 px where pixels are
+  // coarser), its peak scaled so the total is the same at every resolution — at a fixed pixel size a star
+  // carried a quarter of its light at 2160 that it had at 1024, and the streaming stars all but vanished
+  const sigma = max(u.pixelAngle.mul(0.64), STAR_SIGMA);
+  const payback = float(STAR_SIGMA).div(sigma).pow(2);
+  const quad = dist.mul(sigma).mul(6.25);
   const temp = fract(k.mul(0.61803398875));
   const tint = mix(mix(vec3(1, 0.72, 0.5), vec3(1, 0.95, 0.88), smoothstep(0, 0.55, temp)), vec3(0.72, 0.82, 1), smoothstep(0.75, 1, temp));
   const starMat = new THREE.NodeMaterial();
@@ -203,7 +210,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   starMat.colorNode = Fn(() => {
     const rr2 = length(uv().sub(0.5)).mul(2);
     const core = exp(rr2.div(0.32).pow(2).negate());
-    return vec4(tint.mul(flux).mul(core).mul(u.local).mul(0.25).mul(clear(normalize(toStar))), 1);
+    return vec4(tint.mul(flux).mul(payback).mul(core).mul(u.local).mul(0.25).mul(clear(normalize(toStar))), 1);
   })();
   starMat.name = 'drift-local-stars';
   const stars = billboardMesh(starMat, COUNT, 'drift-local-stars');
