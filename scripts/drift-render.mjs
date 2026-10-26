@@ -8,9 +8,11 @@
  * with `ffmpeg -f concat -c copy` — every clip starts on a keyframe, so nothing is re-encoded. One serial tab left
  * the GPU and the CPU mostly idle (~5 fps at 1024²); the lanes fill both.
  *
- *   node scripts/drift-render.mjs --size 2048 --fps 30 [--from 0] [--to <s>] [--lanes N]
+ *   node scripts/drift-render.mjs --size 1024 --fps 30 [--from 0] [--to <s>] [--lanes 2] [--allow-lanes]
  *        [--out out/drift/<name>.mp4] [--codec x264|prores] [--port 5288]
- *        [--crf 12] [--preset slow] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5]
+ *        [--crf 18] [--preset medium] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5]
+ *
+ *   --lanes    parallel pages, at most 2 unless --allow-lanes (see MACHINE GUARDS)
  *
  *   --blur     motion-blur sub-frames per frame (1 = none; 8 for masters), averaged in linear HDR
  *   --shutter  fraction of the frame interval the shutter is open (0.5 = 180°)
@@ -32,8 +34,8 @@
  * adds a SwiftShader fallback adapter.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { cpus } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { cpus, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -55,11 +57,11 @@ const SIZE = num('size', 2048);
 const FPS = num('fps', 30);
 const FROM = num('from', 0);
 const TO_ARG = arg('to', null);
-const LANES = Math.max(1, Math.floor(num('lanes', 4)));
+const LANES = Math.max(1, Math.floor(num('lanes', 2)));
 const CODEC = arg('codec', 'x264');
 const PORT = num('port', 5288);
-const CRF = arg('crf', '12');
-const PRESET = arg('preset', 'slow');
+const CRF = arg('crf', '18');
+const PRESET = arg('preset', 'medium');
 const INFLIGHT = Math.max(1, Math.floor(num('inflight', 3)));
 const QUEUE = Math.max(0, Math.floor(num('queue', 8)));
 const KEEP = argv.includes('--keep');
@@ -67,6 +69,51 @@ const BLUR = Math.max(1, Math.floor(num('blur', 1)));
 const SHUTTER = num('shutter', 0.5);
 /** no lane progress for this long = a hung lane (the first frame includes boot and shader compile) */
 const STALL_MS = 180_000;
+
+// ------------------------------------------------------------------------------------------- MACHINE GUARDS
+// A render shares the machine with whoever is working on it. Four lanes of Chromium plus ProRes once filled a
+// 32 GB machine's RAM and its disk to the last 200 MB and crashed it (2026-10-26). So: at most 2 lanes unless
+// asked for explicitly with --allow-lanes, one render at a time (a lock file), a disk check before the first
+// frame, and partial files removed when a render fails.
+const MAX_LANES = argv.includes('--allow-lanes') ? 8 : 2;
+if (LANES > MAX_LANES) throw new Error(`--lanes ${LANES}: more than ${MAX_LANES} needs --allow-lanes (each lane is a full Chromium on the GPU; ${(totalmem() / 2 ** 30).toFixed(0)} GB RAM here)`);
+/** bytes per pixel per frame on disk, generous: ProRes 422 HQ measured 0.54 at 1024² (mostly black); x264 is far smaller */
+const BYTES_PER_PX = { x264: 0.15, prores: 0.8 };
+/** never leave less than this free */
+const DISK_RESERVE = 20 * 2 ** 30;
+const LOCK = resolve(ROOT, 'out/drift/.render.lock');
+let laneDir = null;
+const releaseLock = () => {
+  try {
+    if (existsSync(LOCK) && readFileSync(LOCK, 'utf8').trim() === String(process.pid)) rmSync(LOCK);
+  } catch {
+    /* best effort */
+  }
+};
+function takeLock() {
+  mkdirSync(dirname(LOCK), { recursive: true });
+  if (existsSync(LOCK)) {
+    const pid = Number(readFileSync(LOCK, 'utf8').trim());
+    let alive = false;
+    try {
+      process.kill(pid, 0);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    if (alive) throw new Error(`another render is running (pid ${pid}, ${LOCK}) — one at a time`);
+  }
+  writeFileSync(LOCK, String(process.pid));
+}
+function checkDisk(dir, frames) {
+  const st = statfsSync(dir);
+  const free = st.bavail * st.bsize;
+  // lane clips and the joined file both exist for a moment: twice the estimate
+  const need = 2 * frames * SIZE * SIZE * BYTES_PER_PX[CODEC] + DISK_RESERVE;
+  const gb = (b) => (b / 2 ** 30).toFixed(1);
+  if (free < need) throw new Error(`not enough disk: ${gb(free)} GB free, this render needs ~${gb(need - DISK_RESERVE)} GB plus a ${gb(DISK_RESERVE)} GB reserve`);
+  return { free, need };
+}
 if (CODEC !== 'x264' && CODEC !== 'prores') throw new Error(`--codec ${CODEC}: x264 | prores`);
 const EXT = CODEC === 'prores' ? 'mov' : 'mp4';
 
@@ -105,6 +152,7 @@ const teardown = () =>
       sinks.map((s) => (s.exitCode !== null ? Promise.resolve() : new Promise((r) => (s.once('exit', r), s.kill('SIGTERM'))))),
     );
     await vite?.close();
+    releaseLock();
   })());
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
@@ -114,6 +162,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 }
 
 async function main() {
+  takeLock();
   // -------------------------------------------------------------------------------------------- the dev server
   let base = `http://localhost:${PORT}`;
   const ours = await fetch(`${base}/drift.html`)
@@ -182,8 +231,11 @@ async function main() {
   const OUT = resolve(ROOT, arg('out', `out/drift/${name}.${EXT}`));
   if (!OUT.endsWith(`.${EXT}`)) throw new Error(`--out must end in .${EXT} for --codec ${CODEC}`);
   const LANE_DIR = join(dirname(OUT), `.lanes-${name}`);
+  const disk = checkDisk(dirname(OUT), F);
+  log(`disk: ${(disk.free / 2 ** 30).toFixed(1)} GB free, this render ~${((disk.need - DISK_RESERVE) / 2 ** 30).toFixed(1)} GB at most`);
   rmSync(LANE_DIR, { recursive: true, force: true }); // our own scratch from an earlier run of this name
   mkdirSync(LANE_DIR, { recursive: true });
+  laneDir = LANE_DIR;
   const threads = Math.max(1, Math.floor(cpus().length / N));
   log(`${F} frames [${FROM}, ${TO}) s at ${FPS} fps, ${SIZE}² ${CODEC}${CODEC === 'x264' ? ` crf ${CRF} ${PRESET}, ${threads} threads/lane` : ''}, ${N} lane(s), GPU ${probed.gpu}`);
   for (const l of lanes) log(`  lane ${l.k}: frames [${l.n0}, ${l.n1}) = t [${l.from.toFixed(3)}, ${l.to.toFixed(3)}) s${l.ulp > 0 ? `  (${l.ulp} t values off a serial take's in the last bit)` : ''}`);
@@ -336,10 +388,16 @@ async function main() {
 }
 
 main().then(
-  () => process.exit(0),
+  () => {
+    releaseLock();
+    process.exit(0);
+  },
   async (e) => {
     console.error(`\n[render] FAILED: ${e?.stack ?? e}`);
     await teardown();
+    // a failed render leaves nothing behind (its partial lane clips can be gigabytes) unless --keep
+    if (laneDir && !KEEP) rmSync(laneDir, { recursive: true, force: true });
+    releaseLock();
     process.exit(1);
   },
 );

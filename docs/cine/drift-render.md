@@ -15,11 +15,26 @@ npm run drift:render -- --size 1024 --to 4 --lanes 1 --crf 0  # lossless, for co
 |---|---|---|
 | `--size` / `--fps` | 2048 / 30 | square master, frame rate |
 | `--from` / `--to` | 0 / act end | seconds. The show's end comes from the page (`__drift.total`) |
-| `--lanes` | 4 | parallel pages. Each one gets its own browser, sink and encoder, and x264 gets `cores / lanes` threads per lane |
+| `--lanes` | 2 | parallel pages, at most 2 unless `--allow-lanes` (machine guard, below). Each one gets its own browser, sink and encoder, and x264 gets `cores / lanes` threads per lane |
 | `--codec` | x264 | `x264` gives .mp4 (crf 12, preset slow, like the cine sink). `prores` gives .mov |
 | `--out` | `out/drift/undertime_<size>_<from>-<to>s.<ext>` |
 | `--port` | 5288 | the dev server used for this render (see below) |
-| `--crf` `--preset` `--inflight` `--queue` | 12, slow, 3, 8 | passed to the sink / page. `--keep` keeps the lane clips |
+| `--crf` `--preset` `--inflight` `--queue` | 18, medium, 3, 8 | passed to the sink / page. `--keep` keeps the lane clips |
+
+## Machine guards
+
+A render shares the machine with whoever is working on it. On 2026-10-26 four lanes of Chromium plus ProRes
+output filled a 32 GB machine's RAM and its disk to the last 200 MB, and crashed it. Since then:
+
+- at most 2 lanes unless `--allow-lanes` is passed;
+- one render at a time: `out/drift/.render.lock` holds the running render's pid;
+- before the first frame the driver estimates the output size (x264 0.15, ProRes 0.8 bytes per pixel per
+  frame, doubled for lane clips plus the joined file) and refuses to start unless that plus a 20 GB reserve is
+  free;
+- a failed render deletes its partial lane clips (unless `--keep`).
+
+Previews are x264 mp4 at 1024² with these defaults. ProRes, 2048²+ and motion blur are for masters, after
+the art direction is approved.
 
 ## How it works
 
