@@ -230,3 +230,52 @@ export function eyePath(t: number, p: DriftParams): Vec3 {
   const k = smooth((t - starts.remain) / Math.max(1e-6, p.remain)) * p.approach;
   return [e[0] + (d[0] / n) * k, e[1] + (d[1] / n) * k, e[2] + (d[2] / n) * k];
 }
+
+export interface WebFlight {
+  /** the eye relative to the hero knot in the web's box (box units, world-aligned) */
+  offset: Vec3;
+  /** world units per box */
+  box: number;
+  /** where the hero grain is now (the flight line's turn carries it slowly across the dome) */
+  pivot: Vec3;
+  /** 0..1 how much of the web's gas shows (none while the eye is still inside the grain's knot) */
+  presence: number;
+}
+
+/**
+ * THE WEB FLIGHT (webVolume.ts): the zoom's scale change about the hero grain, seen from inside the web's
+ * box, is the eye flying back out of the grain's knot — `webReach` box units by the zoom's end — and the
+ * line it flies along turns slowly (`webTurn` degrees about the dome's axis, on through the gather beat)
+ * so the filaments pass with parallax rather than only flowing into a point. The turn carries the hero grain
+ * across the dome by the same angle, under 1°/s.
+ */
+export function webFlight(t: number, p: DriftParams): WebFlight {
+  const { starts } = beatStarts(p);
+  const scale = undertimeState(t, p).scale;
+  const D = Math.max(1e-6, p.zoomDecades);
+  const eye = eyePath(starts.zoom, p);
+  const hero = heroGrainPosition(p);
+  const rel: Vec3 = [eye[0] - hero[0], eye[1] - hero[1], eye[2] - hero[2]];
+  const d0 = Math.hypot(rel[0], rel[1], rel[2]) || 1;
+  // the flight line turns about the dome's axis (Rodrigues)
+  const a = domeBasis(p.domeTilt).axis;
+  // the turn runs on past the zoom, eased in and out, until the next act takes over (5 s before the end):
+  // the filaments keep sliding past with parallax instead of freezing for the gather beat
+  const { total } = beatStarts(p);
+  const turnLen = Math.max(1e-6, total - 5 - starts.zoom);
+  const th = ((p.webTurn * Math.PI) / 180) * plateau(clamp01((t - starts.zoom) / turnLen), 4 / turnLen);
+  const c = Math.cos(th);
+  const s = Math.sin(th);
+  const ad = a[0] * rel[0] + a[1] * rel[1] + a[2] * rel[2];
+  const cr: Vec3 = [a[1] * rel[2] - a[2] * rel[1], a[2] * rel[0] - a[0] * rel[2], a[0] * rel[1] - a[1] * rel[0]];
+  const u: Vec3 = [0, 1, 2].map((i) => (rel[i] * c + cr[i] * s + a[i] * ad * (1 - c)) / d0) as Vec3;
+  const reach = p.webReach * Math.pow(10, -D) / scale;
+  return {
+    offset: u.map((x) => x * reach) as Vec3,
+    box: d0 / reach,
+    pivot: [0, 1, 2].map((i) => hero[i] + (rel[i] - u[i] * d0)) as Vec3,
+    // the volume's cells are ~0.004 box units and the hero knot's halo ~0.02: closer in, the eye sits inside
+    // one blur of gas (a grey wash), so the gas comes up as the eye clears the halo
+    presence: smooth((reach - 0.012) / 0.04),
+  };
+}

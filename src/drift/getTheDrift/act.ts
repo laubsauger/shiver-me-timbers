@@ -125,7 +125,10 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       const hitT = disc > 0 ? -bb - Math.sqrt(disc) : -bb;
       waveOrigin.set(eye.x + ahead[0] * hitT - centre.x, eye.y + ahead[1] * hitT - centre.y, eye.z + ahead[2] * hitT - centre.z).normalize();
       const L = lifeState(t, p);
-      const drift = { up, east, north, time: Math.max(0, t - lift), presence: Math.min(1, Math.max(0, (t - lift) / 6)) };
+      const drift = {
+        up, east, north, time: Math.max(0, t - lift), presence: Math.min(1, Math.max(0, (t - lift) / 6)),
+        clear: smoothstep01((t - starts.flood - 0.35 * p.flood) / (0.65 * p.flood + p.drift2 * 0.3)),
+      };
       earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
       milky.update({
         volume: s.volume * (1 - 0.4 * glare), local: s.local * (1 - 0.55 * glare), sunStar: s.sunStar * (1 - handover),

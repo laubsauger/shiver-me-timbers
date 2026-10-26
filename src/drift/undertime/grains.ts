@@ -1,51 +1,26 @@
 /**
- * Undertime's remainder: the grains of matter the cancelling left (U4), the web they lie on (U5), and the
- * first stars it makes (U6).
+ * Undertime's remainder: the grains of matter the cancelling left (U4) and the first stars (U6). The web
+ * they lie on (U5) is the volume of webVolume.ts.
  *
- * SELF-SIMILAR PULL-BACK. Scaling a world about the eye changes nothing the eye can see, so the zoom scales
- * the world about the HERO GRAIN in front — which is the camera flying away from it at exponential speed:
- * everything flows toward the grain and shrinks. To keep the sky populated, grains come in LEVELS: level L
- * is the same kind of field ten times larger (positions and sizes ×10^L, its own rotation), so as level L
- * shrinks into the pivot, level L+1 arrives from all around at the size L had. A level fades in and out by
- * its apparent scale a = 10^L · s, so the flow reads as one endless pull-back, never a cut.
+ * THE REMAINDER is a scatter about the HERO GRAIN in front: a few grains, then a few more; as the zoom pulls
+ * back (the world scales about the grain, timeline.ts) they flow into it and the web's gas takes over.
  *
- * THE WEB. Level 0 is the scatter the wave left; higher levels lie increasingly on filaments between the
- * knots of a jittered lattice (a cosmic web, cheaply: neighbours on a lattice are always near each other).
- * In the gather beat the knots of the levels that fill the sky at the end of the zoom ignite one by one as
- * the first stars; the hero grain, which everything converged on, is the first.
- *
- * COMFORT. The pivot never moves on the dome: the eye has a fixed point to rest on while everything else
- * flows toward it (the timeline caps the flow rate, tests/undertimeTimeline.test.ts).
+ * THE FIRST STARS ignite at the web's knots — its density peaks (scripts/drift-web-volume.py) — one by one
+ * through the gather beat, placed by the same flight that places the gas (`eyePat`, `box`: the eye's place
+ * in the web's box and its size in the world). The hero grain, which everything converged on, is the last.
  *
  * Every size has a floor of about a pixel (the minimum projected width tracks.ts uses), paid back as
  * brightness: a receding grain becomes a fainter point instead of a flickering sub-pixel one.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, PI, abs, attribute, clamp, cos, exp, float, fract, hash, instanceIndex, length, max, min, mix, pow, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, PI, abs, attribute, clamp, cos, exp, float, hash, instanceIndex, length, max, min, mix, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { billboardMesh, eyeFacing } from './billboard';
-import { buildWeb, placeGrains, rng, type Web } from './web';
+import { rng } from './web';
+import { patternToWorld, type WebKnot } from './webVolume';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
-
-/**
- * Which levels exist for a zoom of `decades`: level D fills the sky at the end and level D + 1 is arriving,
- * so the grains need levels 0..D+1 and the stars those two.
- */
-export function grainLevels(decades: number): { count: number; stars: number[] } {
-  const D = Math.max(1, Math.round(decades));
-  return { count: D + 2, stars: [D, D + 1] };
-}
-
-/** share of a level's grains that lie on its web: level 0 is the wave's scatter, the web emerges above it */
-const webShare = (L: number): number => (L === 0 ? 0 : L === 1 ? 0.6 : 0.92);
-const levelWeb = (L: number): Web => buildWeb(1009 + L * 7919, 46);
-/** s for a grain to slide its span along the web, and the span (pattern units) */
-const FLOW_PERIOD = 14;
-const FLOW_SPAN = 0.035;
-/** the web's light, shared out over the grains (a grain carried 1 when the web was 26 000 grains of dots) */
-const GRAIN_LIGHT = 80000;
 
 export interface GrainUniforms extends PocketUniforms {
   time: F;
@@ -68,34 +43,35 @@ export interface GrainUniforms extends PocketUniforms {
   /** the grains' colour (matter warmed toward starlight) */
   warm: V3;
   star: V3;
+  /** the eye's place in the web's box, and the box's size in the world (timeline.ts webFlight) */
+  eyePat: V3;
+  box: F;
 }
 
 /**
- * World positions of the star levels' knots at the END of the pull-back (scale 10^−decades): where Act 2's
- * galaxies open (drift/getTheDrift/galaxies.ts), so the first stars become the first galaxies in place.
+ * World positions of the web's knots near the eye at the END of the pull-back (the flight's `eyePat` and
+ * `box` then): where Act 2's galaxies open (drift/getTheDrift/galaxies.ts), so the first stars become the
+ * first galaxies in place. The densest quarter are level 1 (the bigger galaxies).
  */
-export function finalKnots(decades: number, pivot: [number, number, number], radius: number): Array<{ pos: [number, number, number]; level: number }> {
-  const D = Math.max(1, Math.round(decades));
-  return grainLevels(decades).stars.flatMap((L) =>
-    levelWeb(L).knots.map((k) => {
-      const s = radius * 10 ** (L - D);
-      return { pos: [pivot[0] + k[0] * s, pivot[1] + k[1] * s, pivot[2] + k[2] * s] as [number, number, number], level: L };
-    }),
-  );
+export function finalKnots(knots: WebKnot[], eyePat: [number, number, number], eye: [number, number, number], box: number, reach = 0.55): Array<{ pos: [number, number, number]; level: number }> {
+  const near = knots.filter((k) => {
+    const d = k.pos.map((x, i) => {
+      const v = x - eyePat[i];
+      return v - Math.round(v);
+    });
+    return Math.hypot(d[0], d[1], d[2]) < reach;
+  });
+  const cut = [...near].sort((a, b) => b.density - a.density)[Math.floor(near.length / 4)]?.density ?? Infinity;
+  return near.map((k) => ({ pos: patternToWorld(k.pos, eyePat, eye, box), level: k.density >= cut ? 1 : 0 }));
 }
 
-/** pattern space → world for level L at world scale s */
-function toWorld(p: V3, L: F, U: GrainUniforms): V3 {
-  return U.pivot.add(p.mul(U.radius.mul(pow(float(10), L)).mul(U.scale)));
+/** the remainder's pattern (unit ball) → world: about the hero grain, shrinking into it with the zoom */
+function toWorld(p: V3, U: GrainUniforms): V3 {
+  return U.pivot.add(p.mul(U.radius.mul(U.scale)));
 }
 
-/** 0..1 presence of level L at its apparent scale a = 10^L · s: arriving from far, gone into the pivot */
-function levelPresence(L: F, U: GrainUniforms): F {
-  const a = pow(float(10), L).mul(U.scale);
-  // levels above 0 exist only once the pull-back has begun (U4 is level 0 alone: "very few")
-  const begun = mix(smoothstep(1, 0.6, U.scale), float(1), step(L, 0.5));
-  return smoothstep(16, 6, a).mul(smoothstep(0.02, 0.12, a)).mul(begun);
-}
+/** 0..1 the remainder's presence: there until the pull-back has carried it into the grain */
+const remainderPresence = (U: GrainUniforms): F => smoothstep(0.08, 0.35, U.scale);
 
 /** size floor of ~1.2 px at `dist`, and the brightness that pays the widening back (area ratio) */
 function floored(wanted: F, dist: F, U: GrainUniforms): { size: F; coverage: F } {
@@ -108,82 +84,51 @@ function instanced(mesh: THREE.InstancedMesh, name: string, data: Float32Array, 
   mesh.geometry.setAttribute(name, new THREE.InstancedBufferAttribute(data, size));
 }
 
-export function createGrains(count: number, U: GrainUniforms, decades: number): THREE.InstancedMesh {
-  const levels = grainLevels(decades).count;
-  const per = Math.floor(count / levels);
-  // per grain: pattern position, (level, kind, size jitter, appear order), and the direction it drains along
-  const gPos = new Float32Array(per * levels * 3);
-  const gInfo = new Float32Array(per * levels * 4);
-  const gFlow = new Float32Array(per * levels * 3);
-  for (let L = 0; L < levels; L++) {
-    const { pos, kind, flow } = placeGrains(levelWeb(L), per, webShare(L), 31 + L);
-    const r = rng(77 + L);
-    for (let i = 0; i < per; i++) {
-      const j = L * per + i;
-      gPos.set(pos.subarray(i * 3, i * 3 + 3), j * 3);
-      gFlow.set(flow.subarray(i * 3, i * 3 + 3), j * 3);
-      gInfo.set([L, kind[i], r(), r()], j * 4);
+export function createGrains(count: number, U: GrainUniforms): THREE.InstancedMesh {
+  // per grain: its place in the remainder (unit ball), and (size jitter, appear order)
+  const r = rng(31);
+  const gPos = new Float32Array(count * 3);
+  const gInfo = new Float32Array(count * 2);
+  for (let i = 0; i < count; i++) {
+    for (;;) {
+      const q = [r() * 2 - 1, r() * 2 - 1, r() * 2 - 1];
+      if (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] <= 1) {
+        gPos.set(q, i * 3);
+        break;
+      }
     }
+    gInfo.set([r(), r()], i * 2);
   }
   const pattern = attribute<'vec3'>('grainPos', 'vec3');
-  const info = attribute<'vec4'>('grainInfo', 'vec4');
-  const L = info.x;
-  const kind = info.y;
+  const info = attribute<'vec2'>('grainInfo', 'vec2');
   const j = float(instanceIndex);
-
-  const flow = attribute<'vec3'>('grainFlow', 'vec3');
   const wander = vec3(sin(U.time.mul(0.11).add(j)), sin(U.time.mul(0.13).add(j.mul(1.7))), cos(U.time.mul(0.09).add(j.mul(2.3)))).mul(0.08).mul(U.scale);
-  // matter drains along the web into the knots: each grain slides a short way along its flow and fades out
-  // as another fades in behind it (a conveyor: the flow reads, nothing piles up), each on its own phase
-  const phase = fract(U.time.div(FLOW_PERIOD).add(hash(j.mul(0.71))));
-  const span = mix(float(FLOW_SPAN), float(FLOW_SPAN * 0.2), step(0.75, kind));
-  const pos = toWorld(pattern.add(flow.mul(phase.sub(0.5).mul(span))), L, U).add(wander);
-  const flowFade = mix(float(1), sin(phase.mul(PI)).mul(1.3).min(1), step(0.2, kind));
+  const pos = toWorld(pattern, U).add(wander);
   const dist = pos.sub(U.eye).length();
-
-  // level 0 appears grain by grain through U4 (a few, then a few more), and fills out as the pull-back begins
+  // the remainder appears grain by grain through U4 (a few, then a few more), filling out as the pull-back begins
   const share = mix(U.reveal.mul(0.12), float(1), U.fill);
-  const appear = info.w;
-  const present = smoothstep(appear, appear.add(0.02), share).mul(levelPresence(L, U));
-  // knots brighter than the threads between them, the hair finer still, voids dimmest, so the structure
-  // reads; each grain's share of the light falls as there are more of them (the web's light is fixed)
-  const weight = mix(mix(mix(float(0.3), float(0.65), step(0.2, kind)), float(1), step(0.4, kind)), float(1.5), step(0.75, kind))
-    .mul(mix(float(1), float(0.6), step(L, 0.5)))
-    .mul(GRAIN_LIGHT / Math.max(1, count));
-  const wanted = U.size.mul(pow(float(10), L)).mul(U.scale).mul(info.z.mul(0.8).add(0.6)).mul(mix(float(1), float(0.35), step(0.2, kind)));
+  const present = smoothstep(info.y, info.y.add(0.02), share).mul(remainderPresence(U));
+  const wanted = U.size.mul(U.scale).mul(info.x.mul(0.8).add(0.6));
   // a grain is a point of light, never a disc: capped at ~0.15° (a near disc reads as out-of-focus dirt)
   const f = floored(min(wanted, dist.mul(0.0026)), dist, U);
-  // a few grains on the web ignite with the knots: the first stars are many, not one per knot
-  const ignites = step(0.955, info.z).mul(step(0.25, kind));
-  const t0 = info.w.mul(0.8).add(0.1);
-  const lit = ignites.mul(smoothstep(t0, t0.add(0.06), U.stars));
   const alpha = present
-    .mul(weight)
-    .mul(flowFade)
+    .mul(0.6)
     .mul(f.coverage)
-    .mul(lit.mul(9).add(1))
-    // the web steps back a little as its stars come up, so the stars and the signature carry the end
-    .mul(float(1).sub(U.stars.mul(0.3).mul(float(1).sub(lit))))
     // dim (not gone) behind the crawl; never one across the eye (a grain within ~15 of its sizes is a blur)
     .mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.85)))
     .mul(smoothstep(wanted.mul(12), wanted.mul(40), dist));
-  // one palette, cool, after the simulations' log-stretched renders: voids and hair deep blue, filaments
-  // pale blue, the knots white (they saturate where the grains pile up). Level 0 — the remainder — is pale
-  // matter; only the hero grain (createHeroGrain) is the act's amber
-  const web = mix(mix(vec3(0.3, 0.4, 1), vec3(0.55, 0.68, 1), step(0.4, kind)), vec3(0.9, 0.93, 1), step(0.75, kind));
-  const base = mix(web, vec3(1, 0.92, 0.84), step(L, 0.5).mul(0.7));
-  const tint = mix(base, mix(vec3(0.75, 0.85, 1), U.star, hash(j.mul(0.37))), lit);
+  // pale matter; only the hero grain (createHeroGrain) is the act's amber
+  const tint = mix(vec3(1, 0.92, 0.84), U.warm, hash(j.mul(0.53)).mul(0.3));
 
   const material = additive('undertime-grains');
   material.positionNode = eyeFacing(pos, f.size.mul(step(0.0005, alpha)));
   material.colorNode = Fn(() => {
-    const r = clamp(length(uv().sub(0.5)).mul(2), 0, 1);
-    return vec4(tint.mul(U.radiance).mul(alpha).mul(float(1).sub(r).pow(2.5)), 1);
+    const rr = clamp(length(uv().sub(0.5)).mul(2), 0, 1);
+    return vec4(tint.mul(U.radiance).mul(alpha).mul(float(1).sub(rr).pow(2.5)), 1);
   })();
-  const mesh = billboardMesh(material, per * levels, 'undertime-grains');
+  const mesh = billboardMesh(material, count, 'undertime-grains');
   instanced(mesh, 'grainPos', gPos, 3);
-  instanced(mesh, 'grainInfo', gInfo, 4);
-  instanced(mesh, 'grainFlow', gFlow, 3);
+  instanced(mesh, 'grainInfo', gInfo, 2);
   return mesh;
 }
 
@@ -208,28 +153,29 @@ function starLight(r: F, x: F, y: F, px: F): F {
   return core.add(halo).add(spikes).mul(float(1).sub(smoothstep(0.85, 1, r)));
 }
 
-/** the first stars: knots of the star levels, igniting one by one through the gather beat */
-export function createStars(U: GrainUniforms, decades: number): THREE.InstancedMesh {
-  const knots: number[] = [];
-  for (const L of grainLevels(decades).stars) for (const k of levelWeb(L).knots) knots.push(...k, L);
+/** the first stars: the web's knots, igniting one by one through the gather beat, the densest brightest */
+export function createStars(U: GrainUniforms, knots: WebKnot[]): THREE.InstancedMesh {
+  const top = Math.max(...knots.map((k) => k.density));
+  const data = new Float32Array(knots.length * 4);
+  knots.forEach((k, i) => data.set([...k.pos, k.density / top], i * 4));
   const K = attribute<'vec4'>('starKnot', 'vec4');
-  const L = K.w;
   const k = float(instanceIndex);
-  const pos = toWorld(K.xyz, L, U);
+  // the knot's image nearest the eye, placed by the web's flight
+  const dp = K.xyz.sub(U.eyePat);
+  const pos = U.eye.add(dp.sub(dp.add(0.5).floor()).mul(U.box));
   const seed = k.mul(3.31).add(0.5);
   // most knots ignite, each at its own moment, with a brief overshoot as it catches
-  const lit = step(hash(seed), 0.85);
+  const lit = step(hash(seed), 0.88);
   const t0 = hash(seed.add(1.3)).mul(0.8).add(0.08);
   const on = smoothstep(t0, t0.add(0.05), U.stars);
   const catchFlare = exp(U.stars.sub(t0.add(0.03)).div(0.04).pow(2).negate()).mul(1.5);
-  const bright = hash(seed.add(2.9)).pow(2).mul(0.8).add(0.2);
-  const alpha = lit.mul(on.add(catchFlare.mul(on))).mul(bright).mul(levelPresence(L, U)).mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.75)));
+  const bright = K.w.pow(0.6).mul(0.8).add(0.2);
+  const alpha = lit.mul(on.add(catchFlare.mul(on))).mul(bright).mul(float(1).sub(pocketMask(pos.sub(U.eye), U).mul(0.75)));
   // a point, not a disc: constant angular size whatever the distance
   const dist = pos.sub(U.eye).length();
   const size = dist.mul(STAR_HALF * 2);
   // the first stars were massive and hot: blue-white, some warm
-  const blue = vec3(0.7, 0.8, 1);
-  const tint = mix(blue, U.star, hash(seed.add(4.1)).pow(2));
+  const tint = mix(vec3(0.7, 0.8, 1), U.star, hash(seed.add(4.1)).pow(2));
 
   const material = additive('undertime-stars');
   material.positionNode = eyeFacing(pos, size.mul(step(0.0005, alpha)));
@@ -237,8 +183,8 @@ export function createStars(U: GrainUniforms, decades: number): THREE.InstancedM
     const p = uv().sub(0.5).mul(2);
     return vec4(tint.mul(U.starRadiance).mul(alpha).mul(starLight(length(p), p.x, p.y, U.pixelAngle.div(STAR_HALF))).mul(0.05), 1);
   })();
-  const mesh = billboardMesh(material, knots.length / 4, 'undertime-stars');
-  instanced(mesh, 'starKnot', new Float32Array(knots), 4);
+  const mesh = billboardMesh(material, knots.length, 'undertime-stars');
+  instanced(mesh, 'starKnot', data, 4);
   return mesh;
 }
 

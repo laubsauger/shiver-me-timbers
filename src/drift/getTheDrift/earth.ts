@@ -115,7 +115,7 @@ export interface Earth {
     /** Part B (life.ts): the time-wave layers, the lights, the flood; omitted = the young world */
     life?: LifeState & { waveOrigin: THREE.Vector3 };
     /** Drift-2's floating matter (debris.ts): the gathering point's normal and tangents, s since it lifted, 0..1 */
-    drift?: { up: THREE.Vector3; east: THREE.Vector3; north: THREE.Vector3; time: number; presence: number };
+    drift?: { up: THREE.Vector3; east: THREE.Vector3; north: THREE.Vector3; time: number; presence: number; clear: number };
   }): void;
   dispose(): void;
 }
@@ -219,7 +219,7 @@ export function createEarth(): Earth {
     fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
     waveOrigin: lu.waveOrigin as unknown as V3,
   };
-  const du = { time: uniform(0), presence: uniform(0), up: uniform(new THREE.Vector3(0, 1, 0)), east: uniform(new THREE.Vector3(1, 0, 0)), north: uniform(new THREE.Vector3(0, 0, -1)) };
+  const du = { clear: uniform(0), time: uniform(0), presence: uniform(0), up: uniform(new THREE.Vector3(0, 1, 0)), east: uniform(new THREE.Vector3(1, 0, 0)), north: uniform(new THREE.Vector3(0, 0, -1)) };
   const D: DriftUniforms = { time: du.time, presence: du.presence, up: du.up as unknown as V3, east: du.east as unknown as V3, north: du.north as unknown as V3 };
   const C = u.centre as unknown as V3;
   const S = u.sun as unknown as V3;
@@ -252,7 +252,9 @@ export function createEarth(): Earth {
   const cloudAt = (n: V3, fp: F): F => {
     const c = coords(n, u.cloudShift);
     const a = lcwAt(c, fp).y;
-    const cover = a.mul(a);
+    // after the flood the weather clears over the new sea (within ~600 km of the gathering point, softly out
+    // to ~1100 km): the spirals read from low down, the far clouds stay on the horizon
+    const cover = a.mul(a).mul(float(1).sub(du.clear.mul(smoothstep(0.985, 0.996, n.dot(D.up)))));
     // the data is ~1 km and soft: below it, fbm erodes the edges and textures the decks, then the edges
     // are sharpened (cloud from orbit has crisp edges); thin haze keeps half its cover
     const detail = fbm(n.add(vec3(3, 7, 1)), 900, 7, 0.55, fp);
@@ -534,6 +536,7 @@ export function createEarth(): Earth {
     update(o) {
       u.cloudShift.value = o.time * CLOUD_DRIFT;
       du.presence.value = o.drift?.presence ?? 0;
+      du.clear.value = o.drift?.clear ?? 0;
       if (o.drift) {
         du.time.value = o.drift.time;
         du.up.value.copy(o.drift.up);

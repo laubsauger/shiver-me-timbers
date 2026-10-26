@@ -14,7 +14,6 @@
  * The peak rate is held under the comfort cap by tests/getTheDriftTimeline.test.ts.
  */
 import type { GetTheDriftParams } from '../../params/getTheDrift';
-import { lifeState } from './life';
 import { domeBasis, type Vec3 } from '../../cine/domeMaster';
 
 export const BEATS = ['galaxies', 'ours', 'band', 'sun', 'earth', 'timewave', 'lights', 'overshoot', 'flood', 'drift2'] as const;
@@ -178,17 +177,10 @@ const slerp = (a: Vec3, b: Vec3, k: number): Vec3 => {
   return norm([a[0] * ka + b[0] * kb, a[1] * ka + b[1] * kb, a[2] * ka + b[2] * kb]);
 };
 
-/**
- * EARTH, by translation only: the eye stays where the arrival left it and the planet comes to it — a blue
- * point near the Sun, growing (exponentially, under the comfort cap) while its centre slides down below
- * the front, until its limb lies across the front of the dome. The Sun stays low at the front-left, so the
- * terminator crosses the planet's face: daylit ground on the left, night on the right, dawn between. Through
- * the dawn the limb keeps sinking a few degrees and the light spreads over the curved horizon.
- * The stars and the Sun are at infinity, so none of this moves the sky.
- */
-export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): EarthPose {
+/** where the planet is (centre direction, distance) at act time t: the approach, the dawn's sink, the flood's
+ * and Drift-2's descent — everything but the Sun */
+function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
   const { starts } = beatStarts(p);
-  const sun = domeDir(p.approachEl, p.approachAz, tiltDeg);
   const final = EARTH_RADIUS + p.orbitAltitude;
   const k = clamp01((t - starts.earth) / Math.max(1e-6, p.earthApproach));
   const distance = final * Math.exp(Math.log(p.earthFar) * (1 - ramped(k, 0.15, 0.3)));
@@ -199,30 +191,130 @@ export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): Ear
   // dome while its centre goes below the dome's edge
   const beside = domeDir(p.approachEl - 23, p.approachAz + 85, tiltDeg);
   const below = domeDir(p.limbEl - finalRadius - p.dawnSink * dawn, 0, tiltDeg);
-  // THE DAWN, as a time-lapse: the Sun climbs from where the arrival left it, and the terminator sweeps
-  // across the planet toward the audience (orbital motion would also turn the stars; we keep them still).
-  // Part B: it sets again behind the left limb for the night of the lights, and rises once more for the flood
-  const risen = domeDir(p.approachEl + p.sunRise, p.approachAz + p.sunRise * 0.4, tiltDeg);
-  const set = domeDir(p.approachEl - 28, p.approachAz - 20, tiltDeg);
-  const life = lifeState(t, p);
-  let sunNow = slerp(slerp(sun, risen, dawn), set, life.dusk);
   // the flood: from the night we come down lower over a coast (an eased descent by translation)
   const fk = ramped(clamp01((t - starts.flood) / Math.max(1e-6, p.flood)), 0.3, 0.3);
   const altitude = p.orbitAltitude * Math.exp(Math.log(p.floodAltitude / p.orbitAltitude) * fk);
   const low = EARTH_RADIUS + altitude;
   const dip = (Math.acos(EARTH_RADIUS / low) * 180) / Math.PI;
   const lowCentre = domeDir(p.floodLimbEl - (90 - dip), 0, tiltDeg);
-  let centreDir = slerp(beside, below, smooth((k - 0.3) / 0.7));
-  let dist = distance;
-  if (t > starts.flood) {
-    centreDir = slerp(below, lowCentre, fk);
-    // Drift-2: on down toward the water, eased
-    const dk = ramped(clamp01((t - starts.drift2) / Math.max(1e-6, p.drift2)), 0.3, 0.4);
-    dist = EARTH_RADIUS + altitude * Math.exp(Math.log(p.driftAltitude / p.floodAltitude) * dk);
-    // the morning Sun, high enough to stay clear of the limb as it rises with our descent
-    sunNow = slerp(sunNow, domeDir(p.approachEl + 14, p.approachAz + 30, tiltDeg), smooth((t - starts.flood) / Math.max(1e-6, p.flood)));
+  if (t <= starts.flood) return { centreDir: slerp(beside, below, smooth((k - 0.3) / 0.7)), distance };
+  // Drift-2: on down toward the water, eased
+  const dk = ramped(clamp01((t - starts.drift2) / Math.max(1e-6, p.drift2)), 0.3, 0.4);
+  return { centreDir: slerp(below, lowCentre, fk), distance: EARTH_RADIUS + altitude * Math.exp(Math.log(p.driftAltitude / p.floodAltitude) * dk) };
+}
+
+const rotateAbout = (v: Vec3, a: Vec3, th: number): Vec3 => {
+  const c = Math.cos(th);
+  const s = Math.sin(th);
+  const ad = dot(a, v);
+  const cr = cross(a, v);
+  return [0, 1, 2].map((i) => v[i] * c + cr[i] * s + a[i] * ad * (1 - c)) as Vec3;
+};
+
+/** monotone cubic (Fritsch–Carlson) through (x, y) keys, flat before the first and after the last */
+function monotone(xs: number[], ys: number[], x: number): number {
+  const n = xs.length;
+  if (x <= xs[0]) return ys[0];
+  if (x >= xs[n - 1]) return ys[n - 1];
+  const d = xs.slice(1).map((_, i) => (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]));
+  const m = xs.map((_, i) => (i === 0 || i === n - 1 ? 0 : d[i - 1] * d[i] <= 0 ? 0 : (2 * d[i - 1] * d[i]) / (d[i - 1] + d[i])));
+  let i = 0;
+  while (x > xs[i + 1]) i++;
+  const h = xs[i + 1] - xs[i];
+  const u = (x - xs[i]) / h;
+  const h00 = 2 * u ** 3 - 3 * u ** 2 + 1;
+  const h10 = u ** 3 - 2 * u ** 2 + u;
+  const h01 = -2 * u ** 3 + 3 * u ** 2;
+  const h11 = u ** 3 - u ** 2;
+  return h00 * ys[i] + h10 * h * m[i] + h01 * ys[i + 1] + h11 * h * m[i + 1];
+}
+
+export interface SunDay {
+  /** unit pole the Sun's day turns about, and its start (where the arrival left it) */
+  pole: Vec3;
+  start: Vec3;
+  /** rad along the day: the keys' times and angles */
+  times: number[];
+  angles: number[];
+}
+
+/**
+ * THE SUN'S DAY, as a time-lapse on one continuous path — a small circle about a pole in the front sky, as a
+ * real Sun's day is a small circle about the celestial pole. From where the arrival left it (front left) it
+ * climbs through the dawn and the time waves, comes down the front right and SETS behind the right limb in
+ * the lights beat, passes behind the planet through the night, RISES over the left limb in the flood and
+ * climbs back to where the day began by the end of Drift-2. The circle passes through the start and the
+ * front low sky (behind the planet), so it always sets and rises in view.
+ */
+export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
+  const { starts } = beatStarts(p);
+  const start = domeDir(p.approachEl, p.approachAz, tiltDeg);
+  const e = (p.approachEl * Math.PI) / 180;
+  const a = (p.approachAz * Math.PI) / 180;
+  // the pole on the front meridian, as far from the start as from the front horizon
+  const poleEl = (Math.atan((1 - Math.cos(e) * Math.cos(a)) / Math.sin(e)) * 180) / Math.PI;
+  const pole = domeDir(poleEl, 0, tiltDeg);
+  // turn the way that climbs first
+  const up = domeDir(90, 0, tiltDeg);
+  const sign = dot(rotateAbout(start, pole, 0.01), up) > dot(start, up) ? 1 : -1;
+  const at = (th: number): Vec3 => rotateAbout(start, pole, sign * th);
+  const hidden = (s: Vec3, t: number): boolean => {
+    const g = earthPlace(t, p, tiltDeg);
+    return Math.acos(Math.min(1, dot(s, g.centreDir))) < Math.asin(Math.min(1, EARTH_RADIUS / g.distance));
+  };
+  // where along the circle it sets (in the lights beat's sky) and rises (in the flood's)
+  const tSet = starts.lights + 0.4 * p.lights;
+  const tRise = starts.flood + 0.45 * p.flood;
+  const step = Math.PI / 720;
+  let set = Math.PI;
+  for (let th = 0.3; th < 2 * Math.PI; th += step) {
+    if (hidden(at(th), tSet)) {
+      set = th;
+      break;
+    }
   }
-  return { centreDir, distance: dist, sun: sunNow, radiusDeg: (Math.asin(Math.min(1, EARTH_RADIUS / dist)) * 180) / Math.PI };
+  let rise = set + 1;
+  for (let th = set; th < 2 * Math.PI; th += step) {
+    if (!hidden(at(th), tRise)) {
+      rise = th;
+      break;
+    }
+  }
+  // its highest point
+  let top = 0;
+  for (let th = 0; th < set; th += step) if (dot(at(th), up) > dot(at(top), up)) top = th;
+  const D = Math.PI / 180;
+  return {
+    pole: sign > 0 ? pole : (pole.map((x) => -x) as Vec3),
+    start,
+    times: [starts.earth + p.earthApproach, starts.timewave, tSet, tRise, starts.drift2 + p.drift2],
+    angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, rise + 4 * D, 2 * Math.PI],
+  };
+}
+
+export function sunAt(t: number, day: SunDay): Vec3 {
+  return rotateAbout(day.start, day.pole, monotone(day.times, day.angles, t));
+}
+
+/**
+ * EARTH, by translation only: the eye stays where the arrival left it and the planet comes to it — a lit
+ * point beside the Sun, growing (exponentially, under the comfort cap) while its centre slides down below
+ * the front, until its limb lies across the front of the dome. The Sun's day (sunDay) then runs as a
+ * time-lapse: dawn, day, a sunset behind the right limb, the night of the lights, a sunrise over the left
+ * limb for the flood. The stars are at infinity, so none of this moves the sky (the sky's own slow wheel is
+ * act.ts's).
+ */
+const dayCache = new Map<string, SunDay>();
+export function earthPose(t: number, p: GetTheDriftParams, tiltDeg: number): EarthPose {
+  const key = JSON.stringify(p) + tiltDeg;
+  let day = dayCache.get(key);
+  if (!day) {
+    day = sunDay(p, tiltDeg);
+    dayCache.clear();
+    dayCache.set(key, day);
+  }
+  const g = earthPlace(t, p, tiltDeg);
+  return { centreDir: g.centreDir, distance: g.distance, sun: sunAt(t, day), radiusDeg: (Math.asin(Math.min(1, EARTH_RADIUS / g.distance)) * 180) / Math.PI };
 }
 
 /** the eye at act time t: on the line E0 → Sun point, at fraction f of the starting distance */

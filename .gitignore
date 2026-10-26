@@ -47,3 +47,5 @@ scripts/blender/**/__pycache__/
 # ~150 MB of satellite data (NASA Blue Marble / Black Marble / VIIRS, AWS Terrain Tiles);
 # rebuild with scripts/drift-earth-data.py (sources and URLs in docs/drift/earth-data.md).
 public/drift/earth/
+# the cosmic web volume is built too (scripts/drift-web-volume.py, ~17 MB)
+public/drift/web/

@@ -10,7 +10,7 @@
 import * as THREE from 'three/webgpu';
 import { float, int, ivec2, textureLoad, uniform } from 'three/tsl';
 import type { DriftParams } from '../../params/drift';
-import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, waveTimeAt, type UndertimeState } from './timeline';
+import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, waveTimeAt, webFlight, type UndertimeState } from './timeline';
 import { heroSlot, pairSlot, trackPositionCpu, type PairUniforms } from './pairModel';
 import { HERO_TRACK_END, heroPair, survivorPair, waveFracCpu } from './scripted';
 import { domeBasis } from '../../cine/domeMaster';
@@ -25,6 +25,7 @@ import { createLoopSprites, createLoopTrails } from './loops';
 import { createMist, type Mist } from './mist';
 import { DUST_LIGHTS, createDust } from './dust';
 import { createBursts, type Burst } from './burst';
+import { createWebParticles, createWebVolume, type WebData } from './webVolume';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -225,7 +226,7 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
   return out;
 }
 
-export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 })): UndertimeField {
+export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 })): UndertimeField {
   const birthData = new Float32Array(BIRTH_N * 4);
   const birthTex = new THREE.DataTexture(birthData, BIRTH_N, 1, THREE.RGBAFormat, THREE.FloatType);
   birthTex.minFilter = THREE.NearestFilter;
@@ -283,6 +284,10 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
     // the remainder
     pivot: uniform(new THREE.Vector3()),
     scale: uniform(1),
+    eyePat: uniform(new THREE.Vector3()),
+    box: uniform(1),
+    webPresence: uniform(0),
+    webRadiance: uniform(1),
     fill: uniform(0),
     reveal: uniform(0),
     heroGrain: uniform(0),
@@ -388,9 +393,17 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
     time: u.actTime, eye: pair.eye, pivot: v3(u.pivot), scale: u.scale, reveal: u.reveal, fill: u.fill,
     heroGrain: u.heroGrain, stars: u.stars, radius: u.radius, size: u.size, radiance: u.grainRadiance,
     starRadiance: u.starRadiance, pixelAngle: u.pixelAngle, warm: v3(u.warm), star: v3(u.star),
+    eyePat: v3(u.eyePat), box: u.box,
   };
-  const grains = createGrains(p.grainCount, grainU, p.zoomDecades);
-  const stars = createStars(grainU, p.zoomDecades);
+  const grains = createGrains(p.grainCount, grainU);
+  const stars = createStars(grainU, web.knots);
+  // the web's gas (webVolume.ts), placed in its box by the same flight as the stars
+  // the faint glow of the web's envelope, and its particles carrying the detail
+  const webGlow = uniform(0.12);
+  const webVolume = createWebVolume(web, { eyePat: v3(u.eyePat), presence: u.webPresence, radiance: webGlow });
+  const webParticles = createWebParticles(web, {
+    eyePat: v3(u.eyePat), presence: u.webPresence, radiance: u.webRadiance, eye: pair.eye, box: u.box, pixelAngle: u.pixelAngle,
+  });
   const heroGrain = createHeroGrain(grainU);
 
   // ---------------------------------------------------------------- the event grammar (production-design.md)
@@ -425,7 +438,7 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
   const group = new THREE.Group();
   group.name = 'undertime-field';
   // the sky keeps only its wave band in the event grammar (its first-light shells belong to the old hero)
-  if (dust) group.add(sky.mesh, dust.mesh, grains, stars, heroGrain);
+  if (dust) group.add(sky.mesh, dust.mesh, webVolume, webParticles, grains, stars, heroGrain);
   else group.add(sky.mesh, tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain);
 
   const vx = (a: [number, number, number]): THREE.Vector3 => new THREE.Vector3(...a);
@@ -526,7 +539,16 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
       sky.setLight(u.light.value);
       sky.follow(eye);
 
-      u.pivot.value.set(...heroGrainPosition(p));
+      // the web flight: where the eye is in the web's box, the box's size, and the hero grain it carries
+      const flight = webFlight(t, p);
+      const knot = web.knots[0].pos;
+      u.pivot.value.set(...flight.pivot);
+      u.eyePat.value.set(knot[0] + flight.offset[0], knot[1] + flight.offset[1], knot[2] + flight.offset[2]);
+      u.box.value = flight.box;
+      u.webPresence.value = flight.presence * fade;
+      u.webRadiance.value = p.webRadiance;
+      webGlow.value = p.webRadiance * 0.04;
+      webVolume.position.copy(eye);
       u.scale.value = state.scale;
       const decades = -Math.log10(state.scale);
       u.fill.value = Math.min(1, Math.max(0, decades));

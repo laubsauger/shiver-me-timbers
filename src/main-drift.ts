@@ -23,8 +23,9 @@ import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
 import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
-import { beatStarts, eyePath, heroGrainPosition, undertimeState } from './drift/undertime/timeline';
+import { beatStarts, eyePath, undertimeState, webFlight } from './drift/undertime/timeline';
 import { finalKnots } from './drift/undertime/grains';
+import { loadWebData } from './drift/undertime/webVolume';
 import { getTheDriftParams } from './params/getTheDrift';
 import { createArrival } from './drift/getTheDrift/act';
 import type { ArrivalState } from './drift/getTheDrift/timeline';
@@ -86,7 +87,11 @@ async function boot(): Promise<void> {
   // phrase arrives — the sky it is ABOUT to occupy, its strength rising over the 3 s before (set below,
   // once the crawl exists; the field bakes it into each pair's birth)
   let pocketAt: (at: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 });
-  const field = createUndertimeField(p, (at) => pocketAt(at));
+  // the cosmic web's volume and knots (~17 MB, scripts/drift-web-volume.py): needed to build the field and
+  // to place Act 2's galaxies at its knots
+  const web = loadWebData();
+  await web.ready;
+  const field = createUndertimeField(p, web, (at) => pocketAt(at));
   scene.add(field.group);
   // ?markers: orientation check for the dome master — front red, right green, zenith blue, back yellow.
   // In the master, red must sit at the bottom, green at the right, blue at the centre, yellow at the top.
@@ -122,7 +127,11 @@ async function boot(): Promise<void> {
   const { total: act1 } = beatStarts(p);
   const p2 = getTheDriftParams;
   const act2Start = act1 - p2.overlap;
-  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(p.zoomDecades, heroGrainPosition(p), p.fieldRadius), p.domeTilt);
+  // the galaxies open at the web's knots where the pull-back leaves them
+  const flightEnd = webFlight(act2Start, p);
+  const heroKnot = web.knots[0].pos;
+  const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
+  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt);
   scene.add(arrival.group);
   const total = act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({

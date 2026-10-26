@@ -97,8 +97,13 @@ export interface DriftParams {
   particleSize: number;
   /** s — one pair's life, birth to flash (jittered ±30 % per slot) */
   pairLife: number;
-  /** orders of magnitude the zoom beat pulls back through (reload-scoped: it sets the grain levels) */
+  /** orders of magnitude the zoom beat pulls back through */
   zoomDecades: number;
+  /** the web (webVolume.ts): box units the eye ends from the hero knot; deg the flight line turns through;
+   * the gas's radiance */
+  webReach: number;
+  webTurn: number;
+  webRadiance: number;
   matterColor: number;
   antimatterColor: number;
   /** annihilation light, the flashes and the dome-wide glow */
@@ -175,11 +180,14 @@ export const driftParams: DriftParams = registerParams(
     bloomStrength: 0.12,
     bloomRadius: 0.25,
     bloomThreshold: 1.4,
-    grainCount: 400000,
+    grainCount: 6000,
     fieldRadius: 30,
     particleSize: 0.22,
     pairLife: 3.2,
     zoomDecades: 2,
+    webReach: 0.3,
+    webTurn: 20,
+    webRadiance: 3,
     matterColor: 0xffb44c,
     antimatterColor: 0x6e9cff,
     lightColor: 0xfff0d8,
@@ -224,6 +232,9 @@ export const driftParams: DriftParams = registerParams(
     particleSize: { min: 0.01, max: 1, step: 0.01 },
     pairLife: { min: 0.3, max: 10, step: 0.1 },
     zoomDecades: { min: 0, max: 6, step: 0.25 },
+    webReach: { min: 0.01, max: 0.6, step: 0.005 },
+    webTurn: { min: 0, max: 60, step: 1 },
+    webRadiance: { min: 0, max: 20, step: 0.05 },
     exposure: { min: 0.05, max: 8, step: 0.05 },
     particleRadiance: { min: 0, max: 40, step: 0.1 },
     trackTail: { min: 0.05, max: 4, step: 0.05 },
