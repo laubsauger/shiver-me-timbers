@@ -95,7 +95,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     gatherLat: 45.05,
     gatherLon: 11.9,
     heading: 90,
-    galaxySize: 1.1,
+    galaxySize: 0.45,
     ourRadius: 1.6,
     ourDistance: 14,
     approachEl: 48,

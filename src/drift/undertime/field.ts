@@ -46,7 +46,7 @@ export interface UndertimeField {
   setPocket(pocket: TextPocket, tiltDeg: number): void;
   /** push the timeline state for act time `t`, seen from `eye` (world position); `fade` dims what remains
    * as the next act takes over */
-  update(state: UndertimeState, t: number, eye: THREE.Vector3, fade?: number): void;
+  update(state: UndertimeState, t: number, eye: THREE.Vector3, fade?: number, webKeep?: number): void;
   /** radians per pixel of the view about to be drawn (a cube face: (π/2)/faceSize) — ribbons never go sub-pixel */
   setPixelAngle(rad: number): void;
   dispose(): void;
@@ -444,7 +444,7 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   const vx = (a: [number, number, number]): THREE.Vector3 => new THREE.Vector3(...a);
   return {
     group,
-    update(state, t, eye, fade = 1) {
+    update(state, t, eye, fade = 1, webKeep = 1) {
       if (dust && !mist) {
         events = undertimeEvents(p, pocketAt);
         mist = createMist(events, mistU, true);
@@ -543,9 +543,15 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
       const flight = webFlight(t, p);
       const knot = web.knots[0].pos;
       u.pivot.value.set(...flight.pivot);
-      u.eyePat.value.set(knot[0] + flight.offset[0], knot[1] + flight.offset[1], knot[2] + flight.offset[2]);
+      // the eye's own travel (Act 2 flies on through the web) moves it through the box too
+      const still = eyePath(starts.zoom, p);
+      u.eyePat.value.set(
+        knot[0] + flight.offset[0] + (eye.x - still[0]) / flight.box,
+        knot[1] + flight.offset[1] + (eye.y - still[1]) / flight.box,
+        knot[2] + flight.offset[2] + (eye.z - still[2]) / flight.box,
+      );
       u.box.value = flight.box;
-      u.webPresence.value = flight.presence * fade;
+      u.webPresence.value = flight.presence * webKeep;
       u.webRadiance.value = p.webRadiance;
       webGlow.value = p.webRadiance * 0.04;
       webVolume.position.copy(eye);

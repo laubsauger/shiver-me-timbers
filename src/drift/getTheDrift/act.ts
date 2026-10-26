@@ -12,7 +12,7 @@ import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose,
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
-import { OUR_LOOK, createGalaxies, galaxyField, type GalaxySpec } from './galaxies';
+import { OUR_LOOK, createGalaxies, galaxyField, type GalaxyAtlas, type GalaxySpec } from './galaxies';
 import { createMilkyWay } from './milkyWay';
 
 /** rad/s the sky wheels at over Earth, and the s it eases in over */
@@ -36,13 +36,14 @@ export interface ArrivalAct {
   dispose(): void;
 }
 
-export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos: Vec3; level: number }>, tiltDeg: number): ArrivalAct {
+/** `atlas` must be loaded (its tiles' kinds pick the field's galaxies) */
+export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos: Vec3; level: number }>, tiltDeg: number, atlas: GalaxyAtlas): ArrivalAct {
   const g = ourGalaxy(p, e0, tiltDeg);
-  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0, brightness: 1 };
-  const specs = galaxyField(knots, ours, [e0, g.sun], p.galaxySize);
+  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0, brightness: 1, tile: -1, planar: true, roll: 0 };
+  const specs = galaxyField(knots, ours, [e0, g.sun], p.galaxySize, atlas.galaxies);
   const skyTurn = new THREE.Matrix3();
   const u = { open: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
-  const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> });
+  const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> }, atlas);
   const milky = createMilkyWay(g, p.marchSteps);
   const earth = createEarth();
   const group = new THREE.Group();
@@ -112,7 +113,9 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       const e = earthPose(t, p, tiltDeg);
       const handover = smoothstep01((t - starts.earth + 1) / 5);
       const glare = smoothstep01((e.radiusDeg - 3) / 45) * s.earth;
-      u.field.value = (1 - 0.92 * s.volume) * (1 - glare);
+      // (the volume takes over from the far disc while still a few radii out; the field dims only once we
+      // are inside the disk, among its near stars)
+      u.field.value = (1 - 0.92 * s.local) * (1 - glare);
       centre.set(...e.centreDir).multiplyScalar(e.distance).add(eye);
       sun.set(...e.sun);
       earth.group.visible = s.earth > 0;

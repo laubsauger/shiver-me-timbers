@@ -28,6 +28,7 @@ import { finalKnots } from './drift/undertime/grains';
 import { loadWebData } from './drift/undertime/webVolume';
 import { getTheDriftParams } from './params/getTheDrift';
 import { createArrival } from './drift/getTheDrift/act';
+import { loadGalaxyAtlas } from './drift/getTheDrift/galaxies';
 import type { ArrivalState } from './drift/getTheDrift/timeline';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
@@ -90,7 +91,8 @@ async function boot(): Promise<void> {
   // the cosmic web's volume and knots (~17 MB, scripts/drift-web-volume.py): needed to build the field and
   // to place Act 2's galaxies at its knots
   const web = loadWebData();
-  await web.ready;
+  const galaxyAtlas = loadGalaxyAtlas();
+  await Promise.all([web.ready, galaxyAtlas.ready]);
   const field = createUndertimeField(p, web, (at) => pocketAt(at));
   scene.add(field.group);
   // ?markers: orientation check for the dome master — front red, right green, zenith blue, back yellow.
@@ -131,7 +133,7 @@ async function boot(): Promise<void> {
   const flightEnd = webFlight(act2Start, p);
   const heroKnot = web.knots[0].pos;
   const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
-  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt);
+  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
   const total = act2Start + arrival.total;
   const crawlLayout = (): CrawlLayout => ({
@@ -198,13 +200,15 @@ async function boot(): Promise<void> {
     // Undertime hands its world over to the galaxies, then leaves the scene
     const k = Math.min(1, Math.max(0, t2 / (p2.overlap + 2)));
     const fade = 1 - k * k * (3 - 2 * k);
-    field.group.visible = fade > 0;
+    // the web stays on as the structure the galaxies sit on, dimmer, until we are inside our own galaxy
+    const webKeep = act2 ? 0.45 * (1 - act2.local) + 0.55 * fade : 1;
+    field.group.visible = fade > 0 || webKeep > 0.002;
     arrival.group.visible = t2 >= 0;
     const moved = eye.position.clone().sub(eyeWas);
     camera.position.add(moved);
     controls.target.add(moved);
     eyeWas.copy(eye.position);
-    field.update(state, at, eye.position, fade);
+    field.update(state, at, eye.position, fade, webKeep);
     // Get the Drift arrives at the Sun from galaxy distances: the near clip must follow the scale
     // (and once the planet is there, the nearest thing is its atmosphere, a thousand km off: 1e-4 of a unit)
     const near = act2 ? (act2.earth > 0 ? 1e-4 : Math.max(1e-7, Math.min(0.05, act2.f * 0.02))) : 0.05;

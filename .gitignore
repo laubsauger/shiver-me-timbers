@@ -49,3 +49,5 @@ scripts/blender/**/__pycache__/
 public/drift/earth/
 # the cosmic web volume is built too (scripts/drift-web-volume.py, ~17 MB)
 public/drift/web/
+# the galaxy atlas is built from Hubble images (scripts/drift-galaxy-atlas.py)
+public/drift/galaxies/
