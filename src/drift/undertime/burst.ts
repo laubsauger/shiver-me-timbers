@@ -54,7 +54,9 @@ export function createBursts(events: readonly PairEvent[], U: BurstUniforms): Bu
 
   // the fireball: swells fast, then keeps spreading slowly as it cools
   const R = scale.mul(float(1).sub(exp(age.max(0).div(0.09).negate()))).mul(age.max(0).mul(0.5).add(0.75));
-  const ballA = step(0, age).mul(exp(age.div(0.5).negate())).mul(step(age, 2));
+  // a fireball cools on its own scale: the hero's lingers, the wave's small ones are gone in a breath
+  const tau = scale.mul(0.35).add(0.12).min(0.5);
+  const ballA = step(0, age).mul(exp(age.div(tau).negate())).mul(step(age, tau.mul(6)));
   // sparks: thrown out of it, slowing (drag), gone in under a second
   const dir = randomDir(hash(seed.mul(1.37)), hash(seed.mul(2.91)));
   const v0 = scale.mul(hash(seed.mul(4.7)).mul(5).add(2.5));
@@ -62,7 +64,7 @@ export function createBursts(events: readonly PairEvent[], U: BurstUniforms): Bu
   const travel = v0.mul(float(1).sub(exp(age.max(0).mul(-drag)))).div(drag);
   const sparkPos = vertex.add(dir.mul(travel));
   const speed = v0.mul(exp(age.max(0).mul(-drag)));
-  const sparkA = step(0, age).mul(exp(age.div(0.3).negate())).mul(step(age, 1.2)).mul(step(hash(seed.mul(8.3)), 0.85));
+  const sparkA = step(0, age).mul(exp(age.div(tau.mul(0.7)).negate())).mul(step(age, 1.2)).mul(step(hash(seed.mul(8.3)), 0.85));
 
   const centre = mix(sparkPos, vertex, isBall);
   const toEye = cameraPosition.sub(centre);

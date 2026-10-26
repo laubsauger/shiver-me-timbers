@@ -189,7 +189,7 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
     : float(0.16).add(grow.mul(0.55)).mul(energy.mul(0.4).add(0.8)).mul(hash(i.mul(5.1)).mul(1.1).add(0.5)).mul(mix(float(1.25), float(0.45), isCore));
   // sparks start only once the trail behind the head is fading (~0.25 s), and twinkle out
   const presence = spark
-    ? smoothstep(0.2, 0.35, age).mul(exp(age.sub(0.3).max(0).div(U.life).negate())).mul(step(hash(i.mul(31.7)), 0.45))
+    ? smoothstep(0.2, 0.35, age).mul(exp(age.sub(0.3).max(0).div(U.life.mul(loop.div(1.5).min(1))).negate())).mul(step(hash(i.mul(31.7)), 0.45))
     : smoothstep(0, 0.08, age).mul(exp(age.div(U.life).negate())).mul(step(0, age));
   // lighting at the puff: the key light through the puff (forward scattering), the event lights near it
   const toEye = normalize(cameraPosition.sub(pos));

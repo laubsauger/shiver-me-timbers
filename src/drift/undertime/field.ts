@@ -10,7 +10,7 @@
 import * as THREE from 'three/webgpu';
 import { float, int, ivec2, textureLoad, uniform } from 'three/tsl';
 import type { DriftParams } from '../../params/drift';
-import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, type UndertimeState } from './timeline';
+import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, waveTimeAt, type UndertimeState } from './timeline';
 import { heroSlot, pairSlot, trackPositionCpu, type PairUniforms } from './pairModel';
 import { HERO_TRACK_END, heroPair, survivorPair, waveFracCpu } from './scripted';
 import { domeBasis } from '../../cine/domeMaster';
@@ -160,7 +160,7 @@ function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): P
   // where it is (both beads annihilate on the front); nothing is born behind the front.
   const eyeW = eyePath(starts.wave, p);
   const kept = field.filter((e) => {
-    const cut = starts.wave + waveFracCpu([e.vertex[0] - eyeW[0], e.vertex[1] - eyeW[1], e.vertex[2] - eyeW[2]], p.domeTilt) * p.wave;
+    const cut = starts.wave + waveTimeAt(waveFracCpu([e.vertex[0] - eyeW[0], e.vertex[1] - eyeW[1], e.vertex[2] - eyeW[2]], p.domeTilt)) * p.wave;
     if (e.birth >= cut) return false;
     if (e.birth + e.loop > cut) e.end = Math.max(0.02, (cut - e.birth) / e.loop);
     return true;
@@ -175,21 +175,23 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
   const { starts } = beatStarts(p);
   const r = rng(9090);
   const out: PairEvent[] = [];
-  const N = 520;
+  const N = 750;
   const unit = (): [number, number, number] => {
     const z = r() * 2 - 1;
     const a = r() * Math.PI * 2;
     const s = Math.sqrt(1 - z * z);
     return [s * Math.cos(a), z, s * Math.sin(a)];
   };
-  for (let i = 0; i < N; i++) {
-    const k = (i + r()) / N;
-    const t = starts.wave + k * p.wave;
-    // a point on the front circle at angle θ = π·k from the dome front, any way round it
-    const theta = Math.PI * k + (r() - 0.5) * 0.08;
+  while (out.length < N) {
+    // where on the front: its angle θ from the dome front, drawn in proportion to the front circle's length
+    // (sin θ) so the front never thins out overhead, and weighted toward the CLIMAX over the audience
+    const theta = r() * Math.PI;
+    const climax = Math.sin(theta) ** 2;
+    if (r() > Math.sin(theta) * (0.55 + 0.45 * climax)) continue;
     const phi = r() * Math.PI * 2;
     const d = [0, 1, 2].map((j) => Math.cos(theta) * b.front[j] + Math.sin(theta) * (Math.cos(phi) * b.right[j] + Math.sin(phi) * b.axis[j])) as [number, number, number];
     if (d[0] * b.axis[0] + d[1] * b.axis[1] + d[2] * b.axis[2] < -0.12) continue; // below the spring line
+    const t = starts.wave + waveTimeAt(Math.min(1, Math.max(0, theta / Math.PI + (r() - 0.5) * 0.02))) * p.wave;
     const dist = 7 + r() * 16;
     const axis = unit();
     const t0 = unit();
@@ -201,21 +203,22 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
     const spiralish = r() < 0.4;
     out.push({
       birth: t - 0.05,
-      loop: 0.3 + r() * 0.3,
+      // short lives: the activity hugs the front line, darkness follows right behind it
+      loop: 0.18 + r() * 0.2,
       vertex: [eyeW[0] + d[0] * dist, eyeW[1] + d[1] * dist, eyeW[2] + d[2] * dist],
       axis,
       across,
       open,
-      radius: 0.2 + r() * 0.45,
-      // most below the ray threshold (loops.ts rayKept): the front throws some gamma rays, not a fountain
-      energy: r() < 0.2 ? 0.75 : 0.32 + r() * 0.12,
+      radius: (0.2 + r() * 0.45) * (0.8 + 0.4 * climax),
+      // a few throw gamma rays (loops.ts rayKept), more of them at the climax
+      energy: r() < 0.06 + 0.1 * climax ? 0.75 : 0.32 + r() * 0.12,
       gamma: across,
       spiral: spiralish ? 0.15 : 0,
       drift: 0,
       arc: spiralish ? Math.PI * 3 : 2 * Math.PI - 2 * open,
       meets: spiralish ? 0 : 1,
-      // small fireballs: hundreds of them at once must not bloom the dome into milk
-      burst: 0.12 + r() * 0.22,
+      // small fireballs: hundreds at once must not bloom the dome into milk
+      burst: (0.12 + r() * 0.22) * (0.7 + 0.6 * climax),
       end: 1,
     });
   }
@@ -517,7 +520,9 @@ export function createUndertimeField(p: DriftParams, pocketAt: (t: number) => Te
       u.nearSpeed.value = p.trackSpeed * 1.3;
       sky.setShell(p.grammar ? -1 : t - (H.birth + HERO_TRACK_END), p.heroShellSpeed, p.heroShellRadiance);
       // in the event grammar the band is only the glow behind the front's events
-      sky.setWave(state.wave, u.domeFront.value, p.waveRadiance * (p.grammar ? 0.45 : 1));
+      // the band glows along the front's events, brightest as it passes over the audience
+      const overhead = Math.sin(Math.PI * state.wave) ** 2;
+      sky.setWave(state.wave, u.domeFront.value, p.waveRadiance * (p.grammar ? 0.5 + 0.6 * overhead : 1));
       sky.setLight(u.light.value);
       sky.follow(eye);
 

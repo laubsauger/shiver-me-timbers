@@ -293,7 +293,7 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   // gammas: leaving the meeting point back to back (or, for a spiral, one from each end)
   const gammaFrom = mix(endM, mix(endM, endA, is(7)), float(1).sub(P.meets));
   const gammaHead = gammaFrom.add(P.gamma.mul(sgn.mul(C).mul(since.max(0))));
-  const gammaA = step(0, since).mul(exp(since.div(0.7).negate())).mul(step(since, 1.6)).mul(rayKept);
+  const gammaA = step(0, since).mul(exp(since.div(0.7).negate())).mul(smoothstep(1.6, 1.1, since)).mul(rayKept);
   // bursts
   const burstA = step(0, age).mul(exp(age.div(0.16).negate())).mul(step(age, 0.8));
   const flashA = step(0, since).mul(exp(since.div(0.22).negate()).add(exp(since.div(0.9).negate()).mul(0.04))).mul(step(since, 2.5))

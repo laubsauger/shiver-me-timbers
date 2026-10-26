@@ -44,7 +44,8 @@ export interface UndertimeState {
   waveClock0: number;
   waveRate: number;
   waveLength: number;
-  /** 0..1 progress of the wave front (0 before it, 1 once it has crossed the whole field) */
+  /** 0..1 how far the wave front has swept, as its angle from the dome front over π (waveSweep: it rolls
+   * in slowly from the front horizon, crosses over the audience fast, settles behind) */
   wave: number;
   /** 0..1 the hero grain in front */
   heroGrain: number;
@@ -80,6 +81,24 @@ export function plateau(x: number, ramp: number): number {
   if (k < r) return (r * smoothIntegral(k / r)) / area;
   if (k > 1 - r) return 1 - (r * smoothIntegral((1 - k) / r)) / area;
   return (r / 2 + (k - r)) / area;
+}
+
+/**
+ * THE WAVE'S PACE: the front's angle from the dome front (over π) at wave progress k. Slow in from the
+ * front horizon (the build), fast over the audience (the climax), slowing as it leaves behind them.
+ */
+export const waveSweep = (k: number): number => smooth(k);
+
+/** the inverse: wave progress at which the front reaches angle fraction `frac` (pairs die then) */
+export function waveTimeAt(frac: number): number {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 40; i++) {
+    const m = (lo + hi) / 2;
+    if (waveSweep(m) < frac) lo = m;
+    else hi = m;
+  }
+  return (lo + hi) / 2;
 }
 
 /** start time (s) of each beat, plus the total length */
@@ -155,7 +174,7 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
     waveClock0: fieldClock(starts.wave, p),
     waveRate: p.slowRate,
     waveLength: Math.max(1e-6, p.wave),
-    wave,
+    wave: waveSweep(wave),
     heroGrain,
     grains,
     scale,

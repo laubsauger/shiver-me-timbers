@@ -10,7 +10,7 @@
  * points: what is smaller than a pixel is paid back in brightness, so they never shimmer.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, Loop, cameraPosition, clamp, exp, float, hash, instanceIndex, length, max, normalize, pow, sin, step, uniformArray, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, Loop, cameraPosition, clamp, exp, float, hash, instanceIndex, length, max, normalize, pow, sin, smoothstep, step, uniformArray, uv, vec3, vec4 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from './billboard';
 import { randomDir } from './pairModel';
 
@@ -61,7 +61,9 @@ export function createDust(count: number, U: DustUniforms): Dust {
     const phase = float(0.35).add(pow(cosT.mul(0.5).add(0.5), float(6)).mul(2.5));
     lit.addAssign(C.xyz.mul(phase).div(r2));
   });
-  const present = step(hash(i.mul(5.11)), U.density);
+  // a mote fades as the dust thins (a hard cut makes lit motes blink off one by one)
+  const h = hash(i.mul(5.11));
+  const present = smoothstep(h, h.add(0.08), U.density);
   const size = float(0.035).mul(hash(i.mul(6.7)).mul(1.5).add(0.5));
   const drawn = max(size, U.pixelAngle.mul(1.3).mul(dist));
   const coverage = size.div(drawn).pow(2);

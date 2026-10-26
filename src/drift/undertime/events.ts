@@ -214,23 +214,40 @@ export function eventLights(events: readonly PairEvent[], t: number, eye: Vec3, 
     const age = t - e.birth;
     if (age < -0.1 || age > e.loop * e.end + 1.2) continue;
     // the creation burst
-    if (age >= 0) push(e.vertex, WHITE, 6 * e.energy * Math.exp(-age / 0.18));
+    // (a light that comes on rises over a few frames; one that goes out decays — never a switch)
+    if (age >= 0) push(e.vertex, WHITE, 6 * e.energy * Math.exp(-age / 0.18) * Math.min(1, age / 0.04));
     // the beads, while they fly
     const life = e.loop * e.end;
     const meets = e.meets && e.end >= 1;
     if (age >= 0 && age < life) {
       const u = age / e.loop;
-      push(loopPoint(e, 1, u), AMBER, 0.5 * e.energy);
-      push(loopPoint(e, -1, u), VIOLET, 0.5 * e.energy);
+      const on = Math.min(1, age / 0.1, (life - age) / 0.1);
+      push(loopPoint(e, 1, u), AMBER, 0.5 * e.energy * on);
+      push(loopPoint(e, -1, u), VIOLET, 0.5 * e.energy * on);
     }
     // the annihilation flash: one where a loop's beads meet, one at each end of a spiral
     const since = age - life;
     const ends = meets ? [meetingPoint(e)] : [endPoint(e, 1), endPoint(e, -1)];
-    if (since >= 0) for (const p of ends) push(p, WHITE, (14 / ends.length) * e.energy * Math.exp(-since / 0.25));
+    if (since >= 0) for (const p of ends) push(p, WHITE, (14 / ends.length) * e.energy * Math.exp(-since / 0.25) * Math.min(1, since / 0.04));
     // the light rays in flight: photons coming in, gammas going out (they light what they pass)
-    if (age > -0.9 && age < 0) for (const s of [1, -1]) push(add(e.vertex, e.across, s * PHOTON_SPEED * -age), WHITE, 1.5 * e.energy);
-    if (since > 0 && since < 1.4) for (const s of [1, -1]) push(add(meets ? ends[0] : ends[s > 0 ? 0 : 1], e.gamma, s * PHOTON_SPEED * since), WHITE, 1.5 * e.energy * Math.exp(-since / 0.7));
+    if (age > -0.9 && age < 0) {
+      const on = Math.min(1, (age + 0.9) / 0.25);
+      for (const s of [1, -1]) push(add(e.vertex, e.across, s * PHOTON_SPEED * -age), WHITE, 1.5 * e.energy * on);
+    }
+    if (since > 0 && since < 1.4) {
+      const on = Math.min(1, since / 0.05, (1.4 - since) / 0.4) * Math.exp(-since / 0.7);
+      for (const s of [1, -1]) push(add(meets ? ends[0] : ends[s > 0 ? 0 : 1], e.gamma, s * PHOTON_SPEED * since), WHITE, 1.5 * e.energy * on);
+    }
   }
   cands.sort((a, b) => b.score - a.score);
-  return cands.slice(0, k).map(({ pos, colour }) => ({ pos, colour }));
+  // NO POPS: a light fades out as it drops in rank, reaching zero at the last slot — so when it leaves the
+  // list (or a stronger one pushes it out) nothing it lit switches off at once. Scores change smoothly
+  // (powers decay continuously), so the weights do too.
+  const sTop = cands[Math.floor(k / 2)]?.score ?? 0;
+  const sCut = cands[k - 1]?.score ?? 0;
+  return cands.slice(0, k).map(({ pos, colour, score }) => {
+    const w = sTop > sCut ? Math.min(1, Math.max(0, (score - sCut) / (sTop - sCut))) : 1;
+    const ww = w * w * (3 - 2 * w);
+    return { pos, colour: [colour[0] * ww, colour[1] * ww, colour[2] * ww] as Vec3 };
+  });
 }
