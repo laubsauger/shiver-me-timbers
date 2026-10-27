@@ -188,6 +188,7 @@ async function boot(): Promise<void> {
   // the crawl lives in master space, so it shows in the dome view only
   // (the sea acts: SEA_GRADE — references/sea-golden-hour-sky)
   const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: true });
+  dome.setLayers(sea.cameraLayers);
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;

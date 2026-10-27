@@ -28,8 +28,8 @@ export const DEBRIS_RADIUS = 12000;
 const ARMS = 2;
 const WIND = 1 / Math.tan((13 * Math.PI) / 180);
 const PHASE = 0.6;
-/** rad/s the field turns at */
-export const DEBRIS_SPIN = 0.0005;
+/** rad/s the field turns at (timeline.ts: the landing comes down onto a point of it, and follows it) */
+export { DEBRIS_SPIN } from './timeline';
 const PIECES = 120000;
 /** m: the clumps' two scales */
 export const CLUMP_BIG = 180;
@@ -158,16 +158,34 @@ export function debrisPieces(count = PIECES, seed = 2100): DebrisData {
   return d;
 }
 
-/** a mat of pieces round (cx, cz), `radius` m, densest at its middle (the bed the raft floats in) */
-export function matPieces(cx: number, cz: number, radius: number, count: number, seed = 2101): DebrisData {
+/** a mat of pieces round (cx, cz), densest at its middle and thinning out as a Gaussian of `sigma` m (no edge
+ * to it: the bed the raft floats in, melting into the field) */
+export function matPieces(cx: number, cz: number, sigma: number, count: number, seed = 2101): DebrisData {
   const r = rng(seed);
   const d = emptyData(count);
   for (let n = 0; n < count; n++) {
     const a = r() * Math.PI * 2;
-    const rr = Math.pow(r(), 0.8) * radius;
+    const rr = sigma * Math.sqrt(-2 * Math.log(1 - r() * 0.9999));
     makePiece(d, n, cx + Math.cos(a) * rr, cz + Math.sin(a) * rr, r);
   }
   return d;
+}
+
+/** the pieces that stay clear of a circle of `radius` m round (x, z), each by its own length (the raft's berth:
+ * nothing floats through its hull) */
+export function clearOf(d: DebrisData, x: number, z: number, radius: number): DebrisData {
+  const keep: number[] = [];
+  for (let i = 0; i < d.count; i++) {
+    const [px, pz, , len] = d.place.subarray(i * 4, i * 4 + 4);
+    if (Math.hypot(px - x, pz - z) - len / 2 > radius) keep.push(i);
+  }
+  const out = emptyData(keep.length);
+  keep.forEach((i, n) => {
+    out.place.set(d.place.subarray(i * 4, i * 4 + 4), n * 4);
+    out.shape.set(d.shape.subarray(i * 2, i * 2 + 2), n * 2);
+    out.albedo.set(d.albedo.subarray(i * 3, i * 3 + 3), n * 3);
+  });
+  return out;
 }
 
 export interface DebrisUniforms {

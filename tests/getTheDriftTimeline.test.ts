@@ -6,8 +6,9 @@
  * bright centre low in front.
  */
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { ARRIVED, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, landingTrack, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { ARRIVED, DEBRIS_SPIN, EYE_AT, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -96,11 +97,12 @@ describe('Get the Drift arrival', () => {
     expect(jolt).toBeLessThan(0.12);
   });
 
-  it('lands as one glide: down to the raft the eye never parks or lurches, and only settles a deck above the water', () => {
+  it('lands as one glide: down to the raft the eye never parks or lurches, then drifts on with the raft', () => {
     // A descent that stops gliding forward while it is still coming down reads as two shots spliced together
     // (the v6 notes): the ground's apparent motion (speed over height) and the descent (e-folds of height per
-    // second) must change smoothly from Drift-2's end to the raft, and the motion only dies away as the eye
-    // settles at the deck's height.
+    // second) must change smoothly from Drift-2's end to the raft. Down at the deck's height it does not park
+    // either (direction.md C1, "then a very slow follow"; a still dome reads as a frozen frame): it drifts on
+    // with the debris galaxy's slow turn, the current the raft floats on.
     const endT = starts.drift2 + p.drift2;
     const h = 0.1;
     const height = (t: number): number => earthPose(t, p, tilt).distance - 6.371;
@@ -127,7 +129,34 @@ describe('Get the Drift arrival', () => {
     expect(fastest).toBeLessThan(0.35);
     expect(slowest).toBeGreaterThan(0.05);
     expect(height(total) / LANDED).toBeCloseTo(1, 2);
-    expect(motion(total - h)).toBeLessThan(1e-3);
+    const a = landingTrack(total, p, tilt);
+    const b = landingTrack(total + 1, p, tilt);
+    const current = DEBRIS_SPIN * Math.hypot(EYE_AT[0], EYE_AT[1]);
+    expect(Math.hypot(b.east - a.east, b.north - a.north) / current).toBeCloseTo(1, 2);
+    // (slow: under a metre a second)
+    expect(current).toBeLessThan(1);
+  });
+
+  it('looks down onto the debris spiral from high up, then levels out at the raft — turning gently', () => {
+    // The spiral must read as a shape from the air (v7 notes: "more look down on the spiral from higher up"),
+    // so at Drift-2's end its centre lies well below level (a spiral seen at a grazing angle is a smear). The
+    // eye turns for it, not the planet (turning the planet would turn it under its Sun), and every turn on a
+    // dome stays slow.
+    const endT = starts.drift2 + p.drift2;
+    const at = landingTrack(endT, p, tilt);
+    expect((Math.atan2(at.alt, Math.hypot(at.east, at.north)) * 180) / Math.PI).toBeGreaterThan(40);
+    const g = gatherFrame(p, tilt);
+    const up = new THREE.Vector3(...g.up);
+    const front = new THREE.Vector3(...g.front);
+    const level = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(front, up), up, front.clone().negate()));
+    const turn = (t: number): THREE.Quaternion => {
+      const l = landingTurn(t, p, tilt);
+      return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -l.look).slerp(level, l.k);
+    };
+    let fastest = 0;
+    for (let t = starts.drift2 - 6; t < total; t += 0.1) fastest = Math.max(fastest, (turn(t).angleTo(turn(t + 0.1)) * 180) / Math.PI / 0.1);
+    expect(fastest).toBeLessThan(2);
+    expect(turn(total).angleTo(level)).toBeLessThan(1e-6);
   });
 
   describe('Earth', () => {

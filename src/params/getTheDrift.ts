@@ -31,6 +31,8 @@ export interface GetTheDriftParams {
   /** deg, the limb's elevation through the flood and Drift-2's glide down; Mm, the height it ends at over
    * the debris spiral */
   floodLimbEl: number;
+  /** deg the eye looks further down through Drift-2, onto the spiral from high up (the landing levels it out) */
+  driftLook: number;
   driftAltitude: number;
   /** deg, dome elevation (straight ahead) of the point the floating matter gathers round, at Drift-2's end */
   gatherEl: number;
@@ -91,8 +93,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     drift2: 20,
     landing: 50,
     floodLimbEl: 38,
+    driftLook: 15,
     driftAltitude: 0.03,
-    gatherEl: 6,
+    gatherEl: -1.5,
     gatherLat: 45.05,
     gatherLon: 11.9,
     heading: 90,
@@ -131,8 +134,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     drift2: { min: 0, max: 60, step: 0.5 },
     landing: { min: 10, max: 120, step: 1 },
     floodLimbEl: { min: 0, max: 60, step: 1 },
+    driftLook: { min: 0, max: 40, step: 1 },
     driftAltitude: { min: 0.001, max: 1, step: 0.001 },
-    gatherEl: { min: 0, max: 50, step: 1 },
+    gatherEl: { min: -30, max: 50, step: 0.5 },
     gatherLat: { min: 19, max: 67, step: 0.05 },
     gatherLon: { min: -24, max: 44, step: 0.05 },
     heading: { min: 0, max: 359, step: 1 },

@@ -80,7 +80,13 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
   const level = new THREE.Quaternion().setFromRotationMatrix(
     new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(levelFront, up), up, levelFront.clone().negate()),
   );
-  const none = new THREE.Quaternion();
+  // Drift-2 looks further down onto the spiral (a pitch about the eye's left–right axis), then the landing levels
+  // out from there (timeline.ts landingTurn)
+  const lookAxis = new THREE.Vector3(1, 0, 0);
+  const eyeTurn = (t: number, out: THREE.Quaternion): THREE.Quaternion => {
+    const lt = landingTurn(t, p, tiltDeg);
+    return out.setFromAxisAngle(lookAxis, -lt.look).slerp(level, lt.k);
+  };
   // from the planet's scene into the debris galaxy's frame (the sea's: x east, y up, z north)
   const toField = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, north)).invert();
   // where the descent comes down through SEA_FROM_ALT (its height falls all the way)
@@ -146,7 +152,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
     update(t, eye, turn) {
       const s = arrivalState(t, p);
       eye.set(...arrivalEye(t, p, g));
-      turn.slerpQuaternions(none, level, landingTurn(t, p, tiltDeg).k);
+      eyeTurn(t, turn);
       u.time.value = t;
       // our galaxy's far disc hands over to its volume; the other galaxies dim once we are inside its
       // dust and stars (they are still there, faintly, through the gaps)
@@ -219,7 +225,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos
       return {
         eye: new THREE.Vector3(tr.east, tr.alt, tr.north),
         yaw: Math.atan2(-fx, -fz),
-        turn: new THREE.Quaternion().slerpQuaternions(none, level, landingTurn(t, p, tiltDeg).k).premultiply(toField),
+        turn: eyeTurn(t, new THREE.Quaternion()).premultiply(toField),
         sun: new THREE.Vector3(s3.dot(east), s3.dot(up), s3.dot(north)).normalize(),
         driftTime: Math.max(0, t - lift),
         clouds: smoothstep01((t - formFrom) / 25),

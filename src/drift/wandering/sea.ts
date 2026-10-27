@@ -41,7 +41,9 @@ import { createRaft } from './raft';
 import { CIRRUS_H, CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
 import { EARTH_R, SUN_E } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
-import { DEBRIS_SPIN, createDebrisField, debrisPieces, matPieces, type DebrisUniforms } from '../getTheDrift/debrisField';
+import { createPlanarReflection } from '../../reflection';
+import { mainCameraMask } from '../../reflection/mirrorMath';
+import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, matPieces, type DebrisUniforms } from '../getTheDrift/debrisField';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -62,19 +64,24 @@ const CLOUD_COVER = 0.45;
 const CIRRUS_COVER = 0.22;
 const WIND = 10;
 const WIND_DIR = 0.6;
-/** m: the raft from where the eye comes to rest (far enough that its hull sits well above the dome's front edge,
- * 15° down: its waterline ~8° down from 3 m), and the deg its bearing keeps off the Sun's, on the side
- * nearer the front (to the Sun's right when the Sun is dead ahead) — so its mast never stands in the Sun or
- * across its glitter road; and the rad its bow turns from the eye's heading */
-const RAFT_DISTANCE = 22;
-const RAFT_OFF_SUN = 50;
-const RAFT_SHEER = 0.5;
-/** the ground swell under the glassy sea: m RMS (its Hs is 4×), s */
+/** m: the raft from where the eye comes to rest (its whole hull above the dome's front edge, 15° down: its
+ * waterline ~10° down from 3 m, its mast up into the sky), and the deg its bearing keeps off the Sun's, on the
+ * side nearer the front (to the Sun's right when the Sun is dead ahead) — so its mast never stands in the Sun
+ * or across its glitter road; and the rad it turns off broadside to the eye (broadside, it reads as a raft: its
+ * length, its deck, its mast; end-on, its near end dipped under the dome's edge) */
+const RAFT_DISTANCE = 18;
+const RAFT_OFF_SUN = 45;
+const RAFT_SHEER = 0.35;
+/** the sea: a light air's ripples (between the game's glass and calm presets: glass read too glassy, calm
+ * bobbed), over a ground swell: m RMS (its Hs is 4×), s */
+const RIPPLE = { amplitude: 0.15, windSpeed: 2.5, choppiness: 0.75 };
 const SWELL_RMS = 0.08;
 const SWELL_PERIOD = 14;
-/** m: the mat of debris round the raft (its radius) and its pieces */
-const MAT_RADIUS = 220;
+/** m: the mat of debris round the raft (a Gaussian's sigma: it thins into the field) and its pieces; the berth
+ * kept clear round the raft (its logs reach 6.9 m from its centre) */
+const MAT_SIGMA = 90;
 const MAT_PIECES = 6000;
+const RAFT_BERTH = 7.5;
 
 /** what Act 2 hands the sea each frame (metres: x east, y above the mean sea, z north of the field's centre) */
 export interface SeaDrive {
@@ -98,6 +105,8 @@ export interface SeaAct {
   readonly total: number;
   /** the eye's adaptation to the light (multiplies the show's exposure) */
   readonly exposure: number;
+  /** the layers the cameras drawing this scene must see (DomeCapture.setLayers) */
+  readonly cameraLayers: number;
   /** resolves once its data (the clouds' noise, the flock's keys) is loaded */
   readonly ready: Promise<void>;
   /** put the sea into the state of time t and the eye where it watches from */
@@ -170,12 +179,16 @@ export function createSea(
     scene.add(archipelago.group);
   }
 
-  // a sea close to glass (the v6 notes; the game's default is a working sea, Hs ~2.8 m): the game's glass
-  // preset — a Force 1 air, no wind sea to speak of — over a long low ground swell (direction.md: the swell
-  // lifts and sets the raft down). Set before the spectrum is built, never changed during the act
-  Object.assign(oceanParams, weatherPresets.glass.ocean, { swellAmplitude: SWELL_RMS, swellPeriod: SWELL_PERIOD });
+  // a calm sea, near glass (the v6 notes; the game's default is a working sea, Hs ~2.8 m): the game's glass
+  // preset with a light air's ripples (RIPPLE) over a long low ground swell (direction.md: the swell lifts and
+  // sets the raft down). Set before the spectrum is built, never changed during the act
+  Object.assign(oceanParams, weatherPresets.glass.ocean, RIPPLE, { swellAmplitude: SWELL_RMS, swellPeriod: SWELL_PERIOD });
   const ocean = createOceanSim(SEED);
+  // the raft and the matter mirrored in the water (the game's planar mirror pass, src/reflection), rendered for
+  // every cube face (each from its own camera); the sky in the water stays the ocean's analytic dome
+  const reflection = createPlanarReflection({ sunLight: sky.sunLight, planeY: 0, perRender: true });
   const surface = new OceanSurface(ocean, undefined, undefined, {
+    reflection,
     sunLight: sky.sunLight,
     skyDomeColor: seaSky.dome,
     skySunTerm: seaSky.sunTerm,
@@ -187,6 +200,9 @@ export function createSea(
   surface.group.traverse((x) => {
     if ((x as THREE.Mesh).isMesh) x.receiveShadow = true;
   });
+  reflection?.attachTo(scene);
+  reflection?.excludeFromReflection(seaSky.mesh);
+  reflection?.excludeFromReflection(surface.group);
   const cpu = new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum);
   // the raft, off the Sun's bearing from where the eye comes to rest, its bow turned off the eye's heading
   const raft = createRaft((x, z, t) => cpu.heightAt(x, z, t));
@@ -195,8 +211,15 @@ export function createSea(
   const sunRight = Math.atan2(restSun.dot(right), restSun.dot(front));
   const raftRight = sunRight - Math.sign(sunRight || -1) * ((RAFT_OFF_SUN * Math.PI) / 180);
   const raftAt = restAt.clone().addScaledVector(front, Math.cos(raftRight) * RAFT_DISTANCE).addScaledVector(right, Math.sin(raftRight) * RAFT_DISTANCE);
+  // it floats in the field and turns with it (DEBRIS_SPIN: the current the eye follows, timeline.ts), so it is
+  // where `raftAt` says when the eye rests at the act's end, and at a fixed place in the field's own frame
+  const UP = new THREE.Vector3(0, 1, 0);
+  const restTurn = rest ? DEBRIS_SPIN * rest.driftTime : 0;
+  const raftInField = raftAt.clone().applyAxisAngle(UP, -restTurn);
+  const raftNow = new THREE.Vector3();
 
-  // Drift-2's debris: the galaxy (turning slowly as one) and the mat the raft floats in
+  // Drift-2's debris: the galaxy (turning slowly as one) and the mat the raft floats in, turning with it; none
+  // of it in the raft's berth
   const du = {
     sun: uniform(new THREE.Vector3()),
     sunLight: uniform(new THREE.Vector3()),
@@ -205,11 +228,11 @@ export function createSea(
     pixelAngle: uniform(0.0015),
     metres: uniform(1),
   };
-  const debris = o.drive ? createDebrisField(debrisPieces(), du as unknown as DebrisUniforms) : undefined;
+  const berth = (data: ReturnType<typeof debrisPieces>): ReturnType<typeof debrisPieces> => clearOf(data, raftInField.x, raftInField.z, RAFT_BERTH);
+  const debris = o.drive ? createDebrisField(berth(debrisPieces()), du as unknown as DebrisUniforms) : undefined;
   if (debris) {
     scene.add(debris);
-    const mat = createDebrisField(matPieces(raftAt.x, raftAt.z, MAT_RADIUS, MAT_PIECES), du as unknown as DebrisUniforms);
-    scene.add(mat);
+    debris.add(createDebrisField(berth(matPieces(raftInField.x, raftInField.z, MAT_SIGMA, MAT_PIECES)), du as unknown as DebrisUniforms));
   }
 
   // the test act's sandpipers (W4), startled FLOCK_START s in; the bake's front turned to the dome's front
@@ -245,6 +268,7 @@ export function createSea(
     get exposure() {
       return seaSky.exposure;
     },
+    cameraLayers: mainCameraMask(1),
     ready: Promise.all([ready, cloudData.ready]).then(() => undefined),
     setPixelAngle(rad) {
       fu.pixelAngle.value = rad;
@@ -307,18 +331,21 @@ export function createSea(
         },
         (x, z) => cpu.heightAt(x, z, t),
       );
-      raft.update(t, raftAt.x, raftAt.z, yaw + Math.PI - RAFT_SHEER, {
+      const turn = d ? DEBRIS_SPIN * d.driftTime : 0;
+      raftNow.copy(raftInField).applyAxisAngle(UP, turn);
+      raft.update(t, raftNow.x, raftNow.z, yaw - raftRight + Math.PI / 2 + RAFT_SHEER + turn - restTurn, {
         sun: lum(seaSky.sunColour),
         sky: Math.min(1, lum(seaSky.irradiance) / 0.4),
       });
       if (debris && d) {
-        debris.rotation.y = DEBRIS_SPIN * d.driftTime;
+        debris.rotation.y = turn;
         du.sun.value.copy(sun);
         du.sunLight.value.set(seaSky.sunColour.r, seaSky.sunColour.g, seaSky.sunColour.b).multiplyScalar(SUN_E / Math.PI);
         du.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       }
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
+      reflection?.update(proxy, t);
       surface.update(proxy, t, sun);
       fu.time.value = t - FLOCK_START;
       fu.sun.value.copy(sun);

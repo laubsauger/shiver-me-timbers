@@ -260,6 +260,9 @@ const DAWN_SINK_S = 20;
 
 /** Mm: the eye's height over the water at the raft (a few metres, just above a deck) */
 export const LANDED = 3e-6;
+/** rad/s Drift-2's debris galaxy turns at, as one (debrisField.ts): at the raft, ~2.4 km out, a current of
+ * ~0.5 m/s the raft drifts on and the eye follows */
+export const DEBRIS_SPIN = 0.0002;
 /** how fast the landing's ground track closes on the raft against the height it comes down (see landingTrack) */
 const TRACK_Q = 2;
 /** m east, north of the field's centre: where the eye comes down, in an arm of the debris galaxy (the raft
@@ -307,7 +310,9 @@ export function gatherFrame(p: GetTheDriftParams, tiltDeg: number): GatherFrame 
  * track runs from where Drift-2 left it to the raft, steered by the height: with u the e-folds come down,
  * the share of the way still to go is (1 + qu)·e^(−qu) — it sets off gently, and the ground's apparent
  * motion (speed over height, ∝ u·e^(−(q−1)u)·u̇) rises and dies away with the descent, never stopping before
- * it does. The planet places itself under it; a short blend across Drift-2's end joins the two without a kink.
+ * it does. What it comes down onto is a point of the debris galaxy (EYE_AT when the landing ends), turning with
+ * it: once down, the eye drifts on with the raft and the matter round it (direction.md C1: "then a very slow
+ * follow"). The planet places itself under it; a short blend across Drift-2's end joins the two without a kink.
  */
 export function landingTrack(t: number, p: GetTheDriftParams, tiltDeg: number): { east: number; north: number; alt: number } {
   const { starts } = beatStarts(p);
@@ -320,7 +325,10 @@ export function landingTrack(t: number, p: GetTheDriftParams, tiltDeg: number): 
   const g0 = [dot(eyeAt, g.east) * 1e6, dot(eyeAt, g.north) * 1e6];
   const u = Math.max(0, Math.log(earthAltitude(endT, p)) - Math.log(alt));
   const k = 1 - (1 + TRACK_Q * u) * Math.exp(-TRACK_Q * u);
-  return { east: g0[0] + (EYE_AT[0] - g0[0]) * k, north: g0[1] + (EYE_AT[1] - g0[1]) * k, alt: alt * 1e6 };
+  // (the field turns as three's rotation.y does: x east, z north)
+  const a = DEBRIS_SPIN * (t - (endT + p.landing));
+  const target = [EYE_AT[0] * Math.cos(a) + EYE_AT[1] * Math.sin(a), -EYE_AT[0] * Math.sin(a) + EYE_AT[1] * Math.cos(a)];
+  return { east: g0[0] + (target[0] - g0[0]) * k, north: g0[1] + (target[1] - g0[1]) * k, alt: alt * 1e6 };
 }
 
 function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
@@ -332,12 +340,18 @@ function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centr
   return { centreDir: eye.map((x) => -x / d) as Vec3, distance: d };
 }
 
-/** the eye's turn over the landing: from Act 2's framing (none) to level at the raft, looking ahead */
-export function landingTurn(t: number, p: GetTheDriftParams, tiltDeg: number): { k: number; up: Vec3; front: Vec3 } {
+/**
+ * The eye's turn over Drift-2 and the landing: from Act 2's framing it looks `driftLook` further down through
+ * Drift-2 (`look`, rad, a pitch about the dome's left–right axis: onto the spiral from high up — the eye
+ * turns, not the planet, which would turn the planet under its Sun), then levels out (`k`, toward level at the
+ * raft, looking ahead).
+ */
+export function landingTurn(t: number, p: GetTheDriftParams, tiltDeg: number): { k: number; look: number; up: Vec3; front: Vec3 } {
   const { starts } = beatStarts(p);
   const endT = starts.drift2 + p.drift2;
   const g = gatherFrame(p, tiltDeg);
-  return { k: smooth((t - endT + 4) / (p.landing * 0.85)), up: g.up, front: g.front };
+  const look = ((p.driftLook * Math.PI) / 180) * smooth((t - starts.drift2 + 4) / (p.drift2 + 4));
+  return { k: smooth((t - endT + 4) / (p.landing * 0.85)), look, up: g.up, front: g.front };
 }
 
 /** where the planet is (centre direction, distance) at act time t — everything but the Sun */

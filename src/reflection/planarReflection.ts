@@ -79,6 +79,13 @@ export interface PlanarReflectionOptions {
   planeY?: number;
   /** wire the mirrored cloud stand-in (§V26 "clouds visible in water") */
   clouds?: Omit<CloudMirrorSource, 'params'> & { params?: typeof cloudParams };
+  /**
+   * Re-render the mirror for every RENDER instead of once per frame — for a caller that draws the same scene
+   * from several cameras in one frame (The Drift's dome capture: six cube faces), where the per-frame pass
+   * would mirror one face's view into all six. It drops three's reflector-in-reflector guard, so the caller
+   * must keep the reflecting surface itself out of the mirror (`excludeFromReflection`).
+   */
+  perRender?: boolean;
 }
 
 export interface PlanarReflection {
@@ -121,7 +128,7 @@ export function createPlanarReflection(
     resolutionScale: clampResolutionScale(rp.resolutionScale),
     // FRAME update type + reflector-in-reflector guard. With `true` the pass
     // would re-render for every render context that touches the material.
-    bounces: false,
+    bounces: opts.perRender === true,
     // mip chain = the distance/steepness blur (§V26 "blur ok") for the price
     // of a mipmap generation on a quarter-size target
     generateMipmaps: useMipmaps,

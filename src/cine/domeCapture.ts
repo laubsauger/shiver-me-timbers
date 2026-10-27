@@ -154,6 +154,11 @@ export class DomeCapture {
     }
   }
 
+  /** the layers the face cameras draw (a mirror pass keeps its main-view-only objects off layer 0) */
+  setLayers(mask: number): void {
+    for (const c of this.cubeCamera.children) c.layers.mask = mask;
+  }
+
   /** the grade for the frames that follow (see `grade`): 1, 1 is none */
   setGrade(saturation: number, contrast: number): void {
     this.uSaturation.value = saturation;

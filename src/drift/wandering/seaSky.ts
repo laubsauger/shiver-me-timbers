@@ -140,9 +140,9 @@ const STAR_CONTRAST = 0.002;
 /** m: the marine haze between the eye and a cloud (its light falls to 1/e over this) */
 const CLOUD_HAZE = 18000;
 
-/** the far sea's mean-square wave slope: Cox–Munk's clean surface, 0.003 + 0.00512·U, at the glass preset's
- * 1 m/s (weather/presets.ts; sea.ts) */
-const FAR_SLOPE2 = 0.003 + 0.00512 * 1;
+/** the far sea's mean-square wave slope: Cox–Munk's clean surface, 0.003 + 0.00512·U, at the sea's light air,
+ * 2.5 m/s (sea.ts RIPPLE) */
+const FAR_SLOPE2 = 0.003 + 0.00512 * 2.5;
 /** the far sea's glitter at most, against the Sun's disc (the glint's peak, past what the eye resolves) */
 const FAR_GLINT_MAX = 0.5;
 
