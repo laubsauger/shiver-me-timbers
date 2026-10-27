@@ -155,6 +155,39 @@ export const FLIP_TOP = (() => {
   return f[0] + Math.sqrt(2 * G * (f[4] ?? 0)) / G;
 })();
 
+/** a splash (splash.ts): s into c3, where (eye frame, m), the body's velocity along the water then (m/s), how
+ * hard (0..1: the drops' throw), and whether it is the blow at a roll rather than spray */
+export interface Splash {
+  at: number;
+  x: number;
+  z: number;
+  vx: number;
+  vz: number;
+  energy: number;
+  blow: boolean;
+}
+
+/** where the dolphin throws water: out of the sea and back into it at each leap (harder coming down, and the
+ * harder the higher it went), and its blow at the top of each roll */
+export function dolphinSplashes(): Splash[] {
+  const out: Splash[] = [];
+  const at = (t: number, energy: number, blow: boolean): void => {
+    const p = track(t);
+    out.push({ at: t, x: p.x, z: p.z, vx: p.vx, vz: p.vz, energy, blow });
+  };
+  for (const [t, , , kind, h = 0] of SURFACINGS) {
+    if (kind === 'roll') {
+      at(t, 0.3, true);
+      continue;
+    }
+    const vy0 = Math.sqrt(2 * G * h);
+    const k = Math.min(1, vy0 / 6.5);
+    at(t, 0.35 + 0.35 * k, false);
+    at(t + (2 * vy0) / G, 0.55 + 0.45 * k, false);
+  }
+  return out;
+}
+
 export function dolphinPose(t: number): DolphinPose {
   const p = track(t);
   const [y, vy, ay] = rise(t);

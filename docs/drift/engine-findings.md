@@ -338,3 +338,26 @@ likely part is the shadow maps, built on first use and not yet drawn into for th
 
 Every render the film has had started each lane on such a frame. `recordDomeMaster` now draws one frame at
 `from` and drops it before the take; after it the first frame matches a run's (259 px).
+
+## 15. The film's sea has none of the ocean's foam
+
+The v9 review asked for the ocean's waterline and splash mechanisms on the raft, the debris and the dolphin.
+The film's sea has none of them, and the reason is structural: in `surfaceMaterial.ts` the whole foam composite
+(the white contact froth at a hull, wake foam, the foam sim's whitecaps) is built only `if (foam || flowFoam)`,
+and both are simulations that carry state from frame to frame (flowfoam's injection capture and advection, its
+wake track; the foam sim's accumulator). The Drift renders each frame on its own, so neither is wired.
+
+Tried: opening that branch with neither sim (a contact-only option), so the screen-space contact line would
+draw. The depth compare works in the dome's faces (checked with a debug colour: geometry behind the water is
+found at the raft's logs), but at eye height the band is a sliver hidden behind the hull, and without the sims'
+freshness the froth term (`smoothstep(0.35, 0.9, mask)`) never turns it white. Nothing visible, at any
+strength: reverted.
+
+Done instead for the dolphin: its spray as a pure function of time since each exit and entry, and the blow at
+each roll (`wandering/splash.ts`).
+
+**For the engine (proposed).** Lanes render continuously, so state is fine within a lane if it is right at the
+lane's first frame. Warm the sims up before it: step flowfoam (injection, advection, wake track) and the foam
+sim over the 10–20 s before `from`, without drawing the dome. Both decay exponentially, so the lanes' joins
+would agree to well under a percent, and the film would get the game's whole wake and contact froth for the
+raft, the debris and the dolphin.

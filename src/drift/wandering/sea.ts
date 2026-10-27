@@ -47,6 +47,8 @@ import { shadowTexelSize, snapShadowCenter } from '../../sky/shadowMath';
 import { createCubeMirror } from './mirror';
 import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, keepIf, matPieces, type DebrisUniforms } from '../getTheDrift/debrisField';
 import { createProps } from './props';
+import { DOLPHIN_SPAN, dolphinSplashes } from './dolphin';
+import { createSplashes } from './splash';
 import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createPlants } from './plants';
@@ -364,6 +366,9 @@ export function createSea(
   // the people, the dolphin and the case, the beams, the field, the walkers (props.ts)
   const props = o.drive ? createProps() : undefined;
   if (props) afloat.add(props.group);
+  // the dolphin's spray (splash.ts), on c3's clock
+  const splashes = o.drive ? createSplashes(dolphinSplashes()) : undefined;
+  if (splashes) scene.add(splashes.mesh);
   const fieldEye = new THREE.Vector3();
   const coastEyeAt = (x: number): THREE.Vector3 => {
     const c = coastEye(x, c1End, beach);
@@ -430,6 +435,7 @@ export function createSea(
     setPixelAngle(rad) {
       fu.pixelAngle.value = rad;
       du.pixelAngle.value = rad;
+      if (splashes) (splashes.uniforms.pixelAngle as unknown as { value: number }).value = rad;
       props?.setPixelAngle(rad);
     },
     update(t, eye, renderer, beat = 'c1') {
@@ -604,13 +610,25 @@ export function createSea(
       // isolated, likely the terrain's own under-water tint near y = 0; the palms, the raft and the people are
       // mirrored)
       const underwater = world === 'coast' ? [archipelago.group, scannedRocks.group, ...(plants ? [plants.group] : [])] : [];
-      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
+      // (before the mirror's capture, or the flock and the spray reflect the frame before)
       fu.time.value = flockT;
       fu.sun.value.copy(sun);
       // radiance of a white surface: the Sun's E·T/π facing it, the sky's irradiance/π
       fu.sunLight.value.set(seaSky.sunColour.r, seaSky.sunColour.g, seaSky.sunColour.b).multiplyScalar(SUN_E / Math.PI);
       fu.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       fu.eye.value.copy(eye.position);
+      if (splashes) {
+        const c3 = t - beats.starts.c3;
+        const U = splashes.uniforms as unknown as Record<string, { value: unknown }>;
+        splashes.mesh.visible = world === 'open' && c3 > DOLPHIN_SPAN[0] && c3 < DOLPHIN_SPAN[1] + 3;
+        U.time.value = c3;
+        (U.eye.value as THREE.Vector3).set(eye.position.x, 0, eye.position.z);
+        U.yaw.value = eyeYaw;
+        (U.sun.value as THREE.Vector3).copy(sun);
+        (U.sunLight.value as THREE.Vector3).copy(fu.sunLight.value);
+        (U.skyLight.value as THREE.Vector3).copy(fu.skyLight.value);
+      }
+      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
     },
   };
 }
