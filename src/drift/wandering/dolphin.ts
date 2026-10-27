@@ -29,7 +29,7 @@ const ROLL_TOP = -0.05;
 const ROLL = 2.4;
 /** Hz the tail beats at under water, m it swings at the flukes */
 const BEAT = 2.2;
-const BEAT_AMP = 0.08;
+const BEAT_AMP = 0.12;
 
 export type SurfacingKind = 'roll' | 'leap' | 'flip' | 'swim';
 /** s into c3 (a roll: its top; a leap or the flip: where it leaves the water), m right of the eye and m ahead
@@ -110,8 +110,12 @@ export interface DolphinPose {
   /** rad: its heading (0: along +z, ahead; positive: turning right), and its nose up */
   heading: number;
   pitch: number;
-  /** 1/m: the body's arch along its length (positive: nose and tail down), the tail beat's swing (m), its phase */
+  /** 1/m: the body's arch along its length (positive: nose and tail down), its sideways bend into a turn (positive:
+   * turning right, nose and tail toward the turn's centre), the tail beat's swing (m), its phase */
   bend: number;
+  turn: number;
+  /** rad: its lean into the turn (positive: right side down) */
+  bank: number;
   beat: number;
   phase: number;
   /** m/s along the water */
@@ -239,16 +243,50 @@ export function dolphinSplashes(): Splash[] {
   return out;
 }
 
+/** the path's heading and pitch at t (no bends: what the bends are measured from) */
+function aim(t: number): { heading: number; pitch: number; vh: number; v: number } {
+  const p = track(t);
+  const [, vy] = rise(t);
+  const vh = Math.max(0.3, Math.hypot(p.vx, p.vz));
+  return { heading: Math.atan2(p.vx, p.vz), pitch: Math.atan2(vy, vh), vh, v: Math.hypot(vh, vy) };
+}
+/** s: the window the body's bends are measured over (a body ~2.6 m long at ~3 m/s spans ~0.9 s of its path; the
+ * path's own curvature steps at every waypoint, and a bend taken from it snapped the body there) */
+const BEND_WINDOW = 0.5;
+const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
+
+/**
+ * THE BODY FOLLOWS ITS PATH: bent into the path's curvature in both planes — arched over a leap, curved into a
+ * turn, its nose and tail on the curve rather than on a straight plank about its middle (the v9 review: "a stiff
+ * plank of dolphin … rotates in place") — and leaning into its turns.
+ */
+/** the path's curvature about t, in its vertical plane and across it (1/m), over BEND_WINDOW */
+function curvature(t: number): { bend: number; turn: number } {
+  const a = aim(t);
+  const a0 = aim(t - BEND_WINDOW);
+  const a1 = aim(t + BEND_WINDOW);
+  return {
+    bend: Math.max(-0.5, Math.min(0.5, -(a1.pitch - a0.pitch) / (2 * BEND_WINDOW * a.v))),
+    turn: Math.max(-0.5, Math.min(0.5, wrap(a1.heading - a0.heading) / (2 * BEND_WINDOW * a.vh))),
+  };
+}
+
 export function dolphinPose(t: number): DolphinPose {
   const p = track(t);
-  const [y, vy, ay] = rise(t);
-  const vh = Math.max(0.3, Math.hypot(p.vx, p.vz));
-  const v = Math.hypot(vh, vy);
-  // the path's curvature in its vertical plane (vh steady along it): the body lies along the arc
-  const bend = Math.max(-0.5, Math.min(0.5, (-vh * ay) / (v * v * v)));
+  const [y] = rise(t);
+  const a = aim(t);
+  // (and eased in time, a triangle over ±0.3 s: a body does not take up a new curve in a frame)
+  let bend = 0;
+  let turn = 0;
+  for (const [dt, w] of [[-0.3, 0.25], [0, 0.5], [0.3, 0.25]]) {
+    const c = curvature(t + dt);
+    bend += c.bend * w;
+    turn += c.turn * w;
+  }
+  const bank = Math.max(-0.6, Math.min(0.6, Math.atan((a.vh * a.vh * turn) / G)));
   // the tail beats under water, stills as the body leaves it
   const wet = 1 - smoothstep01((y + 0.6) / 0.5);
-  return { x: p.x, y, z: p.z, heading: Math.atan2(p.vx, p.vz), pitch: Math.atan2(vy, vh), bend, beat: BEAT_AMP * wet, phase: 2 * Math.PI * BEAT * t, speed: vh };
+  return { x: p.x, y, z: p.z, heading: a.heading, pitch: a.pitch, bend, turn, bank, beat: BEAT_AMP * wet, phase: 2 * Math.PI * BEAT * t, speed: a.vh };
 }
 
 function smoothstep01(x: number): number {
@@ -348,6 +386,7 @@ export interface Dolphin {
 
 export function createDolphin(): Dolphin {
   const uBend = uniform(0);
+  const uTurn = uniform(0);
   const uBeat = uniform(0);
   const uPhase = uniform(0);
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.32, metalness: 0 });
@@ -358,7 +397,9 @@ export function createDolphin(): Dolphin {
   const z = positionLocal.z;
   const tail = smoothstep(-0.2, LENGTH / 2, z);
   const dy = uBend.mul(z.mul(z)).mul(-0.5).add(uBeat.mul(tail.mul(tail)).mul(sin(uPhase.sub(z.mul(2.2)))));
-  mat.positionNode = positionLocal.add(vec3(float(0), dy, float(0)));
+  // …and into a turn: both ends toward the turn's centre (local +x is the dolphin's right)
+  const dx = uTurn.mul(z.mul(z)).mul(0.5);
+  mat.positionNode = positionLocal.add(vec3(dx, dy, float(0)));
 
   const parts: THREE.BufferGeometry[] = [bodyGeometry()];
   // the dorsal fin: falcate, on the back from 0.42 to 0.60 of the length, its tip swept back past its base
@@ -380,6 +421,7 @@ export function createDolphin(): Dolphin {
   parts.push(fin(smoothOutline([[0, -0.02], [0.16, 0.02], [0.3, 0.13], [0.33, 0.22], [0.22, 0.16], [0.08, 0.15], [0, 0.12], [-0.08, 0.15], [-0.22, 0.16], [-0.33, 0.22], [-0.3, 0.13], [-0.16, 0.02]], 6), 0.03, new THREE.Matrix4().makeTranslation(0, 0.0, zAt(0.95)).multiply(rotFluke)));
 
   const group = new THREE.Group();
+  group.name = 'drift-dolphin';
   for (const g of parts) {
     const mesh = new THREE.Mesh(g, mat);
     mesh.castShadow = true;
@@ -391,6 +433,7 @@ export function createDolphin(): Dolphin {
     group,
     set(p) {
       uBend.value = p.bend;
+      uTurn.value = p.turn;
       uBeat.value = p.beat;
       uPhase.value = p.phase;
     },

@@ -450,7 +450,7 @@ export function createProps(): Props {
         tmp.set(d.x, 0, -d.z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(s.eye);
         fish.position.set(tmp.x, d.y, tmp.z);
         // (its body along −z: heading 0 is ahead, −z in the eye's frame)
-        fish.rotation.set(d.pitch, s.yaw - d.heading, 0, 'YXZ');
+        fish.rotation.set(d.pitch, s.yaw - d.heading, -d.bank, 'YXZ');
         dolphin.set(d);
       }
 

@@ -53,7 +53,7 @@ import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createPlants } from './plants';
 import { createPalms, palmFeet } from './palms';
-import { C1_FOLLOW, COAST_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
+import { C1_FOLLOW, COAST_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, SAILING, type BeatName, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -652,11 +652,15 @@ export function createSea(
         );
       }
       const light = { sun: lum(seaSky.sunColour), sky: Math.min(1, lum(seaSky.irradiance) / 0.4) };
-      raft.update(t, raftX, raftZ, raftHeading, light, sails, speed);
+      // THE AIR THE SAILS STAND IN: the light air the raft runs before, along its course — the one sea's course is
+      // the eye's front, the coast's the sea's own wind. (The one sea faces into the sea's wind: its sail had been
+      // pressed back against the mast all through seafaring, the v9 review.) The waves keep the sea's wind.
+      const windTo = sailing ? eyeYaw + SAILING.heading + Math.PI : undefined;
+      raft.update(t, raftX, raftZ, raftHeading, light, sails, speed, windTo);
       if (sailing) {
         FAR_RAFTS.forEach(([bearing, distance, off], i) => {
           across(eyeYaw, (bearing * Math.PI) / 180, v);
-          farRafts[i].update(t, eye.position.x + v.x * distance, eye.position.z + v.z * distance, raftHeading + off * 0.3, light, sails, speed);
+          farRafts[i].update(t, eye.position.x + v.x * distance, eye.position.z + v.z * distance, raftHeading + off * 0.3, light, sails, speed, windTo);
         });
       }
       if (props) {

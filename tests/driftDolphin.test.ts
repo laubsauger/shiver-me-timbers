@@ -110,6 +110,26 @@ describe('the dolphin in c3', () => {
     }
   });
 
+  it('bends its body along its path smoothly, into its turns and over its leaps, never snapping', () => {
+    // (a stiff plank turned about its middle read as "rotating in place"; a bend taken from the path's raw curvature,
+    // which steps at every waypoint, snapped the body there instead)
+    let was = dolphinPose(DOLPHIN_SPAN[0]);
+    let turned = 0;
+    for (let t = DOLPHIN_SPAN[0] + 1 / 30; t < DOLPHIN_SPAN[1]; t += 1 / 30) {
+      const p = dolphinPose(t);
+      // (a frame's change at most ~a sixth of the full bend: the flip's take-off is the steepest, ~0.06/frame — a
+      // snap is the whole 0.5 at once)
+      expect(Math.abs(p.bend - was.bend), `bend at ${t.toFixed(2)}`).toBeLessThan(0.08);
+      expect(Math.abs(p.turn - was.turn), `turn at ${t.toFixed(2)}`).toBeLessThan(0.08);
+      if (Math.abs(p.turn) > 0.08) turned++;
+      // it leans INTO a turn: the bank has the turn's sign
+      if (Math.abs(p.turn) > 0.05) expect(Math.sign(p.bank)).toBe(Math.sign(p.turn));
+      was = p;
+    }
+    // and it does bend: the loop before the flip is a real turn
+    expect(turned).toBeGreaterThan(30);
+  });
+
   it('throws no spout at the rolls: only leaps splash', () => {
     const rolls = SURFACINGS.filter((s) => s[3] === 'roll').map((s) => s[0]);
     for (const sp of dolphinSplashes()) {

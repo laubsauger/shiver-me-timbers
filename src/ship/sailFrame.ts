@@ -36,6 +36,10 @@ export interface SailWindFrame {
   /** ∫ gustRate dt and ∫ gustRate·detune dt, each wrapped to [0, 2π) */
   gustPhase: number;
   gustPhaseB: number;
+  /** the true wind this ship's sails stand in (rad, the heading it blows TOWARD), where it is not the sea's
+   *  (`oceanParams.windDirection`): a film's air can follow its course without the waves' spectrum being
+   *  rebuilt. Absent: the sea's wind (the game). */
+  windDirection?: number;
 }
 
 const KEY = 'sailWindFrame';
@@ -71,6 +75,7 @@ export function readSailWindFrame(object: THREE.Object3D): SailWindFrame {
     shipVelZ: n(raw.shipVelZ, 0),
     gustPhase: n(raw.gustPhase, 0),
     gustPhaseB: n(raw.gustPhaseB, 0),
+    windDirection: typeof raw.windDirection === 'number' && Number.isFinite(raw.windDirection) ? raw.windDirection : undefined,
   };
 }
 

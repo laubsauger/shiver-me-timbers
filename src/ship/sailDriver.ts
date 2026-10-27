@@ -185,7 +185,7 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
         forwardZ: fz,
         shipForwardX: wf.shipForwardX,
         shipForwardZ: wf.shipForwardZ,
-        windDirection: oceanParams.windDirection,
+        windDirection: wf.windDirection ?? oceanParams.windDirection,
         windSpeed: oceanParams.windSpeed,
         shipVelX: wf.shipVelX,
         shipVelZ: wf.shipVelZ,

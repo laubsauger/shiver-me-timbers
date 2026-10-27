@@ -174,11 +174,17 @@ const POSE_KEYS: PoseKey[] = [
   { beat: 'w1', at: 6, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
 ];
 
+/** s into c3 the sail is struck over */
+const SAIL_STRIKE: [number, number] = [0.5, 7];
+
 /** the square sail, 0 furled .. 1 set: furled at rest in the debris and through the night, set at sea and
  * along the coast, struck as the raft comes to anchor off the beach (a dissolve crossfades a hoist) */
 export function sailsAt(name: BeatName, t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
-  if (name === 'c2' || name === 'c3' || name === 'w1') return 1;
+  // c3: struck as the wind dies at last light and the raft swings broadside for the dolphin (a square sail across
+  // the wind is pressed back against its mast: the v9 review) — down before the raft is a third of the way round
+  if (name === 'c3') return 1 - smooth((t - starts.c3 - SAIL_STRIKE[0]) / (SAIL_STRIKE[1] - SAIL_STRIKE[0]));
+  if (name === 'c2' || name === 'w1') return 1;
   if (name === 'w2') return 1 - smooth((t - starts.w2 - 28) / 12);
   return 0;
 }
