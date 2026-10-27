@@ -86,7 +86,9 @@ const STALL_MS = 180_000;
 const MAX_LANES = argv.includes('--allow-lanes') ? 8 : 2;
 if (LANES > MAX_LANES) throw new Error(`--lanes ${LANES}: more than ${MAX_LANES} needs --allow-lanes (each lane is a full Chromium on the GPU; ${(totalmem() / 2 ** 30).toFixed(0)} GB RAM here)`);
 /** bytes per pixel per frame on disk, generous: ProRes 422 HQ measured 0.54 at 1024² (mostly black); x264 is far smaller */
-const BYTES_PER_PX = { x264: 0.15, prores: 0.8 };
+// (x264 measured: crf 18 veryfast, the v9 2160 tail 0.009 B/px a frame, the 4096 coast — the busiest — 0.013; 0.04
+// keeps 3× over that. At 0.15 a 4096 film asked for 108 GB, ~10× what it takes, and refused to start)
+const BYTES_PER_PX = { x264: 0.04, prores: 0.8 };
 /** never leave less than this free */
 const DISK_RESERVE = 20 * 2 ** 30;
 const LOCK = resolve(ROOT, 'out/drift/.render.lock');
