@@ -40,6 +40,9 @@ export interface Palms {
   /** the light the fronds pass through (set per frame): unit toward the Sun; the Sun's and the sky's radiance on
    * a white surface */
   readonly light: { sun: THREE.Vector3; sunLight: THREE.Vector3; skyLight: THREE.Vector3 };
+  /** the sky each palm hides from the ground (beachMaterial.ts setOccluders): its crown, over where the lean
+   * carries it, and its foot */
+  readonly occluders: Array<[number, number, number, number]>;
 }
 
 /** the share of the light a frond lets through (a coconut leaflet: thin, ~a quarter in the green) */
@@ -145,5 +148,16 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
       }
     }),
   ).then(() => undefined);
-  return { group, ready, light: { sun: uSun.value as THREE.Vector3, sunLight: uSunLight.value as THREE.Vector3, skyLight: uSkyLight.value as THREE.Vector3 } };
+  const occluders: Array<[number, number, number, number]> = [];
+  for (const s of slots) {
+    const x = beach.x - s.off;
+    const z = beach.z - s.along;
+    // the lean is toward the sea (−x), about z: the crown stands out over the sand by h·sin(lean)
+    const reach = s.h * Math.sin(s.lean);
+    const crown = s.kind === 'fan' ? s.h * 0.5 : s.h * 0.42;
+    // (at 0.45 of the sky hidden it did not read at all: the low Sun is most of the light on the sand facing it)
+    occluders.push([x - reach * 0.85, z, crown * 1.3, s.kind === 'fan' ? 0.5 : 0.7]);
+    occluders.push([x, z, 1.0, 0.5]);
+  }
+  return { group, ready, occluders, light: { sun: uSun.value as THREE.Vector3, sunLight: uSunLight.value as THREE.Vector3, skyLight: uSkyLight.value as THREE.Vector3 } };
 }

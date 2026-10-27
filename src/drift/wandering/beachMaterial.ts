@@ -11,13 +11,21 @@
  *   forest_floor  Poly Haven forest_floor       mixed into the cover, its autumn leaves dulled (temperate)
  *
  * Each layer is two RGBA maps (albedo + roughness; normal xy + ambient occlusion + height), sampled flat on
- * the ground (xz) at two scales and two turns blended by a slow noise, so the tile never repeats visibly; the
- * rock triplanar. The shading normal is the maps' (reoriented about the ground's), in view space as the hook
- * wants it.
+ * the ground (xz) without a repeat: Quílez's "texture repetition" (its third, two-tap form) — a slow gradient
+ * noise picks one of 8 offsets of the tile and blends to the next across its transitions, the blend biased by the
+ * two samples' own contrast so it follows the texture's features and not a straight band. (The earlier anti-tiling
+ * — two scales and two turns blended by a value noise — left a single tile wherever the noise saturated, and the
+ * value noise's own cells: a grid through the sand, the v9 review.) The rock is triplanar. The shading normal is
+ * the maps' (reoriented about the ground's), in view space as the hook wants it.
+ *
+ * Under the palms the ground is darker (`setOccluders`): a crown hides the sky overhead, and at golden hour the
+ * sky is most of the light on a beach (the Sun is over the sea: the palms' own shadows fall inland, out of view).
+ * Ambient occlusion, so the low Sun's direct light still reaches under them.
  */
 import * as THREE from 'three/webgpu';
-import { abs, cameraViewMatrix, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, Loop, abs, cameraViewMatrix, dFdx, dFdy, exp, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
 import type { TerrainBlendHooks } from '../../terrain/sandMaterial';
+import { fbm2 } from '../../terrain/noise';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -37,7 +45,12 @@ type Layer = keyof typeof LAYERS;
 export interface BeachTerrain {
   hooks: TerrainBlendHooks;
   ready: Promise<void>;
+  /** what hides the sky from the ground: (x, z) m, radius m, strength 0..1 — a palm's crown, a trunk's foot */
+  setOccluders(list: Array<[number, number, number, number]>): void;
 }
+
+/** the most occluders the ground reads (each a few ALU per terrain fragment) */
+const MAX_OCCLUDERS = 112;
 
 export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/packed/`): BeachTerrain {
   const loader = new THREE.TextureLoader();
@@ -58,24 +71,45 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
 
   /** sRGB → linear (the albedo's rgb) */
   const linear = (c: V3): V3 => c.pow(2.2) as V3;
-  const rot = (uv: V2, a: number): V2 => vec2(uv.x.mul(Math.cos(a)).sub(uv.y.mul(Math.sin(a))), uv.x.mul(Math.sin(a)).add(uv.y.mul(Math.cos(a)))) as V2;
 
-  /** one layer flat on the ground: albedo (linear), roughness, tangent normal (xy), AO — anti-tiled */
-  const flat = (layer: Layer, w: F) => {
+  // the index field the tile offsets follow: a slow gradient noise (no cells to show), m
+  const index = fbm2(positionWorld.xz.div(13), 2).mul(8) as F;
+  const indexCell = index.floor();
+  const indexBlend = index.fract();
+  const offA = sin(vec2(3, 7).mul(indexCell)) as V2;
+  const offB = sin(vec2(3, 7).mul(indexCell.add(1))) as V2;
+
+  /** one layer flat on the ground: albedo (linear), roughness, tangent normal (xy), AO — without a repeat */
+  const flat = (layer: Layer) => {
     const [tw, th] = LAYERS[layer];
     const p = positionWorld.xz;
-    const uv1 = vec2(p.x.div(tw), p.y.negate().div(th)) as V2;
-    const uv2 = rot(vec2(p.x.div(tw * 2.7), p.y.negate().div(th * 2.7)) as V2, 0.9);
-    const A1 = texture(maps[layer].a, uv1) as V4;
-    const A2 = texture(maps[layer].a, uv2) as V4;
-    const B1 = texture(maps[layer].b, uv1) as V4;
-    const B2 = texture(maps[layer].b, uv2) as V4;
-    // the second sample's normal turned back by its uv's turn
-    const n2 = rot(B2.xy.mul(2).sub(1) as V2, -0.9);
+    const uv = vec2(p.x.div(tw), p.y.negate().div(th)) as V2;
+    // (explicit gradients: the offsets jump at an index step, and an implicit sample there takes the smallest mip)
+    const gx = dFdx(uv);
+    const gy = dFdy(uv);
+    const A1 = texture(maps[layer].a, uv.add(offA)).grad(gx, gy) as V4;
+    const A2 = texture(maps[layer].a, uv.add(offB)).grad(gx, gy) as V4;
+    const B1 = texture(maps[layer].b, uv.add(offA)).grad(gx, gy) as V4;
+    const B2 = texture(maps[layer].b, uv.add(offB)).grad(gx, gy) as V4;
+    const d = A1.rgb.sub(A2.rgb);
+    const w = smoothstep(0.2, 0.8, indexBlend.sub(d.x.add(d.y).add(d.z).mul(0.1))) as F;
     const a = mix(A1, A2, w) as V4;
-    const n = mix(B1.xy.mul(2).sub(1) as V2, n2, w) as V2;
+    const n = mix(B1.xy.mul(2).sub(1) as V2, B2.xy.mul(2).sub(1) as V2, w) as V2;
     return { albedo: linear(a.rgb as V3), rough: a.a as F, n, ao: mix(B1.z, B2.z, w) as F, h: mix(B1.w, B2.w, w) as F };
   };
+
+  // THE SKY HIDDEN BY THE PALMS (see the header)
+  const occData = Array.from({ length: MAX_OCCLUDERS }, () => new THREE.Vector4(0, 0, 1, 0));
+  const occ = uniformArray(occData, 'vec4');
+  const skyOcclusion = Fn(() => {
+    const keep = float(1).toVar();
+    Loop(MAX_OCCLUDERS, ({ i }: { i: THREE.Node }) => {
+      const o = occ.element(i) as unknown as V4;
+      const d = positionWorld.xz.sub(o.xy);
+      keep.mulAssign(float(1).sub(o.w.mul(exp(d.dot(d).div(o.z.mul(o.z)).negate()))));
+    });
+    return keep;
+  })() as F;
 
   /** value noise of positionWorld.xz / scale, 0..1 (anti-tiling and patchiness) */
   const noise = (scale: number): F => {
@@ -94,11 +128,10 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   const hooks: TerrainBlendHooks = {
     ground(ctx) {
       const N = normalWorldGeometry;
-      const mixW = smoothstep(0.25, 0.75, noise(7)) as F;
-      const dry = flat('sand_dry', mixW);
-      const wet = flat('sand_wet', mixW);
-      const grass = flat('grass', mixW);
-      const leaves = flat('forest_floor', mixW);
+      const dry = flat('sand_dry');
+      const wet = flat('sand_wet');
+      const grass = flat('grass');
+      const leaves = flat('forest_floor');
 
 
       // sand: dry above the wet band, wet in it, foam where the swash is
@@ -153,8 +186,15 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       const nWorld = mix(rockN, groundN, ctx.groundW).normalize();
       const normal = cameraViewMatrix.mul(vec4(nWorld, 0)).xyz.normalize();
       // (no painted glitter on scanned sand)
-      return { albedo, roughness, normal, emissiveGate: float(0) };
+      return { albedo, roughness, normal, emissiveGate: float(0), ao: skyOcclusion };
     },
   };
-  return { hooks, ready: Promise.all(loads).then(() => undefined) };
+  return {
+    hooks,
+    ready: Promise.all(loads).then(() => undefined),
+    setOccluders(list) {
+      if (list.length > MAX_OCCLUDERS) throw new Error(`beach: ${list.length} occluders, at most ${MAX_OCCLUDERS}`);
+      occData.forEach((v, i) => (i < list.length ? v.set(...list[i]) : v.set(0, 0, 1, 0)));
+    },
+  };
 }

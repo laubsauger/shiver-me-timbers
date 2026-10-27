@@ -289,6 +289,7 @@ export function createSea(
   if (plants) afloat.add(plants.group);
   const palms = o.drive ? createPalms(beach, ground) : undefined;
   if (palms) afloat.add(palms.group);
+  if (palms) beachTerrain.setOccluders(palms.occluders);
 
   // a calm sea, near glass (the v6 notes; the game's default is a working sea, Hs ~2.8 m): the game's glass
   // preset with a light air's ripples (RIPPLE) over a long low ground swell (direction.md: the swell lifts and

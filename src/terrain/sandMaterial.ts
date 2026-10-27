@@ -925,8 +925,9 @@ export interface TerrainBlendHooks {
    * sparkle, which is gated on the sand already — a hook that paints rock over
    * sand passes its own sand weight so the glitter does not ride the rock.
    * `normal` replaces the shading normal (the sand bedform's is `ctx.sand.reliefNormal`).
+   * `ao` (0..1) occludes the indirect light only (the material's aoNode): the sky a canopy hides.
    */
-  ground(ctx: TerrainGroundContext): { albedo: any; roughness: any; emissiveGate?: any; normal?: any };
+  ground(ctx: TerrainGroundContext): { albedo: any; roughness: any; emissiveGate?: any; normal?: any; ao?: any };
 }
 
 /**
@@ -1060,6 +1061,7 @@ export function terrainBlendMaterial(
   // those depend on the slope blend, which would make the shading normal
   // depend on itself).
   material.normalNode = hooked?.normal ?? sandNodes.reliefNormal;
+  if (hooked?.ao) material.aoNode = hooked.ao;
   material.metalness = 0;
 
   // §V30/§V43 aerial perspective. The island melts into the atmosphere on the
