@@ -612,12 +612,13 @@ export function createSea(
       cu.coverage.value = b ? b.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
       cu.presence.value = formed;
       cu.cirrusCover.value = b ? b.cirrus : CIRRUS_COVER * formed;
-      if (sailing && beat === 'c1') {
-        // c1's sky turns into c2's through the time-lapse
+      if (sailing && t < followStart + LAPSE[1]) {
+        // c1's sky turns into c2's through the time-lapse, across the beats' boundary (c2's own sky only once it is
+        // done: switched at the boundary, the cover stepped there)
         const k = smooth01((t - followStart - LAPSE[0]) / (LAPSE[1] - LAPSE[0]));
         const c2 = spec('c2')!;
-        cu.coverage.value += (c2.cover - cu.coverage.value) * k;
-        cu.cirrusCover.value += (c2.cirrus - cu.cirrusCover.value) * k;
+        cu.coverage.value = CLOUD_COVER * (0.4 + 0.6 * formed) + (c2.cover - CLOUD_COVER * (0.4 + 0.6 * formed)) * k;
+        cu.cirrusCover.value = CIRRUS_COVER * formed + (c2.cirrus - CIRRUS_COVER * formed) * k;
       }
       const atCloud = (h: number, out: THREE.Vector3): void => {
         const c = sunlightCpu(EARTH_R + h * 1e-6, sun.y);

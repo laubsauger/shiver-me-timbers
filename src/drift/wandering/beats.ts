@@ -51,7 +51,9 @@ export const BEATS: BeatSpec[] = [
   // (c3's Sun is right at the horizon at the flip: a degree lower and the throw was lost in the dusk, the v9 review)
   // (no dissolve into c2: c1's follow and the open sea are ONE sea and one shot, the Sun brought down to c2's in a
   // time-lapse through the follow — sea.ts. Two worlds crossfaded showed two suns and two rafts: the v9 review)
-  { name: 'c2', world: 'open', length: 55, dissolve: 0, sunEl: [3, 1.6], sunAz: -22, cover: 0.42, cirrus: 0.2 },
+  // (30 s, not 55: once the sunset time-lapse is done, the raft sailing on with nothing happening before the dolphin
+  // dragged — the v9 review)
+  { name: 'c2', world: 'open', length: 30, dissolve: 0, sunEl: [3, 1.6], sunAz: -22, cover: 0.42, cirrus: 0.2 },
   // (a beat that follows without a dissolve takes the Sun where the last left it: c3's had stood 2° further round,
   // and the Sun jumped as the dolphin came, the v9 review)
   { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -22, cover: 0.42, cirrus: 0.2 },
