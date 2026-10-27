@@ -96,7 +96,9 @@ const OPEN_DEBRIS = { pieces: 2600, sigma: 220, behind: 90, lane: [-9, 15] as [n
 const MIRROR_SIZE = 512;
 /** CPU oceans, one per instant the rafts sample the sea at (raft.ts SAMPLES, 5) and one spare */
 const SEA_POOL = 6;
-const SWELL_PERIOD = 14;
+/** s: the ground swell's period (14 s, ~300 m long, held the raft all but still: "awfully static", the v9 review;
+ * 10 s is ~155 m, the raft seen to lift and settle without bouncing) */
+const SWELL_PERIOD = 10;
 /** m: the mat of debris round the raft (a Gaussian's sigma: it thins into the field) and its pieces; the berth
  * kept clear round the raft (its logs reach 6.9 m from its centre) */
 const MAT_SIGMA = 90;
