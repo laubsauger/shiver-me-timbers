@@ -6,7 +6,10 @@
  * camera, looked up at the fragment's screen position. The dome draws six cube faces a frame, and through them
  * its pass never reached the water (docs/drift/engine-findings.md). This is the dome's own form of the same
  * mirror: ONE cube capture from the eye mirrored under the water (x, −y, z), of everything but the sea and the
- * sky, cleared transparent, clipped at the waterline (nothing under the water is mirrored). For flat water the
+ * sky (and what lies under the water: the caller hides it), cleared transparent. NOT clipped at the waterline:
+ * a ClippingGroup re-plans its planes per camera, and under the dome's twelve cameras a frame that rebuilt every
+ * object below it on every render — the sea rendered at a third of a frame a second (engine-findings.md). The
+ * floating things' submerged halves darken their reflections a little, as a contact would. For flat water the
  * scene a ray reflected up from the surface meets is exactly what that capture sees along the reflected
  * direction; waves bend the lookup with the facet's own normal, and blur it with its tilt and the distance.
  * Where the capture saw nothing (alpha), the ocean's analytic sky stays — as the game's mirror composites.
@@ -29,18 +32,12 @@ export interface CubeMirror {
   readonly reflection: PlanarReflection;
   /** capture the scene from the eye mirrored under the water, with `hide` (the sea, the sky) left out */
   update(renderer: THREE.WebGPURenderer, scene: THREE.Scene, eye: THREE.Vector3, hide: THREE.Object3D[]): void;
-  /** put what stands in the water under this (it is cut at the waterline while the mirror is taken) */
-  readonly floating: THREE.ClippingGroup;
 }
 
 export function createCubeMirror(size: number, far: number): CubeMirror {
   const target = new THREE.CubeRenderTarget(size, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   const camera = new THREE.CubeCamera(0.05, far, target);
   const active = uniform(0);
-  const floating = new THREE.ClippingGroup();
-  floating.name = 'drift-floating';
-  floating.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)];
-  floating.enabled = false;
   const clear = new THREE.Color();
 
   const shade = (input: ReflectionShadeInput): THREE.Node<'vec3'> => {
@@ -56,7 +53,6 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
 
   return {
     reflection: { shade } as unknown as PlanarReflection,
-    floating,
     update(renderer, scene, eye, hide) {
       camera.position.set(eye.x, -eye.y, eye.z);
       camera.updateMatrixWorld();
@@ -71,7 +67,6 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
       scene.backgroundNode = null;
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = true;
-      floating.enabled = true;
       try {
         camera.update(renderer, scene);
       } finally {
@@ -79,7 +74,6 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
         scene.background = bg;
         scene.backgroundNode = bgNode;
         renderer.autoClear = autoClear;
-        floating.enabled = false;
         renderer.setClearColor(clear, alpha);
       }
       active.value = eye.y > 0.05 ? 1 : 0;

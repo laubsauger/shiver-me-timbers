@@ -16,7 +16,7 @@
  * field turns slowly as one (`spin` rad/s), a pure function of time.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, attribute, cameraPosition, max, normalWorld, positionWorld, smoothstep, vec4 } from 'three/tsl';
+import { Fn, abs, attribute, cameraPosition, float, instanceIndex, max, mix, normalLocal, normalWorld, positionLocal, positionWorld, select, smoothstep, texture, vec2, vec4 } from 'three/tsl';
 import { rng } from '../undertime/web';
 
 type F = THREE.Node<'float'>;
@@ -206,9 +206,27 @@ export interface DebrisUniforms {
   metres: F;
 }
 
+/** the wood the pieces are made of: a scanned weathered plank (BlenderKit "PBR Wooden Planks", royalty-free,
+ * public/drift/pbr/planks/, gitignored) — its atlas holds two broad planks, at these uv rectangles */
+let plankTexture: THREE.Texture | null = null;
+const PLANKS: Array<[number, number, number, number]> = [
+  [0.039, 0.07, 0.205, 0.86],
+  [0.27, 0.07, 0.205, 0.86],
+];
+function plank(): THREE.Texture {
+  if (!plankTexture) {
+    plankTexture = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}drift/pbr/planks/diffuse.jpg`);
+    plankTexture.colorSpace = THREE.SRGBColorSpace;
+    plankTexture.anisotropy = 8;
+  }
+  return plankTexture;
+}
+
 /**
  * The field as instanced boxes (planks, logs, chunks, relics), riding half in the water, in a group at the
- * field's centre (the caller places and orients it, and turns it by DEBRIS_SPIN).
+ * field's centre (the caller places and orients it, and turns it by DEBRIS_SPIN). Each is cut from the scanned
+ * plank — its grain along the piece, one of the two boards picked per piece — and tinted by its own weathered
+ * colour, darker where it is wet at the waterline.
  */
 export function createDebrisField(data: DebrisData, U: DebrisUniforms): THREE.Group {
   const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -221,9 +239,22 @@ export function createDebrisField(data: DebrisData, U: DebrisUniforms): THREE.Gr
   // a piece shows once it is about a pixel across: below that the sea's colour carries the field (debris.ts)
   const px = S.mul(U.metres).div(positionWorld.sub(cameraPosition).length().mul(U.pixelAngle).max(1e-12));
   const seen = smoothstep(0.5, 1.4, px).mul(U.presence);
+  const wood = plank();
   material.colorNode = Fn(() => {
     const lit = U.sunLight.mul(max(normalWorld.dot(U.sun), 0)).add(U.skyLight.mul(normalWorld.y.mul(0.35).add(0.65)));
-    return vec4(A.mul(lit), seen);
+    // the board's grain runs along the piece (local x); across it, z on the top and the bottom, y on the sides
+    const across = select(abs(normalLocal.y).greaterThan(0.5), positionLocal.z, positionLocal.y);
+    const pick = float(instanceIndex).mul(0.618).fract().greaterThan(0.5);
+    const r0 = vec4(...PLANKS[0]);
+    const r1 = vec4(...PLANKS[1]);
+    const rect = select(pick, r1, r0);
+    const at = vec2(rect.x.add(rect.z.mul(across.add(0.5).clamp(0, 1))), rect.y.add(rect.w.mul(positionLocal.x.add(0.5).clamp(0, 1))));
+    const grain = texture(wood, at).rgb;
+    // the piece's own weathered tone over the scan's (its mean ~0.3), darker in its wet band at the water
+    const tone = A.mul(3.2);
+    // (the box rides with its local y = 0 at the water: geometry.translate below)
+    const wet = mix(float(0.62), float(1), smoothstep(-0.02, 0.1, positionLocal.y));
+    return vec4(grain.mul(tone).mul(wet).mul(lit), seen);
   })();
   material.name = 'drift-debris';
   const mesh = new THREE.InstancedMesh(geometry, material, data.count);

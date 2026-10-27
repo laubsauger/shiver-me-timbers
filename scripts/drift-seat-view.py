@@ -38,6 +38,7 @@ ap.add_argument('--pitch', type=float, default=30.0, help='mean head pitch above
 ap.add_argument('--from', dest='t0', type=float, default=0.0)
 ap.add_argument('--to', dest='t1', type=float, default=None)
 ap.add_argument('--eye-level', action='store_true')
+ap.add_argument('--glances', default='', help='curious looks on top of the drift: "t:yaw:pitch:hold,..." (s, deg, deg, s), eased in and out over 2.5 s')
 ap.add_argument('--crf', default='20')
 ap.add_argument('--seed', type=int, default=7)
 a = ap.parse_args()
@@ -70,9 +71,22 @@ waves = {k: [(amp * rng.uniform(0.6, 1.0), rng.uniform(6, 19), rng.uniform(0, 2 
          for k, amps in {'yaw': (5.0, 2.5, 1.0), 'pitch': (2.5, 1.2), 'roll': (0.8,)}.items()}
 
 
+# and the glances: a viewer looks where something is happening, holds, and drifts back to the front
+glances = [tuple(float(v) for v in g.split(':')) for g in a.glances.split(',') if g]
+
+
+def bump(t: float, t0: float, hold: float, ease: float = 2.5) -> float:
+    x = min(max((t - t0) / ease, 0), 1) - min(max((t - t0 - ease - hold) / ease, 0), 1)
+    return x * x * (3 - 2 * x)
+
+
 def head(t: float) -> np.ndarray:
     """camera-to-world rotation at t: yaw about up, then pitch, then roll"""
     ang = {k: sum(A * math.sin(2 * math.pi * t / P + ph) for A, P, ph in w) for k, w in waves.items()}
+    for t0, gy, gp, hold in glances:
+        k = bump(t, t0, hold)
+        ang['yaw'] += gy * k
+        ang['pitch'] += gp * k
     yaw, pitch, roll = (math.radians(ang['yaw']), math.radians(a.pitch + ang['pitch']), math.radians(ang['roll']))
     fwd = np.array([math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), math.sin(pitch)])
     rgt = np.array([math.cos(yaw), -math.sin(yaw), 0.0])

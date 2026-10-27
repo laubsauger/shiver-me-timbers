@@ -166,6 +166,9 @@ export interface PropsState {
 
 export interface Props {
   readonly group: THREE.Group;
+  /** what glows (added light: the beams, the field) — kept out of the water's mirror, whose capture is cleared
+   * transparent and would take their coverage for a dark body */
+  readonly glows: THREE.Object3D[];
   update(s: PropsState): void;
   setPixelAngle(rad: number): void;
 }
@@ -341,6 +344,7 @@ export function createProps(): Props {
   const deckAt = new THREE.Vector3(0.6, 0, -1.4);
   return {
     group,
+    glows: [beams, fieldGroup],
     setPixelAngle(rad) {
       fieldU.pixelAngle.value = rad;
     },
@@ -370,7 +374,10 @@ export function createProps(): Props {
         deckY = deckAt.y;
         raft.add(people);
       }
-      people.visible = world !== 'test' && t < starts.w2 + 14;
+      // (aboard until the raft, aground, is far behind the eye on the beach: gone sooner, they popped out of a
+      // raft in plain view as it ran in)
+      const aboard = t < starts.w3 + 25;
+      people.visible = world !== 'test' && aboard;
 
       // THE DOLPHIN: from one surfacing to the next under water (eye-relative: it crosses the view in front of
       // the raft), each an arc out of the water; the flip, high; away
@@ -405,7 +412,7 @@ export function createProps(): Props {
 
       // THE CASE: from the dolphin's snout onto the deck, then aboard
       const cf = c3 - FLIP[0] - 0.9;
-      caseMesh.visible = world !== 'test' && t < starts.w2 + 14 && cf > 0;
+      caseMesh.visible = world !== 'test' && aboard && cf > 0;
       if (caseMesh.visible) {
         raft.updateMatrixWorld(true);
         const end = deckAt.clone().applyMatrix4(raft.matrixWorld);
@@ -462,9 +469,11 @@ export function createProps(): Props {
       fieldGroup.visible = world === 'coast' && t > starts.w3 - 3 && t < starts.w5;
       fieldU.time.value = t;
       fieldU.eye.value.copy(s.eye);
-      fieldU.trailRadiance.value = 0.12;
-      fieldU.beadRadiance.value = 0.1;
-      fieldU.flashRadiance.value = 0.03;
+      // at the edge of seeing (direction: "like heat shimmer or dust in sunlight"; brighter, the beads read as
+      // stars by day in the v9 review)
+      fieldU.trailRadiance.value = 0.08;
+      fieldU.beadRadiance.value = 0.035;
+      fieldU.flashRadiance.value = 0.02;
 
       // THE WALKERS: from behind the eye on its left, down the wet sand by the waterline, the way the flock went
       const w5 = t - starts.w5 + WALK_LEAD;

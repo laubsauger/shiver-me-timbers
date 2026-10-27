@@ -43,6 +43,7 @@ import { createRaft } from './raft';
 import { CIRRUS_H, CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
 import { EARTH_R, SUN_E } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
+import { shadowTexelSize, snapShadowCenter } from '../../sky/shadowMath';
 import { createCubeMirror } from './mirror';
 import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, keepIf, matPieces, type DebrisUniforms } from '../getTheDrift/debrisField';
 import { createProps } from './props';
@@ -50,7 +51,7 @@ import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createPlants } from './plants';
 import { createPalms } from './palms';
-import { COAST_YAW, OPEN_AT, OPEN_YAW, beatStarts, beatSun, beatsAt, coastEye, raftPose, sailsAt, spec, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
+import { COAST_YAW, OPEN_AT, OPEN_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -179,6 +180,10 @@ export function createSea(
   // the sky retints it every update; the ocean melts into its colour at range
   scene.fog = new THREE.Fog(0xa1e7ff, 700, 4500);
   skyParams.timeOfDay = hour;
+  // the sun's shadow map: twice the game's reach at the same texel (7.8 cm), so a low Sun's long shadows of the
+  // island's hills and palms reach the beach instead of stopping at the map's edge 80 m out
+  skyParams.shadowExtent = 160;
+  skyParams.shadowMapSize = 4096;
   // the game's sky rig for its lights (the sun and the ambient the ocean and the raft are built to read); what
   // they are set to, and the sky itself, come from Act 2's air (seaSky.ts): one sky from orbit to sea
   const sky = createSky({ scene });
@@ -213,9 +218,10 @@ export function createSea(
   });
   scene.add(seaSky.mesh);
   // what floats mirrored in the water: one cube capture from the eye mirrored under it (mirror.ts); the sky in
-  // the water stays the ocean's analytic dome. All that stands in the water goes in its clipping group
+  // the water stays the ocean's analytic dome
   const mirror = createCubeMirror(MIRROR_SIZE, FAR);
-  const afloat = mirror.floating;
+  const afloat = new THREE.Group();
+  afloat.name = 'drift-afloat';
   scene.add(afloat);
   let hemi: THREE.HemisphereLight | undefined;
   scene.traverse((x) => {
@@ -261,10 +267,11 @@ export function createSea(
     return !(Math.abs(along) < BEACH_CLEAR.along && off > -BEACH_CLEAR.inland && off < BEACH_CLEAR.out);
   });
   afloat.add(scannedRocks.group);
-  // the plants: scanned grass, ferns and broad leaves on the ground above our beach, in place of the game's
-  // cards and palms (plants.ts)
+  // the plants: scanned ferns and broad leaves on the ground above our beach, in place of the game's cards and
+  // palms (plants.ts) — from the palm line back (scattered over the open sand, backlit by the low Sun, they read
+  // as litter in the v9 review)
   const plants = o.drive
-    ? createPlants(archipelago, ground, { x0: beach.x + 10, x1: beach.x + 95, z0: beach.z - 110, z1: beach.z + 110 }, { minH: 0.9, maxH: 9, maxSlope: 0.45 })
+    ? createPlants(archipelago, ground, { x0: beach.x + 16, x1: beach.x + 95, z0: beach.z - 110, z1: beach.z + 110 }, { minH: 1.4, maxH: 9, maxSlope: 0.45 })
     : undefined;
   if (plants) afloat.add(plants.group);
   const palms = o.drive ? createPalms(beach, ground) : undefined;
@@ -447,24 +454,31 @@ export function createSea(
           const ashoreY = Math.max(ground(c.x, c.z), 0) + c.height;
           eye.position.set(c.x, pose.height + (ashoreY - pose.height) * c.ashore, c.z);
         }
-        eye.rotation.set(0, eyeYaw, 0);
+        // (on the coast the eye looks round toward the land through the landfall; the world, the Sun with it,
+        // stays laid out by eyeYaw)
+        eye.rotation.set(0, eyeYaw + (world === 'coast' ? coastLook(t, c1End) : 0), 0);
         across(eyeYaw, pose.bearing, v);
         raftX = eye.position.x + v.x * pose.distance;
         raftZ = eye.position.z + v.z * pose.distance;
         raftHeading = eyeYaw + pose.heading + Math.PI;
+        sails = sailsAt(beat, t, c1End);
+        speed = travelled(t - 0.5, t + 0.5, c1End);
         if (world === 'coast' && t > beats.starts.w2) {
-          // w2: it sails on, slows and comes to anchor in the shallows off the beach while the eye goes ashore
+          // w2: it runs in under sail, bow first, and grounds in the shallows while the eye goes ashore
           const at = coastEye(beats.starts.w2, c1End, beach);
           const p0 = raftPose(beats.starts.w2, c1End, restPose);
           across(eyeYaw, p0.bearing, v);
-          raftX = at.x + v.x * p0.distance;
-          raftZ = at.z + v.z * p0.distance - travelled(beats.starts.w2, t, c1End);
+          const from = { x: at.x + v.x * p0.distance, z: at.z + v.z * p0.distance };
+          const run = landfall(t, c1End, from, beach);
+          const a = landfall(t - 0.5, c1End, from, beach);
+          const b = landfall(t + 0.5, c1End, from, beach);
+          raftX = run.x;
+          raftZ = run.z;
+          raftHeading = run.heading;
+          speed = Math.hypot(b.x - a.x, b.z - a.z);
         }
-        sails = sailsAt(beat, t, c1End);
-        speed = travelled(t - 0.5, t + 0.5, c1End);
         sun.set(...beatSun(beat, t, c1End)).applyAxisAngle(UP, eyeYaw);
       }
-      if (location.search.includes('seapitch')) eye.rotateX(-0.5);
       eye.updateMatrixWorld();
       // what each world holds
       if (debris) debris.visible = world === 'flood';
@@ -479,8 +493,13 @@ export function createSea(
       skyParams.timeOfDay = hour;
       sky.setShadowFocus(eye.position.x, 0, eye.position.z);
       sky.update(hour);
-      // the key light aimed at this act's Sun (the rig aims it from its own hour)
-      sky.sunLight.position.copy(sky.sunLight.target.position).addScaledVector(sun, skyParams.sunDistance);
+      // the key light aimed at this act's Sun (the rig aims it from its own hour), its frustum centre snapped to
+      // whole shadow texels in THIS Sun's basis (the rig snapped it in its own: kept, every shadow edge crawls
+      // as the eye moves)
+      const texel = shadowTexelSize(skyParams.shadowExtent, sky.sunLight.shadow.mapSize.x);
+      const [sx, sy, sz] = snapShadowCenter([eye.position.x, 0, eye.position.z], [sun.x, sun.y, sun.z], texel);
+      sky.sunLight.target.position.set(sx, sy, sz);
+      sky.sunLight.position.set(sx, sy, sz).addScaledVector(sun, skyParams.sunDistance);
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
       // the water below), the haze at the horizon
       seaSky.update(eye.position, sun);
@@ -555,7 +574,10 @@ export function createSea(
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
       surface.update(proxy, t, sun);
-      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh]);
+      // (on the coast, the islands' ground, rocks and low plants stay out of it: unclipped, the seabed above the
+      // mirrored eye would hide the sky the shallows reflect; the palms, the raft and the people are mirrored)
+      const underwater = world === 'coast' ? [archipelago.group, scannedRocks.group, ...(plants ? [plants.group] : [])] : [];
+      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
       fu.time.value = flockT;
       fu.sun.value.copy(sun);
       // radiance of a white surface: the Sun's E·T/π facing it, the sky's irradiance/π

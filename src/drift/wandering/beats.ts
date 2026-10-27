@@ -52,9 +52,9 @@ export const BEATS: BeatSpec[] = [
   { name: 'c4', world: 'open', length: 60, dissolve: 8, sunEl: [-20, -20], sunAz: -24, cover: 0.12, cirrus: 0.08 },
   { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: 100, cover: 0.4, cirrus: 0.12 },
   { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: 100, cover: 0.4, cirrus: 0.12 },
-  { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.3, cirrus: 0.15 },
-  { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -70, cover: 0.3, cirrus: 0.15 },
-  { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -72, cover: 0.3, cirrus: 0.15 },
+  { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.24, cirrus: 0.12 },
+  { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -70, cover: 0.24, cirrus: 0.12 },
+  { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -72, cover: 0.24, cirrus: 0.12 },
   { name: 'w6', world: 'coast', length: 32, dissolve: 10, sunEl: [-17, -18], sunAz: -72, cover: 0.1, cirrus: 0.05 },
 ];
 
@@ -161,7 +161,7 @@ const POSE_KEYS: PoseKey[] = [
 export function sailsAt(name: BeatName, t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
   if (name === 'c2' || name === 'c3' || name === 'w1') return 1;
-  if (name === 'w2') return 1 - smooth((t - starts.w2 - 8) / 12);
+  if (name === 'w2') return 1 - smooth((t - starts.w2 - 28) / 12);
   return 0;
 }
 
@@ -220,9 +220,10 @@ export const OPEN_YAW = 0;
 /**
  * THE COAST (w1–w5), about one beach: the lagoon island's long gentle shore on its −x side (the game's
  * showcase island), `beach` its middle at the waterline. Beach coordinates: `along` up the beach toward −z,
- * `off` out to sea (toward −x). The eye faces along the beach the whole time (−z: no turns), which puts the
- * sea on the left and the island front right (in this frame, facing −z, +x is to the right); the morning Sun
- * behind right, the evening Sun low in the front left, over the sea.
+ * `off` out to sea (toward −x). The eye faces along the beach (−z), which puts the sea on the left and the
+ * island front right (in this frame, facing −z, +x is to the right); the morning Sun behind right, the evening
+ * Sun low in the front left, over the sea. Only through the landfall does it look round toward the land
+ * (coastLook), slowly, and back along the beach once ashore.
  *
  *   w1  the raft drifts along the coast, 60 m out
  *   w2  it turns in and runs onto the sand; we step off and glide up the beach and along it, at eye height
@@ -236,7 +237,7 @@ export const COAST_YAW = 0;
  * (past ±55 m of its middle the island's lobes rise steeply to the shore) */
 const COAST_KEYS: Array<{ beat: BeatName; at: number; along: number; off: number }> = [
   { beat: 'w2', at: 0, along: -75, off: 60 },
-  { beat: 'w2', at: 30, along: -40, off: 14 },
+  { beat: 'w2', at: 30, along: -50, off: 26 },
   { beat: 'w3', at: 20, along: 5, off: -8 },
   { beat: 'w4', at: 20, along: 12, off: -8 },
   { beat: 'w4', at: 40, along: 12, off: -8 },
@@ -297,5 +298,43 @@ export function coastEye(t: number, c1End: number, beach: { x: number; z: number
   return { x: beach.x - off, z: beach.z - along, ashore, height: EYE_ASHORE + (EYE_W5 - EYE_ASHORE) * lift + (EYE_W6 - EYE_W5) * lift6 };
 }
 
-/** m: where the raft runs aground, (along, off) — just on the sand ahead of where the eye steps off */
-export const BEACHED = { along: -28, off: -3 };
+/** m: where the raft grounds, (along, off): in the shallows ahead and to the right of where the eye steps off;
+ * s into w2 it gets there */
+export const GROUNDED = { along: -30, off: 1 };
+const RUN_IN = 46;
+/** s it takes to bring the bow round to the run in */
+const TURN_IN = 20;
+
+/**
+ * W2, THE LANDFALL: the raft runs in under sail, bow first, from where w1 left it (`from`, sea-scene metres)
+ * and grounds in the shallows (GROUNDED) — a cubic Hermite that leaves at w1's drift (−z at COAST_DRIFT) and
+ * comes to rest, its bow along its course (the v8 notes: pushed sideways up the beach, it read as "on rails").
+ * Before w2: `from`. Returns its x, z and heading (sea.ts convention: π is bow to −z).
+ */
+export function landfall(t: number, c1End: number, from: { x: number; z: number }, beach: { x: number; z: number }): { x: number; z: number; heading: number } {
+  const { starts } = beatStarts(c1End);
+  const tx = beach.x - GROUNDED.off;
+  const tz = beach.z - GROUNDED.along;
+  const at = (s: number): [number, number] => {
+    const u = Math.min(1, Math.max(0, (s - starts.w2) / RUN_IN));
+    const h10 = u * u * u - 2 * u * u + u;
+    const h01 = -2 * u * u * u + 3 * u * u;
+    return [from.x + (tx - from.x) * h01, from.z + (tz - from.z) * h01 - COAST_DRIFT * RUN_IN * h10];
+  };
+  const [x, z] = at(t);
+  // the bow comes round to its run in slowly, as a raft's does (a few degrees of leeway early in the turn):
+  // eased from w1's heading to the course it grounds on
+  const [ax, az] = at(starts.w2 + RUN_IN * 0.9);
+  const [bx, bz] = at(starts.w2 + RUN_IN * 0.97);
+  const course = Math.atan2(-(bx - ax), -(bz - az)) + Math.PI;
+  const turn = Math.atan2(Math.sin(course - Math.PI), Math.cos(course - Math.PI));
+  return { x, z, heading: Math.PI + turn * smooth((t - starts.w2) / TURN_IN) };
+}
+
+/** rad: how far the eye looks round toward the land (−: to the right) over the landfall, on top of COAST_YAW;
+ * eased in as the raft turns in, held as we step off, eased back along the beach once ashore */
+const LOOK = -24 * D;
+export function coastLook(t: number, c1End: number): number {
+  const { starts } = beatStarts(c1End);
+  return LOOK * (smooth((t - starts.w2 + 12) / 30) - smooth((t - starts.w2 - 34) / 30));
+}

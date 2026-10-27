@@ -4,9 +4,11 @@
  * scripts/drift-pbr-fetch.py) grow on the ground above the beach we land on instead — seeded, so every frame and
  * lane places the same plants:
  *
- *   grass_bermuda_01      low grass tufts, the most of them
- *   fern_02               fern clumps (four variants in the file)
- *   anthurium_botany_01   broad-leaved clumps, the fewest
+ *   fern_02               fern clumps (four variants in the file), the most of them
+ *   anthurium_botany_01   broad-leaved clumps
+ *
+ * (Poly Haven's grass_bermuda_01 was tried and left out: one tuft is a 223k-triangle scan, and a beach of them
+ * was half a billion triangles a face — the coast rendered at under a frame a second.)
  *
  * Poly Haven ships a plant's alpha as its own map, not in the glTF: wired in here (alpha-tested, two-sided), or
  * the leaf cards draw as opaque quads. The palms come later (real models, the user is fetching them).
@@ -17,9 +19,8 @@ import type { Archipelago } from '../../island/archipelago';
 import { rng } from '../undertime/web';
 
 const PLANTS = [
-  { id: 'grass_bermuda_01', count: 2600, scale: [0.8, 1.5] },
-  { id: 'fern_02', count: 420, scale: [0.7, 1.3] },
-  { id: 'anthurium_botany_01', count: 140, scale: [0.8, 1.2] },
+  { id: 'fern_02', count: 650, scale: [0.7, 1.4] },
+  { id: 'anthurium_botany_01', count: 240, scale: [0.8, 1.3] },
 ] as const;
 
 export interface Plants {

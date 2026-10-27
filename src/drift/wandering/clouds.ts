@@ -36,7 +36,7 @@ const R = 6.371e6;
 /** m above the sea: the cirrus sheet; m: its streaks' length and width */
 export const CIRRUS_H = 8000;
 const CIRRUS_LONG = 60000;
-const CIRRUS_WIDE = 6000;
+const CIRRUS_WIDE = 9000;
 /** m: the patches the cirrus gathers in (most of the sky has none) */
 const CIRRUS_PATCH = 90000;
 /** m: beyond, the clouds have gone into the haze */
@@ -232,7 +232,9 @@ export function cirrus(o: V3, d: V3, data: CloudData, U: CloudUniforms): { light
   const fine = texture3D(data.detail, vec3(along.div(CIRRUS_LONG / 9), 0.29, across.div(CIRRUS_WIDE / 6)));
   const patch = smoothstep(0.42, 0.7, texture3D(data.shape, vec3(p.x.div(CIRRUS_PATCH), 0.53, p.z.div(CIRRUS_PATCH))).b);
   const fibres = texture3D(data.detail, vec3(along.div(CIRRUS_LONG / 4), 0.61, across.div(CIRRUS_WIDE / 5))).g;
-  const sheet = smoothstep(U.cirrusCover.oneMinus(), U.cirrusCover.oneMinus().add(0.5), streak.g.mul(0.65).add(fine.r.mul(0.2)).add(fibres.mul(0.15))).mul(patch);
+  // (a soft ramp from a little under the cover's threshold: from it, only the noise's ridges passed, as thin
+  // hard-edged threads — "worms" in the v9 review)
+  const sheet = smoothstep(U.cirrusCover.oneMinus().sub(0.12), U.cirrusCover.oneMinus().add(0.62), streak.g.mul(0.65).add(fine.r.mul(0.2)).add(fibres.mul(0.15))).mul(patch);
   const tau = sheet.mul(0.6).mul(smoothstep(0, 0.02, mu)).mul(smoothstep(MAX_DIST * 3, MAX_DIST, t));
   const cosT = d.dot(U.sun);
   const hg = float((1 - 0.49) / (4 * Math.PI)).div(float(1.49).sub(cosT.mul(1.4)).pow(1.5));

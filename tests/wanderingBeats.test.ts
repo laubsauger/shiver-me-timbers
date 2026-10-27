@@ -6,7 +6,7 @@
  * (a jump there is a cut, a jolt is "stop and go"); and within a beat the Sun moves only slowly ("real time").
  */
 import { describe, expect, it } from 'vitest';
-import { BEATS, C1_FOLLOW, beatStarts, beatSun, beatsAt, coastEye, raftPose, type RaftPose } from '../src/drift/wandering/beats';
+import { BEATS, C1_FOLLOW, SAILING, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, type RaftPose } from '../src/drift/wandering/beats';
 
 const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
@@ -67,6 +67,44 @@ describe('the beats after the landing', () => {
     // ashore by w3 (the field and the flock are seen from the beach), and still out at sea through w1
     expect(coastEye(starts.w1 + 10, c1End, beach).ashore).toBe(0);
     expect(coastEye(starts.w3, c1End, beach).ashore).toBe(1);
+  });
+
+  it('runs the raft in to the beach bow first, at a sailing pace, clear of the eye, and leaves it aground', () => {
+    // (the v8 notes: pushed sideways up the beach it read as "on rails"; a raft must sail in, and stop)
+    const at = coastEye(starts.w2, c1End, beach);
+    const from = { x: at.x + Math.sin(SAILING.bearing) * SAILING.distance, z: at.z - Math.cos(SAILING.bearing) * SAILING.distance };
+    const h = 0.05;
+    let was = landfall(starts.w2, c1End, from, beach);
+    // it leaves where w1 had it, as w1 had it moving: bow to −z, at the coast drift
+    expect(was.x).toBeCloseTo(from.x, 6);
+    expect(was.z).toBeCloseTo(from.z, 6);
+    expect(Math.cos(was.heading)).toBeCloseTo(-1, 3);
+    let fastest = 0;
+    let nearest = Infinity;
+    let turning = 0;
+    for (let t = starts.w2 + h; t < starts.w3 + 30; t += h) {
+      const now = landfall(t, c1End, from, beach);
+      const eye = coastEye(t, c1End, beach);
+      fastest = Math.max(fastest, Math.hypot(now.x - was.x, now.z - was.z) / h);
+      nearest = Math.min(nearest, Math.hypot(now.x - eye.x, now.z - eye.z));
+      turning = Math.max(turning, (Math.abs(Math.atan2(Math.sin(now.heading - was.heading), Math.cos(now.heading - was.heading))) / h) * (180 / Math.PI));
+      was = now;
+    }
+    expect(fastest).toBeLessThan(2.6);
+    expect(turning).toBeLessThan(6);
+    // (it comes round slowly: a little leeway early in the turn, never crabbing broadside)
+    expect(nearest).toBeGreaterThan(5);
+    // aground: it stays put
+    expect(landfall(starts.w2 + 50, c1End, from, beach)).toEqual(landfall(starts.w5, c1End, from, beach));
+  });
+
+  it('looks round toward the land only slowly, and is back along the beach for the flock', () => {
+    const h = 0.1;
+    let fastest = 0;
+    for (let t = starts.w1; t < total; t += h) fastest = Math.max(fastest, (Math.abs(coastLook(t + h, c1End) - coastLook(t, c1End)) / h) * (180 / Math.PI));
+    expect(fastest).toBeLessThan(1.5);
+    expect(coastLook(starts.w1 + 10, c1End)).toBeCloseTo(0, 9);
+    expect(coastLook(starts.w4, c1End)).toBeCloseTo(0, 9);
   });
 
   it('moves the Sun within a beat as real time would, slowly', () => {
