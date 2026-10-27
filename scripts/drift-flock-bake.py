@@ -19,6 +19,16 @@ heeds its neighbours more loosely; no hard floor (a soft lift keeps them off the
 after the wheeling over the front and the zenith the air carries them away down the beach, where every one
 of them comes down on the sand ~200 m ahead and stays (nothing hangs in the air when the bake ends).
 
+Fourth bake (2026-10-27, the v9 review: the vortex "was supposed to be that, at least for a while", one that
+"resembles the debris vortex we've seen earlier"): from VORTEX[0] to VORTEX[1] the air turns the flock into a
+vortex over the audience, the debris galaxy's own shape (getTheDrift/debrisField.ts: two trailing logarithmic
+arms at a 13° pitch, turning clockwise seen from above). Each bird is given a radius on an arm and flies its own
+place on an arm (or in the core) and the arms turn as one, as a galaxy's pattern does: the rim at the birds'
+airspeed, the inner birds slower, wheeling (each at its own airspeed, the inner ones lapped the outer and wound
+the arms flat into a ring within seconds: tried). It tightens, then opens, and the air takes the flock on as
+before. Inside the vortex the birds still keep apart and still carry their own turbulence; alignment and
+cohesion give way to it.
+
   out/drift/data/.venv/bin/python -I scripts/drift-flock-bake.py public/drift/flock
 """
 
@@ -50,6 +60,44 @@ nf = rng.uniform(0.25, 0.9, (N, 3))
 nph = rng.uniform(0, 2 * np.pi, (N, 3))
 # where they come down: the waterline far ahead
 LAND = np.array([-8.0, 0.0, -205.0])
+# THE VORTEX: s it holds (eased in and out over V_EASE), its axis (vertical, through this point: just ahead of
+# the audience, overhead), the arms' reach (m), their pitch, the rim's airspeed (m/s), the core's share of the
+# birds and its reach (m), and the funnel: the height at the arms' inner end (m) and its rise per metre out
+VORTEX = (7.0, 25.0)
+V_EASE = 4.0
+V_AXIS = np.array([-2.0, 0.0, -8.0])
+V_R = (13.0, 30.0)
+V_CORE = 0.12
+V_CORE_R = (3.0, 11.0)
+V_WIND = 1 / np.tan(np.radians(13))
+V_SPEED = 11.0
+V_BASE = 13.0
+V_RISE = 0.55
+
+
+def vortex_weight(t: float) -> float:
+    a = np.clip((t - VORTEX[0]) / V_EASE, 0, 1)
+    b = np.clip((VORTEX[1] - t) / V_EASE, 0, 1)
+    return float(a * a * (3 - 2 * a) * b * b * (3 - 2 * b))
+
+
+def vortex_squeeze(t: float) -> float:
+    """the radii's scale: it tightens to its narrowest mid-way, then opens past where it began"""
+    u = np.clip((t - VORTEX[0]) / (VORTEX[1] - VORTEX[0]), 0, 1)
+    return float(1 - 0.3 * np.sin(np.pi * min(1, u * 1.4)) + 0.35 * max(0, u - 0.7) / 0.3)
+
+
+def arm_angle(r: np.ndarray, arm: np.ndarray) -> np.ndarray:
+    """rad (from +x toward −z): where arm 0 or 1 passes at radius r — trailing, as the debris' arms"""
+    return np.log(r / V_R[0]) * V_WIND + arm * np.pi
+
+
+# each bird's place in the vortex, given as it enters (its radius by its rank in distance from the axis, so the
+# body is not torn across; its arm)
+v_r = None
+v_theta0 = None
+# ∫ dt / squeeze since the vortex began: the pattern turns at the rim's airspeed over the rim's CURRENT radius
+v_phase = 0.0
 
 
 def wind_centre(t: float) -> np.ndarray:
@@ -86,6 +134,23 @@ for step in range(n_steps + 1):
         keys.append(pos.astype(np.float32).copy())
     flying = (t >= takeoff) & (t < landed_at)
     idx = np.nonzero(flying)[0]
+    vw = vortex_weight(t)
+    if v_r is None and t >= VORTEX[0]:
+        rel = pos - V_AXIS
+        dist0 = np.hypot(rel[:, 0], rel[:, 2])
+        rank = np.argsort(np.argsort(dist0)) / (N - 1)
+        core = rank < V_CORE
+        q = np.where(core, rank / V_CORE, (rank - V_CORE) / (1 - V_CORE))
+        lo, hi = np.where(core, V_CORE_R[0], V_R[0]), np.where(core, V_CORE_R[1], V_R[1])
+        v_r = np.sqrt(lo ** 2 + (hi ** 2 - lo ** 2) * q)
+        phi = np.arctan2(-rel[:, 2], rel[:, 0])
+        # (half to each arm, whichever is nearer: the body comes in from one side, so by nearness alone nearly
+        # all of it took one arm — tried; the other half streams round to the far arm as the vortex forms)
+        near = [np.angle(np.exp(1j * (phi - arm_angle(v_r, np.full(N, k))))) for k in (0, 1)]
+        pref = np.abs(near[1]) - np.abs(near[0])
+        arm = (np.argsort(np.argsort(pref)) < N // 2).astype(np.float64)
+        # (the core has no arms: each keeps the bearing it came in at)
+        v_theta0 = np.where(core, phi, arm_angle(v_r, arm) + rng.normal(0, 0.1, N))
     if len(idx):
         p = pos[idx]
         v = vel[idx]
@@ -102,20 +167,31 @@ for step in range(n_steps + 1):
             sep = (nd / np.maximum(nd2, 0.04)[..., None] * (nd2 < 2.6)[..., None]).sum(1) * 2.4
             ali = (v[nn].mean(1) - v) * 1.4
             coh = (p[nn].mean(1) - p) * 0.32
-            acc += sep + ali + coh
+            acc += sep + (ali + coh) * (1 - 0.8 * vw)
         # the air: carries the body toward where the loop is now; the body turns slowly within itself about
         # its own centre (a fold, not an orbit)
+        free = np.zeros_like(p)
         c = wind_centre(t)
         to = c - p
         dist = np.linalg.norm(to, axis=1, keepdims=True) + 1e-6
-        acc += to / dist * np.minimum(dist * 0.35, 9.5)
+        free += to / dist * np.minimum(dist * 0.35, 9.5)
         mid = p.mean(0)
         r = p - mid
         rl = np.linalg.norm(r, axis=1, keepdims=True) + 1e-6
         # the fold, capped (a straggler far out must not be flung), and a faint pull to the body's centre so
         # it never comes apart into separate flocks
-        acc += np.cross(wind_axis(t), r) / rl * np.minimum(rl * 0.35, 2.5)
-        acc += -r / rl * np.clip(rl - 18, 0, 20) * 0.05
+        free += np.cross(wind_axis(t), r) / rl * np.minimum(rl * 0.35, 2.5)
+        free += -r / rl * np.clip(rl - 18, 0, 20) * 0.05
+        acc += free * (1 - vw)
+        # the vortex: each bird toward its own place on its arm, turning with the pattern (clockwise from
+        # above: the angle falls)
+        if vw > 0:
+            rad = v_r[idx] * vortex_squeeze(t)
+            th = v_theta0[idx] - V_SPEED / V_R[1] * v_phase
+            goal = np.stack([V_AXIS[0] + rad * np.cos(th), V_BASE + (rad - V_R[0]) * V_RISE, V_AXIS[2] - rad * np.sin(th)], -1)
+            # d(goal)/dθ · dθ/dt: the tangent, at the pattern's speed there
+            gvel = np.stack([np.sin(th), np.zeros_like(th), np.cos(th)], -1) * (V_SPEED * v_r[idx] / V_R[1])[:, None]
+            acc += ((goal - p) * 1.1 + (gvel - v) * 1.6) * vw
         # each its own turbulence (the body is never one rigid shape)
         acc += NOISE * np.sin(nf[idx] * t * 2 * np.pi + nph[idx]) * np.array([1.0, 0.45, 1.0])
         # lift off the sand for the first seconds of flight; then a soft lift, rising as they near the sand
@@ -124,9 +200,12 @@ for step in range(n_steps + 1):
         landing = (t > 44) & (np.linalg.norm(p - LAND, axis=1, keepdims=True) < 40)
         acc[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, np.maximum(0, 3 - p[:, 1:2]) * 3.0)
         v = v + acc * DT
+        if v_r is not None:
+            v_phase += DT / vortex_squeeze(t)
         sp = np.linalg.norm(v, axis=1, keepdims=True) + 1e-6
         # sandpipers fly ~10–14 m/s; slower in the first wingbeats and coming in to land
-        lo = np.where(since < 1.0, 2.0, np.where(landing, 3.0, 9.0))
+        # (in the vortex the inner birds wheel slower, with the pattern)
+        lo = np.where(since < 1.0, 2.0, np.where(landing, 3.0, 9.0 - 6.0 * vw))
         hi = np.where(landing, 7.0, 14.0)
         v = v / sp * np.clip(sp, lo, hi)
         vel[idx] = v
