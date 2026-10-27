@@ -10,6 +10,7 @@ import raftMaterialsBalsaSource from '../src/ship/raftMaterialsBalsa.ts?raw';
 import raftMaterialsWeaveSource from '../src/ship/raftMaterialsWeave.ts?raw';
 import raftMaterialNodesSource from '../src/ship/raftMaterialNodes.ts?raw';
 import raftSailFaceSource from '../src/ship/raftSailFace.ts?raw';
+import raftScansSource from '../src/ship/raftScans.ts?raw';
 import { createPieceMaterial, familyOf } from '../src/ship/pieceMaterials';
 import {
   BALSA_AXIS,
@@ -185,19 +186,28 @@ describe('§V40 binding budget of the raft families', () => {
 
   const FAMILY_SOURCES = [raftMaterialsSource, raftMaterialsBalsaSource, raftMaterialsWeaveSource];
 
-  it('binds no texture of its own in any raft family file', () => {
+  it('binds no texture of its own in any raft family file — the scans bind theirs in one place', () => {
     for (const src of FAMILY_SOURCES) expect(sites(src)).toBe(0);
     expect(sites(raftMaterialNodesSource)).toBe(0);
     expect(sites(raftSailFaceSource)).toBe(0);
+    // raftScans.ts: every texture() it emits reads one of a scan's TWO maps (each projection of the same map is
+    // the same binding), so a family that takes a scan binds two textures and two samplers more, never more
+    const reads = strip(raftScansSource).match(/\btexture\s*\(\s*\w+/g) ?? [];
+    expect(reads.length).toBeGreaterThan(0);
+    for (const r of reads) expect(r).toMatch(/texture\s*\(\s*t$/);
+    const maps = new Set(strip(raftScansSource).match(/tri\(scan\.(\w+)\)/g));
+    expect([...maps].sort()).toEqual(['tri(scan.albedoRough)', 'tri(scan.normalAoH)']);
   });
 
   it('stays at or under the deck family (9 samplers) — it shares only the ship-wide set', () => {
     // every raft family = its own 0 + the set woodMaterial's non-deck families
-    // bind: wetline 1 + caustics (1 array + 3 displacement) + sun shadow 1.
+    // bind: wetline 1 + caustics (1 array + 3 displacement) + sun shadow 1,
+    // + a scan's two maps where it takes one (balsa, the planks, the deck mats).
     // The deck family adds the heightfield + 2 deck-water tiers on top = 9.
     const SHARED = 1 + 4 + 1;
+    const SCAN = 2;
     const own = FAMILY_SOURCES.reduce((n, src) => n + sites(src), 0) + sites(raftMaterialNodesSource) + sites(raftSailFaceSource);
-    expect(SHARED + own).toBeLessThanOrEqual(9);
+    expect(SHARED + SCAN + own).toBeLessThanOrEqual(9);
   });
 
   it('binds nothing in the vertex stage (no positionNode)', () => {

@@ -23,7 +23,7 @@
  * terms (crowns, tone steps) by periodResolved. §V23: functional mix/smoothstep.
  */
 import * as THREE from 'three/webgpu';
-import { float, mix, normalLocal, positionLocal, uniform, vec2 } from 'three/tsl';
+import { float, mix, normalLocal, positionLocal, uniform, vec2, vec3 } from 'three/tsl';
 import { bandLimitedEdge, coordFilter, periodResolved } from './bandLimit';
 import { hash2, triplanarFbm } from '../terrain/noise';
 import type { PieceKind } from './pieceTypes';
@@ -34,6 +34,7 @@ import { createHighlightNodes } from './raftHighlight';
 import { createBalsaMaterial } from './raftMaterialsBalsa';
 import { createThatchMaterial, createWeaveMaterial } from './raftMaterialsWeave';
 import { createWoodMaterial, type LocalFrame, type ShipMaterialHandle } from './woodMaterial';
+import { raftScan, sampleRaftScanAlongLongest, type RaftScanName } from './raftScans';
 
 export {
   BALSA_AXIS,
@@ -206,11 +207,15 @@ export function createPlankMaterial(
     seamDepth: scaled('seamDepth'),
     plankWander: scaled('plankWander'),
   });
-  return createWoodMaterial(
+  const wood = createWoodMaterial(
     { light: p.plankLight, dark: p.plankDark, wale: false, waterline: false },
     frame,
     overrides,
   );
+  // THE SCANNED GRAIN (raftScans.ts) in the boards' own tones, along each board (a guara stands up, a
+  // splashboard runs across the bow). No relief of its own: a plank edge-on to the sun turns any relief into a
+  // bar code (above).
+  return withScanDetail(wood, 'rough_wood', () => p.plankScan, () => p.plankScanTile);
 }
 
 /**
@@ -353,6 +358,37 @@ export function createRaftMaterial(
   return withHighlight(createRaftMaterialBase(family, kind, frame));
 }
 
+/**
+ * A family's material with a scan laid into its own tones as a detail about 1 (raftScans.ts): its colour, its
+ * roughness and its occlusion multiplied by the scan's over the scan's mean, along each piece's long axis. The
+ * family's pattern, palette and wetline stay as they were composed.
+ */
+function withScanDetail(
+  handle: ShipMaterialHandle,
+  name: RaftScanName,
+  mixOf: () => number,
+  tileOf: () => number,
+): ShipMaterialHandle {
+  const m = handle.material;
+  const piece = createRaftPieceUniforms();
+  const uScan = uniform(mixOf());
+  const uTile = uniform(tileOf());
+  const scanMap = raftScan(name);
+  const offset = vec3(piece.seed.mul(23.1), piece.seed.mul(5.7), piece.seed.mul(41.3));
+  const scan = sampleRaftScanAlongLongest(scanMap, positionLocal, normalLocal, piece.aabbMin, piece.aabbMax, offset, uTile);
+  m.colorNode = (m.colorNode as AnyNode).mul(mix(vec3(1), scan.albedo.div(vec3(scanMap.mean.r, scanMap.mean.g, scanMap.mean.b)), uScan));
+  m.roughnessNode = (m.roughnessNode as AnyNode).mul(mix(float(1), scan.rough.div(scanMap.roughMean), uScan)).clamp(0.04, 1);
+  m.aoNode = (m.aoNode as AnyNode).mul(mix(float(1), scan.ao, uScan));
+  return {
+    material: m,
+    refresh(): void {
+      handle.refresh();
+      uScan.value = mixOf();
+      uTile.value = tileOf();
+    },
+  };
+}
+
 function createRaftMaterialBase(
   family: RaftFamily,
   kind: PieceKind,
@@ -362,7 +398,7 @@ function createRaftMaterialBase(
     case 'balsa':
       return createBalsaMaterial(kind, frame);
     case 'bamboo':
-      return createWeaveMaterial(true, frame);
+      return withScanDetail(createWeaveMaterial(true, frame), 'bamboo_wall', () => raftMaterialParams.bambooScan, () => raftMaterialParams.bambooScanTile);
     case 'weave':
       return createWeaveMaterial(false, frame);
     case 'thatch':

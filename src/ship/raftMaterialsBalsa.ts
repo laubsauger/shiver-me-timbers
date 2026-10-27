@@ -64,6 +64,7 @@ import {
   type RaftPieceUniforms,
 } from './raftMaterialNodes';
 import type { LocalFrame, ShipMaterialHandle } from './woodMaterial';
+import { raftScan, sampleRaftScan } from './raftScans';
 
 type Axis = 'x' | 'y' | 'z';
 
@@ -154,6 +155,9 @@ export function createBalsaMaterial(
   const uHalfBeam = uniform(raftLayout().halfBeam);
   const uRough = uniform(p.balsaRough);
   const uBump = uniform(p.balsaBump);
+  const uScan = uniform(p.balsaScan);
+  const uScanTile = uniform(p.balsaScanTile);
+  const uScanRelief = uniform(p.balsaScanRelief);
   const piece: RaftPieceUniforms = createRaftPieceUniforms();
 
   const pos = positionLocal;
@@ -200,6 +204,17 @@ export function createBalsaMaterial(
    * carrier that is still resolvable at the range this retires at.
    */
   let color: AnyNode = mix(dark, lite, mix(float(0.5), contrastStretch(grain), grainResolved));
+  /**
+   * THE SCANNED GRAIN (raftScans.ts) over that fbm: weathered timber's fibres, splits and silvering, which no
+   * fbm draws (the user, after all of the above: "the raft wood is still pretty shitty"). Put on this piece's own
+   * palette — the scan's mean colour divided out, the seeded tone multiplied in — so the palette, the tone spread
+   * and everything laid over it below (stain, checks, grooves, weed, the wet band) still read as they were tuned.
+   * Its mip chain is its band limit: at range it fades to the tone, as `grainResolved` does for the fbm.
+   */
+  const scanMap = raftScan('rough_wood');
+  const scan = sampleRaftScan(scanMap, pos, normalLocal, axis, offset, uScanTile);
+  const scanned = scan.albedo.div(vec3(scanMap.mean.r, scanMap.mean.g, scanMap.mean.b)).mul(tone);
+  color = mix(color, scanned, uScan);
 
   /**
    * METRE-SCALE WEATHERING STAIN — the band §T147 found empty.
@@ -245,7 +260,9 @@ export function createBalsaMaterial(
   color = color.mul(mix(float(1), uGrooveDarken, groove));
   // a stained patch is soaked and slightly smoother; the dry weathered fibre
   // between the patches is rougher. One more thing that was one flat number.
-  let rough: AnyNode = uRough.add(grain.mul(0.1)).add(check.mul(0.1)).sub(stain.mul(0.12));
+  let rough: AnyNode = mix(uRough.add(grain.mul(0.1)), scan.rough.mul(uRough.div(scanMap.roughMean)), uScan)
+    .add(check.mul(0.1))
+    .sub(stain.mul(0.12));
 
   let crevice: AnyNode = float(0);
   if (isLog) {
@@ -305,6 +322,8 @@ export function createBalsaMaterial(
     .sub(0.5)
     .mul(uGrainRelief)
     .mul(grainResolved)
+    .mul(uScan.oneMinus())
+    .add(scan.height.sub(0.5).mul(uScanRelief).mul(uScan))
     .sub(check.mul(uCheckDepth))
     .sub(groove.mul(uGrooveDepth));
 
@@ -315,7 +334,7 @@ export function createBalsaMaterial(
   // cavity: the check and groove cuts, and — logs only — the chink the log's
   // flank faces. Every input is either an already-band-limited mask or a
   // normal component, so none of it needs a gate of its own (§V.48).
-  material.aoNode = float(1).sub(check.max(groove).mul(0.6).max(crevice).clamp(0, 1));
+  material.aoNode = float(1).sub(check.max(groove).mul(0.6).max(crevice).clamp(0, 1)).mul(mix(float(1), scan.ao, uScan));
   material.normalNode = reliefNormal(height, uBump.mul(water.reliefScale));
 
   return {
@@ -352,6 +371,9 @@ export function createBalsaMaterial(
       uHalfBeam.value = raftLayout().halfBeam;
       uRough.value = p.balsaRough;
       uBump.value = p.balsaBump;
+      uScan.value = p.balsaScan;
+      uScanTile.value = p.balsaScanTile;
+      uScanRelief.value = p.balsaScanRelief;
     },
   };
 }

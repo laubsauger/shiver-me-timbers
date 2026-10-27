@@ -38,7 +38,12 @@ export interface RaftMaterialParams {
   balsaCrevice: number; // 0..1 — §T147: ambient occlusion on a log flank that faces its neighbour across a chink
   balsaRough: number;
   balsaBump: number; // relief gain
+  balsaScan: number; // 0..1 — the scanned grain (raftScans.ts) over the procedural one
+  balsaScanTile: number; // × the scan's own tile (0.5 m)
+  balsaScanRelief: number; // m — the scan's height range
   // --- bamboo (lookout platform slats, default mats' bamboo edge)
+  bambooScan: number; // 0..1 — the scanned split bamboo (raftScans.ts) laid into the deck mats' own tones
+  bambooScanTile: number; // × the scan's own tile (2 m)
   bambooYellow: number; // golden-yellow [§7 Bamboo]
   bambooGreen: number; // green-grey streaks
   bambooNodePitch: number; // m — node rings along a cane
@@ -77,6 +82,8 @@ export interface RaftMaterialParams {
   plankDark: number;
   plankWidth: number; // m — §V66: a 0.6 m guara is not planked in 0.55 m boards
   plankReliefScale: number; // 0..1 — the galleon's board relief, scaled: a plank edge-on to the sun flips its normal in and out of the light
+  plankScan: number; // 0..1 — the scanned grain (raftScans.ts) laid into the boards' own tones
+  plankScanTile: number; // × the scan's own tile (0.5 m)
   // --- rope (lashings): three-strand hemp, tan → grey-brown [§7 Rope]
   ropeTan: number;
   ropeDark: number; // the shadowed lay between strands
@@ -187,6 +194,13 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     // exaggeration (groove 34°, grain 12°, check 66°) and lets the ALBEDO carry
     // the wood, which is how woodMaterial has always done it.
     balsaBump: 1.5,
+    // the scanned grain (rough_wood, a 0.5 m tile of weathered timber): what the user still read as "shitty"
+    // after §T147 was the fbm's grain itself — no fibres, no splits, no silver weathering
+    balsaScan: 1,
+    balsaScanTile: 1.6,
+    balsaScanRelief: 0.006,
+    bambooScan: 1,
+    bambooScanTile: 0.6,
     bambooYellow: 0xd9b55e,
     bambooGreen: 0x9a9a6a,
     bambooNodePitch: 0.35,
@@ -251,6 +265,9 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     plankDark: 0x6f675b,
     plankWidth: 0.25,
     plankReliefScale: 0.08,
+    // the splashboards and guaras are the raft wood nearest the eye in most shots, and read as smooth pale plastic
+    plankScan: 1,
+    plankScanTile: 1.2,
     ropeTan: 0xa8916a,
     ropeDark: 0x5f5040,
     cratePine: 0xb8945c,
@@ -294,6 +311,8 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weedHalfBand: m(0, 0.4), weedBowFade: m(0.1, 6, 0.1), weedStrength: m(0, 1), wetDarken: m(0, 1),
     wetRise: m(0, 0.4), balsaCrevice: m(0, 1),
     balsaRough: m(0.3, 1), balsaBump: m(0, 30, 0.5),
+    balsaScan: m(0, 1), balsaScanTile: m(0.25, 4, 0.05), balsaScanRelief: m(0, 0.03, 0.001),
+    bambooScan: m(0, 1), bambooScanTile: m(0.25, 4, 0.05),
     bambooYellow: colour, bambooGreen: colour,
     bambooNodePitch: m(0.1, 0.8), bambooNodeWidth: m(0.005, 0.06, 0.001), bambooSlatWidth: m(0.02, 0.15, 0.005),
     weaveTan: colour, weaveDark: colour,
@@ -307,7 +326,7 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     thatchBump: m(0, 30, 0.5),
     thatchTileWidth: m(0.04, 0.6), thatchTileStagger: m(0, 0.2),
     tickLight: colour, tickDark: colour, tickStrip: m(0.02, 0.3, 0.005), tickBlock: m(1, 10, 1),
-    plankLight: colour, plankDark: colour, plankWidth: m(0.05, 0.6), plankReliefScale: m(0, 1, 0.05),
+    plankLight: colour, plankDark: colour, plankWidth: m(0.05, 0.6), plankReliefScale: m(0, 1, 0.05), plankScan: m(0, 1), plankScanTile: m(0.25, 4, 0.05),
     ropeTan: colour, ropeDark: colour,
     cratePine: colour, crateKhaki: colour, crateBoardWidth: m(0.04, 0.3), jerrycanColor: colour,
     drumColor: colour, dinghyColor: colour, dinghyPatch: m(0, 1), cageColor: colour, crateCard: colour,
