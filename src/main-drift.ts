@@ -39,6 +39,7 @@ import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 import { createSea } from './drift/wandering/sea';
+import { C1_FOLLOW, type BeatName } from './drift/wandering/beats';
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
 import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
@@ -139,18 +140,21 @@ async function boot(): Promise<void> {
   const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
   const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
-  // THE SEA (drift/wandering/sea.ts), in a scene of its own: the landing's last hundred-odd metres (C1) and the
-  // rest at the raft, taken over from Get the Drift as one descent — or, with ?sea[&hour=h], the sea test act
-  // alone on its own clock
+  // THE SEA (drift/wandering/sea.ts), in a scene of its own: the landing's last hundred-odd metres (C1), taken
+  // over from Get the Drift as one descent, then the rest of Part C and Act 3 (wandering/beats.ts) — or, with
+  // ?sea[&hour=h], the sea test act alone on its own clock
   const seaQuery = new URLSearchParams(location.search);
   const seaTest = seaQuery.has('sea');
-  /** s the eye rests at the raft after Get the Drift's landing ends */
-  const HOLD = 25;
   const sea = seaTest
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
-    : createSea(renderer, { drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.seaFrom), total: arrival.total + HOLD - arrival.seaFrom });
+    : createSea(renderer, {
+        drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.seaFrom),
+        c1End: arrival.total - arrival.seaFrom + C1_FOLLOW,
+      });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
   const total = seaStart + sea.total;
+  /** s the show fades to black over at its end (W5: "the title, or the game") */
+  const END_FADE = 6;
   /** s the hand-over into the sea's scene crossfades over: both scenes summed in HDR, each at its own exposure */
   const XF = 3;
   // through the landing Act 2 eases into the sea's look — its adaptation to the light where the sea takes over,
@@ -223,6 +227,10 @@ async function boot(): Promise<void> {
    * and near plane */
   let seaK = 0;
   const seaEye = new THREE.Object3D();
+  /** the sea's beats this frame (two across a dissolve), on its clock; and the end's fade */
+  let seaPasses: Array<{ beat: BeatName; weight: number }> = [];
+  let seaT = 0;
+  let endFade = 1;
   let actExposure = 1;
   let actNear = 0.05;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
@@ -230,7 +238,10 @@ async function boot(): Promise<void> {
     const x = seaTest ? 1 : Math.min(1, Math.max(0, (at - seaStart) / XF));
     seaK = x * x * (3 - 2 * x);
     dome.setFaceSize(faceOverride ?? p.domeFace);
-    if (seaK > 0) sea.update(at - seaStart, seaEye, renderer);
+    seaT = at - seaStart;
+    seaPasses = seaK > 0 ? sea.passes(seaT) : [];
+    const e = Math.min(1, Math.max(0, (total - at) / END_FADE));
+    endFade = seaTest ? 1 : e * e * (3 - 2 * e);
     if (seaK >= 1) {
       dome.setGrade(...SEA_GRADE);
       return state;
@@ -286,10 +297,14 @@ async function boot(): Promise<void> {
       dome.setFar(1e6);
       dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, weight * (1 - seaK) * actExposure, first);
     }
-    if (seaK > 0) {
+    // each of the sea's beats (a dissolve draws two), put in its state just before it is drawn
+    let clear = first && seaK >= 1;
+    for (const ps of seaPasses) {
+      sea.update(seaT, seaEye, renderer, ps.beat);
       dome.setNear(0.05);
       dome.setFar(sea.far);
-      dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * sea.exposure, first && seaK >= 1);
+      dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * ps.weight * endFade * sea.exposure, clear);
+      clear = false;
     }
   };
   let masterSize = 1024;
@@ -351,7 +366,8 @@ async function boot(): Promise<void> {
     guides.update(view === 'dome' && guidesOn, p.domeTilt);
     if (hud) {
       const a2 = act2 as ArrivalState | null;
-      const where = seaK >= 1 ? 'the sea · C1 landing' : seaK > 0 ? 'the sea · hand-over' : a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
+      const beatNow = seaPasses.map((ps) => ps.beat).join('→');
+      const where = seaK >= 1 ? `the sea · ${beatNow}` : seaK > 0 ? 'the sea · hand-over' : a2 && t >= act1 ? `get the drift · ${a2.beat}` : `undertime · ${state.beat}`;
       hud.textContent =
         `${where.padEnd(26)} ${t.toFixed(2).padStart(6)} s / ${total.toFixed(0)} s  ×${speed}${paused ? '  paused' : ''}${recording}\n` +
         (a2 && t >= act1
