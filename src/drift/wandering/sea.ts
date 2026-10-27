@@ -92,6 +92,8 @@ const WIND_TO = Math.PI;
 const OPEN_DEBRIS = { pieces: 2600, sigma: 220, behind: 90, lane: [-9, 15] as [number, number] };
 /** px: each face of the water's mirror capture */
 const MIRROR_SIZE = 512;
+/** CPU oceans, one per instant the rafts sample the sea at (raft.ts SAMPLES, 5) and one spare */
+const SEA_POOL = 6;
 const SWELL_PERIOD = 14;
 /** m: the mat of debris round the raft (a Gaussian's sigma: it thins into the field) and its pieces; the berth
  * kept clear round the raft (its logs reach 6.9 m from its centre) */
@@ -295,9 +297,23 @@ export function createSea(
   surface.group.traverse((x) => {
     if ((x as THREE.Mesh).isMesh) x.receiveShadow = true;
   });
-  const cpu = new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum);
+  // ONE SEA PER INSTANT. A CpuOcean recomputes its grids whenever it is asked about a new time, and every raft
+  // averages the sea over the same few instants (raft.ts SAMPLES): the main raft and the five far ones took
+  // 30 recomputes a frame on the open sea, ~60 ms, most of the frame (engine-findings.md). A pool of oceans
+  // sharing one spectrum, each holding the last instant it was asked about, computes each instant once.
+  const seas = Array.from({ length: SEA_POOL }, () => ({ at: Number.NaN, sea: new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum) }));
+  let seaUse = 0;
+  const seaAt = (t: number): CpuOcean => {
+    let s = seas.find((x) => x.at === t);
+    if (!s) {
+      s = seas[seaUse];
+      seaUse = (seaUse + 1) % seas.length;
+      s.at = t;
+    }
+    return s.sea;
+  };
   // a raft floats on the sea, or rests on the sand once aground (w2)
-  const floating = (x: number, z: number, t: number): number => Math.max(cpu.heightAt(x, z, t), ground(x, z) + ON_SAND);
+  const floating = (x: number, z: number, t: number): number => Math.max(seaAt(t).heightAt(x, z, t), ground(x, z) + ON_SAND);
   // the raft, off the Sun's bearing from where the eye comes to rest, its bow turned off the eye's heading
   const raft = createRaft(floating);
   afloat.add(raft.group);
@@ -543,7 +559,7 @@ export function createSea(
             hazeColor: (scene.fog as THREE.Fog).color,
             cameraPosition: eye.position,
           },
-          (x, z) => cpu.heightAt(x, z, t),
+          (x, z) => seaAt(t).heightAt(x, z, t),
         );
       }
       const light = { sun: lum(seaSky.sunColour), sky: Math.min(1, lum(seaSky.irradiance) / 0.4) };

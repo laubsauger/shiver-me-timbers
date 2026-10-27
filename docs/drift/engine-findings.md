@@ -276,3 +276,27 @@ cascades at the source:
 - move the variance the mips average away into the specular lobe's roughness (Toksvig/LEAN), so the far sea
   keeps its sheen instead of turning flat. The shader's existing `normalVar` is where it goes.
 That removes the noise at its cause, for the game's own cameras as well, at the cost of the mip passes.
+
+## 13. Where a frame's time goes now (2160², after findings 9–11)
+
+One lane, no encoder (an in-page harness timing `__drift.record` against a sink that discards):
+
+| | open sea (400 s) | coast (640 s) |
+|---|---|---|
+| frame | 101 ms | 68 ms |
+| shadows off | 99 ms | 66 ms |
+| sun shadow map 1024² instead of 4096² | 106 ms | 70 ms |
+| cube faces 600² instead of 1200² | ~the same | |
+
+- **Shadows are cheap.** The twelve shadow renders a frame of finding 3 cost 2–5 ms in all; not worth an engine
+  change for speed (finding 3's correctness point stands).
+- **The CPU ocean was most of the open sea's frame.** `CpuOcean` recomputes its grids whenever it is asked about
+  a new time. The raft averages the sea over five instants (`raft.ts` SAMPLES), and the five far rafts ask for
+  the same five, so the grids were computed 30 times a frame: 60% of the main thread, ~64 ms. The film now keeps
+  a pool of oceans sharing one spectrum, one per instant (`sea.ts` `seaAt`): 5 recomputes, ~17 ms, identical
+  raft poses. Open sea: 106 → 78 ms a frame on one lane; 15.4 → 17.0 fps with two lanes and x264.
+- With two lanes the rest is shared: two pages' main threads (three's per-object render work), the GPU, and two
+  x264 encoders on the same CPU.
+
+**For the engine.** A `CpuOcean` that keeps its last few grids by time (or computes several instants in one
+pass) would do the same for the game, where every ship's buoyancy asks the same sea.
