@@ -422,7 +422,7 @@ export function createSea(
     debris.add(createDebrisField(berth(matPieces(raftInField.x, raftInField.z, MAT_SIGMA, MAT_PIECES)), du as unknown as DebrisUniforms));
   }
   // the far rafts, about the eye
-  const farRafts = o.drive ? FAR_RAFTS.map(() => createRaft(floating)) : [];
+  const farRafts = o.drive ? FAR_RAFTS.map(() => createRaft(floating, { far: true })) : [];
   for (const r of farRafts) afloat.add(r.group);
   // the people, the dolphin and the case, the beams, the field, the walkers (props.ts)
   const props = o.drive ? createProps() : undefined;

@@ -39,7 +39,12 @@ export function lanternNight(sunElevationDeg: number): number {
   return k * k * (3 - 2 * k);
 }
 
-export function createRaftLanterns(p: RaftParams = raftParams): RaftLanterns {
+/**
+ * `lights: false` for a raft seen only from far off: its glass still glows, but it carries no point lights — and
+ * a light that is in the scene in one beat and not in the next makes every lit material rebuild, twice a frame
+ * through a dissolve (The Drift's night-to-coast crossfade fell to under a frame a second).
+ */
+export function createRaftLanterns(p: RaftParams = raftParams, o: { lights?: boolean } = {}): RaftLanterns {
   const L = raftLayout(p);
   const hw = p.cabinWidth / 2;
   const eaveY = L.cabinFloorY + p.cabinEave;
@@ -86,7 +91,7 @@ export function createRaftLanterns(p: RaftParams = raftParams): RaftLanterns {
     });
     group.add(lantern);
   });
-  const lights = [-1, 1].map((sx) => {
+  const lights = (o.lights === false ? [] : [-1, 1]).map((sx) => {
     const l = new THREE.PointLight(CANDLE, 0, REACH, 2);
     l.position.set(sx * out, eaveTip - DROP, (zs[0] + zs[1]) / 2);
     l.castShadow = false;

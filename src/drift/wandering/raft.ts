@@ -59,7 +59,8 @@ const STILL_SAIL = { sailFlutterAmp: 0.015, sailLuffFlap: 0, sailGustAmp: 0, sai
  * way and full at rest; the waves keep their wind. */
 const FILM_SAIL_WIND_REF = 1.4;
 
-export function createRaft(heightAt: (x: number, z: number, t: number) => number): RaftProp {
+/** `far`: a raft seen only on the horizon (its lanterns carry no point lights: raftLanterns.ts) */
+export function createRaft(heightAt: (x: number, z: number, t: number) => number, o: { far?: boolean } = {}): RaftProp {
   // (read into each sail's shape as the blueprint is built)
   raftParams.sailWindRef = FILM_SAIL_WIND_REF;
   const blueprint = buildRaftBlueprint();
@@ -90,7 +91,7 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   group.name = 'drift-raft';
   group.add(assembly.group);
   // the lanterns under the roof's corners (the game's), lit as the sunlight goes
-  const lanterns = createRaftLanterns();
+  const lanterns = createRaftLanterns(undefined, { lights: !o.far });
   assembly.group.add(lanterns.group);
   const contacts = raftContactPoints();
   const euler = new THREE.Euler(0, 0, 0, 'YXZ');
