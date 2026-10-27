@@ -163,7 +163,9 @@ const POSE_KEYS: PoseKey[] = [
   // dolphin's throw onto its bow crosses the view (seen end-on from astern, the case landed out of sight behind
   // the cabin and the sail: the v9 review)
   { beat: 'c3', at: 0, pose: {} },
-  { beat: 'c3', at: 14, pose: { distance: 10, height: 1.6, bearing: 10 * D, heading: 70 * D } },
+  // (2.3 m up, not 1.6: from just over the water the deck was a sliver at the waterline, and the case thrown onto
+  // it read as landing in the sea beyond — the v9 review)
+  { beat: 'c3', at: 14, pose: { distance: 10, height: 2.3, bearing: 10 * D, heading: 70 * D } },
   { beat: 'c3', at: 32, pose: {} },
   // c4: back a little and up, for the beams overhead; the raft back on its course through the night
   { beat: 'c4', at: 4, pose: { distance: 12, height: 2.2, bearing: 12 * D } },

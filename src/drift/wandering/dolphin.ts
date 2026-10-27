@@ -37,13 +37,45 @@ export type SurfacingKind = 'roll' | 'leap' | 'flip' | 'swim';
 export type Surfacing = [number, number, number, SurfacingKind, number?];
 
 /**
- * Porpoising in from far out on the left on a diagonal that crosses the Sun's line (c3's Sun sets ~24° left: a
+ * C3'S RAFT, as the dolphin's choreography is laid about it (beats.ts POSE_KEYS, c3: settled by 14 s, held through
+ * the flip; tests/driftDolphin.test.ts holds the two together): its centre's bearing (deg right of the front) and
+ * distance (m) from the eye, and its heading (deg: its bow swung that far to the left, broadside to us).
+ */
+export const C3_RAFT = { bearing: 10, distance: 10, heading: 70 };
+/** where the case lands, on the raft: m across from its centreline toward the eye, and m forward of its centre
+ * (the fore-deck, ahead of the cabin and the mast foot) */
+export const CASE_ON_DECK = { across: 1.9, along: 3.0 };
+/** the flip: m from the deck spot it throws at, and the way in (deg off the raft's own bow line, toward the eye) */
+const FLIP_RANGE = 5.5;
+const FLIP_IN = 45;
+
+const D = Math.PI / 180;
+/** eye-frame (x right, z ahead) of a raft-local spot (across toward the eye, along toward the bow) */
+export function c3RaftPoint(across: number, along: number): [number, number] {
+  const c: [number, number] = [Math.sin(C3_RAFT.bearing * D) * C3_RAFT.distance, Math.cos(C3_RAFT.bearing * D) * C3_RAFT.distance];
+  const a: [number, number] = [-Math.sin(C3_RAFT.heading * D), Math.cos(C3_RAFT.heading * D)];
+  // across: the side facing the eye
+  const n0: [number, number] = [a[1], -a[0]];
+  const n: [number, number] = n0[0] * -c[0] + n0[1] * -c[1] > 0 ? n0 : [-n0[0], -n0[1]];
+  return [c[0] + a[0] * along + n[0] * across, c[1] + a[1] * along + n[1] * across];
+}
+/** the deck spot (eye frame), and the dolphin's line in to it: out from the spot, toward the eye and the bow */
+export const CASE_TARGET: [number, number] = c3RaftPoint(CASE_ON_DECK.across, CASE_ON_DECK.along);
+const FLIP_OUT: [number, number] = (() => {
+  const p = c3RaftPoint(CASE_ON_DECK.across + Math.sin(FLIP_IN * D), CASE_ON_DECK.along + Math.cos(FLIP_IN * D));
+  return [p[0] - CASE_TARGET[0], p[1] - CASE_TARGET[1]];
+})();
+const onLine = (d: number): [number, number] => [CASE_TARGET[0] + FLIP_OUT[0] * d, CASE_TARGET[1] + FLIP_OUT[1] * d];
+
+/**
+ * Porpoising in from far out on the left on a diagonal that crosses the Sun's line (c3's Sun sets ~22° left: a
  * dark body only reads against the afterglow, so the high breach is on that line, 20 m out), round close by us
- * on the left, a leap across the view, and in to the raft — which has swung broadside by then (beats.ts: its
- * port side to us, its bow to the left, toward the afterglow) — for the flip 4 m off its bow, on the Sun's line,
- * the case thrown on across the view onto the bow; down short of the raft, turning away, and off the way it
- * came. (It had come down into the bow and swum on through it: "it landed in the thing".) Spaced for ~3.5–4 m/s,
- * a dolphin's cruise; slower into the flip. A `swim` is a waypoint under water (no surfacing).
+ * on the left, and in to the raft — broadside by then, its near side to us and its bow to the left, toward the
+ * afterglow — straight at the fore-deck: the flip is on that line, FLIP_RANGE m out, so the case is thrown on
+ * the way the dolphin was going and comes down on the deck (it had been thrown a fixed reach along the heading
+ * and landed on the water: the v9 review). The dolphin goes down short of the raft, passes under its side and
+ * turns away, off the way it came. Spaced for ~3.5–4 m/s, a dolphin's cruise; slower into the flip. A `swim` is
+ * a waypoint under water (no surfacing).
  */
 export const SURFACINGS: Surfacing[] = [
   [1.5, -45, 38, 'roll'],
@@ -53,13 +85,19 @@ export const SURFACINGS: Surfacing[] = [
   [11.5, -10.6, 17.2, 'leap', 2.1],
   [14.6, -5, 5.5, 'roll'],
   [17.6, -14, 4, 'leap', 1.0],
-  [20.4, -21, 9, 'roll'],
-  [22.4, -17, 14.5, 'swim'],
-  [25.6, -8.7, 12.4, 'flip', 0.9],
-  [28.0, -9.3, 17.8, 'swim'],
-  [30.5, -13.5, 23, 'roll'],
-  [33.3, -21, 25, 'leap', 0.9],
-  [36.1, -30, 30, 'roll'],
+  // (round in a wide loop on our left to come back along the line: turned about at one roll, it all but stopped)
+  [19.2, -19.5, 2.8, 'swim'],
+  [20.7, -21.5, -1.0, 'roll'],
+  [22.3, -17.5, -4.0, 'swim'],
+  [25.3, ...onLine(FLIP_RANGE + 4.5), 'swim'],
+  [26.6, ...onLine(FLIP_RANGE), 'flip', 0.9],
+  // (two waypoints on the line past the flip, so its heading through the flip is the line: deep by then, under
+  // the raft's side)
+  [28.4, ...onLine(FLIP_RANGE - 2.8), 'swim'],
+  [29.5, ...onLine(FLIP_RANGE - 5.2), 'swim'],
+  [33.3, -13.5, 23, 'roll'],
+  [36.0, -21, 25, 'leap', 0.9],
+  [38.8, -30, 30, 'roll'],
 ];
 /** s it swims on after the last surfacing (out of sight) */
 const AWAY = 3.5;
@@ -160,14 +198,14 @@ export const FLIP_RELEASE = (() => {
   return f[0] + (0.6 * Math.sqrt(2 * G * (f[4] ?? 0))) / G;
 })();
 
-/** the throw at the flip, in the eye's level frame: where the case leaves the snout (x, y, z), and
- * the way it goes along the water (unit): the dolphin's own heading, so the case carries on where it was going */
-export function flipThrow(): { from: [number, number, number]; dir: [number, number] } {
+/** the throw at the flip, in the eye's level frame: where the case leaves the snout (x, y, z), the way it goes
+ * along the water (unit: the dolphin's own heading, at the deck spot), and the deck spot it comes down on */
+export function flipThrow(): { from: [number, number, number]; dir: [number, number]; to: [number, number] } {
   const d = dolphinPose(FLIP_RELEASE);
   const cp = Math.cos(d.pitch);
   const nose = 1.3;
   const dir: [number, number] = [Math.sin(d.heading), Math.cos(d.heading)];
-  return { from: [d.x + dir[0] * nose * cp, d.y + nose * Math.sin(d.pitch), d.z + dir[1] * nose * cp], dir };
+  return { from: [d.x + dir[0] * nose * cp, d.y + nose * Math.sin(d.pitch), d.z + dir[1] * nose * cp], dir, to: CASE_TARGET };
 }
 
 /** a splash (splash.ts): s into c3, where (eye frame, m), the body's velocity along the water then (m/s), how

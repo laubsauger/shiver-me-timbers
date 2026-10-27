@@ -143,9 +143,10 @@ export interface Props {
   setPixelAngle(rad: number): void;
 }
 
-/** the case's throw: m on from the snout it lands, m it rises over the snout (up against the afterglow), m/s² */
-const CASE_REACH = 3.0;
+/** the case's throw: m it rises over the higher of the snout and the deck (up against the afterglow), m/s² */
 const CASE_LOB = 1.0;
+/** m it skids on along the deck once it lands */
+const CASE_SKID = 0.35;
 const G_CASE = 9.81;
 /** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4). Each
  * station is a light on a low island on the horizon (STATION_*): the beams start and end at its light, so they
@@ -393,6 +394,16 @@ export function createProps(): Props {
 
   const tmp = new THREE.Vector3();
   const deckAt = new THREE.Vector3(0.6, 0, -1.4);
+  // the top of what stands on the raft at raft-local (x, z), under anything over 1.3 m (the roof, the sail): a ray
+  // straight down in the raft's frame
+  const deckRay = new THREE.Raycaster();
+  const deckTop = (x: number, z: number): THREE.Vector3 => {
+    const r = raftOf.current!;
+    deckRay.set(new THREE.Vector3(x, 6, z).applyMatrix4(r.matrixWorld), new THREE.Vector3(0, -1, 0).transformDirection(r.matrixWorld));
+    const ys = deckRay.intersectObject(r, true).map((h) => r.worldToLocal(h.point.clone()).y).filter((y) => y < 1.3);
+    return new THREE.Vector3(x, ys.length ? Math.max(...ys) : 0.6, z);
+  };
+  const raftOf: { current: THREE.Object3D | null } = { current: null };
   return {
     group,
     glows: [beams, fieldGroup],
@@ -401,6 +412,7 @@ export function createProps(): Props {
     },
     update(s) {
       const { t, starts, world, raft } = s;
+      raftOf.current = raft;
       // people ride the raft wherever it goes
       if (deckY === null) {
         // where each stands, found by a ray down onto the raft (raft-local): out from under the cabin's roof
@@ -442,8 +454,9 @@ export function createProps(): Props {
         dolphin.set(d);
       }
 
-      // THE CASE: flicked from the dolphin's snout as it rises in the flip, along its heading (it carries on where
-      // the dolphin was going), lobbed a metre over the snout and falling onto the deck there; then aboard
+      // THE CASE: flicked from the dolphin's snout as it rises in the flip, on the way it was going, and down on
+      // the fore-deck it was thrown at (dolphin.ts CASE_ON_DECK): a ballistic lob from the snout, CASE_LOB m over the
+      // higher end, landing on whatever is on the deck there (found from above in the raft's own frame); then aboard
       const cf = c3 - FLIP_RELEASE;
       caseMesh.visible = world !== 'test' && aboard && cf > 0;
       if (caseMesh.visible) {
@@ -452,23 +465,34 @@ export function createProps(): Props {
         const toWorld = (x: number, y: number, z: number): THREE.Vector3 =>
           new THREE.Vector3(x, 0, -z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, y, s.eye.z));
         const from = toWorld(...throwAt.from);
-        // where it lands: CASE_REACH m on along the heading, on the deck (raft-local deck height), every frame from
-        // the raft's pose now (pure in t)
-        const land = raft.worldToLocal(toWorld(throwAt.from[0] + throwAt.dir[0] * CASE_REACH, 0, throwAt.from[2] + throwAt.dir[1] * CASE_REACH));
-        land.y = deckY ?? 0.6;
-        const end = raft.localToWorld(land.clone());
-        const vy0 = Math.sqrt(2 * G_CASE * CASE_LOB);
-        const flight = (vy0 + Math.sqrt(vy0 * vy0 + 2 * G_CASE * Math.max(0, from.y - end.y))) / G_CASE;
+        // the spot in the raft's frame, and the deck's top there (pure in t: the raft's pose now)
+        const spot = raft.worldToLocal(toWorld(throwAt.to[0], 0, throwAt.to[1]));
+        // its flight's direction in the raft's frame (for the skid)
+        const spotDir = raft.worldToLocal(toWorld(throwAt.to[0] + throwAt.dir[0], 0, throwAt.to[1] + throwAt.dir[1])).sub(spot).setY(0).normalize();
+        const end = raft.localToWorld(deckTop(spot.x, spot.z).add(new THREE.Vector3(0, 0.11, 0)));
+        const apex = Math.max(from.y, end.y) + CASE_LOB;
+        const vy0 = Math.sqrt(2 * G_CASE * (apex - from.y));
+        const flight = vy0 / G_CASE + Math.sqrt((2 * (apex - end.y)) / G_CASE);
+        const heading = s.yaw - Math.atan2(throwAt.dir[0], throwAt.dir[1]);
         if (cf < flight && world === 'open') {
           const u = cf / flight;
           caseMesh.position.lerpVectors(from, end, u);
           caseMesh.position.y = from.y + vy0 * cf - 0.5 * G_CASE * cf * cf;
-          // tumbling end over end about the axis across its flight
-          caseMesh.rotation.set(0, s.yaw - Math.atan2(throwAt.dir[0], throwAt.dir[1]), 0, 'YXZ');
-          caseMesh.rotateX(-u * Math.PI * 1.5);
+          // tumbling end over end about the axis across its flight, a turn and a half, landing flat
+          caseMesh.rotation.set(0, heading, 0, 'YXZ');
+          caseMesh.rotateX(-u * Math.PI * 3);
         } else {
-          caseMesh.position.copy(end);
-          caseMesh.quaternion.copy(raft.quaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.4));
+          // LANDED: it hits the deck, hops twice and skids to a stop along its flight (so it reads as landing ON
+          // something), then sits there aboard, riding the raft
+          const k = cf - flight;
+          const hop = (a: number, at: number, len: number): number => (k > at && k < at + len ? a * Math.sin((Math.PI * (k - at)) / len) : 0);
+          const skid = CASE_SKID * (1 - Math.exp(-k / 0.25));
+          const settle = raft.worldToLocal(end.clone());
+          settle.x += (spotDir.x * skid);
+          settle.z += (spotDir.z * skid);
+          caseMesh.position.copy(raft.localToWorld(settle)).add(new THREE.Vector3(0, hop(0.22, 0, 0.3) + hop(0.07, 0.3, 0.18), 0));
+          caseMesh.rotation.set(0, heading, 0, 'YXZ');
+          caseMesh.rotateX(-0.25 * hop(1, 0, 0.3));
         }
       }
       // the radio: its dial glows from c4 on (with the static's flicker), dark again by day

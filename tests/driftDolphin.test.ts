@@ -6,7 +6,18 @@
  * comes up only where the choreography says, and is out of sight between.
  */
 import { describe, expect, it } from 'vitest';
-import { DOLPHIN_SPAN, FLIP_RELEASE, SURFACINGS, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
+import { C3_RAFT, DOLPHIN_SPAN, FLIP_RELEASE, SURFACINGS, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
+import { C1_FOLLOW, beatStarts, raftPose, type RaftPose } from '../src/drift/wandering/beats';
+
+/** eye frame (x right, z ahead) → c3's raft: (across, along) m from its centre, along toward its bow */
+function c3RaftLocal([x, z]: [number, number] | number[]): [number, number] {
+  const D = Math.PI / 180;
+  const c = [Math.sin(C3_RAFT.bearing * D) * C3_RAFT.distance, Math.cos(C3_RAFT.bearing * D) * C3_RAFT.distance];
+  const a = [-Math.sin(C3_RAFT.heading * D), Math.cos(C3_RAFT.heading * D)];
+  const rx = x - c[0];
+  const rz = z - c[1];
+  return [rx * a[1] - rz * a[0], rx * a[0] + rz * a[1]];
+}
 
 const G = 9.81;
 const h = 1 / 240;
@@ -59,37 +70,42 @@ describe('the dolphin in c3', () => {
     for (const t of gaps) expect(dolphinPose(t).y + 0.32).toBeLessThan(-0.4);
   });
 
-  it('flips the case from high, its head up, off the raft\'s bow, and throws it on along its own heading', () => {
+  it('flips the case from high, head up, heading straight at the deck spot it throws it onto', () => {
     const f = dolphinPose(FLIP_RELEASE);
     expect(f.y).toBeGreaterThan(0.6);
     expect(f.pitch).toBeGreaterThan(0.3);
-    // c3's raft (beats.ts): 10° right at 10 m, swung broadside, bow 70° to the left; its centre log is 13.7 m
-    // (params/raft.ts), so its bow is ~6.9 m from the centre along that heading
-    const h = (70 * Math.PI) / 180;
-    const c = [Math.sin((10 * Math.PI) / 180) * 10, Math.cos((10 * Math.PI) / 180) * 10];
-    const bow = [c[0] - Math.sin(h) * 6.85, c[1] + Math.cos(h) * 6.85];
-    expect(Math.hypot(f.x - bow[0], f.z - bow[1])).toBeLessThan(4.5);
-    // the case goes where the dolphin was going (a throw sideways to its travel read as "unbelievable"), and
-    // toward the bow, not away from the raft
+    // the case goes where the dolphin was going (a throw sideways to its travel read as "unbelievable"), and that is
+    // at the deck: it had been thrown a fixed reach along the heading and come down on the water (the v9 review)
     const th = flipThrow();
     expect(th.dir[0] * Math.sin(f.heading) + th.dir[1] * Math.cos(f.heading)).toBeGreaterThan(0.99);
-    expect((bow[0] - th.from[0]) * th.dir[0] + (bow[1] - th.from[2]) * th.dir[1]).toBeGreaterThan(0);
+    const to = [th.to[0] - th.from[0], th.to[1] - th.from[2]];
+    const len = Math.hypot(to[0], to[1]);
+    expect((to[0] * th.dir[0] + to[1] * th.dir[1]) / len).toBeGreaterThan(Math.cos((5 * Math.PI) / 180));
+    // a flick, not a cannon shot
+    expect(len).toBeLessThan(6.5);
+    // and the spot is on the deck: within the raft's planform (13.7 m long, 9 logs ≈ 5.4 m across)
+    const [x, z] = c3RaftLocal(th.to);
+    expect(Math.abs(z)).toBeLessThan(6.85 - 1);
+    expect(Math.abs(x)).toBeLessThan(2.7 - 0.5);
+  });
+
+  it('lays the choreography about the raft where beats.ts puts it in c3', () => {
+    const rest: RaftPose = { bearing: 0.26, distance: 18, heading: -1.5, height: 3 };
+    const c1End = 21 + C1_FOLLOW;
+    const p = raftPose(beatStarts(c1End).starts.c3 + FLIP_RELEASE, c1End, rest);
+    expect((p.bearing * 180) / Math.PI).toBeCloseTo(C3_RAFT.bearing, 3);
+    expect(p.distance).toBeCloseTo(C3_RAFT.distance, 3);
+    expect((p.heading * 180) / Math.PI).toBeCloseTo(C3_RAFT.heading, 3);
   });
 
   it('never comes up into the raft, nor swims through it near the surface', () => {
     // c3's raft at the flip (as above): its centre log from the stern to the bow, 13.7 m, 9 logs ≈ 5.4 m across
     // (the v9 review: "it landed in the thing" — it had come down into the bow and swum on through it)
-    const h = (70 * Math.PI) / 180;
-    const c = [Math.sin((10 * Math.PI) / 180) * 10, Math.cos((10 * Math.PI) / 180) * 10];
-    const ax = [-Math.sin(h), Math.cos(h)];
     for (let t = FLIP_RELEASE - 6; t < FLIP_RELEASE + 6; t += 0.02) {
       const p = dolphinPose(t);
       if (p.y < -0.9) continue;
-      const rx = p.x - c[0];
-      const rz = p.z - c[1];
-      const along = rx * ax[0] + rz * ax[1];
-      const across = Math.abs(rx * ax[1] - rz * ax[0]);
-      const inside = Math.abs(along) < 6.85 + 1.3 && across < 2.7 + 0.5;
+      const [across, along] = c3RaftLocal([p.x, p.z]);
+      const inside = Math.abs(along) < 6.85 + 1.3 && Math.abs(across) < 2.7 + 0.5;
       expect(inside, `t = ${t.toFixed(2)}`).toBe(false);
     }
   });
