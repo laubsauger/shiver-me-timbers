@@ -68,12 +68,30 @@ describe('the dolphin in c3', () => {
     const h = (70 * Math.PI) / 180;
     const c = [Math.sin((10 * Math.PI) / 180) * 10, Math.cos((10 * Math.PI) / 180) * 10];
     const bow = [c[0] - Math.sin(h) * 6.85, c[1] + Math.cos(h) * 6.85];
-    expect(Math.hypot(f.x - bow[0], f.z - bow[1])).toBeLessThan(3.5);
+    expect(Math.hypot(f.x - bow[0], f.z - bow[1])).toBeLessThan(4.5);
     // the case goes where the dolphin was going (a throw sideways to its travel read as "unbelievable"), and
     // toward the bow, not away from the raft
     const th = flipThrow();
     expect(th.dir[0] * Math.sin(f.heading) + th.dir[1] * Math.cos(f.heading)).toBeGreaterThan(0.99);
     expect((bow[0] - th.from[0]) * th.dir[0] + (bow[1] - th.from[2]) * th.dir[1]).toBeGreaterThan(0);
+  });
+
+  it('never comes up into the raft, nor swims through it near the surface', () => {
+    // c3's raft at the flip (as above): its centre log from the stern to the bow, 13.7 m, 9 logs ≈ 5.4 m across
+    // (the v9 review: "it landed in the thing" — it had come down into the bow and swum on through it)
+    const h = (70 * Math.PI) / 180;
+    const c = [Math.sin((10 * Math.PI) / 180) * 10, Math.cos((10 * Math.PI) / 180) * 10];
+    const ax = [-Math.sin(h), Math.cos(h)];
+    for (let t = FLIP_RELEASE - 6; t < FLIP_RELEASE + 6; t += 0.02) {
+      const p = dolphinPose(t);
+      if (p.y < -0.9) continue;
+      const rx = p.x - c[0];
+      const rz = p.z - c[1];
+      const along = rx * ax[0] + rz * ax[1];
+      const across = Math.abs(rx * ax[1] - rz * ax[0]);
+      const inside = Math.abs(along) < 6.85 + 1.3 && across < 2.7 + 0.5;
+      expect(inside, `t = ${t.toFixed(2)}`).toBe(false);
+    }
   });
 
   it('throws no spout at the rolls: only leaps splash', () => {

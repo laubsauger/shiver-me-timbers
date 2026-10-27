@@ -24,9 +24,9 @@ const G = 9.81;
 /** m: the body's centre while it swims between surfacings, under the water */
 const DEPTH = 1.3;
 /** m: the body's centre at the top of a roll (the back and the fin out) */
-const ROLL_TOP = -0.2;
+const ROLL_TOP = -0.05;
 /** s a roll takes, from going up to going down again (at ~3.5 m/s its nose rises ~24°: a dolphin's roll) */
-const ROLL = 2.2;
+const ROLL = 2.4;
 /** Hz the tail beats at under water, m it swings at the flukes */
 const BEAT = 2.2;
 const BEAT_AMP = 0.08;
@@ -40,8 +40,9 @@ export type Surfacing = [number, number, number, SurfacingKind, number?];
  * Porpoising in from far out on the left on a diagonal that crosses the Sun's line (c3's Sun sets ~24° left: a
  * dark body only reads against the afterglow, so the high breach is on that line, 20 m out), round close by us
  * on the left, a leap across the view, and in to the raft — which has swung broadside by then (beats.ts: its
- * port side to us, its bow to the left, toward the afterglow) — for the flip off its bow, on the Sun's line,
- * the case thrown across the view onto the bow; under the bow and away the way it came. Spaced for ~3.5–4 m/s,
+ * port side to us, its bow to the left, toward the afterglow) — for the flip 4 m off its bow, on the Sun's line,
+ * the case thrown on across the view onto the bow; down short of the raft, turning away, and off the way it
+ * came. (It had come down into the bow and swum on through it: "it landed in the thing".) Spaced for ~3.5–4 m/s,
  * a dolphin's cruise; slower into the flip. A `swim` is a waypoint under water (no surfacing).
  */
 export const SURFACINGS: Surfacing[] = [
@@ -54,9 +55,9 @@ export const SURFACINGS: Surfacing[] = [
   [17.6, -14, 4, 'leap', 1.0],
   [20.4, -21, 9, 'roll'],
   [22.4, -17, 14.5, 'swim'],
-  [25.6, -6.9, 11.95, 'flip', 0.9],
-  [27.0, -3.2, 11.2, 'swim'],
-  [30.5, -12, 20, 'roll'],
+  [25.6, -8.7, 12.4, 'flip', 0.9],
+  [28.0, -9.3, 17.8, 'swim'],
+  [30.5, -13.5, 23, 'roll'],
   [33.3, -21, 25, 'leap', 0.9],
   [36.1, -30, 30, 'roll'],
 ];

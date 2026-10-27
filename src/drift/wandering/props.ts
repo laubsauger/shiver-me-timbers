@@ -144,7 +144,7 @@ export interface Props {
 }
 
 /** the case's throw: m on from the snout it lands, m it rises over the snout (up against the afterglow), m/s² */
-const CASE_REACH = 2.6;
+const CASE_REACH = 3.0;
 const CASE_LOB = 1.0;
 const G_CASE = 9.81;
 /** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4). Each
