@@ -2,14 +2,16 @@
  * What happens at sea level beyond the sea, the sky and the raft (drift-narrative/wandering-on/direction.md),
  * each a pure function of the sea's clock and placed by the beat being drawn (beats.ts):
  *
- *   people     figures on the raft (c1–w2): BLOCKING STAND-INS, as the dolphin — no models yet (the user's
- *              call, 2026-10-27: crude placeholders now, real assets in a later pass)
- *   dolphin    c3: circles the raft, surfacing, then flips the blue case onto the deck with its snout
+ *   people     figures on the raft (c1–w2): BLOCKING STAND-INS — no models yet (the user's call, 2026-10-27:
+ *              crude placeholders now, real assets in a later pass)
+ *   dolphin    c3: porpoising in, circling the raft, then flips the blue case onto the deck with its snout
+ *              (dolphin.ts: its outline and its motion)
  *   case       the blue hard case; in c4 its radio's dial glows
  *   beams      c4: signals made visible, arcing between far stations below the horizon across the sky,
  *              few at first, more as stations answer — thin, slow, soft-edged, warm (direction.md)
  *   field      w3–w4: Drift 3, Act 1's pairs (events.ts, loops.ts) at a breath of their energy, every pair
- *              meeting its partner — no bursts, no remainder: sensed more than seen
+ *              meeting its partner — no bursts, no remainder: sensed more than seen; and again in w6, over
+ *              the eye as it rises into the night, among the stars
  *   walkers    w5: the wanderers, small, walking on along the waterline into the dusk
  *
  * Sea-scene metres (x east, y up, z north).
@@ -18,7 +20,10 @@ import * as THREE from 'three/webgpu';
 import { Fn, abs, cameraPosition, float, normalWorld, positionWorld, sin, smoothstep, uniform, uv, vec3, vec4 } from 'three/tsl';
 import { driftParams } from '../../params/drift';
 import { generatePairs } from '../undertime/events';
+import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
+import type { Vec3 } from '../../cine/domeMaster';
+import { DOLPHIN_SPAN, FLIP_TOP, createDolphin, dolphinPose } from './dolphin';
 
 const smooth = (x: number): number => {
   const k = Math.min(1, Math.max(0, x));
@@ -48,46 +53,6 @@ function figure(sitting: boolean, hex: number): THREE.Group {
     legs.position.set(0, 0.25, -0.3);
     g.add(legs);
   }
-  g.traverse((o) => {
-    o.castShadow = true;
-  });
-  return g;
-}
-
-/** the dolphin stand-in: a spindle body along −z (its snout), a dorsal fin, flukes; 2.4 m */
-function dolphin(): THREE.Group {
-  const skin = standIn(0x56636f, 0.35);
-  const pts: THREE.Vector2[] = [];
-  for (let i = 0; i <= 16; i++) {
-    const u = i / 16;
-    // thickest a third back from the snout, tapering to the tail stock
-    const r = 0.28 * Math.sin(Math.PI * Math.pow(u, 0.7)) * (1 - 0.55 * u);
-    pts.push(new THREE.Vector2(Math.max(0.01, r), -1.2 + 2.4 * u));
-  }
-  const bodyGeo = new THREE.LatheGeometry(pts, 14);
-  bodyGeo.rotateX(Math.PI / 2);
-  const g = new THREE.Group();
-  g.add(new THREE.Mesh(bodyGeo, skin));
-  const fin = new THREE.Shape();
-  fin.moveTo(0, 0);
-  fin.lineTo(-0.28, 0.32);
-  fin.lineTo(-0.38, 0);
-  const finGeo = new THREE.ExtrudeGeometry(fin, { depth: 0.03, bevelEnabled: false });
-  finGeo.rotateY(Math.PI / 2);
-  const finMesh = new THREE.Mesh(finGeo, skin);
-  finMesh.position.set(-0.015, 0.22, 0.05);
-  g.add(finMesh);
-  const fluke = new THREE.Shape();
-  fluke.moveTo(0, 0);
-  fluke.lineTo(0.32, 0.22);
-  fluke.lineTo(0.1, 0);
-  fluke.lineTo(0.32, -0.22);
-  const flukeGeo = new THREE.ExtrudeGeometry(fluke, { depth: 0.03, bevelEnabled: false });
-  flukeGeo.rotateX(-Math.PI / 2);
-  flukeGeo.rotateY(-Math.PI / 2);
-  const flukeMesh = new THREE.Mesh(flukeGeo, skin);
-  flukeMesh.position.set(0, 0, 1.15);
-  g.add(flukeMesh);
   g.traverse((o) => {
     o.castShadow = true;
   });
@@ -161,6 +126,8 @@ export interface PropsState {
   night: number;
   /** where the eye stands in w3 (the field gathers about it), and the ground's height (m, the sea's 0) */
   fieldEye: THREE.Vector3;
+  /** where the eye is on the coast at sea time t (w6's field gathers over it as it rises) */
+  coastEyeAt: (t: number) => THREE.Vector3;
   ground: (x: number, z: number) => number;
 }
 
@@ -173,18 +140,6 @@ export interface Props {
   setPixelAngle(rad: number): void;
 }
 
-/** the dolphin's surfacings in c3 (s into c3, deg right of the front, m from the eye, m it clears the water
- * by): at last light a dark body only reads against something bright, so it leaps on the Sun's side (c3's
- * Sun sets ~24° left), between the eye and the afterglow and its road on the water — porpoising in, two clear
- * breaches, the flip at the raft's sunward end, away */
-const SURFACINGS: Array<[number, number, number, number]> = [
-  [4, -62, 20, 0.4],
-  [8.5, -46, 16, 1.3],
-  [13, -30, 13, 0.5],
-  [18, -12, 15, 1.5],
-];
-const FLIP: [number, number, number, number] = [26, -14, 11, 1.2];
-const LEAVE: [number, number, number, number] = [34, -40, 22, 0.8];
 /** s the case flies, and how high (m over the line from the water to the deck: up against the sky) */
 const FLIGHT = 1.3;
 const LOFT = 2.6;
@@ -219,7 +174,8 @@ export function createProps(): Props {
   let deckY: number | null = null;
 
   // THE DOLPHIN and THE CASE
-  const fish = dolphin();
+  const dolphin = createDolphin();
+  const fish = dolphin.group;
   group.add(fish);
   const caseMesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.4), standIn(0x1f5fa8, 0.45));
   caseMesh.castShadow = true;
@@ -379,46 +335,30 @@ export function createProps(): Props {
       const aboard = t < starts.w3 + 25;
       people.visible = world !== 'test' && aboard;
 
-      // THE DOLPHIN: from one surfacing to the next under water (eye-relative: it crosses the view in front of
-      // the raft), each an arc out of the water; the flip, high; away
+      // THE DOLPHIN (dolphin.ts), in the eye's level frame: x right, z ahead
       const c3 = t - starts.c3;
-      const stops = [...SURFACINGS, FLIP, LEAVE];
-      fish.visible = world === 'open' && c3 > stops[0][0] - 3 && c3 < LEAVE[0] + 3;
+      fish.visible = world === 'open' && c3 > DOLPHIN_SPAN[0] && c3 < DOLPHIN_SPAN[1];
       if (fish.visible) {
-        let i = 0;
-        while (i < stops.length - 1 && c3 > stops[i + 1][0]) i++;
-        const [ta, ba, da, clear] = stops[i];
-        const [tb, bb, db] = stops[Math.min(i + 1, stops.length - 1)];
-        const u = tb > ta ? Math.min(1, Math.max(0, (c3 - ta) / (tb - ta))) : 0;
-        const bear = ((ba + (bb - ba) * u) * Math.PI) / 180;
-        const dist = da + (db - da) * u;
-        const at = (bearing: number, d: number): THREE.Vector3 => tmp.set(Math.sin(bearing) * d, 0, -Math.cos(bearing) * d).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(s.eye);
-        at(bear, dist);
-        const px = tmp.x;
-        const pz = tmp.z;
-        // heading: along the way to the next stop
-        at(((bb * Math.PI) / 180), db);
-        const head = Math.atan2(-(tmp.x - px), -(tmp.z - pz));
-        // out of the water after each stop, clearing it by `clear` (a breach of a metre and more is out ~2 s),
-        // nose up rising, down falling; the flip: head high
-        const since = c3 - ta;
-        const span = 1.2 + 0.7 * clear;
-        const arc = since > 0 && since < span ? since / span : -1;
-        const y = arc >= 0 ? -0.8 + (clear + 1.1) * Math.sin(Math.PI * arc) : -1.4;
-        const pitch = arc >= 0 ? (i === SURFACINGS.length ? 1.0 : 0.65) * Math.cos(Math.PI * arc) : 0;
-        fish.position.set(px, y, pz);
-        fish.rotation.set(pitch, head, 0, 'YXZ');
+        const d = dolphinPose(c3);
+        tmp.set(d.x, 0, -d.z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(s.eye);
+        fish.position.set(tmp.x, d.y, tmp.z);
+        // (its body along −z: heading 0 is ahead, −z in the eye's frame)
+        fish.rotation.set(d.pitch, s.yaw - d.heading, 0, 'YXZ');
+        dolphin.set(d);
       }
 
       // THE CASE: from the dolphin's snout onto the deck, then aboard
-      const cf = c3 - FLIP[0] - 0.9;
+      const cf = c3 - FLIP_TOP;
       caseMesh.visible = world !== 'test' && aboard && cf > 0;
       if (caseMesh.visible) {
         raft.updateMatrixWorld(true);
         const end = deckAt.clone().applyMatrix4(raft.matrixWorld);
         if (cf < FLIGHT && world === 'open') {
           const u = cf / FLIGHT;
-          const startP = fish.position.clone().add(new THREE.Vector3(0, 0.5, 0));
+          // from the snout at the top of the flip (its pose then, in the eye's frame now: every frame on its own)
+          const f = dolphinPose(FLIP_TOP);
+          const nose = new THREE.Vector3(0, 0.05, -1.3).applyEuler(new THREE.Euler(f.pitch, -f.heading, 0, 'YXZ')).add(new THREE.Vector3(f.x, f.y, -f.z));
+          const startP = nose.applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, 0, s.eye.z));
           caseMesh.position.copy(startP).lerp(end, u);
           caseMesh.position.y += 4 * LOFT * u * (1 - u);
           caseMesh.rotation.set(u * Math.PI * 2.5, raft.rotation.y + u * 1.2, u * 0.8);
@@ -457,6 +397,27 @@ export function createProps(): Props {
           },
           30,
         ).filter((e) => e.meets === 1);
+        // w6: over the eye as it rises into the night, wider and slower, the loops larger (seen from tens of
+        // metres, against the stars)
+        const night = generatePairs(
+          {
+            seed: 2106,
+            rate: (x) => 25 * smooth((x - starts.w6 - 4) / 18),
+            from: starts.w6 - 2,
+            to: starts.w6 + spec('w6')!.length,
+            centre: (x) => {
+              const e = s.coastEyeAt(x);
+              return [e.x, e.y + 24, e.z - 18];
+            },
+            radius: 34,
+            eye: (x) => s.coastEyeAt(x).toArray() as Vec3,
+            clearance: 7,
+            loopRadius: [0.5, 1.6],
+            loopTime: [1.6, 3.2],
+          },
+          25,
+        ).filter((e) => e.meets === 1);
+        events.push(...night);
         for (const e of events) {
           // no creation burst; and under the energy that draws photons and gammas (loops.ts: rays only above 0.45)
           e.burst = 0;
@@ -466,14 +427,16 @@ export function createProps(): Props {
         fieldBuilt = { trails: createLoopTrails(events, U), sprites: createLoopSprites(events, U) };
         fieldGroup.add(fieldBuilt.trails, fieldBuilt.sprites);
       }
-      fieldGroup.visible = world === 'coast' && t > starts.w3 - 3 && t < starts.w5;
+      fieldGroup.visible = world === 'coast' && ((t > starts.w3 - 3 && t < starts.w5) || t > starts.w6 - 3);
       fieldU.time.value = t;
       fieldU.eye.value.copy(s.eye);
       // at the edge of seeing (direction: "like heat shimmer or dust in sunlight"; brighter, the beads read as
       // stars by day in the v9 review)
-      fieldU.trailRadiance.value = 0.06;
-      fieldU.beadRadiance.value = 0.02;
-      fieldU.flashRadiance.value = 0.02;
+      // (at night the eye has opened to the stars: the same radiance read as scribbles over the Milky Way)
+      const dim = t > starts.w6 - 3 ? 0.6 : 1;
+      fieldU.trailRadiance.value = 0.06 * dim;
+      fieldU.beadRadiance.value = 0.02 * dim;
+      fieldU.flashRadiance.value = 0.02 * dim;
 
       // THE WALKERS: from behind the eye on its left, down the wet sand by the waterline, the way the flock went
       const w5 = t - starts.w5 + WALK_LEAD;

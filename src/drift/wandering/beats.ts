@@ -10,8 +10,8 @@
  *   w3  the field     on the open beach, Act 1's pairs flicker in balance at the edge of seeing   golden hour
  *   w4  sandpipers    the flock rises from the waterline and wheels over the dome           sunset
  *   w5  wandering on  the flock settles far down the beach; the wanderers walk on after it   dusk
- *   w6  the outro     night over the beach: the Milky Way, the stations' beams still across it,
- *                     the eye still rising, and the fade                                         night
+ *   w6  the outro     night over the beach: the Milky Way, the stations' beams still across it, the
+ *                     field's flicker among the stars, the eye still rising, and the fade       night
  *
  * TIME PASSES IN DISSOLVES (the user's call, 2026-10-27): where a beat's time of day is hours from the last
  * one's, both are drawn at once and crossfaded over `dissolve` s — the light and the surroundings change, the
@@ -55,7 +55,9 @@ export const BEATS: BeatSpec[] = [
   { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.24, cirrus: 0.12 },
   { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -70, cover: 0.24, cirrus: 0.12 },
   { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -72, cover: 0.24, cirrus: 0.12 },
-  { name: 'w6', world: 'coast', length: 32, dissolve: 10, sunEl: [-17, -18], sunAz: -72, cover: 0.1, cirrus: 0.05 },
+  // (a long, slow fall into the night and a held vista under it, the field's flicker back among the stars: the
+  // v9 review, "not the best framing for appreciating the night sky")
+  { name: 'w6', world: 'coast', length: 60, dissolve: 24, sunEl: [-17, -18], sunAz: -72, cover: 0.1, cirrus: 0.05 },
 ];
 
 export interface Beats {
@@ -244,7 +246,7 @@ const COAST_KEYS: Array<{ beat: BeatName; at: number; along: number; off: number
   // w5: held while the wanderers come past (props.ts), then back and up as they walk on
   { beat: 'w5', at: 12, along: 12, off: -8 },
   { beat: 'w5', at: 35, along: -14, off: -3 },
-  { beat: 'w6', at: 32, along: -40, off: 6 },
+  { beat: 'w6', at: 60, along: -40, off: 6 },
 ];
 /** m/s the raft and the eye sail along the coast in w1 */
 const COAST_DRIFT = 1.0;

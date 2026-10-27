@@ -365,6 +365,10 @@ export function createSea(
   const props = o.drive ? createProps() : undefined;
   if (props) afloat.add(props.group);
   const fieldEye = new THREE.Vector3();
+  const coastEyeAt = (x: number): THREE.Vector3 => {
+    const c = coastEye(x, c1End, beach);
+    return new THREE.Vector3(c.x, Math.max(0, ground(c.x, c.z)) + c.height, c.z);
+  };
   if (o.drive) {
     const at = coastEye(beats.starts.w3 + 25, c1End, beach);
     fieldEye.set(at.x, Math.max(0, ground(at.x, at.z)) + at.height, at.z);
@@ -581,6 +585,7 @@ export function createSea(
           beach,
           night: 1 - smooth01((sun.y + 0.1) / 0.12),
           fieldEye,
+          coastEyeAt,
           ground,
         });
       }

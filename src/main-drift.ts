@@ -156,7 +156,7 @@ async function boot(): Promise<void> {
   /** s the show fades to black over at its end (W5: "the title, or the game") */
   const END_FADE = 6;
   /** the end title: Act 1's signature again, over the outro's night (W6), in the crawl's overlay */
-  const endTitle = [{ lines: ['the Drift'], at: seaTest ? Infinity : seaStart + seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts.w6 + 9, signature: true }];
+  const endTitle = [{ lines: ['the Drift'], at: seaTest ? Infinity : seaStart + seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts.w6 + 38, signature: true }];
   let titleOn = false;
   /** s the hand-over into the sea's scene crossfades over: both scenes summed in HDR, each at its own exposure */
   const XF = 3;
