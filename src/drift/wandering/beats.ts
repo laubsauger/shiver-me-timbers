@@ -48,8 +48,9 @@ export const C1_FOLLOW = 20;
 /** the beats after c1 (c1's length and light are Act 2's landing) */
 export const BEATS: BeatSpec[] = [
   // (c3's Sun is right at the horizon at the flip: a degree lower and the throw was lost in the dusk, the v9 review)
-  { name: 'c2', world: 'open', length: 55, dissolve: 8, sunEl: [3, 1.6], sunAz: -22, cover: 0.35, cirrus: 0.2 },
-  { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -24, cover: 0.35, cirrus: 0.2 },
+  // (c2's dissolve is long and its sky near c1's: at 8 s, with fewer clouds, the morning snapped to sunset)
+  { name: 'c2', world: 'open', length: 55, dissolve: 14, sunEl: [3, 1.6], sunAz: -22, cover: 0.42, cirrus: 0.2 },
+  { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -24, cover: 0.42, cirrus: 0.2 },
   { name: 'c4', world: 'open', length: 60, dissolve: 8, sunEl: [-20, -20], sunAz: -24, cover: 0.12, cirrus: 0.08 },
   { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: 100, cover: 0.4, cirrus: 0.12 },
   { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: 100, cover: 0.4, cirrus: 0.12 },
@@ -144,12 +145,13 @@ const D = Math.PI / 180;
  * a little astern of it, and the sea runs past (v8 notes: broadside and drifting it read as "on rails") */
 export const SAILING: RaftPose = { bearing: 24 * D, distance: 15, heading: 0, height: 2.6 };
 const POSE_KEYS: PoseKey[] = [
-  // c1's follow: at rest it lies broadside; it swings its bow round to the front before seafaring
+  // c1's follow: at rest it lies broadside. It SETS SAIL (sea.ts: the sail hoisted, then way on along its own
+  // heading, the eye sailing with it) and only once it moves does its bow come round onto the course, as it
+  // falls in ahead of us — one motion through c2's dissolve (it had swung 90° where it lay, then slid sideways:
+  // "as if by magic", the v9 review)
   { beat: 'c2', at: -C1_FOLLOW, pose: {} },
-  { beat: 'c2', at: -3, pose: { heading: SAILING.heading } },
-  // (the dissolve into c2 keeps the raft where c1 left it; then it falls in ahead under sail)
-  { beat: 'c2', at: 4, pose: {} },
-  { beat: 'c2', at: 16, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
+  { beat: 'c2', at: -9, pose: {} },
+  { beat: 'c2', at: 14, pose: { heading: SAILING.heading, bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
   // c3: still, close, low — in to the raft as the dolphin comes (direction: "still, close, low"); the raft swings
   // broadside on the dying air, its port side to us and its bow to the left, toward the afterglow, so the
   // dolphin's throw onto its bow crosses the view (seen end-on from astern, the case landed out of sight behind

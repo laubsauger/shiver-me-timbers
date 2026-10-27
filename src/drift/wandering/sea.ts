@@ -53,7 +53,7 @@ import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createPlants } from './plants';
 import { createPalms } from './palms';
-import { COAST_YAW, OPEN_AT, OPEN_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
+import { C1_FOLLOW, COAST_YAW, OPEN_AT, OPEN_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -90,8 +90,9 @@ const SWELL_RMS = 0.08;
  * the open sea's and the coast's eye facing the same way (beats.ts) */
 const WIND_TO = Math.PI;
 /** the open sea's scattered debris (the flood's matter drifting apart): a Gaussian of `sigma` m centred behind
- * where the rig sets off, so the raft sails out of it; none in the lane the raft and the eye sail */
-const OPEN_DEBRIS = { pieces: 2600, sigma: 220, behind: 90, lane: [-9, 15] as [number, number] };
+ * where the rig sets off, so the raft sails out of it; none in the lane the raft and the eye sail (dense enough
+ * that c2's dissolve thins the flood's debris rather than wiping it away) */
+const OPEN_DEBRIS = { pieces: 6000, sigma: 260, behind: 90, lane: [-9, 15] as [number, number] };
 /** px: each face of the water's mirror capture */
 const MIRROR_SIZE = 512;
 /** CPU oceans, one per instant the rafts sample the sea at (raft.ts SAMPLES, 5) and one spare */
@@ -99,6 +100,11 @@ const SEA_POOL = 6;
 /** s: the ground swell's period (14 s, ~300 m long, held the raft all but still: "awfully static", the v9 review;
  * 10 s is ~155 m, the raft seen to lift and settle without bouncing) */
 const SWELL_PERIOD = 10;
+/** setting sail in c1's follow: s into it the sail is hoisted over, s it gathers way over, m/s it makes then
+ * (beats.ts speedAt: c2's) */
+const HOIST: [number, number] = [2, 9];
+const WAY: [number, number] = [7, 16];
+const COURSE_SPEED = 1.2;
 /** m: the mat of debris round the raft (a Gaussian's sigma: it thins into the field) and its pieces; the berth
  * kept clear round the raft (its logs reach 6.9 m from its centre) */
 const MAT_SIGMA = 90;
@@ -209,6 +215,7 @@ export function createSea(
   const cu = {
     time: uniform(0),
     wind: uniform(new THREE.Vector2(Math.cos(WIND_DIR) * WIND, Math.sin(WIND_DIR) * WIND)),
+    shift: uniform(new THREE.Vector2()),
     coverage: uniform(CLOUD_COVER),
     presence: uniform(1),
     sun: uniform(new THREE.Vector3()),
@@ -331,6 +338,7 @@ export function createSea(
   const restTurn = rest ? DEBRIS_SPIN * rest.driftTime : 0;
   const raftInField = raftAt.clone().applyAxisAngle(UP, -restTurn);
   const raftNow = new THREE.Vector3();
+  const sailed = new THREE.Vector3();
   // c1's rest, as the pose of the raft against the eye that every later beat moves on from (beats.ts)
   const restPose: RaftPose = {
     bearing: raftRight,
@@ -349,7 +357,47 @@ export function createSea(
     pixelAngle: uniform(0.0015),
     metres: uniform(1),
   };
-  const berth = (data: ReturnType<typeof debrisPieces>): ReturnType<typeof debrisPieces> => clearOf(data, raftInField.x, raftInField.z, RAFT_BERTH);
+  // SETTING SAIL, through c1's follow: the sail hoisted (HOIST, s into the follow), then way on along the raft's own
+  // heading (WAY: from rest to the course's speed), its bow coming round as it goes (beats.ts raftPose). Where it
+  // has sailed, in the field's frame (it floats in the field, which turns): integrated from the heading, pure in t
+  const smooth01 = (x: number): number => {
+    const k = Math.min(1, Math.max(0, x));
+    return k * k * (3 - 2 * k);
+  };
+  const followStart = c1End - C1_FOLLOW;
+  const hoistAt = (t: number): number => smooth01((t - followStart - HOIST[0]) / (HOIST[1] - HOIST[0]));
+  const wayAt = (t: number): number => COURSE_SPEED * smooth01((t - followStart - WAY[0]) / (WAY[1] - WAY[0]));
+  const fieldHeading = (t: number): number => yaw + raftPose(t, c1End, restPose).heading + Math.PI - restTurn;
+  const sailedFrom = (t: number, out: THREE.Vector3): THREE.Vector3 => {
+    out.set(0, 0, 0);
+    const h = 0.1;
+    for (let x = followStart + WAY[0]; x < t; x += h) {
+      const step = Math.min(h, t - x);
+      const m = x + step / 2;
+      const v = wayAt(m) * step;
+      const hd = fieldHeading(m);
+      out.x += Math.sin(hd) * v;
+      out.z += Math.cos(hd) * v;
+    }
+    return out;
+  };
+  // where the open sea's sky has to be sampled from to be the flood's overhead at c2's dissolve: the eye's place in
+  // c1 then (Act 2's drive, plus the way it has made) less its place in the open sea (beats.ts travelled)
+  const ZERO2 = new THREE.Vector2();
+  const openSkyShift = new THREE.Vector2();
+  if (o.drive) {
+    const c2 = beats.starts.c2;
+    const atC1 = o.drive(c2).eye.clone().add(sailedFrom(c2, new THREE.Vector3()).applyAxisAngle(UP, DEBRIS_SPIN * o.drive(c2).driftTime));
+    openSkyShift.set(atC1.x - OPEN_AT[0], atC1.z - (OPEN_AT[1] - travelled(c2 - 6, c2, c1End)));
+  }
+  // none of the debris in the raft's berth, nor along the way it sails out (c1 is drawn until c2's dissolve ends)
+  const lane: THREE.Vector3[] = [];
+  if (o.drive) {
+    const p = new THREE.Vector3();
+    for (let x = followStart; x <= beats.starts.c2 + 8; x += 1) lane.push(sailedFrom(x, p).clone().add(raftInField));
+  }
+  const berth = (data: ReturnType<typeof debrisPieces>): ReturnType<typeof debrisPieces> =>
+    (lane.length ? lane : [raftInField]).reduce((d, q) => clearOf(d, q.x, q.z, RAFT_BERTH), data);
   const debris = o.drive ? createDebrisField(berth(debrisPieces()), du as unknown as DebrisUniforms) : undefined;
   if (debris) {
     afloat.add(debris);
@@ -418,11 +466,6 @@ export function createSea(
   const v = new THREE.Vector3();
   /** a direction `bearing` rad right of a front turned `turn` rad about y */
   const across = (turn: number, bearing: number, out: THREE.Vector3): THREE.Vector3 => out.set(Math.sin(bearing), 0, -Math.cos(bearing)).applyAxisAngle(UP, turn);
-  const smooth01 = (x: number): number => {
-    const k = Math.min(1, Math.max(0, x));
-    return k * k * (3 - 2 * k);
-  };
-
   return {
     scene,
     far: FAR,
@@ -468,11 +511,15 @@ export function createSea(
         eye.position.copy(d.eye);
         eye.quaternion.copy(d.turn);
         sun.copy(d.sun);
-        raftNow.copy(raftInField).applyAxisAngle(UP, turn);
+        // (setting sail: the way it has made, turned with the field; the eye sails with it)
+        sailedFrom(t, sailed).applyAxisAngle(UP, turn);
+        eye.position.add(sailed);
+        raftNow.copy(raftInField).applyAxisAngle(UP, turn).add(sailed);
         raftX = raftNow.x;
         raftZ = raftNow.z;
-        // (its bow swings round to the front through the follow: beats.ts raftPose)
         raftHeading = yaw + raftPose(t, c1End, restPose).heading + Math.PI + turn - restTurn;
+        sails = hoistAt(t);
+        speed = wayAt(t);
       } else {
         const pose = raftPose(t, c1End, restPose);
         if (world === 'open') {
@@ -536,6 +583,9 @@ export function createSea(
       // the water below), the haze at the horizon
       seaSky.update(eye.position, sun);
       cu.time.value = t;
+      // the open sea lies km from the flood: shifted, its sky is the flood's at the dissolve between them (it had
+      // dissolved to another part of the field: the clouds overhead vanished with the morning)
+      (cu.shift.value as THREE.Vector2).copy(world === 'open' ? openSkyShift : ZERO2);
       cu.sun.value.copy(sun);
       // c1's clouds form as thin veils over most of their field and thicken (coverage rising from zero only
       // pops scattered lumps into the sky); each later beat has its own sky

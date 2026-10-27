@@ -106,6 +106,9 @@ export interface CloudUniforms {
   time: F;
   /** m/s, the wind on the sea's xz plane */
   wind: THREE.Node<'vec2'>;
+  /** m on the xz plane the field is sampled shifted by: a world placed elsewhere in the sea (c2's open sea, km
+   * from c1's flood) keeps the sky it dissolves from */
+  shift: THREE.Node<'vec2'>;
   /** 0..1, how much of the sky the field covers */
   coverage: F;
   /** 0..1, how far the clouds have formed: their density (thin, translucent veils while they form) */
@@ -129,7 +132,7 @@ const sat = (x: F): F => x.clamp(0, 1) as F;
  * (linear), its opacity, and how far its light comes from (m, opacity-weighted; for the haze in front of it).
  */
 export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, quality: { steps: number; lightSteps: number; detail: boolean } = FULL): { light: V3; alpha: F; dist: F } {
-  const drift = vec3(U.wind.x, 0, U.wind.y).mul(U.time);
+  const drift = vec3(U.wind.x, 0, U.wind.y).mul(U.time).add(vec3(U.shift.x, 0, U.shift.y));
   // the planet's surface below the eye: altitude of p ≈ |p − C| − R (C straight down)
   const C = vec3(o.x, float(-R), o.z);
   const alt = (p: V3): F => p.sub(C).length().sub(R) as F;
@@ -233,7 +236,7 @@ export function cirrus(o: V3, d: V3, data: CloudData, U: CloudUniforms): { light
   const cv = Math.cos(CIRRUS_VEER) * CIRRUS_WIND;
   const sv = Math.sin(CIRRUS_VEER) * CIRRUS_WIND;
   const wind = vec3(U.wind.x.mul(cv).sub(U.wind.y.mul(sv)), 0, U.wind.x.mul(sv).add(U.wind.y.mul(cv)));
-  const p = o.add(d.mul(t)).add(vec3(U.wind.x, 0, U.wind.y).mul(2.5 * CIRRUS_PIVOT)).add(wind.mul(U.time.sub(CIRRUS_PIVOT)));
+  const p = o.add(d.mul(t)).add(vec3(U.wind.x, 0, U.wind.y).mul(2.5 * CIRRUS_PIVOT)).add(wind.mul(U.time.sub(CIRRUS_PIVOT))).add(vec3(U.shift.x, 0, U.shift.y));
   // along and across the wind up there
   const w = wind.normalize();
   // warped, so the streaks bend and wander instead of running in ranks

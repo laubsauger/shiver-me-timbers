@@ -29,6 +29,7 @@ import { createDeckFieldTexture } from '../../ship/deckFieldTexture';
 import { createPieceMaterialCache } from '../../core/bootShared';
 import { ShipAssembly } from '../../ship/shipAssembly';
 import { raftMaterialParams } from '../../params/raftMaterials';
+import { raftParams } from '../../params/raft';
 import { createDeckWater, setActiveDeckWater } from '../../deckwater';
 import { raftContactPoints } from '../../sailing/raftBeaching';
 import { shipFlagParams, shipMaterialParams } from '../../params/ship';
@@ -51,7 +52,15 @@ export interface RaftProp {
 /** the film's still sail (see the header): the game's cloth with everything that moves it from frame to frame off */
 const STILL_SAIL = { sailFlutterAmp: 0.015, sailLuffFlap: 0, sailGustAmp: 0, sailTurnSkew: 0, sailResponse: 12, sailWindRef: 2.4 };
 
+/** m/s of apparent wind at which the film's canvas reads full. The film's true wind is the light air its ripples
+ * are built from (2.5 m/s), so a raft running before it at 1.2 m/s sees ~1.3 m/s: at the game's 4.2 the sail hung
+ * 9% full, flat as a board ("a little more fullness in the sails", the v9 review). At 1.4 it is ~60% full under
+ * way and full at rest; the waves keep their wind. */
+const FILM_SAIL_WIND_REF = 1.4;
+
 export function createRaft(heightAt: (x: number, z: number, t: number) => number): RaftProp {
+  // (read into each sail's shape as the blueprint is built)
+  raftParams.sailWindRef = FILM_SAIL_WIND_REF;
   const blueprint = buildRaftBlueprint();
   const deckField = buildRaftDeckField(blueprint);
   // the deck material reads the active deck water at construction (raft/raftScene.ts): bound, never stepped
