@@ -62,6 +62,16 @@ async function post(sink: string, path: string, body: BodyInit): Promise<void> {
   if (!res.ok) throw new Error(`drift record: sink ${path} → ${res.status} ${await res.text()}`);
 }
 
+/**
+ * Frames between forced garbage collections. Chrome keeps a fetch's request body (here a whole frame, 18 MB at
+ * 2160²) in native memory until the JS objects of that request are garbage collected, and V8 does not count that
+ * memory, so nothing triggers a collection: the page grew ~18 MB a frame and long renders crashed ("Target
+ * crashed" at ~900 frames a lane). Reproduced in a blank page posting 18 MB bodies; collecting every 10 posts held
+ * it flat (docs/drift/engine-findings.md). `gc` exists only when the page's browser runs with
+ * `--js-flags=--expose-gc` (scripts/drift-render.mjs launches it so); elsewhere this does nothing.
+ */
+const GC_EVERY = 20;
+
 /** frames rendered for [from, to) at fps — the count the sink checks the take against */
 export function frameCount(from: number, to: number, fps: number): number {
   return Math.max(0, Math.round((to - from) * fps));
@@ -104,7 +114,11 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
       const frame = n;
       chain = chain.then(async () => {
         const px = await pixels;
-        await post(sink, `frame?shot=${shotQ}&n=${frame}&w=${size}&h=${size}${groupQ}`, px as unknown as BodyInit);
+        // as a Blob: Chrome uploads a typed-array body at ~40 MB/s (440 ms for one 2160² frame, five times the
+        // frame's render), a Blob at ~1 GB/s (17 ms; docs/drift/engine-findings.md). The Blob copies the bytes,
+        // so the capture's reused buffer is free again at once.
+        await post(sink, `frame?shot=${shotQ}&n=${frame}&w=${size}&h=${size}${groupQ}`, new Blob([px as Uint8Array<ArrayBuffer>]));
+        if (frame % GC_EVERY === GC_EVERY - 1) (globalThis as { gc?: () => void }).gc?.();
         o.onProgress?.(frame + 1, frames);
       });
       slot.done = chain;

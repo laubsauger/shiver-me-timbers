@@ -2,11 +2,13 @@
 
 The Drift renders the game's own world (FFT ocean, raft, islands, sky rig) offline through a fulldome
 capture: six cube faces a frame, every frame a pure function of show time, rendered out of order in parallel
-lanes at 2–5 fps. That use stresses parts of the engine the real-time game never exercises. This page records
-what broke, how the film works around it, and what it suggests for the engine. Written 2026-10-27.
+lanes (2–5 fps at first, 8–15 fps after findings 9 and 10). That use stresses parts of the engine the
+real-time game never exercises. This page records what broke, how the film works around it, and what it
+suggests for the engine. Written 2026-10-27.
 
-The film's workarounds all live under `src/drift/`. The game's systems are unchanged, except where a small
-optional hook was added; those additions are listed under each finding.
+The film's workarounds live under `src/drift/`, and the capture fixes in `src/cine/domeCapture.ts` and the
+render driver. The game's systems are unchanged, except where a small optional hook was added; those additions
+are listed under each finding.
 
 ## 1. Planar reflection fails under several cameras per frame
 
@@ -155,11 +157,65 @@ This is not a bug, but it matters for the realistic look the film needs:
 - **Low-sun shadows on the beach.** The user reported "glitchy" dark shadows from the island's hills across
   the beach. Not yet reproduced: shadow map resolution and the shadow camera's focus at a very low Sun are
   the likely place to look.
-- **Page memory grows during long sea renders (open).** At 2160² the page's renderer process grows by
-  ~18 MB a frame in the sea scene, about one master-sized RGBA readback (Act 2 alone: ~3.6 MB a frame). A
-  260 s half crashed both lanes ("Target crashed") at ~900 frames each. Turning off the mirror, the sail
-  updates or the per-beat frame bump (finding 3) changed nothing. The suspect is the readback path: a
-  mapped staging buffer per frame that V8 only frees on a GC, which a scene making little JS garbage
-  rarely triggers. Not confirmed. The film renders in 20 s chunks, so each chunk starts with fresh pages.
-  Worth checking for any long offline capture: destroy readback buffers explicitly, or force a GC
-  between frames.
+- **Page memory grew during long sea renders.** Found and fixed: see finding 9.
+
+## 9. Frame transport: a typed-array POST is slow, and is held until a GC
+
+The recorder reads each master back and POSTs the raw RGBA to a local sink (`src/drift/record.ts`,
+`scripts/cine-sink.mjs`). Two problems were in that one `fetch`.
+
+**Memory.** At 2160² the page grew ~18 MB a frame, one frame's bytes, and a long render crashed both lanes
+("Target crashed") at ~900 frames each.
+- Probed with CDP heap usage and per-process RSS. The JS heap and the ArrayBuffer backing stores stayed flat.
+  The renderer grew 4.2 → 6.4 GB, then fell to 1.9 GB on a natural major GC, and the same on a forced one.
+- No GPU object churn: wrapping `GPUDevice`/`GPUQueue` counted zero buffers, textures or bind groups created
+  per frame. Three's readback already destroys its staging buffer.
+- Reproduced in a blank page posting 18 MB `Uint8Array` bodies to a local server: +18 MB per POST until a GC.
+  Reading the response does not release it. Collecting every 10 posts holds the page flat.
+- So Chrome keeps a fetch's request body in native memory until the request's JS objects are collected, and
+  V8 does not count that memory, so nothing triggers the collection.
+
+**Speed.** The same POST was most of the frame time:
+
+| 2160², open sea, one lane | ms per frame |
+|---|---|
+| as rendered last night | 475 |
+| `fetch` stubbed out | 86 |
+| cube faces at 600² instead of 1200² | 478 |
+
+Blank-page benchmark, 18 MB to a local server: `fetch(Uint8Array)` 440 ms (40 MB/s), XHR 437 ms, four parallel
+fetches 434 ms, WebSocket 60 ms, **`fetch(Blob)` 17 ms (~1 GB/s)**. An in-process network service changed
+nothing.
+
+**Fix** (`src/drift/record.ts`, `scripts/drift-render.mjs`):
+- frames are posted as a `Blob`;
+- the lanes' Chrome runs with `--js-flags=--expose-gc`, and the recorder collects every 20 frames.
+
+Measured after: 1,800 frames of the coast at 2160² in one take, renderer RSS steady at 0.4–0.7 GB a lane. The
+render went from 3.6 to 15.4 fps (open sea, two lanes, x264 veryfast) and 10.9 fps on the coast, so the whole
+film at 2160² takes ~25 min instead of ~2.5 h. The 20 s chunking is no longer needed.
+
+**For the engine.** `src/cine/recorder.ts` (the other films' capture) posts the same way and has the same cost.
+Any page that ships large binaries to a local process should send Blobs and keep an eye on native memory.
+
+## 10. The dome capture rendered the whole cube
+
+The master reads directions within 90° of the dome's zenith, about half the cube. All six faces were drawn in
+full. With the 15° tilt the bottom face is never read, nor the lower part of each side face.
+
+**Fix** (`src/cine/domeCapture.ts` `drawFaces`, `faceScissor`). The dome's edge is a great circle, a straight
+line on each face, so each face is drawn with a scissor around the part the master reads (plus 4 px for the
+master's bilinear lookups), and a face with none is skipped. `tests/domeFaceScissor.test.ts` checks that every
+master pixel lands inside its face's rectangle, for any heading and tilt.
+
+Measured (two lanes, 2160², with finding 9's fix):
+
+| | full faces | scissored |
+|---|---|---|
+| coast, landfall (600–610 s) | 3.7 fps | 8.3 fps |
+| open sea (400 s), one lane | 107 ms | 102 ms |
+
+On the coast, the near beach and plants below the dome's edge filled most of the side faces' lower halves.
+
+**For the engine.** Any cube capture that feeds a partial projection (a dome, a cylinder, a reflection probe of
+the upper hemisphere) can scissor its faces the same way.

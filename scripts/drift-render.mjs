@@ -199,7 +199,9 @@ async function main() {
   }
 
   // ------------------------------------------------- probe: boots the page once (warms Vite) and asks for the act end
-  const launch = () => chromium.launch({ channel: CHANNEL, headless: true });
+  // --expose-gc: the page collects garbage every few frames, or each frame's POST body stays in its memory
+  // until a GC nothing triggers (src/drift/record.ts GC_EVERY)
+  const launch = () => chromium.launch({ channel: CHANNEL, headless: true, args: ['--js-flags=--expose-gc'] });
   const probeBrowser = await launch();
   browsers.push(probeBrowser);
   const probe = await probeBrowser.newPage({ viewport: { width: 256, height: 256 } });

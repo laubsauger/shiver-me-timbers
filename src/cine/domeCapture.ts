@@ -29,11 +29,63 @@
  * WHY THE CUBE STAYS WORLD-ALIGNED: rotating the CubeCamera would rotate its faces, and the lookup would
  * then have to happen in the cube's own frame. Keeping it unrotated means the lookup direction is just the
  * eye's rotation applied to the camera-local dome direction.
+ *
+ * ONLY THE HEMISPHERE IS DRAWN (`drawFaces`). The master looks up directions within 90° of the dome's zenith,
+ * about half the cube: with a 15° tilt the bottom face is never read, and neither is the lower part of each
+ * side face. The dome's edge is a great circle, a straight line on every face, so the part of a face the master
+ * reads lies inside one rectangle; each face is drawn with that rectangle as its scissor, and a face with none
+ * is not drawn. Frame time is mostly fragment shading (the sea at 2160²: ~80 ms fixed, ~385 ms in pixels,
+ * docs/drift/engine-findings.md), and the skipped part is mostly the sea, the most expensive surface.
  */
 import * as THREE from 'three/webgpu';
 import { cubeTexture, mix, texture, toneMapping, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { domeMasterDirectionNode } from './domeMaster';
+import { domeBasis, domeMasterDirectionNode } from './domeMaster';
+
+/** px drawn past the dome's edge on each face: the master's bilinear lookups at the spring line read across it */
+const EDGE_PAD = 4;
+
+const _axis = new THREE.Vector3();
+const _p = new THREE.Vector3();
+const _rect = new THREE.Vector4();
+const _rot = new THREE.Matrix3();
+
+/**
+ * The part of face camera `cam` (of a cube `size` px a face) that sees directions on the dome side of the plane
+ * through the eye with normal `axis` (world), as a scissor rectangle in the face's pixels (WebGPU: top-left
+ * origin) into `out`; null when the face sees none of it.
+ */
+export function faceScissor(cam: THREE.PerspectiveCamera, axis: THREE.Vector3, size: number, out: THREE.Vector4): THREE.Vector4 | null {
+  // d·axis over the face is affine in NDC (points of one depth lie on a plane, d unnormalised): three samples
+  _rot.setFromMatrix4(cam.matrixWorld);
+  const f = (nx: number, ny: number): number => _p.set(nx, ny, 0.5).applyMatrix4(cam.projectionMatrixInverse).applyMatrix3(_rot).dot(axis);
+  const f0 = f(0, 0);
+  const fx = f(1, 0) - f0;
+  const fy = f(0, 1) - f0;
+  // clip the face square by f ≥ 0 (Sutherland–Hodgman, one plane)
+  const square: Array<[number, number]> = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+  const value = ([x, y]: [number, number]): number => f0 + fx * x + fy * y;
+  const kept: Array<[number, number]> = [];
+  square.forEach((a, i) => {
+    const b = square[(i + 1) % 4];
+    const va = value(a);
+    const vb = value(b);
+    if (va >= 0) kept.push(a);
+    if (va >= 0 !== vb >= 0) {
+      const s = va / (va - vb);
+      kept.push([a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s]);
+    }
+  });
+  if (kept.length < 3) return null;
+  const xs = kept.map((q) => q[0]);
+  const ys = kept.map((q) => q[1]);
+  const x0 = Math.max(0, Math.floor(((Math.min(...xs) + 1) / 2) * size) - EDGE_PAD);
+  const x1 = Math.min(size, Math.ceil(((Math.max(...xs) + 1) / 2) * size) + EDGE_PAD);
+  const y0 = Math.max(0, Math.floor(((1 - Math.max(...ys)) / 2) * size) - EDGE_PAD);
+  const y1 = Math.min(size, Math.ceil(((1 - Math.min(...ys)) / 2) * size) + EDGE_PAD);
+  if (x1 <= x0 || y1 <= y0) return null;
+  return out.set(x0, y0, x1 - x0, y1 - y0);
+}
 
 export interface DomeCaptureOptions {
   /** px per cube face; ~0.55 × the master width matches resolution (drift/record.ts faceSizeFor) */
@@ -184,6 +236,42 @@ export class DomeCapture {
     this.cubeNode.value = this.target.texture;
   }
 
+  /**
+   * The cube camera's six faces, each only where the master reads it (header: ONLY THE HEMISPHERE IS DRAWN):
+   * `CubeCamera.update` with a scissor per face, and the faces that see none of the dome's hemisphere (`axis`,
+   * world) skipped.
+   */
+  private drawFaces(renderer: THREE.WebGPURenderer, scene: THREE.Scene, axis: THREE.Vector3): void {
+    const cube = this.cubeCamera;
+    if (cube.coordinateSystem !== renderer.coordinateSystem) {
+      cube.coordinateSystem = renderer.coordinateSystem;
+      cube.updateCoordinateSystem();
+    }
+    const target = this.target;
+    const size = target.width;
+    const bound = renderer.getRenderTarget();
+    const boundFace = renderer.getActiveCubeFace();
+    const boundMip = renderer.getActiveMipmapLevel();
+    const scissorTest = renderer.getScissorTest();
+    const xr = renderer.xr.enabled;
+    renderer.xr.enabled = false;
+    renderer.setScissorTest(true);
+    try {
+      (cube.children as THREE.PerspectiveCamera[]).forEach((cam, face) => {
+        const rect = faceScissor(cam, axis, size, _rect);
+        if (!rect) return;
+        target.scissor.copy(rect);
+        renderer.setRenderTarget(target, face, 0);
+        renderer.render(scene, cam);
+      });
+    } finally {
+      target.scissor.set(0, 0, size, size);
+      renderer.setScissorTest(scissorTest);
+      renderer.xr.enabled = xr;
+      renderer.setRenderTarget(bound, boundFace, boundMip);
+    }
+  }
+
   /** cube faces from `eye`, then the master at `size`² into hdr (linear) */
   private renderHdr(renderer: THREE.WebGPURenderer, scene: THREE.Scene, eye: THREE.Object3D, tiltDeg: number, size: number): void {
     eye.updateMatrixWorld();
@@ -191,7 +279,7 @@ export class DomeCapture {
     this.cubeCamera.updateMatrixWorld();
     this.uView.value.setFromMatrix4(eye.matrixWorld);
     this.uTilt.value = (tiltDeg * Math.PI) / 180;
-    this.cubeCamera.update(renderer, scene);
+    this.drawFaces(renderer, scene, _axis.fromArray(domeBasis(tiltDeg).axis).applyMatrix3(this.uView.value).normalize());
     const s = Math.max(16, Math.round(size));
     if (this.hdr.width !== s) {
       this.hdr.setSize(s, s);
