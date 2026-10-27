@@ -617,6 +617,11 @@ export function createSea(
       fu.sunLight.value.set(seaSky.sunColour.r, seaSky.sunColour.g, seaSky.sunColour.b).multiplyScalar(SUN_E / Math.PI);
       fu.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       fu.eye.value.copy(eye.position);
+      if (palms) {
+        palms.light.sun.copy(sun);
+        palms.light.sunLight.copy(fu.sunLight.value);
+        palms.light.skyLight.copy(fu.skyLight.value);
+      }
       if (splashes) {
         const c3 = t - beats.starts.c3;
         const U = splashes.uniforms as unknown as Record<string, { value: unknown }>;

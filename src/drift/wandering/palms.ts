@@ -13,6 +13,7 @@
  * The walk runs at off −8; nothing stands nearer than off −13.
  */
 import * as THREE from 'three/webgpu';
+import { cameraPosition, diffuseColor, float, normalWorld, positionWorld, uniform, vec3 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
 
@@ -36,7 +37,13 @@ const HERO: Array<{ along: number; off: number; kind: Kind; lean: number; turn: 
 export interface Palms {
   readonly group: THREE.Group;
   readonly ready: Promise<void>;
+  /** the light the fronds pass through (set per frame): unit toward the Sun; the Sun's and the sky's radiance on
+   * a white surface */
+  readonly light: { sun: THREE.Vector3; sunLight: THREE.Vector3; skyLight: THREE.Vector3 };
 }
+
+/** the share of the light a frond lets through (a coconut leaflet: thin, ~a quarter in the green) */
+const TRANSMIT = 0.45;
 
 export function createPalms(beach: { x: number; z: number }, ground: (x: number, z: number) => number, base = `${import.meta.env.BASE_URL}drift/pbr/blenderkit/`): Palms {
   const group = new THREE.Group();
@@ -61,6 +68,41 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
     n++;
   }
 
+  const uSun = uniform(new THREE.Vector3(0, 1, 0));
+  const uSunLight = uniform(new THREE.Vector3());
+  const uSkyLight = uniform(new THREE.Vector3());
+  /**
+   * A FROND IS LIT THROUGH. Seen from under the canopy — the dome looks up into it — a leaf card's face toward us
+   * is the one away from the Sun, lit only by the ambient, and the fronds read black (the v9 review: "this black
+   * shit on the side … the palm tree stuff is really meh"). A real frond is thin: the Sun behind it glows through
+   * it (brightest looking toward the Sun), and so does the bright sky above. Added as emission, from the leaf's own
+   * colour. `backlit` is the Sun on the far side of the leaf from the eye (a product of two dots: whichever way
+   * the card's normal faces). The shaded side of the crown, front-lit but in its own shadow, had gone black too.
+   */
+  const leafOf = (mat: THREE.MeshStandardMaterial): THREE.MeshStandardNodeMaterial => {
+    const leaf = new THREE.MeshStandardNodeMaterial({
+      map: mat.map,
+      normalMap: mat.normalMap,
+      roughnessMap: mat.roughnessMap,
+      color: mat.color,
+      roughness: mat.roughness,
+      metalness: 0,
+      alphaTest: Math.max(0.4, mat.alphaTest),
+      side: THREE.DoubleSide,
+    });
+    const toEye = cameraPosition.sub(positionWorld).normalize();
+    const nv = normalWorld.dot(toEye);
+    const nl = normalWorld.dot(uSun);
+    const backlit = nv.mul(nl).negate().max(0).sqrt();
+    const toward = toEye.negate().dot(uSun).max(0).pow(4);
+    const sky = toEye.negate().y.max(0);
+    // (and a crown is never black inside: light scattered leaf to leaf, the sky's through the fronds above)
+    const through = uSunLight.mul(backlit.mul(float(0.5).add(toward.mul(1.5)))).add(uSkyLight.mul(sky.add(0.8)));
+    // (light through a leaf comes out yellower and greener than light off it)
+    leaf.emissiveNode = diffuseColor.rgb.mul(vec3(1.1, 1.3, 0.6)).mul(through).mul(TRANSMIT);
+    leaf.name = `${mat.name}-lit-through`;
+    return leaf;
+  };
   const loader = new GLTFLoader();
   const ready = Promise.all(
     (Object.keys(FILES) as Kind[]).map(async (kind) => {
@@ -80,14 +122,8 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
         const geo = m.geometry.clone().applyMatrix4(m.matrixWorld);
         geo.translate(-cx, -box.min.y, -cz);
         const mats = (Array.isArray(m.material) ? m.material : [m.material]) as THREE.MeshStandardMaterial[];
-        for (const mat of mats) {
-          if (mat.alphaTest > 0 || mat.transparent) {
-            mat.alphaTest = Math.max(0.4, mat.alphaTest);
-            mat.transparent = false;
-            mat.side = THREE.DoubleSide;
-          }
-        }
-        parts.push(new THREE.Mesh(geo, m.material));
+        const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : mat));
+        parts.push(new THREE.Mesh(geo, Array.isArray(m.material) ? drawn : drawn[0]));
       });
       const matrices = mine.map((s) => {
         const x = beach.x - s.off;
@@ -109,5 +145,5 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
       }
     }),
   ).then(() => undefined);
-  return { group, ready };
+  return { group, ready, light: { sun: uSun.value as THREE.Vector3, sunLight: uSunLight.value as THREE.Vector3, skyLight: uSkyLight.value as THREE.Vector3 } };
 }
