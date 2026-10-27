@@ -155,3 +155,11 @@ This is not a bug, but it matters for the realistic look the film needs:
 - **Low-sun shadows on the beach.** The user reported "glitchy" dark shadows from the island's hills across
   the beach. Not yet reproduced: shadow map resolution and the shadow camera's focus at a very low Sun are
   the likely place to look.
+- **Page memory grows during long sea renders (open).** At 2160² the page's renderer process grows by
+  ~18 MB a frame in the sea scene, about one master-sized RGBA readback (Act 2 alone: ~3.6 MB a frame). A
+  260 s half crashed both lanes ("Target crashed") at ~900 frames each. Turning off the mirror, the sail
+  updates or the per-beat frame bump (finding 3) changed nothing. The suspect is the readback path: a
+  mapped staging buffer per frame that V8 only frees on a GC, which a scene making little JS garbage
+  rarely triggers. Not confirmed. The film renders in 20 s chunks, so each chunk starts with fresh pages.
+  Worth checking for any long offline capture: destroy readback buffers explicitly, or force a GC
+  between frames.
