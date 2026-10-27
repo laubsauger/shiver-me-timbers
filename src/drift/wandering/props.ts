@@ -125,6 +125,8 @@ export interface PropsState {
   beach: { x: number; z: number };
   /** the night's darkness 0..1 (the radio and the beams are lights against it) */
   night: number;
+  /** the sky's radiance just above the horizon (linear): the far islands are hazed into it */
+  horizon: THREE.Color;
   /** where the eye stands in w3 (the field gathers about it), and the ground's height (m, the sea's 0) */
   fieldEye: THREE.Vector3;
   /** where the eye is on the coast at sea time t (w6's field gathers over it as it rises) */
@@ -145,16 +147,23 @@ export interface Props {
 const CASE_REACH = 2.6;
 const CASE_LOB = 1.0;
 const G_CASE = 9.81;
-/** the beams: stations' bearings (deg right of the front, just under the horizon), and which answer which,
- * when (s into c4) */
+/** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4). Each
+ * station is a light on a low island on the horizon (STATION_*): the beams start and end at its light, so they
+ * point at something (they had met in empty sky just under the horizon: the v9 review) */
 const STATIONS = [-150, -95, -40, 10, 55, 105, 160];
+/** m: how far the stations' islands lie, their islands' radius and height (seeded per station, ±40%), and the
+ * light's height over the island's top */
+const STATION_DIST = 7000;
+const STATION_R = 380;
+const STATION_H = 55;
+const BEACON_UP = 6;
 const LINKS: Array<[number, number, number]> = [
   [2, 3, 9], [3, 4, 15], [1, 2, 20], [4, 5, 25], [0, 3, 30], [5, 6, 34], [2, 5, 38], [1, 4, 42], [0, 6, 46],
 ];
 /** m: the beams' sphere about the eye (inside the far plane), and their tube's radius (soft: brightest at its
  * core, a few pixels across in the master) */
 const BEAM_R = 9000;
-const BEAM_W = 45;
+const BEAM_W = 30;
 
 export function createProps(): Props {
   const group = new THREE.Group();
@@ -215,16 +224,97 @@ export function createProps(): Props {
     const e = (elDeg * Math.PI) / 180;
     return new THREE.Vector3(Math.sin(b) * Math.cos(e), Math.sin(e), -Math.cos(b) * Math.cos(e));
   };
+  // THE STATIONS: a low island on the horizon each (a flattened dome, its height and width seeded), dark, hazed
+  // most of the way into the horizon's own colour (7 km of marine air), and its light on top (night only)
+  const stations = new THREE.Group();
+  stations.name = 'drift-stations';
+  const uHorizon = uniform(new THREE.Color());
+  const islandMat = new THREE.MeshBasicNodeMaterial({ fog: false });
+  // (a silhouette a little darker than the sky behind it, never black: the haze between)
+  islandMat.colorNode = (uHorizon as unknown as THREE.Node<"vec3">).mul(0.55);
+  const beaconMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  beaconMat.colorNode = Fn(() => {
+    const q = uv().sub(0.5).mul(2);
+    const r = q.length();
+    // a point and its glow in the haze (the quad is 0.5° wide at the stations' range: the core ~3 px in a 2k master)
+    const core = smoothstep(0.3, 0.0, r);
+    const halo = smoothstep(1, 0, r).pow(2).mul(0.35);
+    return vec4(vec3(1, 0.7, 0.38).mul(core.mul(3).add(halo).mul(beamNight).mul(beamGain)), 1);
+  })();
+  // …and its road on the water below it: a light on the horizon is a column of glitter down to the eye (the mirror
+  // fades out at 2.5 km, the stations are 7 km off)
+  const roadMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
+  roadMat.colorNode = Fn(() => {
+    const q = uv();
+    const across = smoothstep(0.5, 0, q.x.sub(0.5).abs());
+    // brightest toward the horizon (q.y = 1), broken into glints along it
+    const along = float(0.2).add(q.y.pow(2).mul(0.8));
+    const glint = sin(q.y.mul(173).add(beamTime.mul(2.1))).mul(sin(q.y.mul(61).sub(beamTime.mul(1.3)))).mul(0.5).add(0.5);
+    return vec4(vec3(1, 0.68, 0.36).mul(across.mul(along).mul(glint.pow(3)).mul(2.5).mul(beamNight).mul(beamGain)), 1);
+  })();
+  const beaconDir: THREE.Vector3[] = [];
+  // one road along −z (turned to each bearing): a trapezoid from 150 m to the station, half-width ∝ distance
+  const roadGeo = (() => {
+    const g = new THREE.BufferGeometry();
+    const n = 24;
+    const pos: number[] = [];
+    const uvs: number[] = [];
+    const idx: number[] = [];
+    for (let i = 0; i <= n; i++) {
+      const u = i / n;
+      // (spaced geometrically: as many rows near as far)
+      const d = 150 * Math.pow(STATION_DIST / 150, u);
+      const w = d * 0.0045;
+      pos.push(-w, 0, -d, w, 0, -d);
+      uvs.push(0, u, 1, u);
+      if (i < n) idx.push(2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 1, 2 * i + 3, 2 * i + 2);
+    }
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    g.setIndex(idx);
+    return g;
+  })();
+  STATIONS.forEach((bearing, i) => {
+    const k = (n: number): number => 0.6 + 0.8 * ((Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453) % 1 + 1) % 1;
+    const h = STATION_H * k(1);
+    const r = STATION_R * k(2);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 8, 0, Math.PI * 2, 0, Math.PI / 2), islandMat);
+    const at = dirAt(bearing, 0).multiplyScalar(STATION_DIST);
+    dome.position.set(at.x, -h * 0.15, at.z);
+    dome.scale.set(r, h, r * 0.7);
+    dome.rotation.y = (-bearing * Math.PI) / 180;
+    stations.add(dome);
+    const top = new THREE.Vector3(at.x, h * 0.85 + BEACON_UP, at.z);
+    beaconDir.push(top.clone().normalize());
+    const beacon = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), beaconMat);
+    beacon.position.copy(top);
+    beacon.lookAt(0, top.y, 0);
+    stations.add(beacon);
+    // the road: flat on the sea from near the eye out to the island's foot, a constant ~0.5° wide as seen from
+    // the eye (a strip of constant width is a sub-pixel line at the horizon and a slab close by)
+    const road = new THREE.Mesh(roadGeo, roadMat);
+    road.rotation.y = (-bearing * Math.PI) / 180;
+    // (1.6 m over the mean sea, under the night eye (2.2 m and up): lower, the sea hid it; from 150 m out, as a
+    // road comes in to the one who sees it)
+    road.position.y = 1.6;
+    // (after the sea: both transparent, sorted by place, and the sea writes depth)
+    road.renderOrder = 2;
+    stations.add(road);
+  });
+  group.add(stations);
+
   for (const [a, b, at] of LINKS) {
-    const A = dirAt(STATIONS[a], -1.5);
-    const B = dirAt(STATIONS[b], -1.5);
+    // from station to station, light to light (on the beams' sphere, along the lights' own directions)
+    const A = beaconDir[a].clone();
+    const B = beaconDir[b].clone();
     // a circle on the sky through both stations and an apex over the bearing between them (a rainbow's
     // shape): the wider the link, the higher it reaches (35–70°), never higher than half the stations' spread
     // (higher, the arc through the apex is the circle's major one: a loop, not an arch)
     let mid = (STATIONS[a] + STATIONS[b]) / 2;
     if (Math.abs(STATIONS[a] - STATIONS[b]) > 180) mid += 180;
     const sep = A.angleTo(B);
-    const C = dirAt(mid, Math.min(35 + 35 * (sep / Math.PI), ((sep * 180) / Math.PI) * 0.45));
+    // (at most 55° up: higher, the arcs between far-apart stations ran through the zenith as straight lines)
+    const C = dirAt(mid, Math.min(25 + 30 * (sep / Math.PI), ((sep * 180) / Math.PI) * 0.4));
     const n = new THREE.Vector3().subVectors(B, A).cross(new THREE.Vector3().subVectors(C, A)).normalize();
     const centre = n.clone().multiplyScalar(n.dot(A));
     const ua = A.clone().sub(centre);
@@ -254,8 +344,11 @@ export function createProps(): Props {
       const pulse = sin(u.mul(18).sub(beamTime.mul(0.9))).mul(0.25).add(0.75);
       // soft-edged: brightest where the tube faces the eye
       const facing = abs(normalWorld.dot(cameraPosition.sub(positionWorld).normalize())).pow(3);
-      const ends = smoothstep(0, 0.03, u).mul(smoothstep(1, 0.97, u));
-      const k = grown.mul(pulse).mul(facing).mul(ends).mul(beamNight);
+      const ends = smoothstep(0, 0.01, u).mul(smoothstep(1, 0.99, u));
+      // the haze: low over the sea a beam is seen through kilometres more air, and dims into the horizon
+      const up = positionWorld.sub(cameraPosition).normalize().y;
+      const haze = smoothstep(-0.01, 0.2, up).mul(0.75).add(0.25);
+      const k = grown.mul(pulse).mul(facing).mul(ends).mul(haze).mul(beamNight);
       return vec4(vec3(1, 0.74, 0.42).mul(k.mul(0.025).mul(beamGain)), 1);
     })();
     const tube = new THREE.Mesh(geo, mat);
@@ -387,6 +480,11 @@ export function createProps(): Props {
       beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
       beams.position.copy(s.eye);
       beams.rotation.set(0, s.yaw, 0);
+      // the stations' islands are on the open sea's horizon all along (the coast's are the archipelago's)
+      stations.visible = world === 'open' || beams.visible;
+      stations.position.set(s.eye.x, 0, s.eye.z);
+      stations.rotation.set(0, s.yaw, 0);
+      (uHorizon.value as THREE.Color).copy(s.horizon);
       beamTime.value = t - starts.c4;
       beamNight.value = s.night;
       beamGain.value = world === 'coast' ? 0.4 : 1;

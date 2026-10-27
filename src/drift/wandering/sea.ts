@@ -643,6 +643,7 @@ export function createSea(
           raft: raft.group,
           beach,
           night: 1 - smooth01((sun.y + 0.1) / 0.12),
+          horizon: seaSky.horizon,
           fieldEye,
           coastEyeAt,
           ground,
