@@ -39,6 +39,15 @@ const CIRRUS_LONG = 60000;
 const CIRRUS_WIDE = 9000;
 /** m: the patches the cirrus gathers in (most of the sky has none) */
 const CIRRUS_PATCH = 90000;
+/** the wind at the cirrus against the cumulus': a little stronger, but at four to five times the height that crosses
+ * the sky at a quarter of the cumulus' angular speed; and veered (rad; winds turn with height). They had drifted
+ * the same way at half the cumulus' rate, along their own streaks, and read as one layer moving together (user,
+ * v9: no parallax); now they slide across each other. */
+const CIRRUS_WIND = 1.2;
+const CIRRUS_VEER = 0.5;
+/** s on the sea's clock (mid-act) when the cirrus lies where its old drift (2.5× the cumulus wind) had it: the
+ * layout the v9 cut was reviewed with, kept within ~3.5 km (a streak is 9 km wide) over the whole act */
+const CIRRUS_PIVOT = 226;
 /** m: beyond, the clouds have gone into the haze */
 const MAX_DIST = 45000;
 /** m: the shape volume's tile (cells ~1.5 km), the detail's, the coverage field's */
@@ -221,9 +230,12 @@ export function cirrus(o: V3, d: V3, data: CloudData, U: CloudUniforms): { light
   const mu = d.y;
   const k = float(CIRRUS_H).sub(o.y).mul(float(2 * R + CIRRUS_H).add(o.y));
   const t = k.div(r0.mul(mu.max(0)).add(sqrt(r0.mul(r0).mul(mu.mul(mu)).add(k))));
-  const p = o.add(d.mul(t)).add(vec3(U.wind.x, 0, U.wind.y).mul(U.time.mul(2.5)));
-  // along and across the wind
-  const w = vec3(U.wind.x, 0, U.wind.y).normalize();
+  const cv = Math.cos(CIRRUS_VEER) * CIRRUS_WIND;
+  const sv = Math.sin(CIRRUS_VEER) * CIRRUS_WIND;
+  const wind = vec3(U.wind.x.mul(cv).sub(U.wind.y.mul(sv)), 0, U.wind.x.mul(sv).add(U.wind.y.mul(cv)));
+  const p = o.add(d.mul(t)).add(vec3(U.wind.x, 0, U.wind.y).mul(2.5 * CIRRUS_PIVOT)).add(wind.mul(U.time.sub(CIRRUS_PIVOT)));
+  // along and across the wind up there
+  const w = wind.normalize();
   // warped, so the streaks bend and wander instead of running in ranks
   const warp = texture3D(data.shape, vec3(p.x.div(45000), 0.19, p.z.div(45000))).rg.sub(0.5);
   const along = p.x.mul(w.x).add(p.z.mul(w.z)).add(warp.x.mul(3000));
