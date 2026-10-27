@@ -67,12 +67,16 @@ clipping, not the capture.
 faces, six dome faces), and toggling the group between them invalidates every node material under it, so
 pipelines or bind groups are rebuilt for every object, every face.
 
-**Film workaround.** No clip. The island ground, rocks and low plants are left out of the coast's mirror
-capture instead.
+**Film workaround.** First no clip, which reflected the floating things' submerged halves as dark undersides.
+Now `mirror.ts` `clipToWater` gives each mirror face an oblique near plane at the water (Lengyel's method,
+adapted to WebGPU's [0, 1] depth), and skips the face that looks straight down. It costs nothing per object;
+`tests/mirrorClip.test.ts` checks that the plain frustum above the water is kept and nothing under it. The
+island ground, rocks and low plants stay out of the coast's mirror: mirrored, even clipped, the far islands
+reflected as teal blocks (cause not isolated).
 
-**For the engine.** Don't toggle a `ClippingGroup` per render pass. For a planar or probe mirror, clip in the
-mirror's own material variant (a `positionWorld.y` discard in an override material) or by an oblique
-near plane, which costs nothing per object.
+**For the engine.** Don't toggle a `ClippingGroup` per render pass. For a planar or probe mirror, clip by an
+oblique near plane (as `clipToWater` does), which costs nothing per object, or in the mirror's own material
+variant (a `positionWorld.y` discard in an override material).
 
 ## 3. Shadow maps update once per camera per node frame
 

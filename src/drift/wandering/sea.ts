@@ -578,8 +578,10 @@ export function createSea(
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
       surface.update(proxy, t, sun);
-      // (on the coast, the islands' ground, rocks and low plants stay out of it: unclipped, the seabed above the
-      // mirrored eye would hide the sky the shallows reflect; the palms, the raft and the people are mirrored)
+      // (on the coast, the islands' ground, rocks and low plants stay out of it: mirrored, even clipped at the
+      // waterline, the far islands reflected as teal blocks, not dark mirror images — tried 2026-10-27, cause not
+      // isolated, likely the terrain's own under-water tint near y = 0; the palms, the raft and the people are
+      // mirrored)
       const underwater = world === 'coast' ? [archipelago.group, scannedRocks.group, ...(plants ? [plants.group] : [])] : [];
       mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
       fu.time.value = flockT;
