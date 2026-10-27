@@ -15,7 +15,8 @@
  *
  * TIME PASSES IN DISSOLVES (the user's call, 2026-10-27): where a beat's time of day is hours from the last
  * one's, both are drawn at once and crossfaded over `dissolve` s — the light and the surroundings change, the
- * camera never stops. Everywhere else the light runs on in real time, slowly. A dissolve may also change the
+ * camera never stops. Not from the landing into seafaring: that is one continuous shot, its Sun scripted down
+ * to c2's (sea.ts, "one sea"). Everywhere else the light runs on in real time, slowly. A dissolve may also change the
  * WORLD (the flood's debris galaxy, the open sea, the coast; one sea, kilometres apart), never where the eye
  * is against the raft: that is one continuous curve over every beat (`raftPose`), so the raft holds its place
  * on the dome through every change until we step off it.
@@ -48,15 +49,18 @@ export const C1_FOLLOW = 20;
 /** the beats after c1 (c1's length and light are Act 2's landing) */
 export const BEATS: BeatSpec[] = [
   // (c3's Sun is right at the horizon at the flip: a degree lower and the throw was lost in the dusk, the v9 review)
-  // (c2's dissolve is long and its sky near c1's: at 8 s, with fewer clouds, the morning snapped to sunset)
-  { name: 'c2', world: 'open', length: 55, dissolve: 14, sunEl: [3, 1.6], sunAz: -22, cover: 0.42, cirrus: 0.2 },
-  { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -24, cover: 0.42, cirrus: 0.2 },
+  // (no dissolve into c2: c1's follow and the open sea are ONE sea and one shot, the Sun brought down to c2's in a
+  // time-lapse through the follow — sea.ts. Two worlds crossfaded showed two suns and two rafts: the v9 review)
+  { name: 'c2', world: 'open', length: 55, dissolve: 0, sunEl: [3, 1.6], sunAz: -22, cover: 0.42, cirrus: 0.2 },
+  // (a beat that follows without a dissolve takes the Sun where the last left it: c3's had stood 2° further round,
+  // and the Sun jumped as the dolphin came, the v9 review)
+  { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -22, cover: 0.42, cirrus: 0.2 },
   { name: 'c4', world: 'open', length: 60, dissolve: 8, sunEl: [-20, -20], sunAz: -24, cover: 0.12, cirrus: 0.08 },
   { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: 100, cover: 0.4, cirrus: 0.12 },
   { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: 100, cover: 0.4, cirrus: 0.12 },
   { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.24, cirrus: 0.12 },
-  { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -70, cover: 0.24, cirrus: 0.12 },
-  { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -72, cover: 0.24, cirrus: 0.12 },
+  { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -68, cover: 0.24, cirrus: 0.12 },
+  { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -68, cover: 0.24, cirrus: 0.12 },
   // (a long, slow fall into the night and a held vista under it, the field's flicker back among the stars: the
   // v9 review, "not the best framing for appreciating the night sky")
   { name: 'w6', world: 'coast', length: 60, dissolve: 24, sunEl: [-17, -18], sunAz: -72, cover: 0.1, cirrus: 0.05 },
@@ -177,7 +181,7 @@ export function sailsAt(name: BeatName, t: number, c1End: number): number {
 
 /** m/s the raft makes through the water: sailing on a light air, slower as the wind dies at last light, all but
  * still through the night; along the coast, then easing to anchor in w2 */
-function speedAt(t: number, starts: Record<BeatName, number>): number {
+export function speedAt(t: number, starts: Record<BeatName, number>): number {
   if (t < starts.w1 - 10) {
     const c3 = smooth((t - starts.c3) / 12);
     const c4 = smooth((t - starts.c4 + 4) / 8);

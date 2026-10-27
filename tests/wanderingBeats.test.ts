@@ -14,6 +14,21 @@ const rest: RaftPose = { bearing: 0.26, distance: 18, heading: -1.5, height: 3 }
 const beach = { x: -39310, z: 150 };
 
 describe('the beats after the landing', () => {
+  it('moves the Sun on without a jump wherever a beat follows another without a dissolve', () => {
+    // (a beat's own Sun starting where the last one's stood: two degrees off it, the Sun jumped across the sky in
+    // the cut — the v9 review, just before the dolphin)
+    for (let i = 1; i < BEATS.length; i++) {
+      const b = BEATS[i];
+      if (b.dissolve > 0) continue;
+      const a = BEATS[i - 1];
+      const s = starts[b.name];
+      const end = beatSun(a.name, s, c1End);
+      const start = beatSun(b.name, s, c1End);
+      const angle = Math.acos(Math.min(1, end[0] * start[0] + end[1] * start[1] + end[2] * start[2]));
+      expect((angle * 180) / Math.PI, `${a.name} → ${b.name}`).toBeLessThan(0.05);
+    }
+  });
+
   it('draws every instant with one beat, or two crossfading only across the planned dissolves', () => {
     const dissolving = new Set<string>();
     for (let t = 0; t < total; t += 0.05) {
@@ -21,9 +36,10 @@ describe('the beats after the landing', () => {
       expect(ps.reduce((s, p) => s + p.weight, 0)).toBeCloseTo(1, 9);
       if (ps.length === 2) dissolving.add(ps[1].name);
     }
-    // the time-of-day jumps: c1's morning to c2's sunset, c3's last light to c4's night, the night to w1's
-    // morning, w2's late morning to w3's golden hour, w5's dusk to the outro's night; nowhere else
-    expect([...dissolving].sort()).toEqual(['c2', 'c4', 'w1', 'w3', 'w6']);
+    // the time-of-day jumps: c3's last light to c4's night, the night to w1's morning, w2's late morning to w3's
+    // golden hour, w5's dusk to the outro's night; nowhere else — not c1 into c2, one continuous shot whose Sun
+    // is scripted down to c2's (two worlds crossfaded there showed two suns and two rafts)
+    expect([...dissolving].sort()).toEqual(['c4', 'w1', 'w3', 'w6']);
     // a dissolve is centred on its beat's start and lasts what the beat says
     for (const b of BEATS.filter((x) => x.dissolve > 0)) {
       expect(beatsAt(starts[b.name] - b.dissolve / 2 - 0.01, c1End)).toHaveLength(1);
