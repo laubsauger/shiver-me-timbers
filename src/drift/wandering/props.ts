@@ -94,10 +94,62 @@ function dolphin(): THREE.Group {
   return g;
 }
 
+/** the wanderers: their clothes, and their heights (m) */
+const WALKERS: Array<[number, number]> = [
+  [0x3b342d, 1.78],
+  [0x5a4a3c, 1.64],
+  [0x2f3438, 1.72],
+];
+/** m/s they walk at, s before w5 they come past the eye, and where along the beach (beats.ts) they start */
+const WALK_SPEED = 1.15;
+const WALK_LEAD = 1;
+const WALK_FROM = 7;
+
+/** a walking figure (feet at its origin, facing −z): legs and arms swinging about the hips and shoulders */
+function walker(hex: number, height: number): { group: THREE.Group; stride: (phase: number) => void } {
+  const k = height / 1.75;
+  const cloth = standIn(hex);
+  const skin = standIn(0x7a5c48);
+  const group = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.17 * k, 0.48 * k, 4, 10), cloth);
+  body.position.y = 1.12 * k;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.11 * k, 14, 10), skin);
+  head.position.y = 1.62 * k;
+  group.add(body, head);
+  const limb = (len: number, r: number, mat: THREE.Material, x: number, y: number): THREE.Group => {
+    const pivot = new THREE.Group();
+    const m = new THREE.Mesh(new THREE.CapsuleGeometry(r * k, len * k, 3, 8), mat);
+    m.position.y = -(len * k) / 2 - r * k;
+    pivot.add(m);
+    pivot.position.set(x * k, y * k, 0);
+    group.add(pivot);
+    return pivot;
+  };
+  const legs = [limb(0.72, 0.07, cloth, -0.09, 0.86), limb(0.72, 0.07, cloth, 0.09, 0.86)];
+  const arms = [limb(0.5, 0.05, cloth, -0.23, 1.4), limb(0.5, 0.05, skin, 0.23, 1.4)];
+  group.traverse((o) => {
+    o.castShadow = true;
+    o.receiveShadow = true;
+  });
+  return {
+    group,
+    // `phase`: strides walked (one stride is two steps)
+    stride(phase) {
+      const a = Math.sin(phase * Math.PI * 2);
+      legs[0].rotation.x = 0.42 * a;
+      legs[1].rotation.x = -0.42 * a;
+      arms[0].rotation.x = -0.3 * a;
+      arms[1].rotation.x = 0.3 * a;
+      body.position.y = 1.12 * k + 0.025 * Math.abs(Math.cos(phase * Math.PI * 2));
+      head.position.y = body.position.y + 0.5 * k;
+    },
+  };
+}
+
 export interface PropsState {
   /** sea s, and the beat's start times it is placed by */
   t: number;
-  starts: { c3: number; c4: number; w1: number; w2: number; w3: number; w4: number; w5: number };
+  starts: { c3: number; c4: number; w1: number; w2: number; w3: number; w4: number; w5: number; w6: number };
   world: 'flood' | 'open' | 'coast' | 'test';
   eye: THREE.Vector3;
   /** the eye's front, a turn about y (beats.ts) */
@@ -118,19 +170,21 @@ export interface Props {
   setPixelAngle(rad: number): void;
 }
 
-/** the dolphin's surfacings in c3, in the water between the eye and the raft (it crosses the view, circles
- * back, flips the case aboard, and leaves): s into c3, deg right of the front, m from the eye */
-const SURFACINGS: Array<[number, number, number]> = [
-  [5, 62, 15],
-  [9.5, 40, 12],
-  [14, -38, 12],
-  [19, -58, 15],
+/** the dolphin's surfacings in c3 (s into c3, deg right of the front, m from the eye, m it clears the water
+ * by): at last light a dark body only reads against something bright, so it leaps on the Sun's side (c3's
+ * Sun sets ~24° left), between the eye and the afterglow and its road on the water — porpoising in, two clear
+ * breaches, the flip at the raft's sunward end, away */
+const SURFACINGS: Array<[number, number, number, number]> = [
+  [4, -62, 20, 0.4],
+  [8.5, -46, 16, 1.3],
+  [13, -30, 13, 0.5],
+  [18, -12, 15, 1.5],
 ];
-const FLIP: [number, number, number] = [27, -26, 10.5];
-const LEAVE: [number, number, number] = [34, -70, 22];
-/** s the case flies, and how high (m over the line from the water to the deck) */
-const FLIGHT = 1.1;
-const LOFT = 1.8;
+const FLIP: [number, number, number, number] = [26, -14, 11, 1.2];
+const LEAVE: [number, number, number, number] = [34, -40, 22, 0.8];
+/** s the case flies, and how high (m over the line from the water to the deck: up against the sky) */
+const FLIGHT = 1.3;
+const LOFT = 2.6;
 /** the beams: stations' bearings (deg right of the front, just under the horizon), and which answer which,
  * when (s into c4) */
 const STATIONS = [-150, -95, -40, 10, 55, 105, 160];
@@ -179,9 +233,13 @@ export function createProps(): Props {
     const d = uv().sub(0.5).length().mul(2);
     return vec4(vec3(1, 0.6, 0.25).mul(dialGlow.mul(0.35)).mul(float(1).sub(d).max(0).pow(2.5)), 1);
   })();
-  const halo = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9), haloMat);
+  const halo = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5), haloMat);
   halo.position.set(0.08, 0.2, 0.05);
   caseMesh.add(halo);
+  // and its light on the deck and the sails about it (always in the scene, so the light count never changes)
+  const radioLight = new THREE.PointLight(0xffa35a, 0, 7, 2);
+  radioLight.position.set(0.08, 0.35, 0.05);
+  caseMesh.add(radioLight);
   group.add(caseMesh);
 
   // THE BEAMS: one tube per link on a sphere about the eye (it follows the eye: they are far)
@@ -189,6 +247,8 @@ export function createProps(): Props {
   beams.name = 'drift-beams';
   const beamTime = uniform(0);
   const beamNight = uniform(0);
+  // (the outro's network is the memory of c4's: fainter)
+  const beamGain = uniform(1);
   const dirAt = (bearingDeg: number, elDeg: number): THREE.Vector3 => {
     const b = (bearingDeg * Math.PI) / 180;
     const e = (elDeg * Math.PI) / 180;
@@ -235,7 +295,7 @@ export function createProps(): Props {
       const facing = abs(normalWorld.dot(cameraPosition.sub(positionWorld).normalize())).pow(3);
       const ends = smoothstep(0, 0.03, u).mul(smoothstep(1, 0.97, u));
       const k = grown.mul(pulse).mul(facing).mul(ends).mul(beamNight);
-      return vec4(vec3(1, 0.78, 0.45).mul(k.mul(0.05)), 1);
+      return vec4(vec3(1, 0.74, 0.42).mul(k.mul(0.025).mul(beamGain)), 1);
     })();
     const tube = new THREE.Mesh(geo, mat);
     tube.frustumCulled = false;
@@ -271,10 +331,10 @@ export function createProps(): Props {
   fieldGroup.name = 'drift-field';
   group.add(fieldGroup);
 
-  // THE WALKERS (w5)
+  // THE WALKERS (w5): three figures with legs and arms that swing as they walk (stand-ins all the same)
   const walkers = new THREE.Group();
-  const walkerShapes = [figure(false, 0x2e2a28), figure(false, 0x3a332c), figure(false, 0x282a2e)];
-  walkerShapes.forEach((w) => walkers.add(w));
+  const walkerShapes = WALKERS.map(([hex, h]) => walker(hex, h));
+  walkerShapes.forEach((w) => walkers.add(w.group));
   group.add(walkers);
 
   const tmp = new THREE.Vector3();
@@ -320,7 +380,7 @@ export function createProps(): Props {
       if (fish.visible) {
         let i = 0;
         while (i < stops.length - 1 && c3 > stops[i + 1][0]) i++;
-        const [ta, ba, da] = stops[i];
+        const [ta, ba, da, clear] = stops[i];
         const [tb, bb, db] = stops[Math.min(i + 1, stops.length - 1)];
         const u = tb > ta ? Math.min(1, Math.max(0, (c3 - ta) / (tb - ta))) : 0;
         const bear = ((ba + (bb - ba) * u) * Math.PI) / 180;
@@ -332,19 +392,19 @@ export function createProps(): Props {
         // heading: along the way to the next stop
         at(((bb * Math.PI) / 180), db);
         const head = Math.atan2(-(tmp.x - px), -(tmp.z - pz));
-        // out of the water for the first 1.7 s after each stop (the flip: higher, head up, 2.4 s)
+        // out of the water after each stop, clearing it by `clear` (a breach of a metre and more is out ~2 s),
+        // nose up rising, down falling; the flip: head high
         const since = c3 - ta;
-        const span = i === SURFACINGS.length ? 2.4 : 1.7;
+        const span = 1.2 + 0.7 * clear;
         const arc = since > 0 && since < span ? since / span : -1;
-        const high = i === SURFACINGS.length ? 1.7 : 1.25;
-        const y = arc >= 0 ? -0.7 + high * Math.sin(Math.PI * arc) : -1.4;
-        const pitch = arc >= 0 ? (i === SURFACINGS.length ? 0.9 : 0.5) * Math.cos(Math.PI * arc) : 0;
+        const y = arc >= 0 ? -0.8 + (clear + 1.1) * Math.sin(Math.PI * arc) : -1.4;
+        const pitch = arc >= 0 ? (i === SURFACINGS.length ? 1.0 : 0.65) * Math.cos(Math.PI * arc) : 0;
         fish.position.set(px, y, pz);
         fish.rotation.set(pitch, head, 0, 'YXZ');
       }
 
       // THE CASE: from the dolphin's snout onto the deck, then aboard
-      const cf = c3 - FLIP[0] - 1;
+      const cf = c3 - FLIP[0] - 0.9;
       caseMesh.visible = world !== 'test' && t < starts.w2 + 14 && cf > 0;
       if (caseMesh.visible) {
         raft.updateMatrixWorld(true);
@@ -363,13 +423,15 @@ export function createProps(): Props {
       // the radio: its dial glows from c4 on (with the static's flicker), dark again by day
       const radio = smooth((t - starts.c4 + 2) / 4) * (1 - smooth((t - starts.w1 + 3) / 6));
       dialGlow.value = radio * (0.85 + 0.15 * Math.sin(t * 7.3) * Math.sin(t * 2.1)) * 6;
+      radioLight.intensity = (dialGlow.value / 6) * 0.08;
 
       // THE BEAMS: about the eye, in c4's night
-      beams.visible = world === 'open' && t > starts.c4 - 6;
+      beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
       beams.position.copy(s.eye);
       beams.rotation.set(0, s.yaw, 0);
       beamTime.value = t - starts.c4;
       beamNight.value = s.night;
+      beamGain.value = world === 'coast' ? 0.4 : 1;
 
       // THE FIELD: w3 swells and settles; it fades through w4
       if (!fieldBuilt && world === 'coast') {
@@ -404,14 +466,19 @@ export function createProps(): Props {
       fieldU.beadRadiance.value = 0.1;
       fieldU.flashRadiance.value = 0.03;
 
-      // THE WALKERS: down the waterline ahead, small, into the dusk
-      const w5 = t - starts.w5;
-      walkers.visible = world === 'coast' && w5 > -4;
+      // THE WALKERS: from behind the eye on its left, down the wet sand by the waterline, the way the flock went
+      const w5 = t - starts.w5 + WALK_LEAD;
+      walkers.visible = world === 'coast' && w5 > 0;
       walkerShapes.forEach((w, i) => {
-        const along = 34 + i * 1.6 + 0.9 * Math.max(0, w5 + 4);
-        w.position.set(s.beach.x + 1.5 + i * 0.7, 0, s.beach.z - along);
-        w.position.y = Math.max(0, s.ground(w.position.x, w.position.z)) + 0.03 * Math.abs(Math.sin((w5 + i) * 3.4));
-        w.rotation.y = 0;
+        const walked = WALK_SPEED * Math.max(0, w5 - i * 0.7);
+        const along = WALK_FROM + walked - i * 1.5;
+        // (2–3 m to the eye's left as they pass it: beats.ts holds the eye at off −8)
+        const off = -5.3 + (i - 1) * 0.5 + 0.2 * Math.sin(walked * 0.11 + i);
+        const x = s.beach.x - off;
+        const z = s.beach.z - along;
+        w.group.position.set(x, Math.max(-0.05, s.ground(x, z)), z);
+        w.group.rotation.y = 0;
+        w.stride(walked / WALKERS[i][1]);
       });
     },
   };

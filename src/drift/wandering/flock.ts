@@ -11,7 +11,7 @@
  * of every murmuration. Wingbeats (~10 Hz) would alias at 30 fps; the bank carries the life instead.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, attribute, clamp, float, instanceIndex, int, ivec2, length, max, min, mix, normalize, smoothstep, step, textureLoad, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, attribute, clamp, float, instanceIndex, int, ivec2, length, max, min, mix, normalize, sin, smoothstep, step, textureLoad, uv, vec3, vec4 } from 'three/tsl';
 import { billboardMesh } from '../undertime/billboard';
 
 type F = THREE.Node<'float'>;
@@ -108,7 +108,11 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
   const across = normalize(along.cross(view));
   const corner = attribute<'vec3'>('position', 'vec3');
   const size = drawn.mul(step(0.5, flying.add(0.6)));
-  const quad = pos.add(along.mul(corner.y.mul(size).mul(0.7))).add(across.mul(corner.x.mul(size).mul(1.6)));
+  // the wingbeat, each bird on its own phase (~3 Hz as drawn: a sandpiper's ~10 Hz would alias at 30 fps): the
+  // span opens and closes, so the flock shimmers as live birds do instead of drifting as specks
+  const beat = sin(U.time.mul(18.8).add(bird.mul(2.399))).mul(0.5).add(0.5);
+  const span = mix(float(0.45), float(1), beat);
+  const quad = pos.add(along.mul(corner.y.mul(size).mul(0.55))).add(across.mul(corner.x.mul(size).mul(1.7).mul(span)));
   const material = new THREE.NodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
@@ -122,8 +126,11 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
     const wing = float(1).sub(smoothstep(0.55, 1, q.x.abs().add(q.y.mul(0.6).abs().mul(q.x.abs().mul(1.4).add(0.3)))));
     // albedos, lit by the scene's own light: a dark back in the sky's light, a white belly in the Sun's when it
     // is turned to it (a Sun below the horizon lights nothing)
-    const back = vec3(0.09, 0.08, 0.07).mul(U.skyLight.add(U.sunLight.mul(0.25)));
-    const belly = vec3(0.85, 0.82, 0.76).mul(U.skyLight.add(U.sunLight.mul(shows.mul(1.6))));
+    // (the low Sun's colour half taken back to its brightness: at a pixel or two a warm-lit belly read as an
+    // orange speck, "confetti" — the v8 notes)
+    const sunGrey = mix(U.sunLight, vec3(U.sunLight.dot(vec3(0.2126, 0.7152, 0.0722))), 0.5);
+    const back = vec3(0.07, 0.065, 0.06).mul(U.skyLight.add(sunGrey.mul(0.2)));
+    const belly = vec3(0.8, 0.78, 0.74).mul(U.skyLight.add(sunGrey.mul(shows.mul(0.7))));
     const c = mix(back, belly, shows);
     const a = wing.mul(min(coverage.mul(1.4), 1)).mul(U.presence).mul(smoothstep(0.02, 0.4, flying.add(0.3)));
     return vec4(c, a);

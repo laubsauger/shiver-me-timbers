@@ -22,8 +22,8 @@ describe('the beats after the landing', () => {
       if (ps.length === 2) dissolving.add(ps[1].name);
     }
     // the time-of-day jumps: c1's morning to c2's sunset, c3's last light to c4's night, the night to w1's
-    // morning, w2's late morning to w3's golden hour; nowhere else
-    expect([...dissolving].sort()).toEqual(['c2', 'c4', 'w1', 'w3']);
+    // morning, w2's late morning to w3's golden hour, w5's dusk to the outro's night; nowhere else
+    expect([...dissolving].sort()).toEqual(['c2', 'c4', 'w1', 'w3', 'w6']);
     // a dissolve is centred on its beat's start and lasts what the beat says
     for (const b of BEATS.filter((x) => x.dissolve > 0)) {
       expect(beatsAt(starts[b.name] - b.dissolve / 2 - 0.01, c1End)).toHaveLength(1);

@@ -13,9 +13,12 @@
  * night, so they are scaled here by the light that is actually there: the transmission by the sunlight
  * reaching the sea, the floor by the sky's light against the day's.
  *
- * The sails are furled and the pennant is struck: their flutter integrates a phase from the renderer's
- * frame clock (sailDriver.ts, flagDriver.ts), which is wall time — offline, at a few frames a second, the
- * canvas flapped ten times too fast (a "hyperlapse"), and from frame to frame, not from show time.
+ * The pennant is struck: its flutter integrates a phase from the renderer's frame clock (flagDriver.ts),
+ * which is wall time — offline, at a few frames a second, it flapped ten times too fast (a "hyperlapse"). The
+ * square sail's driver (sailDriver.ts) runs on the same clock, so for the film it is held STILL: set full and
+ * drawing (the v8 notes: furled, the raft read as "screwed on rails"), its flutter, luff flap, gusts and turn
+ * skew off, its response fast, so the belly is the wind's alone — a steady sail on a light steady air, the same
+ * in every frame. `sails` hoists it (0 furled: the cloth gone, the yard lowered; 1 set) as a continuous trim.
  *
  * Not yet: the ropes (a Verlet solve carried frame to frame) and the deck water (a simulation).
  */
@@ -30,6 +33,7 @@ import { createDeckWater, setActiveDeckWater } from '../../deckwater';
 import { raftContactPoints } from '../../sailing/raftBeaching';
 import { shipFlagParams, shipMaterialParams } from '../../params/ship';
 import { refreshShipMaterials } from '../../ship/pieceMaterials';
+import { writeSailWindFrame } from '../../ship/sailFrame';
 
 /** s the sea's height is averaged over, and how many instants */
 const SETTLE = 1.2;
@@ -41,8 +45,11 @@ export interface RaftProp {
    * the raft's pose at time t, at (x, z) on the sea heading `heading` rad (0: bow toward +z); `sun` and `sky`
    * are the light there against the day's (0..1: the sunlight's luminance, the sky's irradiance)
    */
-  update(t: number, x: number, z: number, heading: number, light: { sun: number; sky: number }): void;
+  update(t: number, x: number, z: number, heading: number, light: { sun: number; sky: number }, sails?: number, speed?: number): void;
 }
+
+/** the film's still sail (see the header): the game's cloth with everything that moves it from frame to frame off */
+const STILL_SAIL = { sailFlutterAmp: 0.015, sailLuffFlap: 0, sailGustAmp: 0, sailTurnSkew: 0, sailResponse: 12, sailWindRef: 2.4 };
 
 export function createRaft(heightAt: (x: number, z: number, t: number) => number): RaftProp {
   const blueprint = buildRaftBlueprint();
@@ -51,12 +58,15 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   setActiveDeckWater(createDeckWater({ source: deckField }));
   const assembly = new ShipAssembly(blueprint, createPieceMaterialCache(createDeckFieldTexture(deckField)));
   assembly.setSailTint(raftMaterialParams.sailTint);
-  // furled as on a moored raft: the cloth gone (the shader's drop scale), the yards lowered with it
+  // set full once; hoisted and furled after by the continuous trim (the cloth's drop, the yard's hoist)
+  Object.assign(shipMaterialParams, STILL_SAIL);
+  const sailIds: string[] = [];
   for (const def of blueprint) {
     if (!def.sailStates) continue;
-    assembly.setSailState(def.id, 'furled');
+    assembly.setSailState(def.id, 'full');
     assembly.setSailDropScale(def.id, 0);
     assembly.setYardHoist(def.id, 0);
+    sailIds.push(def.id);
   }
   const pennant = assembly.group.getObjectByName('flag-stern');
   if (pennant) pennant.visible = false;
@@ -77,7 +87,20 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
 
   return {
     group,
-    update(t, x, z, heading, light) {
+    update(t, x, z, heading, light, sails = 0, speed = 0) {
+      for (const id of sailIds) {
+        assembly.setSailDropScale(id, sails);
+        assembly.setYardHoist(id, sails);
+        // the wind frame the game's rig would publish: the hull's heading and its way through the water
+        writeSailWindFrame(assembly.sailMesh(id), {
+          shipForwardX: Math.sin(heading),
+          shipForwardZ: Math.cos(heading),
+          shipVelX: Math.sin(heading) * speed,
+          shipVelZ: Math.cos(heading) * speed,
+          gustPhase: 0,
+          gustPhaseB: 0,
+        });
+      }
       shipMaterialParams.sailBacklitStrength = backlit * light.sun;
       shipMaterialParams.sailAmbientLift = ambientLift * light.sky;
       shipFlagParams.flagAmbientLift = flagLift * light.sky;

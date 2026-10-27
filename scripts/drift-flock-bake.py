@@ -9,8 +9,15 @@ about a point above the beach (the air, not a leader). Takeoff is a startle wave
 waterline lift first and the wave runs along the flock at ~15 m/s. They rise, wheel as one shape across the
 sky over the audience, tighten and open, and settle far down the beach.
 
-World (metres): the audience's eye at the origin, 1.6 m up; +x right, +y up, −z ahead (the front of the
-dome); the waterline runs across the view 30 m ahead.
+World (metres): the audience's eye at the origin, 1.6 m up, on the beach; +x right, +y up, −z ahead (the
+front of the dome, down the beach). The waterline runs along the view 8 m to the LEFT (x = −8): the sea beyond
+it, the sand to the right (wandering/beats.ts COAST, w4).
+
+Second bake (2026-10-27, the v8 notes: "too organized", "bounce off the ground", "frozen in midair"): 75 s,
+the whole of w4 and w5 — the birds start along OUR waterline; each carries its own slow turbulence and
+heeds its neighbours more loosely; no hard floor (a soft lift keeps them off the sand while they fly); and
+after the wheeling over the front and the zenith the air carries them away down the beach, where every one
+of them comes down on the sand ~200 m ahead and stays (nothing hangs in the air when the bake ends).
 
   out/drift/data/.venv/bin/python -I scripts/drift-flock-bake.py public/drift/flock
 """
@@ -24,34 +31,41 @@ OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
 
 N = 2400
-DURATION = 34.0  # s
+DURATION = 75.0  # s
 DT = 1 / 60
 KEY_HZ = 15
 SEED = 2100
 
 rng = np.random.default_rng(SEED)
 
-# on the sand along the waterline: a band 70 m long, a few metres deep, 26–34 m ahead
-pos = np.stack([rng.uniform(-35, 35, N), np.zeros(N), -rng.uniform(26, 34, N)], -1).astype(np.float64)
+# on the wet sand and in the swash along the waterline (x −8): a band 40 m long, 20–60 m ahead
+pos = np.stack([rng.uniform(-11, -5, N), np.zeros(N), -rng.uniform(20, 60, N)], -1).astype(np.float64)
 vel = np.zeros((N, 3))
-# the startle wave runs from the left end
-takeoff = 1.5 + (pos[:, 0] + 35) / 15 + rng.normal(0, 0.12, N)
+# the startle wave runs from the far end toward us
+takeoff = 1.2 + (pos[:, 2] + 60) / 12 + rng.normal(0, 0.15, N)
 landed_at = np.full(N, np.inf)
+# each bird's own turbulence: three slow sines at its own rates and phases (m/s²)
+NOISE = 3.2
+nf = rng.uniform(0.25, 0.9, (N, 3))
+nph = rng.uniform(0, 2 * np.pi, (N, 3))
+# where they come down: the waterline far ahead
+LAND = np.array([-8.0, 0.0, -205.0])
 
 
 def wind_centre(t: float) -> np.ndarray:
-    """where the air carries the flock: a big loop up over the front, across the zenith and round, then away
-    down the beach (the body follows it as one; nothing pulls a bird to a radius, so no ring forms)"""
-    w = 2 * np.pi / 21  # slow enough for the birds to keep up (~11 m/s along the loop)
-    # over the front sky (the tilted dome's front), reaching the zenith once
-    loop = np.array([np.sin(w * (t - 3)) * 30, 24 + np.sin(w * 2 * (t - 3)) * 8, -18 - np.cos(w * (t - 3)) * 16])
-    away = np.array([150.0, 1.0, -45.0])
-    k = np.clip((t - 24) / 9, 0, 1)
-    k = k * k * (3 - 2 * k)
-    start = np.array([0.0, 6.0, -30.0])
+    """where the air carries the flock: up off the waterline, a big loop over the front, across the zenith and
+    round, then away down the beach and down to the sand (the body follows it as one; nothing pulls a bird to a
+    radius, so no ring forms)"""
+    w = 2 * np.pi / 22
+    loop = np.array([-4 + np.sin(w * (t - 4)) * 26, 13 + np.sin(w * 2 * (t - 4)) * 5, -28 - np.cos(w * (t - 4)) * 16])
+    start = np.array([-8.0, 5.0, -40.0])
     rise = np.clip((t - 1.5) / 4, 0, 1)
     rise = rise * rise * (3 - 2 * rise)
-    return (start * (1 - rise) + loop * rise) * (1 - k) + away * k
+    away = np.clip((t - 30) / 14, 0, 1)
+    away = away * away * (3 - 2 * away)
+    down = np.clip((t - 42) / 10, 0, 1)
+    far = np.array([-8.0, 9.0 * (1 - down) + 0.5 * down, -200.0])
+    return (start * (1 - rise) + loop * rise) * (1 - away) + far * away
 
 
 def wind_axis(t: float) -> np.ndarray:
@@ -82,16 +96,16 @@ for step in range(n_steps + 1):
             nn = np.argpartition(d2, k, axis=1)[:, :k]
             nd = d[np.arange(len(idx))[:, None], nn]  # self − neighbour
             nd2 = d2[np.arange(len(idx))[:, None], nn]
-            sep = (nd / np.maximum(nd2, 0.04)[..., None] * (nd2 < 2.6)[..., None]).sum(1) * 2.2
-            ali = (v[nn].mean(1) - v) * 2.0
-            coh = (p[nn].mean(1) - p) * 0.45
+            sep = (nd / np.maximum(nd2, 0.04)[..., None] * (nd2 < 2.6)[..., None]).sum(1) * 2.4
+            ali = (v[nn].mean(1) - v) * 1.4
+            coh = (p[nn].mean(1) - p) * 0.32
             acc += sep + ali + coh
         # the air: carries the body toward where the loop is now; the body turns slowly within itself about
         # its own centre (a fold, not an orbit)
         c = wind_centre(t)
         to = c - p
         dist = np.linalg.norm(to, axis=1, keepdims=True) + 1e-6
-        acc += to / dist * np.minimum(dist * 0.25, 7.0)
+        acc += to / dist * np.minimum(dist * 0.35, 9.5)
         mid = p.mean(0)
         r = p - mid
         rl = np.linalg.norm(r, axis=1, keepdims=True) + 1e-6
@@ -99,23 +113,27 @@ for step in range(n_steps + 1):
         # it never comes apart into separate flocks
         acc += np.cross(wind_axis(t), r) / rl * np.minimum(rl * 0.35, 2.5)
         acc += -r / rl * np.clip(rl - 18, 0, 20) * 0.05
-        # lift off the sand for the first seconds of flight; never into the ground
+        # each its own turbulence (the body is never one rigid shape)
+        acc += NOISE * np.sin(nf[idx] * t * 2 * np.pi + nph[idx]) * np.array([1.0, 0.45, 1.0])
+        # lift off the sand for the first seconds of flight; then a soft lift, rising as they near the sand
+        # (no floor to bounce off), until the landing: near the landing ground they let themselves down
         since = (t - takeoff[idx])[:, None]
-        acc[:, 1:2] += np.where(since < 1.5, 9.0, 0.0) + np.maximum(0, 5 - p[:, 1:2]) * np.where(t > 27, 1.0, 8.0)
+        landing = (t > 44) & (np.linalg.norm(p - LAND, axis=1, keepdims=True) < 40)
+        acc[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, np.maximum(0, 3 - p[:, 1:2]) * 3.0)
         v = v + acc * DT
         sp = np.linalg.norm(v, axis=1, keepdims=True) + 1e-6
-        # sandpipers fly ~10–14 m/s; slower in the first wingbeats
-        lo = np.where(since < 1.0, 2.0, 9.0)
-        v = v / sp * np.clip(sp, lo, 14.0)
+        # sandpipers fly ~10–14 m/s; slower in the first wingbeats and coming in to land
+        lo = np.where(since < 1.0, 2.0, np.where(landing, 3.0, 9.0))
+        hi = np.where(landing, 7.0, 14.0)
+        v = v / sp * np.clip(sp, lo, hi)
         vel[idx] = v
         pos[idx] = p + v * DT
+        # down on the sand: they stay
+        low = idx[(pos[idx, 1] < 0.25) & landing[:, 0]]
+        landed_at[low] = t
+        pos[low, 1] = 0
+        vel[low] = 0
         pos[idx, 1] = np.maximum(pos[idx, 1], 0.0)
-        # landing: once the air has carried them away down the beach, they come down onto the sand
-        if t > 27:
-            low = idx[(pos[idx, 1] < 0.4) & (pos[idx, 0] > 60)]
-            landed_at[low] = t
-            pos[low, 1] = 0
-            vel[low] = 0
 keys = np.stack(keys)  # (frames, birds, 3)
 print('keys', keys.shape, 'altitude range', keys[..., 1].min(), keys[..., 1].max())
 # float16 RGBA rows: one row per key, one texel per bird (xyz, w = 1 while flying, 0 on the sand)
@@ -131,7 +149,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 eye = np.array([0, 1.6, 0])
 S = 360
 frames = []
-for t in (2, 4, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33):
+for t in (2, 5, 9, 13, 18, 24, 30, 36, 42, 50, 60, 74):
     f = keys[min(len(keys) - 1, int(t * KEY_HZ))] - eye
     d = f / (np.linalg.norm(f, axis=1, keepdims=True) + 1e-9)
     el = np.degrees(np.arcsin(np.clip(d[:, 1], -1, 1)))

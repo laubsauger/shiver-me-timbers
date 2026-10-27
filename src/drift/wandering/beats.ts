@@ -9,7 +9,9 @@
  *   w2  landfall      it runs onto the sand; we step off and glide along the waterline      late morning
  *   w3  the field     on the open beach, Act 1's pairs flicker in balance at the edge of seeing   golden hour
  *   w4  sandpipers    the flock rises from the waterline and wheels over the dome           sunset
- *   w5  wandering on  the flock settles; a slow pull back and up                            dusk
+ *   w5  wandering on  the flock settles far down the beach; the wanderers walk on after it   dusk
+ *   w6  the outro     night over the beach: the Milky Way, the stations' beams still across it,
+ *                     the eye still rising, and the fade                                         night
  *
  * TIME PASSES IN DISSOLVES (the user's call, 2026-10-27): where a beat's time of day is hours from the last
  * one's, both are drawn at once and crossfaded over `dissolve` s — the light and the surroundings change, the
@@ -22,7 +24,7 @@
  * frame renders on its own.
  */
 
-export type BeatName = 'c1' | 'c2' | 'c3' | 'c4' | 'w1' | 'w2' | 'w3' | 'w4' | 'w5';
+export type BeatName = 'c1' | 'c2' | 'c3' | 'c4' | 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'w6';
 export type WorldName = 'flood' | 'open' | 'coast';
 
 export interface BeatSpec {
@@ -53,6 +55,7 @@ export const BEATS: BeatSpec[] = [
   { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.3, cirrus: 0.15 },
   { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -70, cover: 0.3, cirrus: 0.15 },
   { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -72, cover: 0.3, cirrus: 0.15 },
+  { name: 'w6', world: 'coast', length: 32, dissolve: 10, sunEl: [-17, -18], sunAz: -72, cover: 0.1, cirrus: 0.05 },
 ];
 
 export interface Beats {
@@ -134,15 +137,53 @@ interface PoseKey {
   pose: Partial<RaftPose>;
 }
 const D = Math.PI / 180;
+/** the raft under sail against the eye: ahead and to the right, its bow along the front — we sail alongside,
+ * a little astern of it, and the sea runs past (v8 notes: broadside and drifting it read as "on rails") */
+export const SAILING: RaftPose = { bearing: 24 * D, distance: 15, heading: 0, height: 2.6 };
 const POSE_KEYS: PoseKey[] = [
+  // c1's follow: at rest it lies broadside; it swings its bow round to the front before seafaring
+  { beat: 'c2', at: -C1_FOLLOW, pose: {} },
+  { beat: 'c2', at: -3, pose: { heading: SAILING.heading } },
+  // (the dissolve into c2 keeps the raft where c1 left it; then it falls in ahead under sail)
+  { beat: 'c2', at: 4, pose: {} },
+  { beat: 'c2', at: 16, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
   // c3: still, close, low — in to the raft as the dolphin comes (direction: "still, close, low")
   { beat: 'c3', at: 0, pose: {} },
-  { beat: 'c3', at: 14, pose: { distance: 10, height: 1.6, bearing: 6 * D } },
+  { beat: 'c3', at: 14, pose: { distance: 10, height: 1.6, bearing: 10 * D } },
   // c4: back a little and up, for the beams overhead
-  { beat: 'c4', at: 4, pose: { distance: 12, height: 2.2, bearing: 8 * D } },
-  // w1: alongside again, as in c1–c2
-  { beat: 'w1', at: 6, pose: { distance: 18, height: 3 } },
+  { beat: 'c4', at: 4, pose: { distance: 12, height: 2.2, bearing: 12 * D } },
+  // w1: under sail along the coast, as in c2
+  { beat: 'w1', at: 6, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
 ];
+
+/** the square sail, 0 furled .. 1 set: furled at rest in the debris and through the night, set at sea and
+ * along the coast, struck as the raft comes to anchor off the beach (a dissolve crossfades a hoist) */
+export function sailsAt(name: BeatName, t: number, c1End: number): number {
+  const { starts } = beatStarts(c1End);
+  if (name === 'c2' || name === 'c3' || name === 'w1') return 1;
+  if (name === 'w2') return 1 - smooth((t - starts.w2 - 8) / 12);
+  return 0;
+}
+
+/** m/s the raft makes through the water: sailing on a light air, slower as the wind dies at last light, all but
+ * still through the night; along the coast, then easing to anchor in w2 */
+function speedAt(t: number, starts: Record<BeatName, number>): number {
+  if (t < starts.w1 - 10) {
+    const c3 = smooth((t - starts.c3) / 12);
+    const c4 = smooth((t - starts.c4 + 4) / 8);
+    return 1.2 + (0.6 - 1.2) * c3 + (0.2 - 0.6) * c4;
+  }
+  return 1.0 * (1 - smooth((t - starts.w2) / 22));
+}
+
+/** m the raft has come since `from` (sea s): the integral of its speed, in 0.05 s steps */
+export function travelled(from: number, t: number, c1End: number): number {
+  const { starts } = beatStarts(c1End);
+  const h = 0.05;
+  let d = 0;
+  for (let x = from; x < t; x += h) d += speedAt(Math.min(x + h / 2, t), starts) * Math.min(h, t - x);
+  return d;
+}
 
 /**
  * THE RAFT AGAINST THE EYE, over every beat: c1's rest pose (`rest`), then eased to each key in turn. Through
@@ -171,10 +212,10 @@ export function raftPose(t: number, c1End: number, rest: RaftPose): RaftPose {
   return from;
 }
 
-/** m/s the raft drifts on at sea (all the rafts the same way: the current), along its own heading */
-export const DRIFT = 0.55;
-/** m: where the open sea's rig starts (kilometres from the flood's debris, so none of it shows) */
+/** m: where the open sea's rig starts (kilometres from the flood's debris, so none of it shows). Every raft
+ * sails downwind, along −z (the wind's own direction: sea.ts WIND_TO), with the eye's front */
 export const OPEN_AT: [number, number] = [0, 40000];
+export const OPEN_YAW = 0;
 
 /**
  * THE COAST (w1–w5), about one beach: the lagoon island's long gentle shore on its −x side (the game's
@@ -187,7 +228,8 @@ export const OPEN_AT: [number, number] = [0, 40000];
  *   w2  it turns in and runs onto the sand; we step off and glide up the beach and along it, at eye height
  *   w3  the glide eases out through w3's dissolve: on the open beach, still but for a slow drift
  *   w4  still: the flock rises from the waterline ahead
- *   w5  a slow pull back and up
+ *   w5  held while the wanderers come past, then a slow pull back and up as they walk on
+ *   w6  still back and up, into the night
  */
 export const COAST_YAW = 0;
 /** m: the coast rig's keys, (along, off) of the eye, eased between — ashore, within the beach's gentle ~110 m
@@ -198,15 +240,19 @@ const COAST_KEYS: Array<{ beat: BeatName; at: number; along: number; off: number
   { beat: 'w3', at: 20, along: 5, off: -8 },
   { beat: 'w4', at: 20, along: 12, off: -8 },
   { beat: 'w4', at: 40, along: 12, off: -8 },
-  { beat: 'w5', at: 35, along: -20, off: -2 },
+  // w5: held while the wanderers come past (props.ts), then back and up as they walk on
+  { beat: 'w5', at: 12, along: 12, off: -8 },
+  { beat: 'w5', at: 35, along: -14, off: -3 },
+  { beat: 'w6', at: 32, along: -40, off: 6 },
 ];
-/** m/s the raft and the eye drift along the coast in w1 */
-const COAST_DRIFT = 0.8;
+/** m/s the raft and the eye sail along the coast in w1 */
+const COAST_DRIFT = 1.0;
 /** s into w2 the eye steps off the raft (the raft's run in ends) */
 export const STEP_OFF = 30;
 /** m: the eye over the sand once ashore, and the height it rises to as w5 pulls back */
 export const EYE_ASHORE = 1.6;
 const EYE_W5 = 11;
+const EYE_W6 = 22;
 
 /**
  * The eye on the coast at sea time t: x, z (sea-scene metres) and whether it is ashore (then its height is the
@@ -246,8 +292,9 @@ export function coastEye(t: number, c1End: number, beach: { x: number; z: number
     }
   }
   const ashore = smooth((t - (w2 + STEP_OFF - 4)) / 10);
-  const lift = smooth((t - starts.w5) / spec('w5')!.length);
-  return { x: beach.x - off, z: beach.z - along, ashore, height: EYE_ASHORE + (EYE_W5 - EYE_ASHORE) * lift };
+  const lift = smooth((t - starts.w5 - 10) / (spec('w5')!.length - 10));
+  const lift6 = smooth((t - starts.w6) / spec('w6')!.length);
+  return { x: beach.x - off, z: beach.z - along, ashore, height: EYE_ASHORE + (EYE_W5 - EYE_ASHORE) * lift + (EYE_W6 - EYE_W5) * lift6 };
 }
 
 /** m: where the raft runs aground, (along, off) — just on the sand ahead of where the eye steps off */

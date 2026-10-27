@@ -174,10 +174,15 @@ export function matPieces(cx: number, cz: number, sigma: number, count: number, 
 /** the pieces that stay clear of a circle of `radius` m round (x, z), each by its own length (the raft's berth:
  * nothing floats through its hull) */
 export function clearOf(d: DebrisData, x: number, z: number, radius: number): DebrisData {
+  return keepIf(d, (px, pz, len) => Math.hypot(px - x, pz - z) - len / 2 > radius);
+}
+
+/** the pieces `keep(x, z, length)` says may stay */
+export function keepIf(d: DebrisData, keepPiece: (x: number, z: number, len: number) => boolean): DebrisData {
   const keep: number[] = [];
   for (let i = 0; i < d.count; i++) {
     const [px, pz, , len] = d.place.subarray(i * 4, i * 4 + 4);
-    if (Math.hypot(px - x, pz - z) - len / 2 > radius) keep.push(i);
+    if (keepPiece(px, pz, len)) keep.push(i);
   }
   const out = emptyData(keep.length);
   keep.forEach((i, n) => {

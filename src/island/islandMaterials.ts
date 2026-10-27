@@ -24,6 +24,7 @@ import {
   type CoverMeshMaterial,
   type TerrainBlendMaterialHandle,
 } from '../terrain';
+import type { TerrainBlendHooks } from '../terrain/sandMaterial';
 import { applyWindSway, createPalmMaterial } from '../vegetation';
 import type { WindSway } from '../vegetation/windSway';
 import { createStructureMaterial } from './structures';
@@ -112,8 +113,13 @@ export interface IslandMaterials {
   dispose(): void;
 }
 
-export function createIslandMaterials(): IslandMaterials {
-  const terrain = terrainBlendMaterial();
+/**
+ * `terrainHooks`: a caller's own pre-lighting ground for the terrain (terrain/sandMaterial.ts
+ * TerrainBlendHooks) — The Drift's scanned PBR beach (drift/wandering/beachMaterial.ts). Absent for the game:
+ * its graph is then the one it always was.
+ */
+export function createIslandMaterials(opts: { terrainHooks?: TerrainBlendHooks } = {}): IslandMaterials {
+  const terrain = terrainBlendMaterial({}, {}, opts.terrainHooks);
   const rock = createRockMaterial();
   const palm = createPalmMaterial();
   const palmSway = applyWindSway(palm.material, {

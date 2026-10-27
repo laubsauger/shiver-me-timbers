@@ -35,6 +35,7 @@ import {
   SHOWCASE_SEED_STRIDE,
   type Anchorage,
 } from './showcase';
+import type { TerrainBlendHooks } from '../terrain/sandMaterial';
 
 /** placement attempts per island before the layout is declared impossible */
 const PLACEMENT_ATTEMPTS = 512;
@@ -293,6 +294,8 @@ export interface CreateArchipelagoOptions {
    * (positions, radii, archetypes, overrides); nothing here re-validates it.
    */
   sites?: IslandSite[];
+  /** the terrain's pre-lighting ground hook (islandMaterials.ts createIslandMaterials) */
+  terrainHooks?: TerrainBlendHooks;
 }
 
 export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
@@ -301,7 +304,7 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
 
   const group = new THREE.Group();
   group.name = 'archipelago';
-  const materials = createIslandMaterials();
+  const materials = createIslandMaterials({ terrainHooks: opts.terrainHooks });
   const islands: Island[] = [];
   const foamTargets: THREE.Object3D[] = [];
   // hand each island a silhouette nobody else has, until the families run out

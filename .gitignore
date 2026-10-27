@@ -55,3 +55,6 @@ public/drift/galaxies/
 # (scripts/drift-cloud-noise.py)
 public/drift/flock/
 public/drift/clouds/
+# the sea-level PBR assets are downloaded, CC0 (Poly Haven, ambientCG: ~620 MB at 4K): the list, sources and
+# checksums in scripts/drift-pbr-assets.json, fetched by scripts/drift-pbr-fetch.py
+public/drift/pbr/

@@ -47,6 +47,12 @@ const ADAPT_REF = 0.4;
 const ADAPT = 0.5;
 const ADAPT_MAX = 14;
 
+/** THE NIGHT SKY'S OWN LIGHT (starlight, airglow, the Milky Way; the single-scattering air has none, so a
+ * moonless night lit nothing at all and the raft went black — a pop at every dissolve into night): an
+ * irradiance floor (linear rgb, a little blue), added to the light the scene is lit by but not to the
+ * adaptation (the night sky stays as dark as it was) */
+const NIGHT_LIGHT: Rgb = [0.009, 0.011, 0.016];
+
 /** the exposure the eye opens to under a sky of this irradiance (luminance, linear) */
 export const adaptation = (lum: number): number => Math.min(ADAPT_MAX, Math.pow(ADAPT_REF / Math.max(lum, 1e-9), ADAPT));
 
@@ -271,7 +277,7 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
         const L = radianceCpu(r0, d, sun);
         for (let k = 0; k < 3; k++) H[k] += L[k] / 16;
       }
-      irradiance.setRGB(E[0], E[1], E[2]);
+      irradiance.setRGB(E[0] + NIGHT_LIGHT[0], E[1] + NIGHT_LIGHT[1], E[2] + NIGHT_LIGHT[2]);
       horizon.setRGB(H[0], H[1], H[2]);
       const lum = 0.2126 * E[0] + 0.7152 * E[1] + 0.0722 * E[2];
       exposure = adaptation(lum);
