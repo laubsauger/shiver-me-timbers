@@ -107,6 +107,19 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
   let chain: Promise<void> = Promise.resolve();
   let n = 0;
   try {
+    // A WARM-UP FRAME, drawn and dropped. The first frame a page draws is not the frame it draws at the same t
+    // once it has drawn one (7.5k px differ at 1080², against ~300 between two warmed runs): the dolphin showed
+    // through the water unshadowed beside the raft, and the raft and its reflections moved, in the first frame
+    // of every lane — a flash at each lane's join (engine-findings.md §14). Whatever builds on first use (the
+    // shadow maps are the likely part) has built by the second.
+    if (frames > 0) {
+      slots[0].cap.bind();
+      try {
+        deps.frame(from, (o.shutter ?? 0.5) / fps, Math.max(1, Math.round(o.blur ?? 1)));
+      } finally {
+        slots[0].cap.unbind();
+      }
+    }
     for (; n < frames; n++) {
       const slot = slots[n % K];
       await slot.done; // this target's previous frame is read back AND posted

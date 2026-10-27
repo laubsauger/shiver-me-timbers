@@ -317,3 +317,24 @@ One lane, no encoder (an in-page harness timing `__drift.record` against a sink 
 
 **For the engine.** A `CpuOcean` that keeps its last few grids by time (or computes several instants in one
 pass) would do the same for the game, where every ship's buoyancy asks the same sea.
+
+## 14. The first frame a page draws is wrong
+
+Seen as a flash in a C3 test clip, exactly at the frame where the second lane's half begins: for one frame the
+dolphin lay pale on the water beside the raft, where it is in fact a metre down and behind the raft's port logs.
+
+Measured at t = 425 (C3), 1080², pixels differing by more than 3/255:
+
+| | pixels |
+|---|---|
+| a fresh page's first frame vs a run from 2 s earlier | 7 483 |
+| the same page drawing the same t a second time vs that run | 248 |
+| two runs from different starts | 317 |
+| two fresh pages' first frames | 32 |
+
+So it is not history: it is the first frame only, and it is the same in every fresh page. Besides the dolphin
+the raft, its sails and the water's patches of reflection differ: what changes looks like lighting, and the
+likely part is the shadow maps, built on first use and not yet drawn into for that frame (not isolated).
+
+Every render the film has had started each lane on such a frame. `recordDomeMaster` now draws one frame at
+`from` and drops it before the take; after it the first frame matches a run's (259 px).
