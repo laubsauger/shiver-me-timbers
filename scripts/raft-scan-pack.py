@@ -29,7 +29,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 SIZE = 1024
 RELIEF = 512
 # scan -> its tile on the ground, m (Poly Haven's own dimensions)
-SCANS = {'rough_wood': 0.5, 'bamboo_wall': 2.0, 'bamboo_wall_03': 1.85, 'reed_roof_04': 2.5}
+SCANS = {'rough_wood': 0.5, 'bamboo_wall': 2.0, 'reed_roof_04': 2.5}
 
 
 def load(path: Path, mode: str, size: int = SIZE) -> np.ndarray:

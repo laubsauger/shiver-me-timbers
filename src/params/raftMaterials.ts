@@ -60,6 +60,8 @@ export interface RaftMaterialParams {
   weaveRough: number;
   weaveBump: number;
   // --- thatch (roof)
+  thatchScan: number; // 0..1 — the scanned reed (raftScans.ts) laid into the thatch's own tones
+  thatchScanTile: number; // × the scan's own tile (2.5 m)
   thatchLight: number; // pale straw [§7 Thatch: "museum pale straw palm"]
   thatchDark: number; // dry brown
   thatchUnder: number; // 0..1 — underside multiplier (the overhang's ragged shade)
@@ -223,6 +225,8 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     // player at. 1.4 keeps a little exaggeration for a plait's genuinely proud
     // strand (22.7°) and halves the gradient the frames show.
     weaveBump: 1.5,
+    thatchScan: 1,
+    thatchScanTile: 0.5,
     thatchLight: 0xc9b07a,
     thatchDark: 0x8c7a50,
     thatchUnder: 0.55,
@@ -318,7 +322,7 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weaveTan: colour, weaveDark: colour,
     weaveStrip: m(0.02, 0.1, 0.001), weaveBlock: m(1, 10, 1), weaveEdge: m(0.02, 0.4), weaveRelief: m(0, 0.02, 0.001),
     weaveToneVar: m(0, 0.3), weaveRough: m(0.3, 1), weaveBump: m(0, 30, 0.5),
-    thatchLight: colour, thatchDark: colour, thatchUnder: m(0, 1),
+    thatchScan: m(0, 1), thatchScanTile: m(0.25, 4, 0.05), thatchLight: colour, thatchDark: colour, thatchUnder: m(0, 1),
     // §T134 — the floor was 0.1 while the leaf lap has to live INSIDE the
     // geometry's 0.30 m course; 0.04 lets the slider reach a lap, not a course
     thatchRowPitch: m(0.04, 0.8, 0.005), thatchRowEdge: m(0.005, 0.1, 0.001), thatchRowRagged: m(0, 0.15),

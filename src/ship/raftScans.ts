@@ -116,15 +116,21 @@ export function sampleRaftScan(scan: RaftScan, pos: AnyNode, normal: AnyNode, al
 
 /**
  * The same, with the grain along whichever of the piece's local axes is longest (its bounds, `aabbMin`/`aabbMax`
- * from raftMaterialNodes): for a family whose pieces run in different directions (a guara stands up, a
- * splashboard runs across the bow).
+ * from raftMaterialNodes), or the middle one: for a family whose pieces run in different directions (a guara
+ * stands up, a splashboard runs across the bow).
  */
-export function sampleRaftScanAlongLongest(scan: RaftScan, pos: AnyNode, normal: AnyNode, aabbMin: AnyNode, aabbMax: AnyNode, offset: AnyNode, tile: AnyNode = float(1)): ScanSample {
+export function sampleRaftScanAlongLongest(scan: RaftScan, pos: AnyNode, normal: AnyNode, aabbMin: AnyNode, aabbMax: AnyNode, offset: AnyNode, tile: AnyNode = float(1), rank: 'longest' | 'middle' = 'longest'): ScanSample {
   const p = pos.add(offset).div(tile.mul(scan.metres));
   const e = aabbMax.sub(aabbMin);
-  // 1 where that axis is the longest (x wins ties, then y)
-  const ax = e.x.greaterThanEqual(e.y).and(e.x.greaterThanEqual(e.z)).select(float(1), float(0));
-  const ay = float(1).sub(ax).mul(e.y.greaterThanEqual(e.z).select(float(1), float(0)));
+  // 1 where that axis is the one asked for: the longest (x wins ties, then y), or the middle one (a slab's
+  // width: a roof slab is long along the ridge, its width runs down the slope, and it is thin)
+  const on = (c: AnyNode): AnyNode => c.select(float(1), float(0));
+  const lx = on(e.x.greaterThanEqual(e.y).and(e.x.greaterThanEqual(e.z)));
+  const ly = float(1).sub(lx).mul(on(e.y.greaterThanEqual(e.z)));
+  const sx = on(e.x.lessThan(e.y).and(e.x.lessThan(e.z)));
+  const sy = float(1).sub(sx).mul(on(e.y.lessThan(e.z)));
+  const ax = rank === 'longest' ? lx : float(1).sub(lx).sub(sx).clamp(0, 1);
+  const ay = rank === 'longest' ? ly : float(1).sub(ly).sub(sy).clamp(0, 1);
   const a = abs(normal);
   const w0 = pow(a, vec3(4));
   const w = w0.div(w0.x.add(w0.y).add(w0.z).max(1e-5));

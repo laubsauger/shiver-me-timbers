@@ -360,14 +360,15 @@ export function createRaftMaterial(
 
 /**
  * A family's material with a scan laid into its own tones as a detail about 1 (raftScans.ts): its colour, its
- * roughness and its occlusion multiplied by the scan's over the scan's mean, along each piece's long axis. The
- * family's pattern, palette and wetline stay as they were composed.
+ * roughness and its occlusion multiplied by the scan's over the scan's mean, along each piece's long (or middle)
+ * axis. The family's pattern, palette and wetline stay as they were composed.
  */
 function withScanDetail(
   handle: ShipMaterialHandle,
   name: RaftScanName,
   mixOf: () => number,
   tileOf: () => number,
+  rank: 'longest' | 'middle' = 'longest',
 ): ShipMaterialHandle {
   const m = handle.material;
   const piece = createRaftPieceUniforms();
@@ -375,7 +376,7 @@ function withScanDetail(
   const uTile = uniform(tileOf());
   const scanMap = raftScan(name);
   const offset = vec3(piece.seed.mul(23.1), piece.seed.mul(5.7), piece.seed.mul(41.3));
-  const scan = sampleRaftScanAlongLongest(scanMap, positionLocal, normalLocal, piece.aabbMin, piece.aabbMax, offset, uTile);
+  const scan = sampleRaftScanAlongLongest(scanMap, positionLocal, normalLocal, piece.aabbMin, piece.aabbMax, offset, uTile, rank);
   m.colorNode = (m.colorNode as AnyNode).mul(mix(vec3(1), scan.albedo.div(vec3(scanMap.mean.r, scanMap.mean.g, scanMap.mean.b)), uScan));
   m.roughnessNode = (m.roughnessNode as AnyNode).mul(mix(float(1), scan.rough.div(scanMap.roughMean), uScan)).clamp(0.04, 1);
   m.aoNode = (m.aoNode as AnyNode).mul(mix(float(1), scan.ao, uScan));
@@ -402,7 +403,8 @@ function createRaftMaterialBase(
     case 'weave':
       return createWeaveMaterial(false, frame);
     case 'thatch':
-      return createThatchMaterial(frame);
+      // the reeds down the slope: a roof slab's middle axis (it is long along the ridge, and thin)
+      return withScanDetail(createThatchMaterial(frame), 'reed_roof_04', () => raftMaterialParams.thatchScan, () => raftMaterialParams.thatchScanTile, 'middle');
     case 'plank':
       return createPlankMaterial(frame);
     case 'crate':

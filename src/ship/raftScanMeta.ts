@@ -18,15 +18,6 @@ export const RAFT_SCAN_META = {
     ],
     "roughMean": 0.7067
   },
-  "bamboo_wall_03": {
-    "metres": 1.85,
-    "mean": [
-      0.30604,
-      0.17668,
-      0.09359
-    ],
-    "roughMean": 0.8377
-  },
   "reed_roof_04": {
     "metres": 2.5,
     "mean": [
