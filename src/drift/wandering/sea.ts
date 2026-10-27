@@ -413,6 +413,10 @@ export function createSea(
       props?.setPixelAngle(rad);
     },
     update(t, eye, renderer, beat = 'c1') {
+      // a node frame of its own for each beat drawn: three renders a light's shadow map once per camera per
+      // node frame, so the second beat of a dissolve drew with the first's shadows (its own Sun's, not this
+      // one's) — the raft unlit through w1's dissolve, popping lit as it ended (engine-findings.md)
+      (renderer as unknown as { _nodes: { nodeFrame: { frameId: number } } })._nodes.nodeFrame.frameId++;
       const d = o.drive && beat === 'c1' ? o.drive(t) : undefined;
       const b = beat === 'c1' ? undefined : spec(beat);
       const world: WorldName | 'test' = !o.drive ? 'test' : b ? b.world : 'flood';

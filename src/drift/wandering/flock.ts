@@ -4,14 +4,14 @@
  * here as a float texture (one row per key, one texel per bird: xyz, w = 1 while flying) and interpolated
  * with Catmull–Rom, so every frame is a pure function of the flock's own time.
  *
- * A bird is a small dark wedge stretched along its flight, a pixel at least (what it gains in size it gives
+ * A bird is a small dark silhouette (body and swept wings) stretched along its flight, a pixel at least (what it gains in size it gives
  * back in strength). Against the low sun a sandpiper is a dark back and a white belly: as the flock BANKS
  * through a turn the birds show the sun their bellies, so its brightness comes from its bank — the bend of
  * its path (from the keys) toward the sun — and waves of light run through the flock as it turns, the look
  * of every murmuration. Wingbeats (~10 Hz) would alias at 30 fps; the bank carries the life instead.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, attribute, clamp, float, instanceIndex, int, ivec2, length, max, min, mix, normalize, sin, smoothstep, step, textureLoad, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, attribute, clamp, float, instanceIndex, int, ivec2, length, max, min, mix, normalize, sin, smoothstep, step, textureLoad, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { billboardMesh } from '../undertime/billboard';
 
 type F = THREE.Node<'float'>;
@@ -122,8 +122,14 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
   material.positionNode = quad;
   material.colorNode = Fn(() => {
     const q = uv().sub(0.5).mul(2);
-    // a swept wedge: wings wide at the body, tapering; a short tail
-    const wing = float(1).sub(smoothstep(0.55, 1, q.x.abs().add(q.y.mul(0.6).abs().mul(q.x.abs().mul(1.4).add(0.3)))));
+    // a bird seen from below: a slim body with its tail, and two wings tapering to swept-back tips (the
+    // flock now wheels overhead, ~15 m up, where a wedge read as a blotch)
+    const ax = q.x.abs();
+    const wingY = float(0.22).sub(ax.pow(1.6).mul(0.55));
+    const th = float(0.3).mul(float(1).sub(ax).max(0).pow(0.6)).add(0.02);
+    const wingD = q.y.sub(wingY).abs().sub(th);
+    const bodyD = length(vec2(q.x.div(0.13), q.y.div(0.85))).sub(1).mul(0.13);
+    const wing = float(1).sub(smoothstep(-0.05, 0.05, min(wingD, bodyD)));
     // albedos, lit by the scene's own light: a dark back in the sky's light, a white belly in the Sun's when it
     // is turned to it (a Sun below the horizon lights nothing)
     // (the low Sun's colour half taken back to its brightness: at a pixel or two a warm-lit belly read as an

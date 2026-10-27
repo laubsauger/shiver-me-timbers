@@ -57,7 +57,10 @@ def wind_centre(t: float) -> np.ndarray:
     round, then away down the beach and down to the sand (the body follows it as one; nothing pulls a bird to a
     radius, so no ring forms)"""
     w = 2 * np.pi / 22
-    loop = np.array([-4 + np.sin(w * (t - 4)) * 26, 13 + np.sin(w * 2 * (t - 4)) * 5, -28 - np.cos(w * (t - 4)) * 16])
+    # (third bake, the v9 review: the loop kept 12–45 m out in front, a cloud low over the beach; the direction
+    # wants it "wheeling up over the audience, across the zenith" — now it swings up in front, over our heads
+    # at ~17 m at t ≈ 15 s, and round to the front again)
+    loop = np.array([-3 + np.sin(w * (t - 4)) * 22, 17 + np.sin(w * 2 * (t - 4)) * 5, -14 - np.cos(w * (t - 4)) * 20])
     start = np.array([-8.0, 5.0, -40.0])
     rise = np.clip((t - 1.5) / 4, 0, 1)
     rise = rise * rise * (3 - 2 * rise)

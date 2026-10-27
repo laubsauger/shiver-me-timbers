@@ -72,7 +72,27 @@ capture instead.
 mirror's own material variant (a `positionWorld.y` discard in an override material) or by an oblique
 near plane, which costs nothing per object.
 
-## 3. Sail, flag and other cloth drivers run on wall-clock time
+## 3. Shadow maps update once per camera per node frame
+
+**Symptom.** In a dissolve the film draws two beats into one frame, each with its own Sun. Through the
+night-to-morning dissolve (w1) the raft stayed a dark silhouette, then popped lit the frame the dissolve
+ended (+1.4 luma over the whole frame). The same at the w6 dissolve.
+
+**Cause.** `ShadowNode.updateBefore` re-renders a light's map only when the camera's last update was in an
+older `nodeFrame.frameId`. The id advances once per animation frame. The second beat reused the first beat's
+map, cast from the first beat's Sun.
+
+**Film workaround.** `sea.update` advances `renderer._nodes.nodeFrame.frameId` for each beat it draws.
+
+**For the engine.**
+- Anything that renders one scene twice in a frame with different lights (split screen, replays, a
+  picture-in-picture) needs the shadow map invalidated between the two. A public way to do that, or a key on
+  the light's state as well as the frame, would be safer than the private counter.
+- The same check means a frame with N cameras renders each shadow map N times, though an orthographic sun
+  map does not depend on the viewing camera. Here that is 12 renders a frame (six dome faces, six mirror
+  faces). Keying directional-light maps on the light alone would save the rest.
+
+## 4. Sail, flag and other cloth drivers run on wall-clock time
 
 `src/ship/sailDriver.ts` (and `flagDriver.ts`) integrate the flutter phase and smooth the sail's drive with
 the renderer's frame time. Offline, at a few frames a second and out of order, sails flapped about ten
@@ -86,7 +106,7 @@ times too fast ("hyperlapse"), and frames depended on render order.
 **For the engine.** Drive the cloth from the simulation clock (fixed tick, the game's own `t`), not
 `frame.time`. Then a replay, a slow-motion shot or an offline render shows the same cloth.
 
-## 4. Island seabed: square grid, straight shallows edge
+## 5. Island seabed: square grid, straight shallows edge
 
 Each island's seabed grid is a square over [−R, R]². Past it the depth jumps, so the shallows tint (`shallowFullDepth`, 18 m) ends on a straight line in the water. From altitude, every island
 sits in a bright square (`island/showcase.ts` notes the same for its rim).
@@ -95,7 +115,7 @@ sits in a bright square (`island/showcase.ts` notes the same for its rim).
 
 **For the engine.** Fade the tint by distance to the grid's edge, or extend the seabed field radially.
 
-## 5. Night has no light in the single-scattering sky
+## 6. Night has no light in the single-scattering sky
 
 The film's own air (`getTheDrift/atmosphere.ts`) gives zero irradiance once the Sun is well down: 1e-13 at
 −20°. A moonless scene then lit nothing: the raft went black and popped at every dissolve into night.
@@ -105,7 +125,7 @@ the eye's adaptation.
 
 **For the engine.** The game's own sky rig may want the same floor.
 
-## 6. Terrain, rocks and plants read as flat colour in a photoreal frame
+## 7. Terrain, rocks and plants read as flat colour in a photoreal frame
 
 This is not a bug, but it matters for the realistic look the film needs:
 
@@ -123,7 +143,7 @@ This is not a bug, but it matters for the realistic look the film needs:
 - **WebGPU allows 16 sampled textures per fragment stage.** Five PBR layers × three maps exceeds it, so the
   layers are packed two RGBA maps each (`scripts/drift-pbr-pack.py`).
 
-## 7. Smaller notes
+## 8. Smaller notes
 
 - **CPU ocean.** `CpuOcean` reuses its height grid for ~1/60 s by default. Offline, set `updateEveryTicks: 0`
   or buoyancy reads a stale sea.

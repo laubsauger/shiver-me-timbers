@@ -39,7 +39,7 @@ import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 import { createSea } from './drift/wandering/sea';
-import { C1_FOLLOW, type BeatName } from './drift/wandering/beats';
+import { C1_FOLLOW, beatStarts as seaBeats, type BeatName } from './drift/wandering/beats';
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
 import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
@@ -155,6 +155,9 @@ async function boot(): Promise<void> {
   const total = seaStart + sea.total;
   /** s the show fades to black over at its end (W5: "the title, or the game") */
   const END_FADE = 6;
+  /** the end title: Act 1's signature again, over the outro's night (W6), in the crawl's overlay */
+  const endTitle = [{ lines: ['the Drift'], at: seaTest ? Infinity : seaStart + seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts.w6 + 9, signature: true }];
+  let titleOn = false;
   /** s the hand-over into the sea's scene crossfades over: both scenes summed in HDR, each at its own exposure */
   const XF = 3;
   // through the landing Act 2 eases into the sea's look — its adaptation to the light where the sea takes over,
@@ -243,6 +246,12 @@ async function boot(): Promise<void> {
     endFade = seaTest ? 1 : e * e * (3 - 2 * e);
     if (seaK >= 1) {
       dome.setGrade(...SEA_GRADE);
+      titleOn = at >= endTitle[0].at;
+      if (titleOn) {
+        Object.assign(crawl.layout, crawlLayout(), { end: total, fade: END_FADE - 1 });
+        crawl.phrases = endTitle;
+        crawl.draw(at);
+      }
       return state;
     }
     const t2 = at - act2Start;
@@ -286,7 +295,7 @@ async function boot(): Promise<void> {
     bloomStrength: p.bloomStrength,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,
-    overlayRadiance: seaK >= 1 ? 0 : p.crawlRadiance,
+    overlayRadiance: seaK >= 1 && !titleOn ? 0 : p.crawlRadiance,
   });
   /** the prepared frame's scenes into the dome's accumulator with `weight`, shared out by the hand-over (each
    * scene's own exposure in its share, so present with `look(1)`) */

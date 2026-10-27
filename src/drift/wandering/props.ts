@@ -471,8 +471,8 @@ export function createProps(): Props {
       fieldU.eye.value.copy(s.eye);
       // at the edge of seeing (direction: "like heat shimmer or dust in sunlight"; brighter, the beads read as
       // stars by day in the v9 review)
-      fieldU.trailRadiance.value = 0.08;
-      fieldU.beadRadiance.value = 0.035;
+      fieldU.trailRadiance.value = 0.06;
+      fieldU.beadRadiance.value = 0.02;
       fieldU.flashRadiance.value = 0.02;
 
       // THE WALKERS: from behind the eye on its left, down the wet sand by the waterline, the way the flock went
