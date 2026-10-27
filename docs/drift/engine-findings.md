@@ -268,14 +268,31 @@ master, lower is calmer; fps with two lanes):
 resolution the master needs; the master averages them through the mips. It reduces the noise, at four times the
 face shading. It is off by default.
 
-**For the engine (proposed, not done: `surfaceMaterial.ts` has another session's uncommitted edits).** Filter the
-cascades at the source:
-- give the cascade array textures a mip chain, built after each FFT (one compute or blit pass per cascade);
-- sample them with the pixel's footprint (implicit derivatives, or `textureGrad` from `fwidth(worldXZ)`, which
-  the shader already computes);
-- move the variance the mips average away into the specular lobe's roughness (Toksvig/LEAN), so the far sea
-  keeps its sheen instead of turning flat. The shader's existing `normalVar` is where it goes.
-That removes the noise at its cause, for the game's own cameras as well, at the cost of the mip passes.
+**Fixed at the source (the ocean, for the game's cameras as well).** Where the noise comes from, measured on open
+sea (t = 400, 2160², mean flicker; ring 8 is the water 15–45 m out, ring 9 the spring line):
+
+| | ring 8 | ring 9 |
+|---|---|---|
+| before | 0.61 | 5.63 |
+| sparkle, glint road, micro detail, shadows, refraction or the cube mirror off (each) | 0.60–0.64 | 5.63–5.85 |
+| cascade normals faded out past 20 m (the floor: no wave detail at all) | 0.17 | 1.90 |
+| **derivative layers mipmapped, sampled over the pixel's footprint** | **0.35** | **3.86** |
+
+So it was the cascade normals alone: the shader band-limits each cascade by fading its amplitude, but inside a band
+that is still kept, a base-level tap point-samples every wavelength shorter than the pixel. The derivative array now
+has a mip chain (three r186 rebuilds a storage texture's chain after each compute write) and 16× anisotropy, and
+the surface samples it with `textureSampleGrad` on its own world-space derivatives (`sampleCascadeLayer`'s `grad`).
+Every other reader of the layers (caustics, the debug view) is pinned to level 0, as before. The shader's notes
+said this could not work: storage textures cannot carry mips, and `generateTextureGrad` drops the array index. Both
+held for three r180, neither for r186. Cost: none measured (63 vs 62 ms a frame at sea, 72 vs 72 on the coast).
+Coast spring line: 2.11 → 1.58.
+
+What is left is geometry: the crests' own edges at 1 px, and the debris reflections broken up by the waves (which
+real water does too). Only more samples per pixel reach those: `--ss 2`.
+
+Not done: the variance the mips average away is not added to the specular roughness (the four channels are full;
+the shader's `unresolvedVar` only counts what the amplitude fade removes). In the fade zone the far sea is therefore
+a little smoother than the spectrum says. Not visible in the test frames.
 
 ## 13. Where a frame's time goes now (2160², after findings 9–11)
 

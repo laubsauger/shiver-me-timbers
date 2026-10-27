@@ -638,12 +638,13 @@ export function buildOceanSurfaceMaterial(
   const pixWorld = foot.x.max(foot.y).max(1e-4);
 
   /**
-   * §V.48, this surface's own occurrence. The cascade DERIVATIVE textures are
-   * compute-written StorageTextures, so they cannot carry a mip chain: a
-   * minified `texture()` fetch is a point sample of a zero-mean slope field,
-   * i.e. per-pixel noise, and the specular lobes downstream amplify it into
-   * the fibrous golden "hair" that covers the whole sea when zoomed out
-   * (user). The gate below is the missing filtered tier.
+   * §V.48, this surface's own occurrence. The cascade DERIVATIVE textures had
+   * no mip chain: a minified `texture()` fetch is a point sample of a
+   * zero-mean slope field, i.e. per-pixel noise, and the specular lobes
+   * downstream amplify it into the fibrous golden "hair" that covers the whole
+   * sea when zoomed out (user). The gate below band-limits each cascade; the
+   * layers now also carry a chain, which filters what the gate keeps
+   * (sampleDeriv).
    *
    * WHAT IT IS MEASURED AGAINST, and this is the whole correction. It used to
    * compare the footprint to the cascade's TEXEL SIZE (domain/N) and delete the
@@ -875,10 +876,18 @@ export function buildOceanSurfaceMaterial(
   // All three cascades are LAYERS of one array texture, so these three calls
   // are ONE texture and ONE sampler in this stage, not three of each (§V.40).
   // Never swap this back to a bare texture() — see sampleCascadeLayer.
+  // Filtered over the pixel's own footprint through the layers' mip chain: the
+  // uv's derivatives, taken before its `.fract()` (the wrap is a jump of a
+  // whole tile). A base-level tap aliased what the band-limit below keeps —
+  // per-pixel dark and sky-blue specks on grazing water
+  // (docs/drift/engine-findings.md §12).
+  const dWorldX = dFdx(worldXZ);
+  const dWorldY = dFdy(worldXZ);
   const sampleDeriv = (i: number) =>
     sampleCascadeLayer(
       sim.cascades[i].derivatives,
       worldXZ.div(sim.cascades[i].domain).fract(),
+      [dWorldX.div(sim.cascades[i].domain), dWorldY.div(sim.cascades[i].domain)],
     );
   // smoothstep(e0,e1,x), e0 > e1: 1 inside normalFadeStart, 0 past End
   const normFade = smoothstep(uNormFade.y, uNormFade.x, camDist);
@@ -901,15 +910,10 @@ export function buildOceanSurfaceMaterial(
    * matters — the removal is precisely why the surface goes mirror-flat. The
    * two measure disjoint things and are ADDED downstream, not blended.
    *
-   * WHY NOT A MIP CHAIN, since §V.48's usual cure is one. Three reasons, all
-   * decisive here: the derivative textures are compute-written storage
-   * textures and cannot carry mips; §V.19 band-splits the cascades so a mip
-   * chain would hold wavelengths no other cascade has, which is the same
-   * "cascade pyramid IS the mip chain" fallacy `slopeResolutionFootprint`
-   * already documents; and in three r180 `generateTextureGrad` DROPS the array
-   * layer index (§V.40), so explicit-gradient sampling of `derivatives` — the
-   * usual way to drive a mip level — emits invalid WGSL. The spectrum gives
-   * the answer exactly, for three scalar uniforms and no fetch at all.
+   * WHY NOT FROM THE MIP CHAIN. The layers carry one now (sampleDeriv), but it
+   * averages the SLOPE; the variance it averages away is stored nowhere (the
+   * four channels are full). The spectrum gives that answer exactly, for
+   * three scalar uniforms and no fetch at all.
    *
    * §V.40: ZERO textures, ZERO samplers. §V.44: a sum of non-negative terms,
    * and the consumer clamps it to `specularAaMax`.

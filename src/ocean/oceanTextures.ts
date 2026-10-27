@@ -3,7 +3,7 @@
  * All simulation data lives in StorageTextures written by compute passes.
  */
 import * as THREE from 'three/webgpu';
-import { int, storageTexture, texture, textureLoad } from 'three/tsl';
+import { float, int, storageTexture, texture, textureLoad } from 'three/tsl';
 
 type TslNode = any;
 
@@ -67,6 +67,15 @@ export function createOutputTexture(n: number): THREE.StorageTexture {
  *    callers sample with `.fract()`-ed uv, so a bilinear tap that straddles the
  *    0/1 seam must wrap to the far edge or it clamps and the tile boundary
  *    shows as a seam across the whole sea.
+ *  - A MIP CHAIN, and 16× anisotropy (the one difference from
+ *    `createOutputTexture`). The sea's shading normals are read from these
+ *    layers, and at a grazing view one pixel spans many of a cascade's
+ *    wavelengths: a base-level tap is a point sample of a zero-mean slope
+ *    field, and the far water shimmered as per-pixel dark and sky-blue specks
+ *    (docs/drift/engine-findings.md §12). three r186 rebuilds a storage
+ *    texture's chain itself, after a compute pass wrote it and before it is
+ *    next sampled (`mipmapsAutoUpdate`, Bindings.js). Only a reader that
+ *    passes its footprint uses the chain: see `sampleCascadeLayer`.
  */
 export function createOutputArrayTexture(
   n: number,
@@ -75,11 +84,12 @@ export function createOutputArrayTexture(
   const tex = new THREE.StorageArrayTexture(n, n, layers);
   tex.type = THREE.FloatType;
   tex.format = THREE.RGBAFormat;
-  tex.minFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.generateMipmaps = false;
+  tex.generateMipmaps = true;
+  tex.anisotropy = 16;
   return tex;
 }
 
@@ -100,12 +110,20 @@ export interface CascadeLayer {
  * the material never draws, and the console names the descriptor rather than
  * the call site. `int()` because `depthNode` is built as an `int`.
  *
- * FRAGMENT STAGE ONLY. `WGSLNodeBuilder.generateTextureSampleLevel` drops the
- * depth snippet in its filterable branch, and the vertex stage always routes
- * there — see the array-texture traps in tests/oceanBindingBudget.test.ts.
+ * WITHOUT `grad`, the base level, bilinear: what every reader got before the
+ * layers had a mip chain. Not an implicit-derivative sample: callers pass
+ * `.fract()`-ed uv, whose derivative jumps by a whole tile at the wrap, so an
+ * implicit sample would take the smallest mip along every tile seam.
+ * WITH `grad` = the uv's screen derivatives [d/dx, d/dy] (of the uv BEFORE its
+ * `.fract()`), a filtered, anisotropic sample over that footprint.
+ *
+ * FRAGMENT STAGE ONLY. Recorded against three r180 in
+ * tests/oceanBindingBudget.test.ts; r186's `generateTextureSampleLevel` and
+ * `generateTextureGrad` do carry the array index in the fragment stage.
  */
-export function sampleCascadeLayer(slice: CascadeLayer, uv: TslNode): TslNode {
-  return texture(slice.texture, uv).depth(int(slice.layer));
+export function sampleCascadeLayer(slice: CascadeLayer, uv: TslNode, grad?: [TslNode, TslNode]): TslNode {
+  const t = texture(slice.texture, uv);
+  return (grad ? t.grad(grad[0], grad[1]) : t.level(float(0))).depth(int(slice.layer));
 }
 
 /**
