@@ -322,7 +322,7 @@ async function boot(): Promise<void> {
     sea.setPixelAngle(rad);
   };
   const renderMaster = (): void => {
-    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
+    setPixelAngle(Math.PI / 2 / (pixelFace ?? p.domeFace));
     if (seaK <= 0) {
       dome.setNear(actNear);
       dome.setFar(1e6);
@@ -336,7 +336,7 @@ async function boot(): Promise<void> {
   const frame = (at: number, shutter: number, samples: number): void => {
     // the pixel size BEFORE the scene is prepared: the acts copy it into their shaders as they update, so set
     // after, a lane's first frame drew with the preview's pixel size (pixel-floored stars a frame too bright)
-    setPixelAngle(Math.PI / 2 / (faceOverride ?? p.domeFace));
+    setPixelAngle(Math.PI / 2 / (pixelFace ?? p.domeFace));
     if (samples <= 1) {
       prepare(at);
       renderMaster();
@@ -394,10 +394,13 @@ async function boot(): Promise<void> {
 
   let recording = '';
   let faceOverride: number | null = null;
+  /** the face size the master is matched to (`faceOverride` without supersampling): one master pixel's angle */
+  let pixelFace: number | null = null;
   const record = async (o: Partial<DriftRecordOptions> = {}): Promise<number> => {
     loop.stop(); // nothing else draws while a take runs (Loom suspends its previews for the same reason)
     const size = o.size ?? 2048;
-    faceOverride = faceSizeFor(size);
+    faceOverride = faceSizeFor(size * (o.supersample ?? 1));
+    pixelFace = faceSizeFor(size);
     const previewSize = masterSize;
     masterSize = size;
     try {
@@ -407,6 +410,7 @@ async function boot(): Promise<void> {
       );
     } finally {
       faceOverride = null;
+      pixelFace = null;
       masterSize = previewSize;
       recording = '';
       loop.start();
@@ -447,7 +451,7 @@ async function boot(): Promise<void> {
   bootReady();
   loop.start();
   if (q.has('record')) {
-    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight&blur&shutter] — a lane of scripts/drift-render.mjs, or a one-off
+    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight&blur&shutter&ss] — a lane of scripts/drift-render.mjs, or a one-off
     const num = (k: string, d: number): number => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
     const status = window as unknown as { __driftRecord?: { done: boolean; frames?: number; error?: string } };
     status.__driftRecord = { done: false };
@@ -463,6 +467,7 @@ async function boot(): Promise<void> {
       inFlight: num('inflight', 3),
       blur: num('blur', 1),
       shutter: num('shutter', 0.5),
+      supersample: num('ss', 1),
     }).then(
       (frames) => (status.__driftRecord = { done: true, frames }),
       (e) => (status.__driftRecord = { done: true, error: String(e) }),

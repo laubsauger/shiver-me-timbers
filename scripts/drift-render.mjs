@@ -10,7 +10,7 @@
  *
  *   node scripts/drift-render.mjs --size 1024 --fps 30 [--from 0] [--to <s>] [--lanes 2] [--allow-lanes]
  *        [--out out/drift/<name>.mp4] [--codec x264|prores] [--port 5288]
- *        [--crf 18] [--preset medium] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5]
+ *        [--crf 18] [--preset medium] [--inflight 3] [--queue 8] [--keep] [--blur 1] [--shutter 0.5] [--ss 1]
  *        [--query sea]   (extra drift.html query, e.g. a test act)
  *        [--channel chromium|chrome]   (chrome: the installed Google Chrome; Playwright's Chromium 153 fails to
  *                                      compile some of the game's sea shaders in Tint, Chrome 155 does not)
@@ -19,6 +19,7 @@
  *
  *   --blur     motion-blur sub-frames per frame (1 = none; 8 for masters), averaged in linear HDR
  *   --shutter  fraction of the frame interval the shutter is open (0.5 = 180°)
+ *   --ss       cube-face supersampling, linear (1 = faces matched to the master; 1.5 or 2 anti-alias the far sea)
  *
  *   --to       default: the show's end, asked of the page (__drift.total)
  *   --codec    x264 → .mp4 (libx264, ~cores/N threads per lane) · prores → .mov (ProRes 422 HQ on VideoToolbox)
@@ -73,6 +74,7 @@ const QUEUE = Math.max(0, Math.floor(num('queue', 8)));
 const KEEP = argv.includes('--keep');
 const BLUR = Math.max(1, Math.floor(num('blur', 1)));
 const SHUTTER = num('shutter', 0.5);
+const SS = num('ss', 1);
 /** no lane progress for this long = a hung lane (the first frame includes boot and shader compile) */
 const STALL_MS = 180_000;
 
@@ -317,7 +319,7 @@ async function main() {
       });
       const q = new URLSearchParams({
         size: String(SIZE), fps: String(FPS), from: String(l.from), to: String(l.to), shot: l.shot, group,
-        sink: sinkUrls[i], inflight: String(INFLIGHT), blur: String(BLUR), shutter: String(SHUTTER),
+        sink: sinkUrls[i], inflight: String(INFLIGHT), blur: String(BLUR), shutter: String(SHUTTER), ss: String(SS),
       });
       await page.goto(`${base}/drift.html?record&lane&${q}${QUERY}`);
     }),

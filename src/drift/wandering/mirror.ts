@@ -39,6 +39,10 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
   const camera = new THREE.CubeCamera(0.05, far, target);
   const active = uniform(0);
   const clear = new THREE.Color();
+  // three sizes a target's mip chain when it first creates the GPU texture, and CubeCamera switches
+  // `generateMipmaps` off for its first five faces: created there, the mirror had ONE level and the blur below
+  // read nothing (domeCapture.ts drawFaces). Created up front instead, on the first update.
+  let initialised = false;
 
   const shade = (input: ReflectionShadeInput): THREE.Node<'vec3'> => {
     const r = reflect(input.viewDirection.negate(), input.normalWorld);
@@ -68,6 +72,10 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = true;
       try {
+        if (!initialised) {
+          renderer.initRenderTarget(target);
+          initialised = true;
+        }
         camera.update(renderer, scene);
       } finally {
         hide.forEach((o, i) => (o.visible = was[i]));

@@ -42,12 +42,24 @@ import { cubeTexture, mix, texture, toneMapping, uniform, uv, vec2, vec3, vec4 }
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { domeBasis, domeMasterDirectionNode } from './domeMaster';
 
-/** px drawn past the dome's edge on each face: the master's bilinear lookups at the spring line read across it */
-const EDGE_PAD = 4;
+/**
+ * px drawn past the dome's edge on each face: the master's lookups at the spring line read across it, from mip
+ * levels up to ~3 near the face corners (16 px there is 2)
+ */
+const EDGE_PAD = 16;
+
+/**
+ * The faces are MIPMAPPED and the master reads them with the derivative's level. A master pixel covers up to
+ * ~3 face texels across near a face's corners (a face spends its texels evenly in tan, the master evenly in
+ * angle), and a single bilinear tap there skips texels: the sea's fine detail at the horizon came out as pixel
+ * noise that changed every frame. With mips each master pixel averages the texels it covers; at the face
+ * centres (level < 0) nothing changes.
+ */
+const FACES = { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter } as const;
 
 const _axis = new THREE.Vector3();
 const _p = new THREE.Vector3();
-const _rect = new THREE.Vector4();
+const _rects = Array.from({ length: 6 }, () => new THREE.Vector4());
 const _rot = new THREE.Matrix3();
 
 /**
@@ -118,6 +130,8 @@ export interface DomeLook {
 export class DomeCapture {
   readonly cubeCamera: THREE.CubeCamera;
   private target: THREE.CubeRenderTarget;
+  /** the cube target whose GPU texture exists, created with its mip chain (`drawFaces`) */
+  private initialised: THREE.CubeRenderTarget | null = null;
   private readonly cubeNode: ReturnType<typeof cubeTexture>;
   private readonly hdr: THREE.RenderTarget;
   private readonly accum: THREE.RenderTarget;
@@ -136,7 +150,7 @@ export class DomeCapture {
   private readonly uOverlayRadiance = uniform(1);
 
   constructor(opts: DomeCaptureOptions) {
-    this.target = new THREE.CubeRenderTarget(opts.faceSize, { type: THREE.HalfFloatType });
+    this.target = new THREE.CubeRenderTarget(opts.faceSize, FACES);
     this.cubeCamera = new THREE.CubeCamera(opts.near ?? 0.05, opts.far ?? 1e6, this.target);
     this.hdr = new THREE.RenderTarget(1024, 1024, { type: THREE.HalfFloatType, depthBuffer: false });
     this.accum = new THREE.RenderTarget(1024, 1024, { type: THREE.FloatType, depthBuffer: false });
@@ -230,7 +244,7 @@ export class DomeCapture {
   setFaceSize(size: number): void {
     if (this.target.width === size) return;
     this.target.dispose();
-    this.target = new THREE.CubeRenderTarget(size, { type: THREE.HalfFloatType });
+    this.target = new THREE.CubeRenderTarget(size, FACES);
     // @types/three types CubeCamera.renderTarget as the WebGL cube target; the WebGPU one is what it renders into
     (this.cubeCamera as unknown as { renderTarget: THREE.CubeRenderTarget }).renderTarget = this.target;
     this.cubeNode.value = this.target.texture;
@@ -256,15 +270,29 @@ export class DomeCapture {
     const xr = renderer.xr.enabled;
     renderer.xr.enabled = false;
     renderer.setScissorTest(true);
+    // the mip chain is built after a render into the target: once, after the last face drawn (as CubeCamera
+    // does). But three sizes the GPU texture's mip chain when it first creates it, from `generateMipmaps` at that
+    // moment — switched off for the first face, it got ONE level and the faces were never filtered (CubeCamera
+    // has the same fault, mirror.ts). So the target is created before the switching starts.
+    if (this.initialised !== target) {
+      renderer.initRenderTarget(target);
+      this.initialised = target;
+    }
+    const cams = cube.children as THREE.PerspectiveCamera[];
+    const rects = cams.map((cam, face) => faceScissor(cam, axis, size, _rects[face]));
+    const last = rects.reduce((at: number, r, face) => (r ? face : at), -1);
+    const mips = target.texture.generateMipmaps;
     try {
-      (cube.children as THREE.PerspectiveCamera[]).forEach((cam, face) => {
-        const rect = faceScissor(cam, axis, size, _rect);
+      cams.forEach((cam, face) => {
+        const rect = rects[face];
         if (!rect) return;
         target.scissor.copy(rect);
+        target.texture.generateMipmaps = mips && face === last;
         renderer.setRenderTarget(target, face, 0);
         renderer.render(scene, cam);
       });
     } finally {
+      target.texture.generateMipmaps = mips;
       target.scissor.set(0, 0, size, size);
       renderer.setScissorTest(scissorTest);
       renderer.xr.enabled = xr;

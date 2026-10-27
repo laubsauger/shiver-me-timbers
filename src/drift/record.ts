@@ -44,6 +44,12 @@ export interface DriftRecordOptions {
   blur?: number;
   /** fraction of the frame interval the shutter is open (0.5 = a 180° shutter) */
   shutter?: number;
+  /**
+   * cube faces this many times the resolution the master needs (linear; 1 = matched, `faceSizeFor`): the master
+   * then averages several face texels a pixel through the faces' mips — anti-aliasing for the sea's fine
+   * detail at the horizon and for thin far things, at ~ss² the face shading
+   */
+  supersample?: number;
   onProgress?: (frame: number, frames: number) => void;
 }
 

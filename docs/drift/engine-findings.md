@@ -149,8 +149,7 @@ This is not a bug, but it matters for the realistic look the film needs:
 
 - **CPU ocean.** `CpuOcean` reuses its height grid for ~1/60 s by default. Offline, set `updateEveryTicks: 0`
   or buoyancy reads a stale sea.
-- **Ocean refraction.** It uses a per-frame `viewportSharedTexture`. Under several cameras per frame it is
-  right for the first only (seams at the dome's face edges). Not yet fixed in the film.
+- **Ocean refraction.** Wrong on five of six cube faces, from a three bug: finding 11.
 - **Atmosphere sampling.** In the film's air, even steps along level rays from the sea (35 km each) left the
   per-pixel jitter visible as a halftone over the sky. Samples now crowd toward the eye (`scatter`, `CROWD`).
   The game's sky rig is a separate model and was not checked.
@@ -219,3 +218,57 @@ On the coast, the near beach and plants below the dome's edge filled most of the
 
 **For the engine.** Any cube capture that feeds a partial projection (a dome, a cylinder, a reflection probe of
 the upper hemisphere) can scissor its faces the same way.
+
+## 11. Three r186: three faults with cube render targets
+
+All three hit any `CubeCamera` or cube target: environment probes, the dome, the mirror.
+
+**The framebuffer copy reads face 0.** `WebGPUBackend.copyFramebufferToTexture`, which `viewportTexture` and
+`viewportSharedTexture` run mid-pass (the ocean's refraction), copies from layer 0 whatever face is being drawn.
+The layered path for array cameras passes its layer; this one does not. So on five of six faces the water
+refracted another face's picture: on the coast the shallows' seabed differed across the face edges (open water,
+being dark and even below, showed nothing). Fixed by `src/core/cubeFaceFramebufferCopy.ts`, installed in
+`App.create` like `opaqueShadowCasters`: it copies from the render context's `activeCubeFace` when the source has
+that layer. Worth reporting upstream: pass `renderContext.activeCubeFace` as `sourceLayer`.
+
+**A cube target's mip chain is sized at creation, and CubeCamera creates it without one.** Three decides a
+texture's mip levels when it first creates the GPU texture, from `generateMipmaps` at that moment.
+`CubeCamera.update` switches `generateMipmaps` off for the first five faces, and the first face's render
+creates the texture: one level, whatever the target asked for. Measured in the page: the dome's cube reported
+`generateMipmaps: true` and a GPU `mipLevelCount` of 1. So the dome master never filtered its faces, and the
+mirror's blur with distance and wave tilt (`level(...)` in `mirror.ts`) read nothing. Fixed by creating each
+target with `renderer.initRenderTarget` before its first face. For the engine: `CubeCamera` should do this, or
+three should size the chain from the target's options rather than the flag's state at first use.
+
+**MSAA on a cube target fails validation.** `CubeRenderTarget({ samples: 4 })` renders, but its clear pass pairs
+a 4-sample depth attachment with a 1-sample colour one ("depth stencil attachment sample count (4) does not
+match"), and the frame is dropped. Not used. A 2D MSAA target per face, copied into the cube, would work around it.
+
+## 12. The far sea is pixel noise at grazing angles
+
+At the horizon the water shows 1–2 px dark specks that change every frame. They are in the faces, not the
+master, and are the ocean's own shading aliasing: its FFT cascade textures (`src/ocean/oceanTextures.ts`) have
+no mipmaps and minify with a linear filter, so where a pixel covers several wavelengths one tap picks a random
+facet. A facet turned toward the eye has low Fresnel and shows the dark body colour.
+
+What the dome can do, measured on the coast at 2160² (mean frame-to-frame flicker in the outer rings of the
+master, lower is calmer; fps with two lanes):
+
+| | rings 6–8 | spring line | fps |
+|---|---|---|---|
+| before | 1.18 1.37 1.02 | 2.13 | 15.8 |
+| faces mipmapped (finding 11) | 0.97 1.14 0.92 | 1.98 | 15.8 |
+| plus `--ss 2` (faces at 2× resolution) | 0.65 0.79 0.82 | 1.69 | 7.8 |
+
+`--ss` (`scripts/drift-render.mjs`, `DriftRecordOptions.supersample`) renders the faces at a multiple of the
+resolution the master needs; the master averages them through the mips. It reduces the noise, at four times the
+face shading. It is off by default.
+
+**For the engine (proposed, not done: `surfaceMaterial.ts` has another session's uncommitted edits).** Filter the
+cascades at the source:
+- give the cascade array textures a mip chain, built after each FFT (one compute or blit pass per cascade);
+- sample them with the pixel's footprint (implicit derivatives, or `textureGrad` from `fwidth(worldXZ)`, which
+  the shader already computes);
+- move the variance the mips average away into the specular lobe's roughness (Toksvig/LEAN), so the far sea
+  keeps its sheen instead of turning flat. The shader's existing `normalVar` is where it goes.
+That removes the noise at its cause, for the game's own cameras as well, at the cost of the mip passes.
