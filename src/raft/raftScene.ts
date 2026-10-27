@@ -45,6 +45,7 @@ import { buildRungDescriptors } from '../ropes/ratlines';
 import { ropeParams } from '../params/ropes';
 import { raftMaterialParams } from '../params/raftMaterials';
 import { blueprintAabb } from '../ship/previewRaft';
+import { createRaftLanterns } from '../ship/raftLanterns';
 
 /**
  * §T W2b: the raft sails on the SIM wake. `raft.html?wake=analytic` builds the
@@ -101,6 +102,9 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
     }
   });
   app.scene.add(assembly.group);
+  // the lanterns under the roof's corners, lit at dusk (raftFrame updates them from the Sun)
+  const lanterns = createRaftLanterns();
+  assembly.group.add(lanterns.group);
 
   const riggingPlan = buildRaftRiggingPlan(blueprint);
   const rungs = buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan);
@@ -133,7 +137,7 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
 
   return {
     blueprint, deckField, assembly, deckWater, ropes, riggingPlan, hullContact, wetline,
-    stemZ, transomZ, beamHalf, updateRopes,
+    stemZ, transomZ, beamHalf, updateRopes, lanterns,
   };
 }
 export type RaftVessel = ReturnType<typeof buildRaftVessel>;

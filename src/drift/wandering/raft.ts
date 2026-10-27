@@ -35,6 +35,7 @@ import { raftContactPoints } from '../../sailing/raftBeaching';
 import { shipFlagParams, shipMaterialParams } from '../../params/ship';
 import { refreshShipMaterials } from '../../ship/pieceMaterials';
 import { writeSailWindFrame } from '../../ship/sailFrame';
+import { createRaftLanterns } from '../../ship/raftLanterns';
 
 /** s the sea's height is averaged over, and how many instants */
 const SETTLE = 1.2;
@@ -88,6 +89,9 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   const group = new THREE.Group();
   group.name = 'drift-raft';
   group.add(assembly.group);
+  // the lanterns under the roof's corners (the game's), lit as the sunlight goes
+  const lanterns = createRaftLanterns();
+  assembly.group.add(lanterns.group);
   const contacts = raftContactPoints();
   const euler = new THREE.Euler(0, 0, 0, 'YXZ');
   const backlit = shipMaterialParams.sailBacklitStrength;
@@ -110,6 +114,9 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
           gustPhaseB: 0,
         });
       }
+      // lit from last light (the sunlight at a seventh of the day's) to full night
+      const dusk = Math.min(1, Math.max(0, 1 - light.sun / 0.15));
+      lanterns.update(dusk * dusk * (3 - 2 * dusk), t);
       shipMaterialParams.sailBacklitStrength = backlit * light.sun;
       shipMaterialParams.sailAmbientLift = ambientLift * light.sky;
       shipFlagParams.flagAmbientLift = flagLift * light.sky;

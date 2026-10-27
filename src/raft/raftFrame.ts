@@ -32,6 +32,9 @@ import { createShipAudioFeed } from '../core/bootShared';
 import { createSeaFrame } from '../core/seaFrame';
 import { stepRaftBeach, type BeachHolder } from './raftShip';
 import type { RaftSea, RaftVessel } from './raftScene';
+import { lanternNight } from '../ship/raftLanterns';
+import { sunElevation } from '../sky/sunCycle';
+import { skyParams } from '../params/sky';
 
 export interface RaftFrameDeps {
   app: App;
@@ -182,6 +185,7 @@ export function createRaftFrame(d: RaftFrameDeps) {
       const rig = updateShipRig(raft, vessel.assembly, frameDt);
       drop = rig.drop;
       vessel.updateRopes(rig.furl);
+      vessel.lanterns.update(lanternNight((sunElevation(skyParams.timeOfDay, skyParams.latitude) * 180) / Math.PI), performance.now() / 1000);
       seaFrame.renderSurface();
       const fwd = g.getWorldDirection(tmpDir);
       return {
