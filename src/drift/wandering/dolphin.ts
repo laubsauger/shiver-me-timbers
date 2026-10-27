@@ -31,17 +31,18 @@ const ROLL = 2.2;
 const BEAT = 2.2;
 const BEAT_AMP = 0.08;
 
-export type SurfacingKind = 'roll' | 'leap' | 'flip';
+export type SurfacingKind = 'roll' | 'leap' | 'flip' | 'swim';
 /** s into c3 (a roll: its top; a leap or the flip: where it leaves the water), m right of the eye and m ahead
  * of it (its level frame), how it comes up, and m a leap's centre clears the water by */
 export type Surfacing = [number, number, number, SurfacingKind, number?];
 
 /**
  * Porpoising in from far out on the left on a diagonal that crosses the Sun's line (c3's Sun sets ~24° left: a
- * dark body only reads against the afterglow, so the high breach is on that line, 20 m out), past the raft's
- * port side close by us (the raft lies ahead, ~10° right at 10 m, bow ahead), a loop out, the flip at the
- * raft's sunward end (its bow, ahead left), and away the way it came. Spaced for ~3.5–4 m/s, a dolphin's
- * cruise; slower into the flip.
+ * dark body only reads against the afterglow, so the high breach is on that line, 20 m out), round close by us
+ * on the left, a leap across the view, and in to the raft — which has swung broadside by then (beats.ts: its
+ * port side to us, its bow to the left, toward the afterglow) — for the flip off its bow, on the Sun's line,
+ * the case thrown across the view onto the bow; under the bow and away the way it came. Spaced for ~3.5–4 m/s,
+ * a dolphin's cruise; slower into the flip. A `swim` is a waypoint under water (no surfacing).
  */
 export const SURFACINGS: Surfacing[] = [
   [1.5, -45, 38, 'roll'],
@@ -49,14 +50,15 @@ export const SURFACINGS: Surfacing[] = [
   [6.5, -27.8, 27.6, 'leap', 0.8],
   [9.0, -19.2, 22.4, 'leap', 1.4],
   [11.5, -10.6, 17.2, 'leap', 2.1],
-  [14.4, -2, 12, 'roll'],
-  [17.0, -6.5, 4, 'roll'],
-  [19.8, -13, 9, 'roll'],
-  [22.6, -9, 17, 'leap', 1.0],
-  [25.6, -1.8, 16, 'flip', 1.3],
-  [29.2, -10, 22, 'roll'],
-  [32.0, -19, 27, 'leap', 0.9],
-  [34.8, -28, 32, 'roll'],
+  [14.6, -5, 5.5, 'roll'],
+  [17.6, -14, 4, 'leap', 1.0],
+  [20.4, -21, 9, 'roll'],
+  [22.4, -17, 14.5, 'swim'],
+  [25.6, -6.9, 11.95, 'flip', 0.9],
+  [27.0, -3.2, 11.2, 'swim'],
+  [30.5, -12, 20, 'roll'],
+  [33.3, -21, 25, 'leap', 0.9],
+  [36.1, -30, 30, 'roll'],
 ];
 /** s it swims on after the last surfacing (out of sight) */
 const AWAY = 3.5;
@@ -119,6 +121,7 @@ function track(t: number): { x: number; z: number; vx: number; vz: number } {
 /** the body's centre height, and its first and second derivatives, at t */
 function rise(t: number): [number, number, number] {
   for (const [at, , , kind, h = 0] of SURFACINGS) {
+    if (kind === 'swim') continue;
     if (kind === 'roll') {
       const s = t - (at - ROLL / 2);
       if (s < 0 || s > ROLL) continue;
@@ -149,11 +152,22 @@ function rise(t: number): [number, number, number] {
 /** the time window it is drawn in (s into c3): from its first approach to well after its last dive */
 export const DOLPHIN_SPAN: [number, number] = [SURFACINGS[0][0] - 3, SURFACINGS[SURFACINGS.length - 1][0] + AWAY];
 
-/** the flip: s into c3 it is at its height (where the case leaves its snout) */
-export const FLIP_TOP = (() => {
+/** the flip: s into c3 the case leaves the snout — on the way up, the head still high and coming forward (at the
+ * top of the arc the body is level, and a case let go there drops off its back) */
+export const FLIP_RELEASE = (() => {
   const f = SURFACINGS.find((x) => x[3] === 'flip')!;
-  return f[0] + Math.sqrt(2 * G * (f[4] ?? 0)) / G;
+  return f[0] + (0.6 * Math.sqrt(2 * G * (f[4] ?? 0))) / G;
 })();
+
+/** the throw at the flip, in the eye's level frame: where the case leaves the snout (x, y, z), and
+ * the way it goes along the water (unit): the dolphin's own heading, so the case carries on where it was going */
+export function flipThrow(): { from: [number, number, number]; dir: [number, number] } {
+  const d = dolphinPose(FLIP_RELEASE);
+  const cp = Math.cos(d.pitch);
+  const nose = 1.3;
+  const dir: [number, number] = [Math.sin(d.heading), Math.cos(d.heading)];
+  return { from: [d.x + dir[0] * nose * cp, d.y + nose * Math.sin(d.pitch), d.z + dir[1] * nose * cp], dir };
+}
 
 /** a splash (splash.ts): s into c3, where (eye frame, m), the body's velocity along the water then (m/s), how
  * hard (0..1: the drops' throw), and whether it is the blow at a roll rather than spray */
@@ -168,7 +182,8 @@ export interface Splash {
 }
 
 /** where the dolphin throws water: out of the sea and back into it at each leap (harder coming down, and the
- * harder the higher it went), and its blow at the top of each roll */
+ * harder the higher it went). No blows at the rolls: a dolphin's is a faint puff, and drawn as a column it read
+ * as a whale's spout (the v9 review) */
 export function dolphinSplashes(): Splash[] {
   const out: Splash[] = [];
   const at = (t: number, energy: number, blow: boolean): void => {
@@ -176,10 +191,7 @@ export function dolphinSplashes(): Splash[] {
     out.push({ at: t, x: p.x, z: p.z, vx: p.vx, vz: p.vz, energy, blow });
   };
   for (const [t, , , kind, h = 0] of SURFACINGS) {
-    if (kind === 'roll') {
-      at(t, 0.3, true);
-      continue;
-    }
+    if (kind === 'roll' || kind === 'swim') continue;
     const vy0 = Math.sqrt(2 * G * h);
     const k = Math.min(1, vy0 / 6.5);
     at(t, 0.35 + 0.35 * k, false);

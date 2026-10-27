@@ -23,7 +23,8 @@ import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
-import { DOLPHIN_SPAN, FLIP_TOP, createDolphin, dolphinPose } from './dolphin';
+import { DOLPHIN_SPAN, FLIP_RELEASE, createDolphin, flipThrow } from './dolphin';
+import { dolphinPose } from './dolphin';
 
 const smooth = (x: number): number => {
   const k = Math.min(1, Math.max(0, x));
@@ -140,9 +141,10 @@ export interface Props {
   setPixelAngle(rad: number): void;
 }
 
-/** s the case flies, and how high (m over the line from the water to the deck: up against the sky) */
-const FLIGHT = 1.3;
-const LOFT = 2.6;
+/** the case's throw: m on from the snout it lands, m it rises over the snout (up against the afterglow), m/s² */
+const CASE_REACH = 2.6;
+const CASE_LOB = 1.0;
+const G_CASE = 9.81;
 /** the beams: stations' bearings (deg right of the front, just under the horizon), and which answer which,
  * when (s into c4) */
 const STATIONS = [-150, -95, -40, 10, 55, 105, 160];
@@ -347,21 +349,30 @@ export function createProps(): Props {
         dolphin.set(d);
       }
 
-      // THE CASE: from the dolphin's snout onto the deck, then aboard
-      const cf = c3 - FLIP_TOP;
+      // THE CASE: flicked from the dolphin's snout as it rises in the flip, along its heading (it carries on where
+      // the dolphin was going), lobbed a metre over the snout and falling onto the deck there; then aboard
+      const cf = c3 - FLIP_RELEASE;
       caseMesh.visible = world !== 'test' && aboard && cf > 0;
       if (caseMesh.visible) {
         raft.updateMatrixWorld(true);
-        const end = deckAt.clone().applyMatrix4(raft.matrixWorld);
-        if (cf < FLIGHT && world === 'open') {
-          const u = cf / FLIGHT;
-          // from the snout at the top of the flip (its pose then, in the eye's frame now: every frame on its own)
-          const f = dolphinPose(FLIP_TOP);
-          const nose = new THREE.Vector3(0, 0.05, -1.3).applyEuler(new THREE.Euler(f.pitch, -f.heading, 0, 'YXZ')).add(new THREE.Vector3(f.x, f.y, -f.z));
-          const startP = nose.applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, 0, s.eye.z));
-          caseMesh.position.copy(startP).lerp(end, u);
-          caseMesh.position.y += 4 * LOFT * u * (1 - u);
-          caseMesh.rotation.set(u * Math.PI * 2.5, raft.rotation.y + u * 1.2, u * 0.8);
+        const throwAt = flipThrow();
+        const toWorld = (x: number, y: number, z: number): THREE.Vector3 =>
+          new THREE.Vector3(x, 0, -z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, y, s.eye.z));
+        const from = toWorld(...throwAt.from);
+        // where it lands: CASE_REACH m on along the heading, on the deck (raft-local deck height), every frame from
+        // the raft's pose now (pure in t)
+        const land = raft.worldToLocal(toWorld(throwAt.from[0] + throwAt.dir[0] * CASE_REACH, 0, throwAt.from[2] + throwAt.dir[1] * CASE_REACH));
+        land.y = deckY ?? 0.6;
+        const end = raft.localToWorld(land.clone());
+        const vy0 = Math.sqrt(2 * G_CASE * CASE_LOB);
+        const flight = (vy0 + Math.sqrt(vy0 * vy0 + 2 * G_CASE * Math.max(0, from.y - end.y))) / G_CASE;
+        if (cf < flight && world === 'open') {
+          const u = cf / flight;
+          caseMesh.position.lerpVectors(from, end, u);
+          caseMesh.position.y = from.y + vy0 * cf - 0.5 * G_CASE * cf * cf;
+          // tumbling end over end about the axis across its flight
+          caseMesh.rotation.set(0, s.yaw - Math.atan2(throwAt.dir[0], throwAt.dir[1]), 0, 'YXZ');
+          caseMesh.rotateX(-u * Math.PI * 1.5);
         } else {
           caseMesh.position.copy(end);
           caseMesh.quaternion.copy(raft.quaternion).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.4));
