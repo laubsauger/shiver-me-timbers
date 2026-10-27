@@ -91,8 +91,14 @@ const SWELL_RMS = 0.08;
 const WIND_TO = Math.PI;
 /** px: each face of the water's mirror capture */
 const MIRROR_SIZE = 512;
-/** CPU oceans, one per instant the rafts sample the sea at (raft.ts SAMPLES, 5) and one spare */
-const SEA_POOL = 6;
+/** CPU oceans kept, one per instant, least recently used out: the rafts sample the sea at 5 instants 0.3 s apart
+ * (raft.ts SAMPLES, SETTLE), which at 30 fps are the instants of the frames 9, 18, 27 and 36 back — kept, each frame
+ * computes one new sea, not five. Until they are reached, 5 a frame are new, so the pool must outlast 9 frames of
+ * them (45): at 40 it never warmed (~2 MB each) */
+const SEA_POOL = 64;
+/** s: the grid the sea's instants are keyed (and computed) on, so the same instant reached from two frames, or
+ * from two lanes, is one key and one value */
+const SEA_QUANTUM = 1e-4;
 /** s: the ground swell's period (14 s, ~300 m long, held the raft all but still: "awfully static", the v9 review;
  * 10 s is ~155 m, the raft seen to lift and settle without bouncing) */
 const SWELL_PERIOD = 10;
@@ -314,18 +320,32 @@ export function createSea(
   // 30 recomputes a frame on the open sea, ~60 ms, most of the frame (engine-findings.md). A pool of oceans
   // sharing one spectrum, each holding the last instant it was asked about, computes each instant once.
   const seas = Array.from({ length: SEA_POOL }, () => ({ at: Number.NaN, sea: new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum) }));
-  let seaUse = 0;
-  const seaAt = (t: number): CpuOcean => {
-    let s = seas.find((x) => x.at === t);
-    if (!s) {
-      s = seas[seaUse];
-      seaUse = (seaUse + 1) % seas.length;
-      s.at = t;
+  // (a Map's order is its recency: a hit moves to the back, the front is evicted)
+  const seaSlot = new Map<number, (typeof seas)[number]>();
+  let unused = seas.length;
+  /** the sea at t, on SEA_QUANTUM's grid: its ocean, and the instant it is computed at */
+  const seaAt = (t: number): { sea: CpuOcean; t: number } => {
+    const key = Math.round(t / SEA_QUANTUM);
+    let s = seaSlot.get(key);
+    if (s) {
+      seaSlot.delete(key);
+    } else if (unused > 0) {
+      s = seas[--unused];
+    } else {
+      const [oldest, slot] = seaSlot.entries().next().value!;
+      seaSlot.delete(oldest);
+      s = slot;
     }
-    return s.sea;
+    s.at = key * SEA_QUANTUM;
+    seaSlot.set(key, s);
+    return { sea: s.sea, t: s.at };
+  };
+  const heightAt = (x: number, z: number, t: number): number => {
+    const s = seaAt(t);
+    return s.sea.heightAt(x, z, s.t);
   };
   // a raft floats on the sea, or rests on the sand once aground (w2)
-  const floating = (x: number, z: number, t: number): number => Math.max(seaAt(t).heightAt(x, z, t), ground(x, z) + ON_SAND);
+  const floating = (x: number, z: number, t: number): number => Math.max(heightAt(x, z, t), ground(x, z) + ON_SAND);
   // the raft, off the Sun's bearing from where the eye comes to rest, its bow turned off the eye's heading
   const raft = createRaft(floating);
   afloat.add(raft.group);
@@ -648,7 +668,7 @@ export function createSea(
             hazeColor: (scene.fog as THREE.Fog).color,
             cameraPosition: eye.position,
           },
-          (x, z) => seaAt(t).heightAt(x, z, t),
+          (x, z) => heightAt(x, z, t),
         );
       }
       const light = { sun: lum(seaSky.sunColour), sky: Math.min(1, lum(seaSky.irradiance) / 0.4) };
