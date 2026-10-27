@@ -45,15 +45,19 @@ export interface Palms {
   readonly occluders: Array<[number, number, number, number]>;
 }
 
+/** where the palms stand (x, z), without loading them: the plants grow round their feet */
+export function palmFeet(beach: { x: number; z: number }): Array<[number, number]> {
+  return palmSlots().map((s) => [beach.x - s.off, beach.z - s.along]);
+}
+
 /** the share of the light a frond lets through (a coconut leaflet: thin, ~a quarter in the green) */
 const TRANSMIT = 0.45;
 
-export function createPalms(beach: { x: number; z: number }, ground: (x: number, z: number) => number, base = `${import.meta.env.BASE_URL}drift/pbr/blenderkit/`): Palms {
-  const group = new THREE.Group();
-  group.name = 'drift-palms';
-  // the scatter: clusters along the top of the beach, the fan palms under them
+type Slot = { along: number; off: number; kind: Kind; lean: number; turn: number; h: number };
+
+/** the palms' places, seeded: the two by hand, clusters along the top of the beach, the fan palms under them */
+function palmSlots(): Slot[] {
   const r = rng(5200);
-  type Slot = { along: number; off: number; kind: Kind; lean: number; turn: number; h: number };
   const slots: Slot[] = HERO.map((s) => ({ ...s, h: HEIGHT[s.kind][0] + (HEIGHT[s.kind][1] - HEIGHT[s.kind][0]) * r() }));
   const near = (a: number, o: number, d: number): boolean => slots.some((s) => Math.hypot(s.along - a, s.off - o) < d);
   for (let i = 0; slots.length < 34 && i < 4000; i++) {
@@ -70,6 +74,14 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
     slots.push({ along, off, kind: 'fan', lean: 0.03, turn: r() * Math.PI * 2, h: HEIGHT.fan[0] + (HEIGHT.fan[1] - HEIGHT.fan[0]) * r() });
     n++;
   }
+
+  return slots;
+}
+
+export function createPalms(beach: { x: number; z: number }, ground: (x: number, z: number) => number, base = `${import.meta.env.BASE_URL}drift/pbr/blenderkit/`): Palms {
+  const group = new THREE.Group();
+  group.name = 'drift-palms';
+  const slots = palmSlots();
 
   const uSun = uniform(new THREE.Vector3(0, 1, 0));
   const uSunLight = uniform(new THREE.Vector3());

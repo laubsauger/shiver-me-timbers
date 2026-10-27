@@ -52,7 +52,7 @@ import { createSplashes } from './splash';
 import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createPlants } from './plants';
-import { createPalms } from './palms';
+import { createPalms, palmFeet } from './palms';
 import { C1_FOLLOW, COAST_YAW, OPEN_AT, OPEN_YAW, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
@@ -284,7 +284,7 @@ export function createSea(
   // palms (plants.ts) — from the palm line back (scattered over the open sand, backlit by the low Sun, they read
   // as litter in the v9 review)
   const plants = o.drive
-    ? createPlants(archipelago, ground, { x0: beach.x + 16, x1: beach.x + 95, z0: beach.z - 110, z1: beach.z + 110 }, { minH: 1.4, maxH: 9, maxSlope: 0.45 })
+    ? createPlants(archipelago, ground, { x0: beach.x + 16, x1: beach.x + 95, z0: beach.z - 110, z1: beach.z + 110 }, { minH: 1.4, maxH: 9, maxSlope: 0.45, feet: palmFeet(beach) })
     : undefined;
   if (plants) afloat.add(plants.group);
   const palms = o.drive ? createPalms(beach, ground) : undefined;

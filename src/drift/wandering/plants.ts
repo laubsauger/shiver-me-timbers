@@ -19,9 +19,12 @@ import type { Archipelago } from '../../island/archipelago';
 import { rng } from '../undertime/web';
 
 const PLANTS = [
-  { id: 'fern_02', count: 650, scale: [0.7, 1.4] },
-  { id: 'anthurium_botany_01', count: 240, scale: [0.8, 1.3] },
+  { id: 'fern_02', count: 650, scale: [0.7, 1.4], perFoot: 4 },
+  { id: 'anthurium_botany_01', count: 240, scale: [0.8, 1.3], perFoot: 2 },
 ] as const;
+/** m: the ring about a palm's foot its clump grows in (leafy ground round the trunks, the v9 review: the sand ran
+ * bare up to every palm) */
+const FOOT_RING: [number, number] = [0.9, 3.2];
 
 export interface Plants {
   readonly group: THREE.Group;
@@ -36,7 +39,7 @@ export function createPlants(
   archipelago: Archipelago,
   ground: (x: number, z: number) => number,
   area: { x0: number; x1: number; z0: number; z1: number },
-  o: { minH: number; maxH: number; maxSlope: number },
+  o: { minH: number; maxH: number; maxSlope: number; feet?: Array<[number, number]> },
   base = `${import.meta.env.BASE_URL}drift/pbr/`,
 ): Plants {
   for (const island of archipelago.islands) {
@@ -88,6 +91,20 @@ export function createPlants(
         q.setFromAxisAngle(up, r() * Math.PI * 2);
         per[Math.floor(r() * variants.length)].push(new THREE.Matrix4().compose(new THREE.Vector3(x, h - 0.03, z), q, new THREE.Vector3(s, s, s)));
         placed++;
+      }
+      // a clump at each palm's foot, on the sand too (above the swash), a little smaller
+      for (const [fx, fz] of o.feet ?? []) {
+        for (let j = 0; j < plant.perFoot; j++) {
+          const a = r() * Math.PI * 2;
+          const d = FOOT_RING[0] + (FOOT_RING[1] - FOOT_RING[0]) * Math.sqrt(r());
+          const x = fx + Math.cos(a) * d;
+          const z = fz + Math.sin(a) * d;
+          const h = ground(x, z);
+          if (h < 0.6) continue;
+          const s = (plant.scale[0] + (plant.scale[1] - plant.scale[0]) * r()) * 0.85;
+          q.setFromAxisAngle(up, r() * Math.PI * 2);
+          per[Math.floor(r() * variants.length)].push(new THREE.Matrix4().compose(new THREE.Vector3(x, h - 0.03, z), q, new THREE.Vector3(s, s, s)));
+        }
       }
       variants.forEach((v, i) => {
         if (!per[i].length) return;
