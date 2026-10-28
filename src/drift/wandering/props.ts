@@ -23,7 +23,7 @@ import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
-import { DOLPHIN_SPAN, FLIP_RELEASE, createDolphin, flipThrow } from './dolphin';
+import { DOLPHIN_SPAN, FLIP_RELEASE, caseOnDeck, createDolphin, flipThrow } from './dolphin';
 import { dolphinPose } from './dolphin';
 
 const smooth = (x: number): number => {
@@ -465,10 +465,11 @@ export function createProps(): Props {
         const toWorld = (x: number, y: number, z: number): THREE.Vector3 =>
           new THREE.Vector3(x, 0, -z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, y, s.eye.z));
         const from = toWorld(...throwAt.from);
-        // the spot in the raft's frame, and the deck's top there (pure in t: the raft's pose now)
-        const spot = raft.worldToLocal(toWorld(throwAt.to[0], 0, throwAt.to[1]));
-        // its flight's direction in the raft's frame (for the skid)
-        const spotDir = raft.worldToLocal(toWorld(throwAt.to[0] + throwAt.dir[0], 0, throwAt.to[1] + throwAt.dir[1])).sub(spot).setY(0).normalize();
+        // the spot in the raft's own frame and its flight's direction there (for the skid), from c3's pose
+        // (dolphin.ts caseOnDeck), and the deck's top there (pure in t: the raft's pose now)
+        const onDeck = caseOnDeck();
+        const spot = new THREE.Vector3(onDeck.spot[0], 0, onDeck.spot[1]);
+        const spotDir = new THREE.Vector3(onDeck.dir[0], 0, onDeck.dir[1]).normalize();
         const end = raft.localToWorld(deckTop(spot.x, spot.z).add(new THREE.Vector3(0, 0.11, 0)));
         const apex = Math.max(from.y, end.y) + CASE_LOB;
         const vy0 = Math.sqrt(2 * G_CASE * (apex - from.y));

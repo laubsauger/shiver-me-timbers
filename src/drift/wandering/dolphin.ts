@@ -212,6 +212,25 @@ export function flipThrow(): { from: [number, number, number]; dir: [number, num
   return { from: [d.x + dir[0] * nose * cp, d.y + nose * Math.sin(d.pitch), d.z + dir[1] * nose * cp], dir, to: CASE_TARGET };
 }
 
+/**
+ * The case's deck spot and the throw's line in the RAFT's own frame (x across, z toward the bow: raft.ts), from c3's
+ * pose — where it stays aboard whatever the raft's pose against the eye later. (Found from the eye-frame spot every
+ * frame, it fell off the deck once the raft's pose changed: afloat beside the raft through c4 and along the coast,
+ * the v10 review.)
+ */
+export function caseOnDeck(): { spot: [number, number]; dir: [number, number] } {
+  const h = C3_RAFT.heading * D;
+  // the raft's bow and its +x in the eye frame (x right, z ahead; its heading eyeYaw + h + π, raft.ts)
+  const bow: [number, number] = [-Math.sin(h), Math.cos(h)];
+  const side: [number, number] = [-Math.cos(h), -Math.sin(h)];
+  const rel: [number, number] = [CASE_TARGET[0] - Math.sin(C3_RAFT.bearing * D) * C3_RAFT.distance, CASE_TARGET[1] - Math.cos(C3_RAFT.bearing * D) * C3_RAFT.distance];
+  const { dir } = flipThrow();
+  return {
+    spot: [rel[0] * side[0] + rel[1] * side[1], rel[0] * bow[0] + rel[1] * bow[1]],
+    dir: [dir[0] * side[0] + dir[1] * side[1], dir[0] * bow[0] + dir[1] * bow[1]],
+  };
+}
+
 /** a splash (splash.ts): s into c3, where (eye frame, m), the body's velocity along the water then (m/s), how
  * hard (0..1: the drops' throw), and whether it is the blow at a roll rather than spray */
 export interface Splash {

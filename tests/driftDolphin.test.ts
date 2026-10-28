@@ -6,7 +6,7 @@
  * comes up only where the choreography says, and is out of sight between.
  */
 import { describe, expect, it } from 'vitest';
-import { C3_RAFT, DOLPHIN_SPAN, FLIP_RELEASE, SURFACINGS, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
+import { C3_RAFT, CASE_ON_DECK, DOLPHIN_SPAN, FLIP_RELEASE, SURFACINGS, caseOnDeck, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
 import { C1_FOLLOW, beatStarts, raftPose, type RaftPose } from '../src/drift/wandering/beats';
 
 /** eye frame (x right, z ahead) → c3's raft: (across, along) m from its centre, along toward its bow */
@@ -87,6 +87,16 @@ describe('the dolphin in c3', () => {
     const [x, z] = c3RaftLocal(th.to);
     expect(Math.abs(z)).toBeLessThan(6.85 - 1);
     expect(Math.abs(x)).toBeLessThan(2.7 - 0.5);
+  });
+
+  it('keeps the case on the deck spot it was thrown at, in the raft\'s own frame, whatever the raft does later', () => {
+    // (found from the eye-frame spot every frame, it fell off the deck once the raft's pose against the eye changed:
+    // afloat beside the raft through the night and along the coast, the v10 review)
+    const { spot, dir } = caseOnDeck();
+    expect(spot[0]).toBeCloseTo(CASE_ON_DECK.across, 6);
+    expect(spot[1]).toBeCloseTo(CASE_ON_DECK.along, 6);
+    // thrown in across the side facing the eye (+x), not from the far side through the cabin
+    expect(dir[0]).toBeLessThan(0);
   });
 
   it('lays the choreography about the raft where beats.ts puts it in c3', () => {
