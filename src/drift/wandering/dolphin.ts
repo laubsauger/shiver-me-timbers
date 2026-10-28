@@ -45,9 +45,12 @@ export const C3_RAFT = { bearing: 10, distance: 10, heading: 70 };
 /** where the case lands, on the raft: m across from its centreline toward the eye, and m forward of its centre
  * (the fore-deck, ahead of the cabin and the mast foot) */
 export const CASE_ON_DECK = { across: 1.9, along: 3.0 };
-/** the flip: m from the deck spot it throws at, and the way in (deg off the raft's own bow line, toward the eye) */
-const FLIP_RANGE = 5.5;
-const FLIP_IN = 45;
+/** the flip: m from the deck spot it throws at, and the way in (deg off the raft's own bow line, toward the eye).
+ * In along the bow line, from ahead of the raft, so the flip is far enough out to be on the dome: at 45° it came
+ * up 7 m ahead, where the water is under the tilted dome's rim (a point shows while its drop below the eye is
+ * under its distance ahead × tan 15°), and the case seemed to come from nowhere at the bottom (the v10 review) */
+const FLIP_RANGE = 8;
+const FLIP_IN = 10;
 
 const D = Math.PI / 180;
 /** eye-frame (x right, z ahead) of a raft-local spot (across toward the eye, along toward the bow) */
@@ -92,12 +95,13 @@ export const SURFACINGS: Surfacing[] = [
   [25.3, ...onLine(FLIP_RANGE + 4.5), 'swim'],
   [26.6, ...onLine(FLIP_RANGE), 'flip', 0.9],
   // (two waypoints on the line past the flip, so its heading through the flip is the line: deep by then, under
-  // the raft's side)
-  [28.4, ...onLine(FLIP_RANGE - 2.8), 'swim'],
-  [29.5, ...onLine(FLIP_RANGE - 5.2), 'swim'],
-  [33.3, -13.5, 23, 'roll'],
-  [36.0, -21, 25, 'leap', 0.9],
-  [38.8, -30, 30, 'roll'],
+  // the raft's side; then out past the stern on our side and away — the bow line has no way round ahead)
+  [28.4, ...onLine(FLIP_RANGE - 3), 'swim'],
+  [29.5, ...onLine(FLIP_RANGE - 6), 'swim'],
+  [31.5, ...c3RaftPoint(3.6, -5), 'swim'],
+  [33.8, ...c3RaftPoint(5, -11.5), 'roll'],
+  [36.5, ...c3RaftPoint(7.5, -18.5), 'leap', 0.9],
+  [39.0, ...c3RaftPoint(10.5, -27), 'roll'],
 ];
 /** s it swims on after the last surfacing (out of sight) */
 const AWAY = 3.5;
