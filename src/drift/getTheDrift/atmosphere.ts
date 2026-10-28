@@ -204,7 +204,10 @@ export function scatter(o: V3, d: V3, C: V3, S: V3, air: Air = ORBIT): { light: 
       const toEye = exp((air.ozone ? ext.add(OZONE.mul(odO)) : ext).negate());
       // the Sun's light here, through the air above (analytic), none in the planet's shadow
       const muS = p.sub(C).dot(S).div(r);
-      const att = toEye.mul(sunlight(r, muS, air));
+      // at the ground, as `h` is: from thousands of Mm off, the f32 ground test lets a grazing ray's samples
+      // dip inside the planet, where the column's exp(−(r − R)/H) overflows and the light comes out +Inf — one
+      // pixel in a half-float face that the master's bloom spread into a black quarter (4096² v10, t 146.27 s)
+      const att = toEye.mul(sunlight(r.max(EARTH_R), muS, air));
       inR.addAssign(att.mul(rR));
       inM.addAssign(att.mul(rM));
       if (air.ms > 0) {
