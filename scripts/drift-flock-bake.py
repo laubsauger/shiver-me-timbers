@@ -17,7 +17,8 @@ Second bake (2026-10-27, the v8 notes: "too organized", "bounce off the ground",
 the whole of w4 and w5 — the birds start along OUR waterline; each carries its own slow turbulence and
 heeds its neighbours more loosely; no hard floor (a soft lift keeps them off the sand while they fly); and
 after the wheeling over the front and the zenith the air carries them away down the beach, where every one
-of them comes down on the sand ~200 m ahead and stays (nothing hangs in the air when the bake ends).
+of them comes down on the sand ~90 m ahead and stays (nothing hangs in the air when the bake ends; fifth bake,
+the v10 review: nearer, and a pull-up out of every dive near the sand).
 
 Fourth bake (2026-10-27, the v9 review: the vortex "was supposed to be that, at least for a while", one that
 "resembles the debris vortex we've seen earlier"): from VORTEX[0] to VORTEX[1] the air turns the flock into a
@@ -58,8 +59,12 @@ landed_at = np.full(N, np.inf)
 NOISE = 3.2
 nf = rng.uniform(0.25, 0.9, (N, 3))
 nph = rng.uniform(0, 2 * np.pi, (N, 3))
-# where they come down: the waterline far ahead
-LAND = np.array([-8.0, 0.0, -205.0])
+# where they come down: the waterline ahead — near enough to see them settle (at ~200 m, the flock shrank to nothing
+# and was gone: "they disappear in a strange way", the v10 review)
+LAND = np.array([-8.0, 0.0, -90.0])
+# m: below this a flying bird pulls up out of its dive, the harder the nearer the sand and the steeper the dive (a
+# soft lift under 3 m let the dives reach the sand at full speed: "smashing on the ground quite hard", v10)
+PULL_UP = 7.0
 # THE VORTEX: s it holds (eased in and out over V_EASE), its axis (vertical, through this point: just ahead of
 # the audience, overhead), the arms' reach (m), their pitch, the rim's airspeed (m/s), the core's share of the
 # birds and its reach (m), and the funnel: the height at the arms' inner end (m) and its rise per metre out
@@ -115,7 +120,7 @@ def wind_centre(t: float) -> np.ndarray:
     away = np.clip((t - 30) / 14, 0, 1)
     away = away * away * (3 - 2 * away)
     down = np.clip((t - 42) / 10, 0, 1)
-    far = np.array([-8.0, 9.0 * (1 - down) + 0.5 * down, -200.0])
+    far = np.array([-8.0, 9.0 * (1 - down) + 0.5 * down, LAND[2] + 5.0])
     return (start * (1 - rise) + loop * rise) * (1 - away) + far * away
 
 
@@ -198,7 +203,9 @@ for step in range(n_steps + 1):
         # (no floor to bounce off), until the landing: near the landing ground they let themselves down
         since = (t - takeoff[idx])[:, None]
         landing = (t > 44) & (np.linalg.norm(p - LAND, axis=1, keepdims=True) < 40)
-        acc[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, np.maximum(0, 3 - p[:, 1:2]) * 3.0)
+        near = np.maximum(0, PULL_UP - p[:, 1:2]) / PULL_UP
+        pull = near * 6.0 + near * near * 16.0 + np.maximum(0, -v[:, 1:2]) * near * 4.0
+        acc[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, pull)
         v = v + acc * DT
         if v_r is not None:
             v_phase += DT / vortex_squeeze(t)
