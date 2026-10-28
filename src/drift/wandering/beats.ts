@@ -174,19 +174,25 @@ const POSE_KEYS: PoseKey[] = [
   { beat: 'w1', at: 6, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
 ];
 
-/** s into c3 the sail is struck over */
-const SAIL_STRIKE: [number, number] = [0.5, 7];
+/** s into c4 the sail is struck over: once the night's dissolve is through (a dissolve crossfades a strike) */
+const SAIL_STRIKE: [number, number] = [10, 17];
 
-/** the square sail, 0 furled .. 1 set: furled at rest in the debris and through the night, set at sea and
- * along the coast, struck as the raft comes to anchor off the beach (a dissolve crossfades a hoist) */
+/** the square sail, 0 furled .. 1 set: furled at rest in the debris, set at sea through the dolphin and on into
+ * the night, struck there; set along the coast, struck as the raft comes to anchor off the beach (a dissolve
+ * crossfades a hoist). Striking it at the dolphin's turn read as hoist-and-strike within 45 s (the v10 review):
+ * the air turns with the raft instead (sea.ts), and dies at last light (`airAt`), the sail going slack. */
 export function sailsAt(name: BeatName, t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
-  // c3: struck as the wind dies at last light and the raft swings broadside for the dolphin (a square sail across
-  // the wind is pressed back against its mast: the v9 review) — down before the raft is a third of the way round
-  if (name === 'c3') return 1 - smooth((t - starts.c3 - SAIL_STRIKE[0]) / (SAIL_STRIKE[1] - SAIL_STRIKE[0]));
-  if (name === 'c2' || name === 'w1') return 1;
+  if (name === 'c4') return 1 - smooth((t - starts.c4 - SAIL_STRIKE[0]) / (SAIL_STRIKE[1] - SAIL_STRIKE[0]));
+  if (name === 'c2' || name === 'c3' || name === 'w1') return 1;
   if (name === 'w2') return 1 - smooth((t - starts.w2 - 28) / 12);
   return 0;
+}
+
+/** the light air the sail stands in at sea, as a share of the waves' wind: the day's through the dolphin's throw,
+ * dying with the last light (the Sun sets ~30 s into c3), all but calm through the night */
+export function airAt(t: number, starts: Record<BeatName, number>): number {
+  return 1 - 0.7 * smooth((t - starts.c3 - 26) / 18);
 }
 
 /** m/s the raft makes through the water: sailing on a light air, slower as the wind dies at last light, all but

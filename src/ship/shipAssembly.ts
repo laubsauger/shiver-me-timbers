@@ -652,7 +652,7 @@ export class ShipAssembly {
         shipForwardX: wf.shipForwardX,
         shipForwardZ: wf.shipForwardZ,
         windDirection: wf.windDirection ?? oceanParams.windDirection,
-        windSpeed: oceanParams.windSpeed,
+        windSpeed: wf.windSpeed ?? oceanParams.windSpeed,
         shipVelX: wf.shipVelX,
         shipVelZ: wf.shipVelZ,
         yawRate: 0, // the skew term is a transient; anchors need the steady shape

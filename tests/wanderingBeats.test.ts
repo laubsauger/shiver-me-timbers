@@ -6,7 +6,7 @@
  * (a jump there is a cut, a jolt is "stop and go"); and within a beat the Sun moves only slowly ("real time").
  */
 import { describe, expect, it } from 'vitest';
-import { BEATS, C1_FOLLOW, SAILING, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, type RaftPose } from '../src/drift/wandering/beats';
+import { BEATS, C1_FOLLOW, SAILING, airAt, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, type RaftPose } from '../src/drift/wandering/beats';
 
 const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
@@ -27,6 +27,24 @@ describe('the beats after the landing', () => {
       const angle = Math.acos(Math.min(1, end[0] * start[0] + end[1] * start[1] + end[2] * start[2]));
       expect((angle * 180) / Math.PI, `${a.name} → ${b.name}`).toBeLessThan(0.05);
     }
+  });
+
+  it('keeps the sail set from the open sea through the dolphin into the night, struck only once the dissolve is through', () => {
+    // (struck at the dolphin's turn, it went up and came down again within 45 s — the v10 review; and a sail set on
+    // one side of a dissolve and struck on the other shows two sails crossfading)
+    for (let t = starts.c2; t <= starts.c4 + 6; t += 0.25) {
+      for (const { name } of beatsAt(t, c1End)) expect(sailsAt(name, t, c1End), `${name} at ${t - starts.c2} s into c2`).toBe(1);
+    }
+    let last = 1;
+    for (let t = starts.c4; t < starts.w1 - 6; t += 0.25) {
+      const now = sailsAt('c4', t, c1End);
+      expect(now).toBeLessThanOrEqual(last);
+      last = now;
+    }
+    expect(last).toBe(0);
+    // the air it stands in: the day's through the dolphin's throw, then dying with the light
+    expect(airAt(starts.c3 + 27, starts)).toBeGreaterThan(0.9);
+    expect(airAt(starts.c4, starts)).toBeLessThan(0.35);
   });
 
   it('draws every instant with one beat, or two crossfading only across the planned dissolves', () => {

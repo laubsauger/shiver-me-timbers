@@ -40,6 +40,9 @@ export interface SailWindFrame {
    *  (`oceanParams.windDirection`): a film's air can follow its course without the waves' spectrum being
    *  rebuilt. Absent: the sea's wind (the game). */
   windDirection?: number;
+  /** and its speed (m/s), where it is not the sea's (`oceanParams.windSpeed`): a film's air can die at dusk while
+   *  the waves keep theirs. Absent: the sea's wind (the game). */
+  windSpeed?: number;
 }
 
 const KEY = 'sailWindFrame';
@@ -76,6 +79,7 @@ export function readSailWindFrame(object: THREE.Object3D): SailWindFrame {
     gustPhase: n(raw.gustPhase, 0),
     gustPhaseB: n(raw.gustPhaseB, 0),
     windDirection: typeof raw.windDirection === 'number' && Number.isFinite(raw.windDirection) ? raw.windDirection : undefined,
+    windSpeed: typeof raw.windSpeed === 'number' && Number.isFinite(raw.windSpeed) && raw.windSpeed >= 0 ? raw.windSpeed : undefined,
   };
 }
 

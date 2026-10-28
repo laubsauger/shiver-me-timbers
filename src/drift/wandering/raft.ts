@@ -45,10 +45,10 @@ export interface RaftProp {
   readonly group: THREE.Group;
   /**
    * the raft's pose at time t, at (x, z) on the sea heading `heading` rad (0: bow toward +z); `sun` and `sky`
-   * are the light there against the day's (0..1: the sunlight's luminance, the sky's irradiance); `windTo` the
-   * air its sail stands in (rad, toward), where it is not the sea's
+   * are the light there against the day's (0..1: the sunlight's luminance, the sky's irradiance); `windTo` and
+   * `windSpeed` the air its sail stands in (rad, toward; m/s), where it is not the sea's
    */
-  update(t: number, x: number, z: number, heading: number, light: { sun: number; sky: number }, sails?: number, speed?: number, windTo?: number): void;
+  update(t: number, x: number, z: number, heading: number, light: { sun: number; sky: number }, sails?: number, speed?: number, windTo?: number, windSpeed?: number): void;
 }
 
 /** the film's still sail (see the header): the game's cloth with everything that moves it from frame to frame off */
@@ -102,7 +102,7 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
 
   return {
     group,
-    update(t, x, z, heading, light, sails = 0, speed = 0, windTo) {
+    update(t, x, z, heading, light, sails = 0, speed = 0, windTo, windSpeed) {
       for (const id of sailIds) {
         assembly.setSailDropScale(id, sails);
         assembly.setYardHoist(id, sails);
@@ -115,6 +115,7 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
           gustPhase: 0,
           gustPhaseB: 0,
           windDirection: windTo,
+          windSpeed,
         });
       }
       // lit from last light (the sunlight at a seventh of the day's) to full night
