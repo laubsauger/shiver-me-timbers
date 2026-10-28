@@ -13,7 +13,7 @@
  * The walk runs at off −8; nothing stands nearer than off −13.
  */
 import * as THREE from 'three/webgpu';
-import { cameraPosition, diffuseColor, float, normalWorld, positionWorld, uniform, vec3 } from 'three/tsl';
+import { atan, attribute, cameraPosition, diffuseColor, float, length, normalWorld, positionLocal, positionWorld, sin, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
 
@@ -27,6 +27,16 @@ const FILES: Record<Kind, string> = {
 /** m: each kind's height range */
 const HEIGHT: Record<Kind, [number, number]> = { dense: [8, 12], coconut: [7, 10], bent: [8, 9], fan: [2.4, 3.6] };
 
+/**
+ * THE WIND IN THE PALMS (the user, 2026-10-28: "some sway in the wind … subtle … the leaves also move
+ * individually … don't overdo it"): each trunk bends downwind with its height², gusting on two slow sines of its
+ * own, and each frond flutters on a phase of its own (its bearing round the crown), more toward its tip. A pure
+ * function of the time it is given, so a film frame renders on its own. m at a 10 m crown; m per m out from it.
+ */
+const SWAY = { crown: 0.22, across: 0.06, flutter: 0.035 };
+/** the air the palms stand in: toward −z, the sea's light air (sea.ts WIND_TO) */
+const WIND = new THREE.Vector2(0, -1);
+
 /** where they stand: (along, off) m, the kind, and a lean toward the sea (rad) — the two bent palms by hand,
  * the rest scattered (see createPalms) */
 const HERO: Array<{ along: number; off: number; kind: Kind; lean: number; turn: number }> = [
@@ -37,6 +47,8 @@ const HERO: Array<{ along: number; off: number; kind: Kind; lean: number; turn: 
 export interface Palms {
   readonly group: THREE.Group;
   readonly ready: Promise<void>;
+  /** s: the time the wind in them runs on */
+  setTime(t: number): void;
   /** the light the fronds pass through (set per frame): unit toward the Sun; the Sun's and the sky's radiance on
    * a white surface */
   readonly light: { sun: THREE.Vector3; sunLight: THREE.Vector3; skyLight: THREE.Vector3 };
@@ -86,6 +98,35 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
   const uSun = uniform(new THREE.Vector3(0, 1, 0));
   const uSunLight = uniform(new THREE.Vector3());
   const uSkyLight = uniform(new THREE.Vector3());
+  const uTime = uniform(0);
+  /**
+   * The sway, on every part of a palm (trunk and fronds, or the crown leaves its trunk). positionNode runs after the
+   * instance transform, so the position is the group's: each instance carries its foot and height (`palmFoot`) and
+   * its crown's centre (`palmCrown`).
+   */
+  const swayed = (fronds: boolean): THREE.Node<'vec3'> => {
+    const foot = attribute('palmFoot', 'vec4');
+    const crown = attribute('palmCrown', 'vec3');
+    const p = positionLocal;
+    const h = foot.w;
+    const up = p.y.sub(foot.y).div(h).clamp(0, 1.2);
+    const own = foot.x.mul(0.37).add(foot.z.mul(0.61));
+    const gust = sin(uTime.mul(1.3).add(own)).mul(0.6).add(sin(uTime.mul(2.1).add(own.mul(1.7))).mul(0.4)).mul(0.5).add(0.5);
+    const sideways = sin(uTime.mul(0.9).add(own.mul(2.3)));
+    const k = up.mul(up).mul(h.div(10));
+    const wind = vec2(WIND.x, WIND.y);
+    const bent = wind.mul(gust.mul(SWAY.crown)).add(vec2(wind.y.negate(), wind.x).mul(sideways.mul(SWAY.across))).mul(k);
+    let out = p.add(vec3(bent.x, 0, bent.y));
+    if (fronds) {
+      // each frond its own: its bearing round the crown sets its phase, its reach the swing
+      const rel = p.sub(crown);
+      const reach = length(rel.xz);
+      const bearing = atan(rel.z, rel.x);
+      const flap = sin(uTime.mul(3.1).add(bearing.mul(5)).add(own)).mul(0.7).add(sin(uTime.mul(4.7).add(bearing.mul(3)).add(own.mul(0.5))).mul(0.3));
+      out = out.add(vec3(0, flap.mul(reach.mul(SWAY.flutter)).mul(smoothstep(0.3, 2.5, reach)).mul(gust.mul(0.6).add(0.4)), 0));
+    }
+    return out as THREE.Node<'vec3'>;
+  };
   /**
    * A FROND IS LIT THROUGH. Seen from under the canopy — the dome looks up into it — a leaf card's face toward us
    * is the one away from the Sun, lit only by the ambient, and the fronds read black (the v9 review: "this black
@@ -115,8 +156,27 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
     const through = uSunLight.mul(backlit.mul(float(0.5).add(toward.mul(1.5)))).add(uSkyLight.mul(sky.add(0.8)));
     // (light through a leaf comes out yellower and greener than light off it)
     leaf.emissiveNode = diffuseColor.rgb.mul(vec3(1.1, 1.3, 0.6)).mul(through).mul(TRANSMIT);
+    leaf.positionNode = swayed(true);
     leaf.name = `${mat.name}-lit-through`;
     return leaf;
+  };
+  /** a trunk's own material, as a node material that sways with its crown */
+  const trunkOf = (mat: THREE.MeshStandardMaterial): THREE.MeshStandardNodeMaterial => {
+    const trunk = new THREE.MeshStandardNodeMaterial({
+      map: mat.map,
+      normalMap: mat.normalMap,
+      roughnessMap: mat.roughnessMap,
+      metalnessMap: mat.metalnessMap,
+      aoMap: mat.aoMap,
+      color: mat.color,
+      roughness: mat.roughness,
+      metalness: mat.metalness,
+      vertexColors: mat.vertexColors,
+      side: mat.side,
+    });
+    trunk.positionNode = swayed(false);
+    trunk.name = `${mat.name}-swaying`;
+    return trunk;
   };
   const loader = new GLTFLoader();
   const ready = Promise.all(
@@ -137,18 +197,25 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
         const geo = m.geometry.clone().applyMatrix4(m.matrixWorld);
         geo.translate(-cx, -box.min.y, -cz);
         const mats = (Array.isArray(m.material) ? m.material : [m.material]) as THREE.MeshStandardMaterial[];
-        const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : mat));
+        const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : trunkOf(mat)));
         parts.push(new THREE.Mesh(geo, Array.isArray(m.material) ? drawn : drawn[0]));
       });
-      const matrices = mine.map((s) => {
+      const feet = new Float32Array(mine.length * 4);
+      const crowns = new Float32Array(mine.length * 3);
+      const matrices = mine.map((s, i) => {
         const x = beach.x - s.off;
         const z = beach.z - s.along;
         const k = s.h / height;
         // lean toward the sea (−x), turned about its own trunk
         const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), s.lean).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.turn));
-        return new THREE.Matrix4().compose(new THREE.Vector3(x, ground(x, z) - 0.15, z), q, new THREE.Vector3(k, k, k));
+        const foot = new THREE.Vector3(x, ground(x, z) - 0.15, z);
+        feet.set([foot.x, foot.y, foot.z, s.h], i * 4);
+        crowns.set(new THREE.Vector3(0, s.h * (s.kind === 'fan' ? 0.75 : 0.92), 0).applyQuaternion(q).add(foot).toArray(), i * 3);
+        return new THREE.Matrix4().compose(foot, q, new THREE.Vector3(k, k, k));
       });
       for (const p of parts) {
+        p.geometry.setAttribute('palmFoot', new THREE.InstancedBufferAttribute(feet, 4));
+        p.geometry.setAttribute('palmCrown', new THREE.InstancedBufferAttribute(crowns, 3));
         const inst = new THREE.InstancedMesh(p.geometry, p.material, matrices.length);
         matrices.forEach((m, i) => inst.setMatrixAt(i, m));
         inst.instanceMatrix.needsUpdate = true;
@@ -171,5 +238,5 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
     occluders.push([x - reach * 0.85, z, crown * 1.3, s.kind === 'fan' ? 0.5 : 0.7]);
     occluders.push([x, z, 1.0, 0.5]);
   }
-  return { group, ready, occluders, light: { sun: uSun.value as THREE.Vector3, sunLight: uSunLight.value as THREE.Vector3, skyLight: uSkyLight.value as THREE.Vector3 } };
+  return { group, ready, occluders, setTime: (t) => void (uTime.value = t), light: { sun: uSun.value as THREE.Vector3, sunLight: uSunLight.value as THREE.Vector3, skyLight: uSkyLight.value as THREE.Vector3 } };
 }

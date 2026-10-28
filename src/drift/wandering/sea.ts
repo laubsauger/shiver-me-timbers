@@ -724,6 +724,7 @@ export function createSea(
       fu.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       fu.eye.value.copy(eye.position);
       if (palms) {
+        palms.setTime(t);
         palms.light.sun.copy(sun);
         palms.light.sunLight.copy(fu.sunLight.value);
         palms.light.skyLight.copy(fu.skyLight.value);
