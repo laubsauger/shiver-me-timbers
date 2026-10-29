@@ -9,6 +9,7 @@
  *        [--renders-include a.mp4,dir]                  and the review sheets (top-level stills, *_review/ folders)
  *   node scripts/drift-bundle.mjs --refs --no-assets  one target alone
  *   options: --out out/drift-bundle · --dry-run (list and size, write nothing) · --narrative <dir>
+ *            --list-json <file> (the asset files a bundle would hold, with size and time: the farm's submitter)
  *
  *   node scripts/drift-bundle.mjs --verify [manifest.json …] [--quick] [--base <dir>]
  *        on the node, after unpacking: every file of every bundle manifest found (out/drift-bundle/manifest-*.json,
@@ -360,6 +361,16 @@ async function verify() {
 // ------------------------------------------------------------------------------------------------------ main
 async function main() {
   if (flag('verify')) return verify();
+  // the asset files a bundle would hold now, with their size and time, as JSON to a file (the render farm's
+  // submitter, drift-farm-client.mjs: which of them a box's bundle lacks, to send along with a job)
+  if (arg('list-json', null)) {
+    const sel = selectAssets();
+    writeFileSync(resolve(arg('list-json')), JSON.stringify(sel.keep.map((f) => {
+      const st = statSync(join(ROOT, f.path));
+      return { path: f.path, bytes: st.size, mtimeMs: Math.round(st.mtimeMs) };
+    })));
+    return;
+  }
   const targets = [];
   if (!flag('no-assets')) targets.push('assets');
   if (flag('refs')) targets.push('refs');

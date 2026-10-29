@@ -1,0 +1,136 @@
+diff --git a/nodes/204-eeg/session.config.json b/nodes/204-eeg/session.config.json
+index f5050f3..daed54f 100644
+--- a/nodes/204-eeg/session.config.json
++++ b/nodes/204-eeg/session.config.json
+@@ -498,6 +498,24 @@
+       "group": 2,
+       "enabled": false,
+       "timeoutMs": 30000
++    },
++    {
++      "name": "drift-worker",
++      "cwd": ".",
++      "cmd": "node",
++      "args": [
++        "scripts/drift-worker.mjs"
++      ],
++      "env": {
++        "DRIFT_NODE_NAME": "eeg-msi",
++        "DRIFT_FARM_HUB": "http://laubs-mbp:5190"
++      },
++      "health": {
++        "kind": "proc"
++      },
++      "group": 2,
++      "enabled": false,
++      "repo": "../shiver-me-timbers"
+     }
+   ],
+   "players": [
+diff --git a/scripts/drift-worker.mjs b/scripts/drift-worker.mjs
+new file mode 100644
+index 0000000..9b890a1
+--- /dev/null
++++ b/scripts/drift-worker.mjs
+@@ -0,0 +1,72 @@
++#!/usr/bin/env node
++/**
++ * THE DRIFT'S RENDER-FARM WORKER on this box, as a studio-manager service (manifest row `drift-worker`,
++ * `enabled: false`: an operator starts it from the fleet card when the box may render, and stops it the same way).
++ * Glue in this repo, as CLAUDE.md asks; the worker itself is shiver-me-timbers' `node scripts/drift-node.mjs worker`
++ * (a public repo, https://github.com/laubsauger/shiver-me-timbers), cloned beside this checkout. It takes render jobs
++ * from the farm hub on the Mac (shiver-me-timbers' drift-dash.mjs, :5190) while the GPU is free of others' work
++ * (ComfyUI, sd-webrtc, FluxRT, a game: it yields, it never touches them), and sends the results back.
++ *
++ *   1. ../shiver-me-timbers — cloned over https when it is not there (DRIFT_CHECKOUT moves it)
++ *   2. its drift-node.json (gitignored there): "name" and "farm".hub from this row's env (DRIFT_NODE_NAME,
++ *      DRIFT_FARM_HUB), other keys kept. Nothing secret: the hub knows a farm box by its tailnet address (the
++ *      Tailscale device key behind it), so no token has to reach the box — this repo's secrets are made on the box
++ *      and never travel (V53)
++ *   3. `node scripts/drift-node.mjs sync`: git pull --ff-only (a checkout with local edits is refused, never reset),
++ *      npm ci when the lockfile changed, the asset bundle from the farm hub (only when it changed), and the GPU
++ *      self-test on the first run — it names whatever the box lacks (Google Chrome, ffmpeg, the driver) with the fix
++ *   4. `node scripts/drift-node.mjs worker`, until the agent stops the row (the signal is passed on; the job in
++ *      progress is lost, finished ones are back on the Mac)
++ *
++ * A failed step ends the process with its output in the row's log: the card shows the row down, and why.
++ */
++import { spawn, spawnSync } from 'node:child_process';
++import { existsSync, readFileSync, writeFileSync } from 'node:fs';
++import { dirname, join, resolve } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
++const DIR = resolve(ROOT, process.env.DRIFT_CHECKOUT ?? '../shiver-me-timbers');
++const REPO = 'https://github.com/laubsauger/shiver-me-timbers.git';
++const say = (m) => console.log(`[drift-worker] ${m}`);
++const fail = (m) => {
++  console.error(`[drift-worker] ${m}`);
++  process.exit(1);
++};
++
++const name = process.env.DRIFT_NODE_NAME;
++const hub = process.env.DRIFT_FARM_HUB;
++if (!name || !hub) fail('the row needs env DRIFT_NODE_NAME (this box in shiver-me-timbers scripts/drift-farm-nodes.json) and DRIFT_FARM_HUB (http://<mac>:5190)');
++
++// 1. the checkout
++if (!existsSync(join(DIR, '.git'))) {
++  say(`cloning ${REPO} into ${DIR}`);
++  const r = spawnSync('git', ['clone', REPO, DIR], { stdio: 'inherit', windowsHide: true });
++  if (r.status !== 0) fail(`git clone failed (exit ${r.status})`);
++}
++
++// 2. its drift-node.json: this row's name and hub over whatever the box has there
++const cfgFile = join(DIR, 'drift-node.json');
++let cfg = {};
++if (existsSync(cfgFile)) {
++  try {
++    cfg = JSON.parse(readFileSync(cfgFile, 'utf8').replace(/^﻿/, ''));
++  } catch (e) {
++    fail(`${cfgFile} is not JSON (${e.message}): fix or delete it`);
++  }
++}
++writeFileSync(cfgFile, `${JSON.stringify({ ...cfg, name, farm: { ...(cfg.farm ?? {}), hub } }, null, 1)}\n`);
++
++// 3. and 4.: sync, then work — each a child with this process's output, so the agent's log holds theirs
++const node = (args) =>
++  new Promise((res) => {
++    const p = spawn(process.execPath, [join(DIR, 'scripts', 'drift-node.mjs'), ...args], { cwd: DIR, stdio: 'inherit', windowsHide: true });
++    const pass = (sig) => () => p.kill(sig);
++    for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, pass(sig));
++    p.on('close', (code) => res(code ?? 1));
++  });
++say(`syncing ${DIR} (code, packages, asset bundle; the GPU check on the first run)`);
++const synced = await node(['sync']);
++if (synced !== 0) fail(`sync failed (exit ${synced}): its lines above say why`);
++say(`working for ${hub} as ${name}`);
++process.exit(await node(['worker']));
+diff --git a/session.config.json b/session.config.json
+index 1f4f003..bf1bf6e 100644
+--- a/session.config.json
++++ b/session.config.json
+@@ -711,6 +711,24 @@
+       "enabled": false,
+       "timeoutMs": 30000,
+       "app": "loom"
++    },
++    {
++      "name": "drift-worker",
++      "cwd": ".",
++      "cmd": "node",
++      "args": [
++        "scripts/drift-worker.mjs"
++      ],
++      "env": {
++        "DRIFT_NODE_NAME": "windows-monster",
++        "DRIFT_FARM_HUB": "http://laubs-mbp:5190"
++      },
++      "health": {
++        "kind": "proc"
++      },
++      "group": 2,
++      "enabled": false,
++      "repo": "../shiver-me-timbers"
+     }
+   ],
+   "players": [

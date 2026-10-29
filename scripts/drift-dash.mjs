@@ -24,6 +24,16 @@
  *
  *       node scripts/drift-dash.mjs --tailnet          (localhost and `tailscale ip -4`; reports from 100.64.0.0/10)
  *
+ *   - STUDIO-MANAGER'S HUB (the studio's fleet tool, ../studio-manager; `yarn studio` on this Mac, :4310): every 10 s,
+ *     server-side, GET /api/fleet (2 s timeout) — each box's GPU load, VRAM, temperature and the services its agent
+ *     runs with their VRAM. The machine cards (scripts/drift-fleet.mjs) merge it with our heartbeats, for the render
+ *     machines in scripts/drift-farm-nodes.json only, this Mac's card first. No hub: a hint how to start it, and our
+ *     heartbeats alone. `--hub <url>` points elsewhere; DRIFT_DASH_NODES moves the node-report file (a test instance).
+ *   - THE DRIFT FARM's hub (scripts/drift-farm.mjs): the job queue the render machines pull work from (their
+ *     `drift-node.mjs worker`), at /farm/… on the same listeners, bearer token from farm.json (written with a random
+ *     token on the first start; gitignored). Its queue is out/drift/farm (DRIFT_FARM_DIR; DRIFT_FARM_TOKEN_FILE moves
+ *     farm.json, for a test instance). Status.farm shows it.
+ *
  * THE /report CONTRACT (JSON, at most 64 KB; only `node` is required):
  *   { node: "win-4090", os: "win32", commit: "abc1234", bundle: "20261029",
  *     state: "idle" | "syncing" | "rendering" | "failed" | "done",
@@ -34,12 +44,138 @@
  * probes cached for 2.5 s whoever asks, thumbnails replaced only when the list changes. It listens on localhost
  * unless `--host` says otherwise; the files it serves are limited to images and videos under the roots below.
  */
+
+// ------------------------------------------------------------------------------------- THE /api CONTRACT
+// GET /api answers a Status, read by the page every 3 s (scripts/drift-dash-ui/, built against these types). Every
+// field may be missing on an older server or a box that never answered: render what is there. Units are in the names
+// (…GB, …Pct, …S seconds, …At ms epoch) or said.
+/**
+ * @typedef {object} Status
+ * @property {number} now                ms epoch, the server's clock (ages: now − x)
+ * @property {LocalMachine} machine      this Mac's load (the gauges)
+ * @property {Slots} slots               this Mac's render slots (scripts/drift-slot.mjs)
+ * @property {{ streams: Stream[], waitingOnUser: string[] }} work   the coordinating session's out/drift/dashboard/work.json
+ * @property {Output[]} outputs          the newest review images and clips (served by GET /file?p=<path>)
+ * @property {Machine[]} machines        this Mac first (self: true), then the render machines of scripts/drift-farm-nodes.json
+ * @property {Sources} sources           where the machines' numbers came from
+ * @property {Farm} farm                 the render farm's queue (drift-farm.mjs)
+ * @property {object[]} nodes            raw drift-node heartbeats by node (kept for older pages; use machines)
+ *
+ * @typedef {object} LocalMachine
+ * @property {number} cores
+ * @property {number[]} load             1/5/15 min load averages
+ * @property {number} [memFreePct]
+ * @property {number} [gpuPct]           Apple GPU utilisation (ioreg)
+ * @property {number} [gpuMemGB]         GPU memory in use (unified)
+ * @property {string} [gpuName]          e.g. "Apple M3 Max"
+ * @property {number} [ramTotalGB]
+ * @property {string} power              "AC" | "battery 80%" | "" (not a Mac)
+ * @property {number} headlessPages      headless Chrome render pages open
+ * @property {{ pid: number, cpu: number, memMB: number, name: string }[]} top   busiest processes
+ *
+ * @typedef {object} Slots
+ * @property {number} limit
+ * @property {{ slot: string, pid: number, label: string, cmd: string, started: number, done?: number, total?: number, unit?: string, etaS?: number, last?: string }[]} held
+ * @property {{ pid: number, label: string, cmd: string, since: number }[]} waiting
+ * @property {{ label: string, cmd: string, out: string|null, exit: string, started: number|null, ended: number }[]} recent
+ *           out: the job's --out, absolute (null: it named none); started/ended ms epoch
+ *
+ * @typedef {object} Stream               one work stream of work.json
+ * @property {string} title
+ * @property {'rendering'|'coding'|'waiting'|'done'|'blocked'|'queued'|string} state
+ * @property {string} [detail]
+ * @property {string} [eta]              free text, e.g. "~40 min"
+ * @property {string|number} [since]
+ *
+ * @typedef {object} Output
+ * @property {string} path               absolute, for GET /file?p=
+ * @property {number} mtime              ms epoch
+ * @property {string} name
+ * @property {string} dir                its folder's name
+ * @property {boolean} video
+ *
+ * @typedef {'ready'|'busy-foreign'|'rendering'|'rendering+shared'|'waiting-foreign'|'syncing'|'failed'|'offline'} MachineState
+ *   ready: free for us · busy-foreign: someone else's load is over the yield policy · rendering: ours ·
+ *   rendering+shared: ours, with a foreign load beside it · waiting-foreign: our job waits for the GPU ·
+ *   syncing: drift-node pulling code/assets · failed: our last job failed (while its heartbeat is fresh)
+ *
+ * @typedef {object} Machine
+ * @property {string} key                stable id ("this-mac" or the fleet name)
+ * @property {string} name               fleet name ("linux-monster"), or "<host> · this Mac"
+ * @property {string|null} tailnet       MagicDNS label ("rnatwoofour-linux")
+ * @property {string} os
+ * @property {boolean} online
+ * @property {boolean} [self]            this Mac
+ * @property {MachineState} badge
+ * @property {string|null} why           busy-foreign: what is over the policy, in words
+ * @property {{ gpu: string, speed: number, battery: boolean }} [hint]   drift-farm-nodes.json's hints
+ * @property {{ name: string|null, utilPct: number|null, usedGB: number|null, totalGB: number|null, tempC: number|null, oursGB: number|null, othersGB: number|null, powerW?: number|null, powerLimitW?: number|null }} gpu
+ *           usedGB = oursGB + othersGB (VRAM; on this Mac unified memory in use, no split)
+ * @property {number|null} ramPct        RAM used
+ * @property {number|null} ramTotalGB
+ * @property {number|null} cpuPct        CPU in use (the box's agent; this Mac: its 1-min load over its cores)
+ * @property {{ name: string, state: string, vramGB: number|null }[]} services   the box's studio-manager services that run ("fluxrt 14.5 GB")
+ * @property {Job|null} job              our drift-node job there (while its heartbeat is fresh)
+ * @property {FarmJob|null} [farm]       the farm job running there
+ * @property {{ why: string, since: string, foreign?: { name: string, memGB: number|null }[] }|null} waiting   waiting-foreign: for whom
+ * @property {string|null} last          newest log line
+ * @property {string|null} error
+ * @property {{ state: string, job: string|null, seen: number }|null} lastRun   our last job, once its heartbeats stopped
+ * @property {string|null} power         "AC" | "battery 80%"
+ * @property {string|null} commit
+ * @property {string|null} bundle        asset bundle date, "20261029"
+ * @property {number|null} seen          ms epoch of our last heartbeat
+ * @property {'agent'|'hub'|null} source where the box's numbers came from
+ * @property {string|null} agentError    its agent did not answer: why
+ * @property {{ held: number, limit: number|null, waiting: number, jobs: string[] }} [slots]   this Mac only
+ *
+ * @typedef {object} Job                  a drift-node render (its heartbeat; drift-queue's status.json)
+ * @property {string} name               the queue job ("preview-2k")
+ * @property {number} chunk              1-based
+ * @property {number} chunks
+ * @property {number} frames             done in the whole job
+ * @property {number} framesTotal
+ * @property {number} [fps]
+ * @property {number} [etaS]             whole job
+ * @property {string} out
+ *
+ * @typedef {object} Sources
+ * @property {Record<string, { ok: boolean, at: number, error: string|null }>} agents   by fleet name: the box's studio-manager agent (http://<tailnet>:4310), polled every 5 s
+ * @property {{ url: string, ok: boolean, at: number, error: string|null, used: boolean }} hub   studio-manager's hub, the fallback (used: asked because an agent did not answer)
+ *
+ * @typedef {object} Farm
+ * @property {boolean} enabled
+ * @property {FarmJob[]} jobs            newest first: queued, running, then the finished of the last 24 h
+ * @property {{ node: string, state: 'waiting'|'busy'|'busy-foreign'|'offline', seen: number, speed: number, job: string|null }[]} workers
+ *
+ * @typedef {object} FarmJob
+ * @property {string} id
+ * @property {string} label              what it is, in a few words ("review stills tower_shots.json")
+ * @property {'still'|'clip'|'long'} kind
+ * @property {'uploading'|'queued'|'preparing'|'running'|'done'|'failed'|'cancelled'} state
+ * @property {string|null} node          the box that took it
+ * @property {string|null} prefer        asked for a box ("--farm eeg-msi")
+ * @property {number} createdAt          ms epoch
+ * @property {number|null} startedAt
+ * @property {number|null} endedAt
+ * @property {number|null} exitCode
+ * @property {string} base               the commit its code is based on (on origin)
+ * @property {{ done: number|null, total: number|null, unit: string|null, fps: number|null, etaS: number|null }} progress
+ * @property {number|null} estS          queued: its expected run time on the fastest box (measured speeds)
+ * @property {string|null} why           queued: why no box has it yet ("no worker online", "windows-monster busy (ComfyUI 18 GB)", "waiting for a faster box …")
+ * @property {string|null} last          newest output line
+ * @property {{ path: string, bytes: number }[]} results   files it sent back, each landed at its local path (path)
+ * @property {string|null} error
+ */
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cpus, loadavg, freemem, totalmem, platform } from 'node:os';
+import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
+import { farmNodes, fleetCards, macCard } from './drift-fleet.mjs';
+import { readYieldPolicy } from './drift-share.mjs';
+import { createFarmHub, farmToken } from './drift-farm.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -50,7 +186,9 @@ const arg = (name, fallback) => {
 const PORT = Number(arg('port', 5190));
 const HOST = arg('host', '127.0.0.1');
 const TAILNET = argv.includes('--tailnet');
-const NODES_FILE = join(ROOT, 'out/drift/dashboard/nodes.json');
+const NODES_FILE = process.env.DRIFT_DASH_NODES ?? join(ROOT, 'out/drift/dashboard/nodes.json');
+const HUB = arg('hub', 'http://localhost:4310').replace(/\/+$/, '');
+const FARM_NODES = join(ROOT, 'scripts/drift-farm-nodes.json');
 const SLOTS = process.env.DRIFT_SLOTS_DIR ?? join(ROOT, 'out/drift/.slots');
 const WORK = join(ROOT, 'out/drift/dashboard/work.json');
 /** where review outputs land: the coordinating session's scratchpad (from work.json, else $DRIFT_SCRATCH) and out/drift */
@@ -75,8 +213,15 @@ const readJson = (p) => {
   }
 };
 
+/** a slot log's first line, `<ISO time>  <command>` (drift-slot.mjs), as { at (ms epoch or null), cmd } */
+function stamped(line) {
+  const m = /^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s+(.*)$/.exec(String(line).trim());
+  return m ? { at: Date.parse(m[1]), cmd: m[2] } : { at: null, cmd: String(line).trim() };
+}
+
 /** a job's command in a few words: what kind, and the span or shot file it renders */
 function label(cmd) {
+  cmd = stamped(cmd).cmd;
   const o = (k) => cmd.match(new RegExp(`--${k}\\s+(\\S+)`))?.[1];
   const out = o('out');
   const at = out ? `  →  ${basename(out)}` : '';
@@ -149,11 +294,15 @@ function slots() {
         const pid = Number(f.slice(5));
         if (!alive(pid)) continue;
         const cmd = readFileSync(p, 'utf8');
-        waiting.push({ pid, label: label(cmd), since: statSync(p).mtimeMs });
+        waiting.push({ pid, label: label(cmd), cmd: cmd.trim(), since: statSync(p).mtimeMs });
       } else if (f.endsWith('.log')) {
         const text = readFileSync(p, 'utf8');
         const exit = text.match(/exit (\S+)\s*$/)?.[1];
-        if (exit !== undefined) recent.push({ label: label(text.split('\n')[0]), exit, ended: statSync(p).mtimeMs });
+        if (exit !== undefined) {
+          const { at, cmd } = stamped(text.split('\n')[0]);
+          const out = cmd.match(/--out\s+(\S+)/)?.[1];
+          recent.push({ label: label(cmd), cmd, out: out ? resolve(ROOT, out) : null, exit, started: at, ended: statSync(p).mtimeMs });
+        }
       }
     } catch {
       // taken or released while we looked
@@ -197,6 +346,8 @@ async function machine() {
         : Number.isFinite(smiMem) ? Math.round(smiMem / 102.4) / 10 : undefined,
       power: !mac ? '' : batt.includes("'AC Power'") ? 'AC' : `battery ${num(/(\d+)%/, batt) ?? '?'}%`,
       headlessPages: headless,
+      gpuName: mac ? cpus()[0]?.model : undefined,
+      ramTotalGB: Math.round(totalmem() / 2 ** 30),
       top,
     },
   };
@@ -232,7 +383,8 @@ function outputs(work) {
       if (e.name.startsWith('.')) continue;
       const p = join(dir, e.name);
       if (e.isDirectory()) {
-        if (depth < 3 && !/^(frames|clipall|chunks|raw|tiles|node_modules)$/.test(e.name)) walk(p, depth + 1);
+        // (dashui/: the console's own screenshots, not work)
+        if (depth < 3 && !/^(frames|clipall|chunks|raw|tiles|node_modules|dashui)$/.test(e.name)) walk(p, depth + 1);
       } else if (MEDIA[extname(e.name).toLowerCase()] && !/^(f_?|frame_?)?\d+\.(png|jpg)$/i.test(e.name)) {
         // (numbered frame dumps — a clip's frames pulled out to look at — are not outputs)
         try {
@@ -274,13 +426,113 @@ const fromTailnet = (ip = '') => {
   return ip.toLowerCase().startsWith('fd7a:115c:a1e0:');
 };
 
+/**
+ * THE RENDER MACHINES' OWN AGENTS (studio-manager's `yarn session serve`, :4310 on every box; the Mac reaches them by
+ * their tailnet names): /api/session/metrics and /status every 5 s, /devices every 30 s (it barely changes; the agent
+ * caches it a minute), each with a 2 s timeout, in the background so a page request never waits on a box.
+ */
+const agents = {};
+const pollAgent = async (n) => {
+  const base = n.agentUrl ?? `http://${n.tailnet}:4310`;
+  const get = (path) => fetch(`${base}${path}`, { signal: AbortSignal.timeout(2000) }).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from ${path}`))));
+  const cur = agents[n.name] ?? {};
+  const devicesDue = !cur.devicesAt || Date.now() - cur.devicesAt > 30_000;
+  const [m, st, dv] = await Promise.allSettled([get('/api/session/metrics'), get('/api/session/status'), devicesDue ? get('/api/session/devices') : Promise.resolve(cur.devices)]);
+  const why = (r) => (r.reason?.name === 'TimeoutError' ? 'no answer in 2 s' : String(r.reason?.cause?.code ?? r.reason?.message ?? r.reason));
+  agents[n.name] = {
+    ok: m.status === 'fulfilled',
+    at: Date.now(),
+    metrics: m.status === 'fulfilled' ? m.value : null,
+    status: st.status === 'fulfilled' ? st.value : cur.status ?? null,
+    devices: dv.status === 'fulfilled' ? dv.value : cur.devices ?? null,
+    devicesAt: dv.status === 'fulfilled' && devicesDue ? Date.now() : cur.devicesAt,
+    error: m.status === 'fulfilled' ? null : why(m),
+  };
+};
+const pollAgents = () => {
+  let allow = [];
+  try {
+    allow = farmNodes(FARM_NODES);
+  } catch {
+    return;
+  }
+  for (const n of allow) pollAgent(n).catch(() => {});
+  // the hub only when a box's agent does not answer (it may still know the box another way)
+  if (allow.some((n) => agents[n.name] && !agents[n.name].ok)) pollHub();
+};
+
+/**
+ * studio-manager's hub (header), the fallback: its newest /api/fleet answer, asked only while a box's own agent does
+ * not answer. A slow or absent hub costs one 2 s timeout per poll, nothing else.
+ */
+const hub = { url: HUB, ok: false, snapshot: null, at: 0, error: 'not asked yet' };
+const pollHub = async () => {
+  try {
+    const r = await fetch(`${HUB}/api/fleet`, { signal: AbortSignal.timeout(2000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    Object.assign(hub, { ok: true, snapshot: await r.json(), at: Date.now(), error: null });
+  } catch (e) {
+    Object.assign(hub, { ok: false, error: e?.name === 'TimeoutError' ? 'no answer in 2 s' : String(e?.cause?.code ?? e?.message ?? e) });
+  }
+};
+pollAgents();
+setInterval(pollAgents, 5_000).unref();
+
+/** the farm's view for /api (Farm); replaced by the farm's own once it is wired (drift-farm.mjs) */
+let farmView = () => ({ enabled: false, jobs: [], workers: [] });
+
+/**
+ * this Mac's name as the tailnet spells it: macOS's LocalHostName ("Laubs-MBP") in lower case ("laubs-mbp", its
+ * MagicDNS label), read once; elsewhere the hostname
+ */
+const MAC_NAME = (() => {
+  const r = platform() === 'darwin' ? spawnSync('scutil', ['--get', 'LocalHostName'], { encoding: 'utf8', timeout: 3000 }) : null;
+  const n = r?.status === 0 ? r.stdout.trim() : '';
+  return (n || hostname().replace(/\.local$/, '')).toLowerCase();
+})();
+
+/** Status.machines and Status.sources (scripts/drift-fleet.mjs): this Mac, then the render machines */
+function machinesNow(m, sl, farm) {
+  let allow = [];
+  let policy;
+  try {
+    allow = farmNodes(FARM_NODES);
+    policy = readYieldPolicy(ROOT);
+  } catch (e) {
+    return { machines: [], sources: { agents: {}, hub: { url: HUB, ok: false, at: 0, error: String(e.message), used: false } } };
+  }
+  const hubUsed = allow.some((n) => agents[n.name] && !agents[n.name].ok);
+  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl }), policy, now: Date.now() });
+  const sources = { agents: Object.fromEntries(allow.map((n) => [n.name, { ok: agents[n.name]?.ok ?? false, at: agents[n.name]?.at ?? 0, error: agents[n.name] ? agents[n.name].error : 'not asked yet' }])), hub: { url: HUB, ok: hub.ok, at: hub.at, error: hub.error, used: hubUsed } };
+  return { machines, sources };
+}
+
+/** @returns {Promise<Status>} */
 async function status() {
   const work = readJson(WORK);
-  return { now: Date.now(), machine: await machine(), slots: slots(), work: work ?? { streams: [], waitingOnUser: [] }, outputs: outputs(work), nodes: [...nodes.values()].sort((a, b) => String(a.node).localeCompare(String(b.node))) };
+  const [m, sl] = [await machine(), slots()];
+  const farm = farmView();
+  const { machines, sources } = machinesNow(m, sl, farm);
+  // (fleet: the same cards under the name the previous page read, until scripts/drift-dash-ui/ replaces it)
+  const fleet = { hub: { url: HUB, ok: !sources.hub.used || hub.ok, error: hub.error }, cards: machines };
+  return { now: Date.now(), machine: m, slots: sl, work: work ?? { streams: [], waitingOnUser: [] }, outputs: outputs(work), machines, sources, farm, fleet, nodes: [...nodes.values()].sort((a, b) => String(a.node).localeCompare(String(b.node))) };
+}
+
+/** the render farm's hub (header); off, with the reason on the console, when farm.json cannot be read */
+let farm = null;
+try {
+  const tokenFile = process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json');
+  const t = farmToken(tokenFile);
+  if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token. Each render machine needs it in its drift-node.json: "farm": { "token": "<the token in ${tokenFile}>" }`);
+  farm = createFarmHub({ dir: process.env.DRIFT_FARM_DIR ?? join(ROOT, 'out/drift/farm'), token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), log: (m) => console.log(`[dash] ${m}`) });
+  farmView = farm.view;
+} catch (e) {
+  console.error(`[dash] farm off: ${e.message}`);
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (farm && (await farm.handle(req, res, url))) return;
   if (url.pathname === '/report' && req.method === 'POST') {
     if (!fromTailnet(req.socket.remoteAddress)) {
       res.writeHead(403).end();
@@ -317,12 +569,33 @@ const server = createServer(async (req, res) => {
       res.writeHead(404).end();
       return;
     }
-    res.writeHead(200, { 'content-type': type, 'cache-control': 'max-age=3600' });
+    // RANGE REQUESTS: Safari and iOS ask a video for its bytes in ranges, and play nothing served whole
+    const size = statSync(p).size;
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    if (m && (m[1] !== '' || m[2] !== '')) {
+      const start = m[1] === '' ? Math.max(0, size - Number(m[2])) : Number(m[1]);
+      const end = m[1] === '' || m[2] === '' ? size - 1 : Math.min(size - 1, Number(m[2]));
+      if (start > end || start >= size) {
+        res.writeHead(416, { 'content-range': `bytes */${size}` }).end();
+        return;
+      }
+      res.writeHead(206, { 'content-type': type, 'content-range': `bytes ${start}-${end}/${size}`, 'content-length': end - start + 1, 'accept-ranges': 'bytes', 'cache-control': 'max-age=3600' });
+      createReadStream(p, { start, end }).pipe(res);
+      return;
+    }
+    res.writeHead(200, { 'content-type': type, 'content-length': size, 'accept-ranges': 'bytes', 'cache-control': 'max-age=3600' });
     createReadStream(p).pipe(res);
     return;
   }
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(PAGE);
+  // the page: the files of scripts/drift-dash-ui/ (flat; "/" is index.html), read from disk on each request
+  const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+  const type = /^[\w.-]+$/.test(name) && UI_TYPES[extname(name)];
+  if (!type || !existsSync(join(UI_DIR, name))) {
+    res.writeHead(404).end();
+    return;
+  }
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
+  createReadStream(join(UI_DIR, name)).pipe(res);
 });
 server.listen(PORT, HOST, () => console.log(`[dash] http://${HOST === '127.0.0.1' ? 'localhost' : HOST}:${PORT}`));
 if (TAILNET) {
@@ -345,97 +618,6 @@ if (TAILNET) {
   bindTailnet();
 }
 
-const PAGE = /* html */ `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Drift Studio</title>
-<style>
-:root{--bg:#0e1416;--card:#162024;--line:#22323a;--ink:#e6efe9;--dim:#8aa29a;--sea:#3fb6a8;--sun:#f2b45c;--coral:#ef7a6a;--sand:#d9c49b;--ok:#7cc98a}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif}
-main{max-width:1100px;margin:0 auto;padding:16px}
-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-h1{font-size:20px;margin:0;letter-spacing:.02em}h1 .w{color:var(--sea)}
-.sub{color:var(--dim);font-size:12px}
-h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--dim);margin:18px 0 8px}
-.grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
-.gauge .v{font-size:22px;font-weight:600}.gauge .k{color:var(--dim);font-size:12px}
-.bar{height:6px;background:#0b1012;border-radius:4px;overflow:hidden;margin-top:6px}.bar i{display:block;height:100%;background:var(--sea);border-radius:4px;transition:width .6s}
-.bar.warm i{background:var(--sun)}.bar.hot i{background:var(--coral)}
-.slot{display:grid;gap:4px}.slot .t{font-weight:600}.slot .m{color:var(--dim);font-size:12px;font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.free{color:var(--dim);font-style:italic}
-.stream{display:grid;grid-template-columns:auto 1fr auto;gap:4px 10px;align-items:start}
-.pill{font-size:11px;padding:2px 8px;border-radius:99px;background:#22323a;color:var(--dim);white-space:nowrap}
-.pill.rendering{background:#13403b;color:#8fe3d6}.pill.coding{background:#2c3550;color:#aebcf2}.pill.waiting{background:#463718;color:var(--sun)}
-.pill.done{background:#1e3a24;color:var(--ok)}.pill.blocked{background:#4a2420;color:var(--coral)}.pill.queued{background:#3a2f1c;color:var(--sand)}
-.stream .d{grid-column:2/4;color:var(--dim);font-size:13px}.stream .eta{color:var(--sand);font-size:12px;white-space:nowrap}
-.list{display:grid;gap:8px}
-ul.you{margin:0;padding-left:18px}ul.you li{margin:3px 0}
-.thumbs{display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
-.thumbs a{display:block;color:var(--dim);font-size:11px;text-decoration:none;overflow:hidden}
-.thumbs img{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#0b1012}
-.thumbs .vid{aspect-ratio:16/10;border-radius:8px;border:1px solid var(--line);display:grid;place-items:center;background:#0b1012;font-size:28px;color:var(--sea)}
-.procs{font-size:12px;color:var(--dim);font-family:ui-monospace,monospace}.procs b{color:var(--ink);font-weight:500}
-.nodes{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}.node .t{display:flex;justify-content:space-between;gap:8px;font-weight:600}
-.node .k{color:var(--dim);font-size:12px}.node.off{opacity:.55}.pill.idle{background:#22323a}.pill.syncing{background:#2c3550;color:#aebcf2}.pill.failed{background:#4a2420;color:var(--coral)}.pill.offline{background:#1a2226;color:#5d6f69}
-.wave{display:inline-block;animation:bob 3s ease-in-out infinite}@keyframes bob{50%{transform:translateY(-2px)}}
-@media (prefers-reduced-motion:reduce){.wave{animation:none}}
-</style></head><body><main>
-<header><h1><span class="wave">⛵</span> The Drift <span class="w">studio</span></h1><span class="sub" id="upd">connecting…</span></header>
-<section class="grid" id="gauges"></section>
-<h2>Render slots · this Mac</h2><section class="list" id="slots"></section>
-<h2>Studio machines</h2><section class="grid nodes" id="nodes"></section>
-<h2>Work streams</h2><section class="list" id="streams"></section>
-<h2>Waiting on you</h2><section class="card" id="you"></section>
-<h2>Latest outputs</h2><section class="thumbs" id="outs"></section>
-<h2>Busiest processes</h2><section class="card procs" id="procs"></section>
-</main><script>
-const $=(id)=>document.getElementById(id);
-const esc=(s)=>String(s??'').replace(/[&<>"]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const dur=(s)=>{if(s==null||!isFinite(s))return'';s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h?h+'h '+m+'m':m?m+'m '+String(x).padStart(2,'0')+'s':x+'s'};
-const ago=(ms,now)=>dur((now-ms)/1000);
-// (a load bar warms as it fills; a GPU or progress bar is plain: a busy GPU is the point)
-const bar=(pct,plain)=>'<div class="bar '+(plain?'':pct>85?'hot':pct>60?'warm':'')+'"><i style="width:'+Math.min(100,Math.max(0,pct||0))+'%"></i></div>';
-const gauge=(k,v,pct,sub,plain)=>'<div class="card gauge"><div class="k">'+k+'</div><div class="v">'+v+'</div>'+(pct!=null?bar(pct,plain):'')+(sub?'<div class="k">'+sub+'</div>':'')+'</div>';
-let lastOuts='';
-function render(d){
-  const m=d.machine,now=d.now;
-  $('upd').textContent='updated '+new Date(now).toLocaleTimeString()+' · '+m.power;
-  const cpuPct=Math.round(100*m.load[0]/m.cores);
-  $('gauges').innerHTML=gauge('GPU',(m.gpuPct??'–')+'%',m.gpuPct,m.gpuMemGB!=null?m.gpuMemGB+' GB in use':'',true)
-    +gauge('CPU load',m.load[0]+' / '+m.cores,cpuPct,'5 min '+m.load[1])
-    +gauge('Memory free',(m.memFreePct??'–')+'%',m.memFreePct!=null?100-m.memFreePct:null,'bar = used')
-    +gauge('Renders',d.slots.held.length+' / '+d.slots.limit+' slots',100*d.slots.held.length/d.slots.limit,d.slots.waiting.length?d.slots.waiting.length+' queued':'none queued');
-  let s='';
-  for(const h of d.slots.held){
-    const pct=h.total?100*h.done/h.total:null;
-    const prog=h.total?h.done+' / '+h.total+' '+h.unit:(h.done?h.done+' '+h.unit+' done':'booting page, compiling shaders…');
-    s+='<div class="card slot"><div class="t">slot '+esc(h.slot)+' · '+esc(h.label)+'</div>'+(pct!=null?bar(pct,true):bar(0,true))
-      +'<div class="sub">'+prog+' · running '+ago(h.started,now)+(h.etaS!=null?' · <b style="color:var(--sand)">~'+dur(h.etaS)+' left</b>':'')+'</div>'
-      +'<div class="m">'+esc(h.last)+'</div></div>';
-  }
-  for(let i=d.slots.held.length;i<d.slots.limit;i++)s+='<div class="card free">free slot — GPU available</div>';
-  for(const w of d.slots.waiting)s+='<div class="card slot"><div class="t"><span class="pill queued">queued</span> '+esc(w.label)+'</div><div class="sub">waiting '+ago(w.since,now)+'</div></div>';
-  $('slots').innerHTML=s;
-  const nd=d.nodes||[];
-  $('nodes').innerHTML=nd.length?nd.map(n=>{const off=now-n.seen>90000,j=n.job||{},g=n.gpu||{},state=off?'offline':n.state||'idle';
-    const pct=j.framesTotal?100*j.frames/j.framesTotal:null;
-    return '<div class="card node'+(off?' off':'')+'"><div class="t"><span>'+esc(n.node)+'</span><span class="pill '+esc(state)+'">'+esc(state)+'</span></div>'
-      +'<div class="k">'+esc([n.os,g.name,n.power].filter(Boolean).join(' · '))+'</div>'
-      +(g.utilPct!=null?'<div class="k">GPU '+g.utilPct+'%'+(g.memUsedGB!=null?' · '+g.memUsedGB+(g.memTotalGB?' / '+g.memTotalGB:'')+' GB':'')+'</div>'+bar(g.utilPct,true):'')
-      +(j.name?'<div style="margin-top:6px"><b>'+esc(j.name)+'</b>'+(j.chunks?' · chunk '+j.chunk+'/'+j.chunks:'')+'</div>'+(pct!=null?bar(pct,true):'')
-        +'<div class="k">'+(j.framesTotal?j.frames+' / '+j.framesTotal+' frames':'')+(j.fps?' · '+(+j.fps).toFixed(2)+' fps':'')+(j.etaS!=null?' · <b style="color:var(--sand)">~'+dur(j.etaS)+' left</b>':'')+'</div>':'')
-      +(n.error?'<div class="k" style="color:var(--coral)">'+esc(n.error)+'</div>':'')
-      +'<div class="m k" style="font-family:ui-monospace,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(n.last||'')+'</div>'
-      +'<div class="k">'+esc(n.commit||'')+(n.bundle?' · bundle '+esc(n.bundle):'')+' · seen '+ago(n.seen,now)+' ago</div></div>'}).join('')
-    :'<div class="card free">no render nodes have reported yet — they appear here once <code>drift-node.mjs</code> runs on them</div>';
-  const st=d.work.streams||[];
-  $('streams').innerHTML=st.length?st.map(x=>'<div class="card stream"><span class="pill '+esc(x.state)+'">'+esc(x.state)+'</span><b>'+esc(x.title)+'</b><span class="eta">'+esc(x.eta||'')+'</span><div class="d">'+esc(x.detail||'')+(x.since?' · since '+new Date(x.since).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'')+'</div></div>').join(''):'<div class="card free">no streams listed</div>';
-  const you=d.work.waitingOnUser||[];
-  $('you').innerHTML=you.length?'<ul class="you">'+you.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>':'<span class="free">nothing — all clear</span>';
-  const key=d.outputs.map(o=>o.path+o.mtime).join('|');
-  if(key!==lastOuts){lastOuts=key;$('outs').innerHTML=d.outputs.map(o=>{const u='/file?p='+encodeURIComponent(o.path);return '<a href="'+u+'" target="_blank">'+(o.video?'<div class="vid">▶</div>':'<img loading="lazy" src="'+u+'">')+esc(o.dir+'/'+o.name)+' · '+ago(o.mtime,now)+' ago</a>'}).join('')}
-  $('procs').innerHTML=m.top.map(p=>'<div><b>'+p.cpu.toFixed(0).padStart(3)+'%</b> '+esc(p.name)+' <span>('+p.memMB+' MB, pid '+p.pid+')</span></div>').join('')+(m.headlessPages?'<div>'+m.headlessPages+' headless render page(s) open</div>':'');
-}
-async function tick(){if(document.hidden)return;try{const r=await fetch('/api');render(await r.json())}catch{$('upd').textContent='dashboard server not reachable'}}
-tick();setInterval(tick,3000);document.addEventListener('visibilitychange',tick);
-</script></body></html>`;
+/** the page's files (index.html, app.js, app.css, mock.js): the studio console, built against the /api types above */
+const UI_DIR = join(ROOT, 'scripts/drift-dash-ui');
+const UI_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };

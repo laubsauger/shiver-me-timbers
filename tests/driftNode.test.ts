@@ -11,7 +11,7 @@
  *     bundle folder, a second sync of the same bundle copies nothing, and a half-copied tarball never stays.
  *   - THE PRESETS: each one is a queue drift-queue.mjs accepts (its own loader, in a dry run), with "to": "end" the
  *     show's length and the output in one folder per state of code and data.
- * Plus the Windows-editor JSON (a BOM, CRLF) and the nvidia-smi line the dashboard shows.
+ * Plus the Windows-editor JSON (a BOM, CRLF).
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -19,8 +19,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { createServer } from 'node:http';
+import { createFarmHub } from '../scripts/drift-farm.mjs';
 import {
-  contentId, decideBundle, needsLength, parseBundleSource, parseJsonc, parseNvidiaSmi, parseSet, readConfig, resolveJobs, stateLabel, syncBundle,
+  contentId, decideBundle, farmSource, needsLength, parseBundleSource, parseJsonc, parseSet, readConfig, resolveJobs, stateLabel, syncBundle,
   type BundleRecord, type QueueSpec,
 } from '../scripts/drift-node-lib.mjs';
 
@@ -193,6 +195,32 @@ describe('syncBundle from a folder (the hand-copied Google Drive / USB case), in
   });
 });
 
+describe('syncBundle from the farm hub (the Windows boxes: no SSH, the bundle over the farm\'s door)', () => {
+  it('reads the pointer and fetches, checks and unpacks the tarball over HTTP; a box needs no token', async () => {
+    const share = join(scratch, 'hub-bundles');
+    makeBundle(share, 'drift-assets-20261031.tar.gz', { 'public/drift/web/v.bin': 'web', 'public/drift/clouds/c.bin': 'cloud' });
+    const hub = createFarmHub({ dir: join(scratch, 'hub-farm'), token: 'tok-tok-tok-tok-tok-tok', hints: () => [{ name: 'windows-monster', tailnetIp: '127.0.0.1' }], bundleDir: share });
+    const server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const a = server.address();
+    const url = `http://127.0.0.1:${typeof a === 'object' && a ? a.port : 0}`;
+    try {
+      const root = join(scratch, 'node-from-hub');
+      mkdirSync(root, { recursive: true });
+      // (127.0.0.1 stands in for the box's tailnet address here)
+      const source = farmSource({ hub: url }, null)!;
+      const r = await syncBundle({ root, source, say: () => {}, bundleScript: BUNDLE_SCRIPT });
+      expect(r.changed).toBe(true);
+      expect(readFileSync(join(root, 'public/drift/clouds/c.bin'), 'utf8')).toBe('cloud');
+      // the same again: nothing fetched
+      expect((await syncBundle({ root, source, prev: r.record, say: () => {}, bundleScript: BUNDLE_SCRIPT })).changed).toBe(false);
+    } finally {
+      hub.close();
+      server.close();
+    }
+  });
+});
+
 describe('the presets', () => {
   const presets = (parseJsonc(readFileSync(join(ROOT, 'scripts/drift-node-presets.jsonc'), 'utf8')) as { presets: Record<string, QueueSpec> }).presets;
 
@@ -231,12 +259,5 @@ describe('the presets', () => {
     expect(set).toEqual({ msaa: 0, ss: 1, codec: 'ffv1' });
     expect(resolveJobs(presets.smoke, { set }).jobs.every((j) => j.msaa === 0 && j.ss === 1)).toBe(true);
     expect(() => parseSet(['sss=1'])).toThrow(/not a job field/);
-  });
-});
-
-describe('the heartbeat', () => {
-  it('reads nvidia-smi\'s csv line as the dashboard shows it (MiB → GB)', () => {
-    expect(parseNvidiaSmi('NVIDIA GeForce RTX 4090, 97, 18432, 24564\r\n')).toEqual({ name: 'NVIDIA GeForce RTX 4090', utilPct: 97, memUsedGB: 18, memTotalGB: 24 });
-    expect(parseNvidiaSmi('')).toBeUndefined();
   });
 });

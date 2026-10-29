@@ -7,8 +7,10 @@ export interface NodeConfig {
   dashboard: string | false | undefined;
   name: string;
   renders: string;
+  farm: { hub?: string; token?: string } | null;
 }
-export type BundleSource = { kind: 'ssh'; target: string; host: string; path: string; label: string } | { kind: 'folder'; path: string; label: string };
+export type BundleSource = { kind: 'ssh'; target: string; host: string; path: string; label: string } | { kind: 'folder'; path: string; label: string } | { kind: 'farm'; hub: string; token: string | null; label: string };
+export function farmSource(farm: { hub?: string; token?: string } | null | undefined, hub?: string | null): BundleSource | null;
 export interface BundlePointer {
   file: string;
   bytes: number;
@@ -75,6 +77,5 @@ export function parseSet(list: string[]): Record<string, unknown>;
 export function resolveJobs(spec: QueueSpec, o?: { length?: number | null; out?: string | null; set?: Record<string, unknown> }): QueueSpec;
 export function needsLength(spec: QueueSpec, set?: Record<string, unknown>): boolean;
 export function stateLabel(commit: string, dirty: boolean, content: string | null): string;
-export function parseNvidiaSmi(text: string): { name: string; utilPct?: number; memUsedGB?: number; memTotalGB?: number } | undefined;
 export function jobOfQueueStatus(st: unknown): { name: string; chunk: number; chunks: number; frames: number; framesTotal: number; fps?: number; etaS?: number; out: string } | undefined;
 export function startHeartbeat(url: string | null, payload: () => unknown, everyMs?: number): { url: string | null; beat: () => Promise<unknown>; stop: () => Promise<unknown> };

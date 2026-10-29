@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  THE STUDIO CONSOLE, the page of scripts/drift-dash.mjs (served from here as static files). One screen for a fleet of
+  render machines and the agents' work (the user, 2026-10-29, on the first page: "this is not gonna fly for handling a
+  fleet of machines, for me to see what's going on"). app.js polls /api every 3 s and patches the DOM in place;
+  ?mock swaps in fake machines and farm jobs (mock.js), ?mock=yield a second set of states.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Drift Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23172630'/%3E%3Cpath d='M4 19c3.5 0 3.5-6 7-6s3.5 6 7 6 3.5-6 7-6' fill='none' stroke='%2338c7b0' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<!-- the state glyphs: drawn once, used by every chip (a glyph per state, so no state is colour alone) -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8v10.4L13 8z"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6"/></symbol>
+  <symbol id="i-diamond" viewBox="0 0 16 16"><path d="M8 1.8 14.2 8 8 14.2 1.8 8z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 16 16"><path d="M3.8 2.8h3v10.4h-3zM9.2 2.8h3v10.4h-3z"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 16 16"><path d="M12.6 9.2A4.8 4.8 0 1 1 11 4.4" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/><path d="M14 1.6v5.2H8.8z"/></symbol>
+  <symbol id="i-queue" viewBox="0 0 16 16"><circle cx="3.2" cy="8" r="1.9"/><circle cx="8" cy="8" r="1.9"/><circle cx="12.8" cy="8" r="1.9"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M2.8 8.6 6.3 12 13.4 4.4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.9" fill="none" stroke="currentColor" stroke-width="2.1"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 16 16"><path d="M2.4 13.6l.9-3.4 7.6-7.6 2.5 2.5-7.6 7.6z"/></symbol>
+  <symbol id="i-block" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.4" fill="none" stroke="currentColor" stroke-width="2.1"/><path d="M4.3 11.7 11.7 4.3" stroke="currentColor" stroke-width="2.1"/></symbol>
+  <symbol id="i-ask" viewBox="0 0 16 16"><path d="M8 1.6a6.4 6.4 0 1 0 0 12.8A6.4 6.4 0 0 0 8 1.6zm-.9 8.9h1.8v1.8H7.1zm.9-6.8c1.6 0 2.7.9 2.7 2.2 0 1.7-1.8 1.8-1.8 3.3H7.1c0-2.2 1.8-2.3 1.8-3.2 0-.5-.4-.8-.9-.8-.6 0-1 .4-1 1H5.2c0-1.5 1.2-2.5 2.8-2.5z" fill-rule="evenodd"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.4 15.2 14H.8zM7.1 5.6v4.6h1.8V5.6zm0 5.7v1.7h1.8v-1.7z" fill-rule="evenodd"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 32 16"><path d="M1 10c3.5 0 3.5-5 7-5s3.5 5 7 5 3.5-5 7-5 3.5 5 7 5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="brand">
+    <svg class="mark" aria-hidden="true"><use href="#i-wave"/></svg>
+    <h1>The Drift <span>studio console</span></h1>
+  </div>
+  <div class="live" id="live" role="status">Connecting to the dashboard server…</div>
+</header>
+
+<main>
+  <section class="fleet" aria-labelledby="h-fleet">
+    <div class="sec-head"><h2 id="h-fleet">Fleet</h2><span class="sec-meta" id="fleet-meta"></span></div>
+    <div id="fleet-note"></div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <div class="work">
+    <section class="jobs" aria-labelledby="h-jobs">
+      <div class="sec-head"><h2 id="h-jobs">Render jobs</h2><span class="sec-meta" id="jobs-meta"></span></div>
+      <div class="jt" id="jobs" role="table" aria-labelledby="h-jobs"></div>
+    </section>
+
+    <section class="you" aria-labelledby="h-you">
+      <div class="sec-head"><h2 id="h-you">Waiting on you</h2><span class="you-n" id="you-n"></span></div>
+      <ul id="you"></ul>
+    </section>
+
+    <section class="streams" aria-labelledby="h-streams">
+      <div class="sec-head"><h2 id="h-streams">Work streams</h2><span class="sec-meta" id="streams-meta"></span></div>
+      <div id="streams"></div>
+    </section>
+  </div>
+
+  <section class="outs" aria-labelledby="h-outs">
+    <div class="sec-head"><h2 id="h-outs">Latest outputs</h2><span class="sec-meta">Click one to open it</span></div>
+    <div class="thumbs" id="outs"></div>
+  </section>
+</main>
+
+<dialog class="viewer" id="viewer" aria-labelledby="viewer-cap">
+  <div class="v-bar">
+    <span class="v-cap" id="viewer-cap"></span>
+    <a class="v-btn" id="viewer-open" target="_blank" rel="noopener">Open file</a>
+    <button class="v-btn" type="button" data-step="-1" aria-label="Previous output">Previous</button>
+    <button class="v-btn" type="button" data-step="1" aria-label="Next output">Next</button>
+    <button class="v-btn" type="button" id="viewer-close">Close</button>
+  </div>
+  <div class="v-stage" id="viewer-stage"></div>
+</dialog>
+</body>
+</html>

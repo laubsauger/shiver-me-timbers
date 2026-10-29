@@ -57,7 +57,9 @@ export function parseJsonc(text) {
   return JSON.parse(clean);
 }
 
-const CONFIG_KEYS = ['bundle', 'dashboard', 'name', 'renders'];
+// ("yield": the shared-machine policy, read by drift-share.mjs readYieldPolicy, which checks its keys; "farm": the
+// render farm, { hub, token } — drift-farm.mjs)
+const CONFIG_KEYS = ['bundle', 'dashboard', 'name', 'renders', 'yield', 'farm'];
 
 /**
  * this machine's config: drift-node.json in the repo root, each key overridable from the environment for one shell
@@ -78,6 +80,11 @@ export function readConfig(root, env = process.env) {
     }
     if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: an object, { "bundle": "…" }`);
     for (const k of Object.keys(cfg)) if (!CONFIG_KEYS.includes(k)) throw new Error(`${file}: unknown key "${k}" (it takes ${CONFIG_KEYS.join(', ')})`);
+    // (the token is optional: a farm box is known to the hub by its tailnet address, drift-farm.mjs AUTH)
+    const f = cfg.farm;
+    if (f !== undefined && (f === null || typeof f !== 'object' || (f.token === undefined && f.hub === undefined) || (f.token !== undefined && (typeof f.token !== 'string' || f.token.length < 16)) || (f.hub !== undefined && !/^https?:\/\//.test(f.hub)))) {
+      throw new Error(`${file}: "farm" is { "hub": "http://<mac>:5190" } (and, for a machine not in scripts/drift-farm-nodes.json, "token": "<the Mac's farm.json token>")`);
+    }
   }
   const dash = env.DRIFT_DASHBOARD !== undefined ? env.DRIFT_DASHBOARD : cfg.dashboard;
   return {
@@ -87,7 +94,18 @@ export function readConfig(root, env = process.env) {
     dashboard: dash === undefined ? undefined : dash === false || dash === '' || dash === '0' ? false : String(dash),
     name: env.DRIFT_NODE_NAME || cfg.name || hostname(),
     renders: cfg.renders || 'out/drift/renders',
+    farm: env.DRIFT_FARM_TOKEN || env.DRIFT_FARM_HUB ? { hub: env.DRIFT_FARM_HUB ?? cfg.farm?.hub, token: env.DRIFT_FARM_TOKEN ?? cfg.farm?.token } : cfg.farm ?? null,
   };
+}
+
+/**
+ * the render farm's hub as a bundle source (the Windows boxes have no SSH: GET /farm/bundle/… with the farm token);
+ * `hub` from "farm".hub, else the dashboard's URL
+ */
+export function farmSource(farm, hub) {
+  const url = (farm?.hub ?? hub ?? '').replace(/\/+$/, '');
+  if (!farm || !url) return null;
+  return { kind: 'farm', hub: url, token: farm.token ?? null, label: `${url} (the farm hub)` };
 }
 
 /** what to put in drift-node.json, printed when there is none (or it has no "bundle") */
@@ -138,7 +156,8 @@ export function parseBundleSource(src) {
 export function dashboardUrl(cfg, source) {
   if (cfg.dashboard === false) return null;
   if (typeof cfg.dashboard === 'string') return cfg.dashboard.replace(/\/+$/, '');
-  return source?.kind === 'ssh' ? `http://${source.host}:5190` : null;
+  if (cfg.farm?.hub) return cfg.farm.hub.replace(/\/+$/, '');
+  return source?.kind === 'ssh' ? `http://${source.host}:5190` : source?.kind === 'farm' ? source.hub : null;
 }
 
 // ------------------------------------------------------------------------------------------------- the bundle
@@ -230,6 +249,12 @@ function checkPointer(p, where) {
  * latest-assets.json, else the newest drift-assets-<date>.tar.gz there ({ fallback: true }, no sha256 or content)
  */
 export async function readPointer(source, root) {
+  if (source.kind === 'farm') {
+    const where = `${source.hub}/farm/bundle/${pointerName()}`;
+    const r = await fetch(where, { headers: source.token ? { authorization: `Bearer ${source.token}` } : {}, signal: AbortSignal.timeout(10_000) }).catch((e) => ({ ok: false, status: 0, text: async () => String(e?.cause?.code ?? e.message) }));
+    if (!r.ok) throw new Error(`cannot read ${where}: ${r.status} ${(await r.text()).slice(0, 200)}${r.status === 401 ? ' — the farm token in drift-node.json is not the Mac\'s (farm.json)' : r.status === 0 ? ' — is the Mac awake, its dashboard running with --tailnet, Tailscale up here?' : ''}`);
+    return checkPointer(await r.json(), where);
+  }
   if (source.kind === 'ssh') {
     const file = `${source.path}/${pointerName()}`;
     const r = await run('ssh', [...SSH_OPTS, source.target, 'cat', file]);
@@ -310,7 +335,7 @@ async function copyWithProgress(src, dst, total, say) {
 export async function syncBundle({ root, source, prev = null, dryRun = false, say = console.log, bundleScript, tar = 'tar' }) {
   const bundleDir = join(root, 'out/drift-bundle');
   const pointer = await readPointer(source, root);
-  const where = source.kind === 'ssh' ? `${source.target}:${source.path}` : resolve(root, source.path);
+  const where = source.kind === 'ssh' ? `${source.target}:${source.path}` : source.kind === 'farm' ? `${source.hub}/farm/bundle` : resolve(root, source.path);
   say(`  source: ${where}/${pointer.file} (${mb(pointer.bytes)}${pointer.created ? `, built ${pointer.created.slice(0, 16).replace('T', ' ')}` : ''}${pointer.commit ? ` at ${pointer.commit}` : ''})`);
   const man = installedManifest(root);
   const installed = man ? contentId(man.files) : null;
@@ -342,7 +367,23 @@ export async function syncBundle({ root, source, prev = null, dryRun = false, sa
     const part = `${local}.part`;
     rmSync(part, { force: true });
     const t0 = Date.now();
-    if (source.kind === 'ssh') {
+    if (source.kind === 'farm') {
+      say(`  fetching ${source.hub}/farm/bundle/${pointer.file} (${mb(pointer.bytes)})`);
+      const r = await fetch(`${source.hub}/farm/bundle/${pointer.file}`, { headers: source.token ? { authorization: `Bearer ${source.token}` } : {}, signal: AbortSignal.timeout(3_600_000) });
+      if (!r.ok) throw new Error(`fetching ${pointer.file} from the farm hub: ${r.status}`);
+      const { Readable } = await import('node:stream');
+      const src = Readable.fromWeb(r.body);
+      let n = 0;
+      let last = Date.now();
+      src.on('data', (c) => {
+        n += c.length;
+        if (Date.now() - last > 5000) {
+          last = Date.now();
+          say(`  fetched ${mb(n)} of ${mb(pointer.bytes)}`);
+        }
+      });
+      await pipeline(src, createWriteStream(part));
+    } else if (source.kind === 'ssh') {
       // scp's own progress meter when this is a terminal (inherit); relative names in the bundle folder, so a
       // Windows drive letter is never read as a host (C:…) and spaces in this machine's path never reach a shell
       say(`  scp ${source.target}:${source.path}/${pointer.file} (${mb(pointer.bytes)})`);
@@ -442,15 +483,6 @@ export const needsLength = (spec, set = {}) => set.to === 'end' || (set.to === u
 export const stateLabel = (commit, dirty, content) => `${commit}${dirty ? '-dirty' : ''}-${content ? content.slice(0, 6) : 'nobundle'}`;
 
 // --------------------------------------------------------------------------------------------- the heartbeat
-/** nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits → the report's gpu */
-export function parseNvidiaSmi(text) {
-  const line = String(text).split(/\r?\n/).find((l) => l.trim());
-  if (!line) return undefined;
-  const [name, util, used, total] = line.split(',').map((s) => s.trim());
-  const gb = (mib) => (Number.isFinite(Number(mib)) && mib !== '' ? Math.round(Number(mib) / 102.4) / 10 : undefined);
-  return { name, utilPct: Number.isFinite(Number(util)) && util !== '' ? Number(util) : undefined, memUsedGB: gb(used), memTotalGB: gb(total) };
-}
-
 /** the queue's status.json (drift-queue.mjs) → the report's job */
 export function jobOfQueueStatus(st) {
   const j = st?.job;

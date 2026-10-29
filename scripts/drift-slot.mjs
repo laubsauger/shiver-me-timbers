@@ -20,6 +20,15 @@
  * going on … and how long it's gonna take"): a job waiting for a slot leaves `wait-<pid>` (its command) here, and a
  * running job's output is copied to `<slot>.log` beside its slot file as well as to the terminal, so the dashboard can
  * show the queue and read a clip's `[review] n/N` progress. The log stays after the job, until the slot's next job.
+ *
+ * ON THE FARM (scripts/drift-farm-client.mjs; the user, 2026-10-29: "make sure that these machines get fat work …
+ * so we have to wait less"): `--farm [auto|<box>]` (or DRIFT_FARM=auto in the environment: every agent's job, with
+ * one variable) sends the command to a studio render machine instead of a slot here, through this Mac's farm hub
+ * (drift-dash.mjs, :5190; token from farm.json). Its output shows here as it runs, and its files land at the --out
+ * paths it named, as if it had run here; files it reads outside the code are sent along. `auto`: the best free box,
+ * and with none free (or none taking it in 60 s), a slot here as before. `--local` overrides DRIFT_FARM.
+ *
+ *   node scripts/drift-slot.mjs --farm auto -- node scripts/drift-review-stills.mjs shots.json --out out/drift/x
  */
 import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, writeSync, closeSync, readFileSync, unlinkSync, readdirSync, writeFileSync, createWriteStream } from 'node:fs';
@@ -84,6 +93,30 @@ if (!cmd.length) {
 if (WEIGHT > SLOTS) {
   console.error(`drift-slot: a job of weight ${WEIGHT} can never run in ${SLOTS} slots`);
   process.exit(2);
+}
+
+// ON THE FARM (header): submit instead of running here; `auto` falls back to a slot here
+const farmAt = opts.indexOf('--farm');
+const FARM = opts.includes('--local') ? null : farmAt >= 0 ? (opts[farmAt + 1] && !opts[farmAt + 1].startsWith('--') ? opts[farmAt + 1] : 'auto') : process.env.DRIFT_FARM || null;
+if (FARM) {
+  const { submit } = await import('./drift-farm-client.mjs');
+  const { rmSync } = await import('node:fs');
+  const stage = join(ROOT, 'out/drift/farm/stage', `${process.pid}-${Date.now()}`);
+  let r;
+  try {
+    const token = JSON.parse(readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8')).token;
+    r = await submit({ root: ROOT, hub: process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190', token, argv: cmd, prefer: FARM, weight: WEIGHT, stage, say: (m) => console.error(`drift-slot: ${m}`) });
+  } catch (e) {
+    r = { fallback: e.message };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+  if (!r.fallback) process.exit(r.code);
+  if (FARM !== 'auto') {
+    console.error(`drift-slot: farm (${FARM}): ${r.fallback}`);
+    process.exit(1);
+  }
+  console.error(`drift-slot: farm: ${r.fallback} — running it here`);
 }
 
 /** take `WEIGHT` free slots at once (all or none), or null */

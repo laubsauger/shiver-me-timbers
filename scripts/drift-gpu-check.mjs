@@ -429,7 +429,7 @@ async function main() {
  */
 const SLOT = join(ROOT, 'scripts/drift-slot.mjs');
 if (process.env.DRIFT_SLOT_HELD !== '1' && existsSync(SLOT) && !flag('no-slot')) {
-  const p = spawn(process.execPath, [SLOT, '--weight', '1', '--', process.execPath, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: { ...process.env, DRIFT_SLOT_HELD: '1' } });
+  const p = spawn(process.execPath, [SLOT, '--weight', '1', '--', process.execPath, fileURLToPath(import.meta.url), ...argv], { stdio: 'inherit', env: { ...process.env, DRIFT_SLOT_HELD: '1', DRIFT_FARM: '' } });
   // Ctrl-C reaches the whole process group: drift-slot passes it on and exits when the check has stopped
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {});
   p.on('exit', (code) => process.exit(code ?? 1));

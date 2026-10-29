@@ -13,9 +13,12 @@
  *   node scripts/drift-node.mjs logs [-f] [--lines 40]     the newest run's log (-f: follow it)
  *   node scripts/drift-node.mjs dash [--port 5190]         the studio dashboard (scripts/drift-dash.mjs) on this machine
  *   node scripts/drift-node.mjs length                     the show's length in s at this commit (asks the page once)
+ *   node scripts/drift-node.mjs worker                     a render-farm worker: takes jobs from the Mac's farm hub
+ *                                                          while the GPU is free of others' work (drift-farm-client.mjs)
  *   common: --dry-run (say what would happen, change nothing) · sync: --gpu-check (run it anyway) · --no-gpu-check
  *   render: --length <s> (the show's length, instead of asking the page) · anything else goes to drift-queue.mjs
- *           (--only, --retries, --decode-check, --no-concat, --port, --dry-run)
+ *           (--only, --retries, --decode-check, --no-concat, --port, --dry-run, --force)
+ *   --force: start even while someone else holds the GPU (sync's GPU check and the queue's chunks; see below)
  *
  * SYNC, step by step; each stops the sync with the fix when it fails, and none discards anything:
  *   0. no render is running here (drift-render's lock, the render slots, a queue, a background run): pulling code
@@ -29,7 +32,9 @@
  *      The source's latest-assets.json (a few hundred bytes) first; the 1.4 GB .tar.gz only when it names other
  *      files than the ones unpacked here; then `tar -xzf` and drift-bundle.mjs --verify --quick
  *   4. scripts/drift-gpu-check.mjs on the first sync, when Chrome's version or the GPU driver changed, or when the
- *      last one failed. It also prints the show's length, which `"to": "end"` jobs use (cached per commit)
+ *      last one failed. It also prints the show's length, which `"to": "end"` jobs use (cached per commit). Like
+ *      every chunk of the queue, it first waits while someone else holds the GPU (drift-share.mjs: ComfyUI, a game;
+ *      the "yield" policy in drift-node.json) — state "waiting-foreign" — unless --force
  *
  * RENDER: sync (unless --no-sync), the preset's or the file's jobs resolved — `"to": "end"` → the show's length,
  * `--set` over every job, and a preset's output into <renders>/<commit>-<bundle>/ (one folder per state of code and
@@ -59,13 +64,16 @@
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, closeSync, readSync, fstatSync } from 'node:fs';
-import { arch, cpus } from 'node:os';
+import { arch, cpus, hostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  bundleStamp, configHelp, contentId, dashboardUrl, installedManifest, jobOfQueueStatus, needsLength, parseBundleSource, parseJsonc,
-  parseNvidiaSmi, parseSet, readConfig, resolveJobs, run, startHeartbeat, stateLabel, syncBundle,
+  bundleStamp, configHelp, contentId, dashboardUrl, farmSource, installedManifest, jobOfQueueStatus, needsLength, parseBundleSource, parseJsonc,
+  parseSet, readConfig, resolveJobs, run, startHeartbeat, stateLabel, syncBundle,
 } from './drift-node-lib.mjs';
+import { gpuSnapshot, localAgent, needVramGB, readYieldPolicy, shareDecision, waitForGpu } from './drift-share.mjs';
+import { workLoop } from './drift-farm-client.mjs';
+import { farmNodes } from './drift-fleet.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = join(ROOT, 'scripts');
@@ -179,7 +187,7 @@ function busy() {
     }
   }
   const q = readJson(QUEUE_STATUS);
-  if (q && q.state === 'rendering' && alive(q.pid)) why.push(`a render queue (pid ${q.pid}, ${q.file})`);
+  if (q && (q.state === 'rendering' || q.state === 'waiting-foreign') && alive(q.pid)) why.push(`a render queue (pid ${q.pid}, ${q.file})`);
   const bg = state.detached;
   if (bg && alive(bg.pid) && bg.pid !== process.pid && bg.pid !== process.ppid) why.push(`a background run: ${bg.what} (pid ${bg.pid})`);
   return why;
@@ -219,14 +227,25 @@ function gpuFingerprint() {
   return `chrome ${chromeVersion() ?? 'not found'} · ${gpu}`;
 }
 
-/** the GPU and the power line for the heartbeat, probed in the background (never on the render's path) */
-const probes = { gpu: undefined, power: undefined, powerAt: 0, smi: true };
+/**
+ * the GPU and the power line for the heartbeat, probed in the background (never on the render's path): the card as
+ * drift-share.mjs reads it (nvidia-smi -q -x: ours vs others' VRAM, who the others are), named by the box's
+ * studio-manager agent where one runs — its device list says which card this is (the MSI laptops' 4090 vs 5090), its
+ * services name the GPU users it started ("comfy")
+ */
+const probes = { gpu: undefined, share: undefined, decision: undefined, power: undefined, powerAt: 0, busy: false };
 function refreshProbes() {
-  if (probes.smi && process.platform !== 'darwin') {
-    execFile('nvidia-smi', ['--query-gpu=name,utilization.gpu,memory.used,memory.total', '--format=csv,noheader,nounits'], { timeout: 3000, windowsHide: true }, (e, out) => {
-      if (e?.code === 'ENOENT') probes.smi = false;
-      probes.gpu = e ? undefined : parseNvidiaSmi(out);
-    });
+  if (!probes.busy && process.platform !== 'darwin') {
+    probes.busy = true;
+    localAgent()
+      .then((agent) => gpuSnapshot({ agent }))
+      .then((share) => {
+        probes.share = share ?? undefined;
+        probes.decision = share ? shareDecision(share, POLICY) : undefined;
+        probes.gpu = share ? { name: share.name, utilPct: share.utilPct, memUsedGB: gbOf(share.usedMB), memTotalGB: gbOf(share.totalMB) } : undefined;
+      })
+      .catch(() => {})
+      .finally(() => (probes.busy = false));
   }
   if (Date.now() - probes.powerAt < 60_000) return;
   probes.powerAt = Date.now();
@@ -255,6 +274,15 @@ function refreshProbes() {
   }
 }
 
+const gbOf = (mb) => (Number.isFinite(mb) ? Math.round(mb / 102.4) / 10 : undefined);
+/** drift-node.json's "yield" (drift-share.mjs); a bad one is reported when a step uses it, not here */
+let POLICY;
+try {
+  POLICY = readYieldPolicy(ROOT);
+} catch {
+  POLICY = undefined;
+}
+
 // ------------------------------------------------------------------------------------------- the heartbeat
 let hb = null;
 let queuePid = null;
@@ -266,9 +294,16 @@ function beat(patch) {
 function payload() {
   const q = queuePid ? readJson(QUEUE_STATUS) : null;
   const live = q && q.pid === queuePid ? q : null;
+  // (the queue waiting for someone else's GPU use to end: drift-share.mjs, the queue's status)
+  const waiting = live?.state === 'waiting-foreign' ? live.waiting : report.state === 'waiting-foreign' ? report.waiting : undefined;
+  // ComfyUI (or a game) on the card while we render: the dashboard shows the contention (the chunk goes on)
+  const shared = report.state === 'rendering' && probes.decision?.state === 'rendering+shared';
+  const sh = probes.share;
   return {
-    node: CFG.name, os: process.platform, commit: `${HEAD.commit}${HEAD.dirty ? '+dirty' : ''}`, bundle: bundleStamp(state.bundle) ?? bundleStamp({ created: installedManifest(ROOT)?.created }),
-    state: report.state, gpu: probes.gpu, power: probes.power, job: jobOfQueueStatus(live), last: (live?.last || lastLine).slice(0, 300), error: report.error?.slice(0, 1000),
+    node: CFG.name, host: hostname(), os: process.platform, commit: `${HEAD.commit}${HEAD.dirty ? '+dirty' : ''}`, bundle: bundleStamp(state.bundle) ?? bundleStamp({ created: installedManifest(ROOT)?.created }),
+    state: live?.state === 'waiting-foreign' ? 'waiting-foreign' : shared ? 'rendering+shared' : report.state, gpu: probes.gpu, power: probes.power, job: jobOfQueueStatus(live) ?? report.job, last: (live?.last || lastLine).slice(0, 300), error: report.error?.slice(0, 1000),
+    ...(sh ? { vram: { usedGB: gbOf(sh.usedMB), totalGB: gbOf(sh.totalMB), oursGB: gbOf(sh.oursMB), foreignGB: probes.decision?.foreignGB ?? undefined, freeGB: gbOf(sh.freeMB) }, foreign: probes.decision?.foreign.slice(0, 6) } : {}),
+    ...(waiting ? { waiting } : {}),
   };
 }
 function startReporting(source) {
@@ -298,7 +333,7 @@ let interrupted = 0;
 let child = null;
 /** run() with the child kept, for the signal above */
 const runTracked = (cmd, a, o = {}) => run(cmd, a, { ...o, onSpawn: (p) => ((child = p), o.onSpawn?.(p)) });
-for (const sig of ['sync', 'render'].includes(CMD) ? ['SIGINT', 'SIGTERM'] : []) {
+for (const sig of ['sync', 'render', 'worker'].includes(CMD) ? ['SIGINT', 'SIGTERM'] : []) {
   process.on(sig, () => {
     if (++interrupted > 1) process.exit(130);
     say(`${sig}: stopping (the render in progress stops itself; finished chunks stay). Again to quit at once`);
@@ -397,6 +432,15 @@ async function stepGpuCheck() {
     say(`GPU check: would run node scripts/drift-gpu-check.mjs (${due})`);
     return true;
   }
+  // (the check boots the page on the GPU like a render: it yields to others' use the same way, drift-share.mjs)
+  await waitForGpu({
+    policy: readYieldPolicy(ROOT),
+    needGB: needVramGB({ size: 256, lanes: 1 }, readYieldPolicy(ROOT)),
+    force: flag('force'),
+    say,
+    onWait: (d, since) => beat({ state: 'waiting-foreign', waiting: { why: d.why, since: new Date(since).toISOString(), foreign: d.foreign.slice(0, 6), freeGB: d.freeGB } }),
+  });
+  if (report.state === 'waiting-foreign') beat({ state: 'syncing', waiting: undefined });
   say(`GPU check (${due}): node scripts/drift-gpu-check.mjs — a minute or two of shader compiles`);
   let total = null;
   const r = await runTracked(process.execPath, [join(SCRIPTS, 'drift-gpu-check.mjs')], {
@@ -417,7 +461,7 @@ async function stepGpuCheck() {
 let syncError = null;
 /** the whole sync; false when a step refused or failed (a dry run goes through every step and says what each would do) */
 async function sync() {
-  const source = parseBundleSource(CFG.bundle);
+  const source = bundleSource();
   if (!source) {
     emit(configHelp(ROOT));
     syncError = `no bundle source: ${CFG.file} has none`;
@@ -459,7 +503,7 @@ async function showLength() {
   }
   if (DRY) throw new Refusal(`the show's length at ${HEAD.commit}${HEAD.dirty ? '+dirty' : ''} is not known on this machine yet: a real run asks the page (one headless boot), or pass --length <s>`);
   say(`asking the page for the show's length at ${HEAD.commit} (one headless boot, in a render slot)`);
-  const r = await runTracked(process.execPath, [SLOT, '--weight', '1', '--', process.execPath, SELF, 'probe-length'], { cwd: ROOT, onLine: (l) => emit(`  ${l}`) });
+  const r = await runTracked(process.execPath, [SLOT, '--weight', '1', '--', process.execPath, SELF, 'probe-length'], { cwd: ROOT, env: { ...process.env, DRIFT_FARM: '' }, onLine: (l) => emit(`  ${l}`) });
   const total = Number(/^show-length ([\d.]+)\s*$/m.exec(r.out)?.[1]);
   if (r.code !== 0 || !(total > 0)) throw new Refusal(`could not ask the page for the show's length (exit ${r.code}) — node scripts/drift-gpu-check.mjs says why; or pass --length <s>`);
   saveState({ show: { commit: HEAD.commit, dirty: HEAD.dirty, total, at: new Date().toISOString(), from: 'probe' } });
@@ -523,14 +567,14 @@ async function render() {
   if (flag('detach')) {
     // what would fail at once in the background is said here, in the terminal
     if (!Object.hasOwn(loadPresets(), target) && !existsSync(resolve(target))) throw new Refusal(`${target}: not a preset (${Object.keys(loadPresets()).join(', ')}) and no such file`);
-    if (!flag('no-sync') && !parseBundleSource(CFG.bundle)) {
+    if (!flag('no-sync') && !bundleSource()) {
       console.log(configHelp(ROOT));
       throw new Refusal('no bundle source for the sync (above), or --no-sync');
     }
     return detach(target);
   }
   openRunLog(`render ${target}`);
-  const source = parseBundleSource(CFG.bundle);
+  const source = bundleSource();
   startReporting(source);
   say(`render ${target} on ${CFG.name}${DRY ? ' (dry run)' : ''}`);
   if (!flag('no-sync')) {
@@ -607,7 +651,7 @@ async function status() {
     row('bundle', `assets ${man.created.slice(0, 10)} at ${man.commit ?? '?'} · ${man.count} files, ${gbs(man.bytes)} · content ${contentId(man.files).slice(0, 6)}`);
     row('', b ? `synced ${when(b.at)} from ${b.source}` : 'unpacked by hand (no sync here yet)');
   } else row('bundle', 'none unpacked here (sync fetches it)');
-  row('config', CFG.exists || CFG.bundle ? `bundle ${CFG.bundle ?? '(none)'} · dashboard ${dashboardUrl(CFG, parseBundleSource(CFG.bundle)) ?? 'none'}` : `no ${CFG.file} (sync prints what to put in it)`);
+  row('config', CFG.exists || CFG.bundle ? `bundle ${CFG.bundle ?? '(none)'} · dashboard ${dashboardUrl(CFG, bundleSource()) ?? 'none'}` : `no ${CFG.file} (sync prints what to put in it)`);
   const g = state.gpuCheck;
   if (g) {
     const now = gpuFingerprint();
@@ -630,13 +674,14 @@ async function status() {
   const q = readJson(QUEUE_STATUS);
   if (q?.job) {
     const j = q.job;
-    const live = q.state === 'rendering' && alive(q.pid);
+    const live = (q.state === 'rendering' || q.state === 'waiting-foreign') && alive(q.pid);
     const pct = j.framesTotal ? ` (${((100 * j.frames) / j.framesTotal).toFixed(1)}%)` : '';
-    row('queue', `${live ? 'rendering' : `${q.state} ${when(q.ended ?? q.updated)}`} · ${j.name}${j.jobs > 1 ? ` (job ${j.index}/${j.jobs})` : ''} · chunk ${j.chunk}/${j.chunks}, ${j.chunksDone} done · ${j.frames}/${j.framesTotal} frames${pct}${j.fps ? ` · ${j.fps} fps` : ''}${live && j.etaS != null ? ` · ~${dur(j.etaS)} left` : ''}`);
+    row('queue', `${live ? q.state : `${q.state} ${when(q.ended ?? q.updated)}`} · ${j.name}${j.jobs > 1 ? ` (job ${j.index}/${j.jobs})` : ''} · chunk ${j.chunk}/${j.chunks}, ${j.chunksDone} done · ${j.frames}/${j.framesTotal} frames${pct}${j.fps ? ` · ${j.fps} fps` : ''}${live && j.etaS != null ? ` · ~${dur(j.etaS)} left` : ''}`);
     row('', `${j.out}${q.error ? ` · ${q.error}` : ''}`);
-    if (live && q.last) row('', q.last.slice(0, 160));
+    if (live && q.state === 'waiting-foreign' && q.waiting) row('', `WAITING since ${when(q.waiting.since)} for the GPU: ${q.waiting.why} (--force renders anyway)`);
+    else if (live && q.last) row('', q.last.slice(0, 160));
   }
-  const url = dashboardUrl(CFG, parseBundleSource(CFG.bundle));
+  const url = dashboardUrl(CFG, bundleSource());
   if (url) {
     const ok = await fetch(`${url}/api`, { signal: AbortSignal.timeout(1500) }).then((r) => r.ok, () => false);
     row('dashboard', `${url} ${ok ? '(reachable)' : '(not reachable from here now: the Mac asleep, off the tailnet, or the dashboard not running with --tailnet)'}`);
@@ -681,11 +726,77 @@ function usage() {
   console.log(text.slice(text.indexOf(' *   node scripts/drift-node.mjs sync'), text.indexOf(' * SYNC, step by step')).replace(/^ \* ?/gm, '').trimEnd());
 }
 
+// --------------------------------------------------------------------------------------------- the farm worker
+/** where this machine's bundle comes from: drift-node.json's "bundle", or ("bundle": "farm", or none) the farm hub */
+function bundleSource() {
+  if (CFG.bundle && CFG.bundle !== 'farm') return parseBundleSource(CFG.bundle);
+  return farmSource(CFG.farm, CFG.dashboard || null);
+}
+
+/**
+ * THE FARM WORKER (drift-farm-client.mjs, header WORK): this box takes jobs from the Mac's farm hub (drift-dash.mjs)
+ * while its GPU is free of others' work and it is on mains power, runs each in a fresh code tree beside the checkout
+ * (../smt-farm), sends the results back, and reports to the dashboard as it goes. Ctrl-C stops it after the job in
+ * progress (twice: at once).
+ */
+async function worker() {
+  if (!CFG.farm) throw new Refusal(`no "farm" in ${CFG.file}: { "farm": { "hub": "http://laubs-mbp:5190" } } (a machine not in scripts/drift-farm-nodes.json also needs "token": "<the Mac's farm.json token>")`);
+  const source = bundleSource();
+  const hubUrl = (CFG.farm.hub ?? dashboardUrl(CFG, source) ?? '').replace(/\/+$/, '');
+  if (!hubUrl) throw new Refusal('no farm hub: "farm": { "hub": "http://<mac>:5190", … } in drift-node.json');
+  const nodes = farmNodes(join(SCRIPTS, 'drift-farm-nodes.json'));
+  const host = hostname().toLowerCase().split('.')[0];
+  const me = nodes.find((n) => n.name === CFG.name) ?? nodes.find((n) => n.tailnet === host || n.name === host);
+  if (!me) throw new Refusal(`this machine (${hostname()}) is not one of the farm's (scripts/drift-farm-nodes.json): set "name" in drift-node.json to ${nodes.map((n) => n.name).join(' | ')}`);
+  openRunLog('worker');
+  startReporting(source);
+  say(`farm worker ${me.name} → ${hubUrl}; jobs run in ${join(dirname(ROOT), 'smt-farm')}`);
+  await workLoop({
+    hub: hubUrl,
+    token: CFG.farm.token ?? null,
+    node: me.name,
+    main: ROOT,
+    work: join(dirname(ROOT), 'smt-farm'),
+    tar: TAR,
+    say,
+    // a job only while the card is free of others' work, and (the laptop) on mains power
+    gpuFree: async () => {
+      if (String(probes.power ?? '').startsWith('battery')) return { ok: false, why: `on battery (${probes.power})` };
+      const share = await gpuSnapshot({ agent: await localAgent() });
+      const d = shareDecision(share, POLICY, needVramGB({ size: 2048, lanes: 1 }, POLICY));
+      // (who, in a few words, for the dashboard's "windows-monster busy (ComfyUI 18 GB)"; the full sentence otherwise)
+      const who = d.foreign.slice(0, 3).map((f) => (f.memGB != null ? `${f.name} ${Math.round(f.memGB)} GB` : f.name)).join(', ');
+      return { ok: d.canStart, why: who || d.why };
+    },
+    // the job's asset bundle: this checkout's, synced from the hub (or drift-node.json's source) when it is another
+    ensureBundle: async (want) => {
+      const have = () => {
+        const m = installedManifest(ROOT);
+        return m ? contentId(m.files) : null;
+      };
+      if (want === null || have() === want) return;
+      if (!source) throw new Error('the job needs another asset bundle and this machine has no bundle source ("bundle" or "farm" in drift-node.json)');
+      say(`farm: the job needs another asset bundle (${want.slice(0, 6)}, this machine has ${have()?.slice(0, 6) ?? 'none'}): syncing it`);
+      const { record } = await syncBundle({ root: ROOT, source, prev: loadState().bundle ?? null, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR });
+      if (record) saveState({ bundle: record });
+      if (have() !== want) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) is not the hub's newest (now ${have()?.slice(0, 6) ?? 'none'} here): rebuild the bundle on the Mac (node scripts/drift-bundle.mjs)`);
+    },
+    onState: (st, job) =>
+      beat({
+        state: st === 'rendering' ? 'rendering' : st === 'busy-foreign' ? 'busy-foreign' : 'idle',
+        job: job ? { name: job.label, chunk: null, chunks: null, frames: job.progress?.done ?? null, framesTotal: job.progress?.total ?? null, fps: job.progress?.fps ?? null, etaS: job.progress?.etaS ?? null, out: job.id } : undefined,
+        error: undefined,
+      }),
+    stop: () => interrupted > 0,
+  });
+  return finish(0);
+}
+
 // ---------------------------------------------------------------------------------------------------- main
 async function main() {
   if (CMD === 'sync') {
     openRunLog('sync');
-    const source = parseBundleSource(CFG.bundle);
+    const source = bundleSource();
     startReporting(source);
     beat({ state: 'syncing' });
     return finish((await sync()) ? 0 : 1, `${DRY ? 'dry run: would stop at ' : 'sync stopped at '}${syncError ?? 'a step above'}`);
@@ -699,6 +810,7 @@ async function main() {
     return;
   }
   if (CMD === 'probe-length') return probeLengthNow();
+  if (CMD === 'worker') return worker();
   if (CMD === 'dash') {
     const p = spawn(process.execPath, [join(SCRIPTS, 'drift-dash.mjs'), ...rest], { cwd: ROOT, stdio: 'inherit' });
     for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => p.kill(sig));
@@ -711,7 +823,7 @@ async function main() {
 
 main().catch((e) => {
   const msg = e instanceof Refusal ? e.message : (e?.stack ?? String(e));
-  if (['sync', 'render'].includes(CMD)) return finish(1, msg);
+  if (['sync', 'render', 'worker'].includes(CMD)) return finish(1, msg);
   console.error(`[node] ${msg}`);
   process.exit(1);
 });

@@ -63,3 +63,5 @@ public/drift/clouds/
 # the sea-level PBR assets are downloaded, CC0 (Poly Haven, ambientCG: ~620 MB at 4K): the list, sources and
 # checksums in scripts/drift-pbr-assets.json, fetched by scripts/drift-pbr-fetch.py
 public/drift/pbr/
+# the farm hub's bearer token (scripts/drift-dash.mjs writes it on first start). Never in this public repo
+/farm.json

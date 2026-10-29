@@ -6,7 +6,7 @@
  * render that was one file lost 80 minutes to one readback stall, then 7 h to a sleep).
  *
  *   node scripts/drift-queue.mjs [jobs.jsonc] [--only smoke,film] [--dry-run] [--no-concat] [--retries 1]
- *                                [--port 5290] [--decode-check] [--allow-battery]
+ *                                [--port 5290] [--decode-check] [--allow-battery] [--force]
  *   node scripts/drift-queue.mjs [jobs.jsonc] --prores4444 [--only film]     ON THE MAC: a job's FFV1 chunks (from a
  *                                node) → the 12-bit ProRes 4444 master (prores4444Job below)
  *
@@ -34,12 +34,20 @@
  * out/drift/queue/status.json holds the job, the chunk, the job's frames done of its total (chunks finished on an
  * earlier run count as done), the rate and a WHOLE-JOB ETA, and the render's newest line; at the end the summary.
  * Not written by --dry-run or --prores4444. A failed write is ignored: the status never stops a render.
+ *
+ * SHARED MACHINES (the user, 2026-10-29: "we're not assuming that we are always going to be the only users of these
+ * machines"): before each chunk the queue looks at the NVIDIA card (scripts/drift-share.mjs) and, while someone
+ * else holds it — ComfyUI's model in VRAM, a game at full load, more than drift-node.json's "yield" policy allows,
+ * or less free VRAM than the job needs — it WAITS, re-checking every 30 s, state "waiting-foreign" in the status
+ * with who and how much. It never touches their processes. A chunk already rendering is not stopped. --force skips
+ * the check. No nvidia-smi (the Mac): no check.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANE_CODECS } from './cine-codecs.mjs';
+import { needVramGB, readYieldPolicy, waitForGpu } from './drift-share.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -73,6 +81,8 @@ const gb = (b) => `${(b / 2 ** 30).toFixed(1)} GB`;
 // ------------------------------------------------------------------------------------- where it stands (header)
 const STATUS_FILE = join(ROOT, 'out/drift/queue/status.json');
 const STATUS_ON = !flag('dry-run') && !flag('prores4444');
+/** drift-node.json's "yield" over its defaults (drift-share.mjs); a wrong key fails the queue at the start */
+let POLICY = null;
 const status = { pid: process.pid, file: JOBS_FILE, started: new Date().toISOString(), state: 'rendering', job: null, last: '' };
 /** merge `patch` into the status and write it whole (a temp file renamed over it: a reader never sees half) */
 function writeStatus(patch = {}) {
@@ -197,6 +207,18 @@ function stayAwake() {
   }
 }
 
+/** wait while someone else holds the GPU (header: SHARED MACHINES); the status says who, the console every 5 min */
+async function yieldToOthers(j) {
+  await waitForGpu({
+    policy: POLICY,
+    needGB: needVramGB(j, POLICY),
+    force: flag('force'),
+    say: (m) => say(`  ${m}`),
+    onWait: (d, since) => writeStatus({ state: 'waiting-foreign', waiting: { why: d.why, since: new Date(since).toISOString(), foreign: d.foreign.slice(0, 6), freeGB: d.freeGB } }),
+  });
+  if (status.state === 'waiting-foreign') writeStatus({ state: 'rendering', waiting: null });
+}
+
 // ---------------------------------------------------------------------------------------------- rendering
 /**
  * drift-render.mjs allows one render per repo (out/drift/.render.lock) and FAILS when another holds it; a queue
@@ -249,7 +271,8 @@ function renderChunk(j, c, attempt, onProgress = () => {}) {
     const args = existsSync(SLOT) ? [SLOT, '--weight', String(j.lanes), '--', process.execPath, ...render] : render;
     if (!existsSync(SLOT) && attempt === 0) say(`  WARNING: no ${relative(ROOT, SLOT)}: rendering without the machine's render slots`);
     log.write(`# ${new Date().toISOString()} attempt ${attempt + 1}: node ${args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}\n`);
-    const p = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    // (DRIFT_FARM off: a chunk always renders here, in this machine's slots — drift-slot.mjs --farm is for the agents')
+    const p = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DRIFT_FARM: '' } });
     let last = 0;
     let tail = '';
     const onData = (d) => {
@@ -345,6 +368,7 @@ async function runJob(j, jobIndex = 0, jobCount = 1) {
     for (let attempt = 0; attempt <= RETRIES && !ok; attempt++) {
       checkPower();
       await waitForRenderLock();
+      await yieldToOthers(j);
       say(`  ${label}: rendering (${why})${attempt > 0 ? `, retry ${attempt}` : ''}`);
       report(i);
       const t0 = Date.now();
@@ -455,6 +479,7 @@ function prores4444Job(j) {
 }
 
 async function main() {
+  POLICY = readYieldPolicy(ROOT);
   const jobs = loadJobs(JOBS_FILE).filter((j) => j.enabled !== false && (ONLY === null || ONLY.includes(j.name)));
   if (ONLY) for (const o of ONLY) if (!jobs.some((j) => j.name === o)) throw new Error(`--only ${o}: no such enabled job in ${JOBS_FILE}`);
   if (jobs.length === 0) throw new Error(`no enabled jobs in ${JOBS_FILE}`);

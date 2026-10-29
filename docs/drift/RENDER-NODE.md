@@ -21,6 +21,7 @@ through the resumable render queue (§6). After a stop, the same command again g
 | … with other settings | `--set ss=1` · `--set msaa=0` · `--set blur=8` · `--set from=300,to=330` · `--only <job>` |
 | only pull | `sync` (`--dry-run`: say what it would do, change nothing) |
 | where it stands | `status` (commit, bundle, GPU check, the job, its frames and ETA) · `logs -f` |
+| farm work out (on the Mac) | `node scripts/drift-slot.mjs --farm auto -- <command>` ("The farm", below); a box takes jobs with `worker` |
 | watch every machine | the studio dashboard on the Mac, `node scripts/drift-dash.mjs --tailnet` (http://<mac>:5190): each node's state, GPU, job, frames and ETA, from a heartbeat the command sends every 5 s. `dash` runs a dashboard on the node itself |
 
 **Publishing the current state, on the Mac:** commit and push the code (a node renders what is pushed: nothing
@@ -86,6 +87,63 @@ heartbeat; tests/driftNode.test.ts), `scripts/drift-node-presets.jsonc`. Under i
 its own: `drift-bundle.mjs`, `drift-gpu-check.mjs`, `drift-queue.mjs`, `drift-render.mjs`, `drift-slot.mjs`.
 `scripts/drift-node-setup.sh` (Linux) and `scripts/drift-node-setup.ps1` (Windows) check the prerequisites and
 print what is missing; they install nothing.
+
+### Shared machines: the render yields
+
+The studio's 4090s and the 5090 laptop also run ComfyUI, sd-webrtc, FluxRT, games (the user, 2026-10-29: "we're not
+assuming that we are always going to be the only users of these machines"). Before **every chunk** (and before the
+GPU check) the queue reads the NVIDIA card (`nvidia-smi -q -x`: every process on it, graphics and compute) and
+**waits while someone else holds it**, re-checking every 30 s. It never stops, kills or touches their processes, and a
+chunk already rendering is not stopped. `status` and the dashboard show the wait: state `waiting-foreign`, who, and
+how much (`ComfyUI 18.0 GB`). `--force` renders anyway.
+
+Ours vs theirs: a process is ours when it or a parent is one of our scripts (drift-render's Chrome and its GPU
+process, cine-sink's ffmpeg), or a Chrome on Playwright's throwaway profile. The desktop (dwm, Xorg) is never waited
+for. On Windows, where the driver gives nvidia-smi no per-process memory, the numbers come from Windows' GPU counters
+(the way studio-manager's agent reads its services' VRAM).
+
+The policy, per machine, in `drift-node.json` (each key optional; the defaults are chosen to yield readily, not
+measured on these machines):
+
+```jsonc
+"yield": {
+  "foreignVramGB": 4,   // GB others may hold before we wait (an idle desktop + browser: 1–2.5; a loaded model: 4–20)
+  "foreignUtil": 30,    // % GPU load by others, while nothing of ours runs, before we wait (a generating ComfyUI: 90+)
+  "needVramGB": 20,     // GB free one lane needs; default 22 at 8192², 10 below (the Mac's measurements)
+  "recheckS": 30        // s between checks while waiting
+}
+```
+
+The code: `scripts/drift-share.mjs` (tests/driftShare.test.ts).
+
+### The farm: the boxes take our daily work
+
+The boxes are also a render farm for everyday work: stills, review clips, single frames (the user, 2026-10-29: "make
+sure that these machines get fat work … so we have to wait less"). It is a pull model, so nothing listens on the
+boxes and no SSH is needed (the Windows boxes have none).
+
+- **The hub** is this Mac's dashboard, `node scripts/drift-dash.mjs --tailnet` (`/farm/…` on :5190; code in
+  `scripts/drift-farm.mjs`). The queue lives in `out/drift/farm/`. Its token is in `farm.json`, written on the first
+  start. That file is gitignored, and the dashboard refuses to write or use a `farm.json` that git would commit.
+- **A worker** on each box: `node scripts/drift-node.mjs worker`. Its `drift-node.json` needs
+  `{ "name": "windows-monster", "farm": { "hub": "http://laubs-mbp:5190" } }`. The three machines of
+  `scripts/drift-farm-nodes.json` need no token: the hub knows them by their tailnet address, and only for their own
+  work. The worker takes a job only while the GPU is free of others' work and the box is on mains power. On the
+  Windows boxes, studio-manager can start it as a service (`docs/drift/studio-manager-proposal.md`).
+- **Submitting** (on the Mac, as an agent would):
+  `node scripts/drift-slot.mjs --farm auto -- node scripts/drift-review-stills.mjs shots.json --out out/drift/x`.
+  The remote output shows in this terminal, and the files land at the `--out` path. `auto` picks the best free box,
+  and falls back to a slot here when none is free or none takes the job in 60 s. `--farm <box>` pins a box.
+  `DRIFT_FARM=auto` makes every agent's `drift-slot` use the farm. The render queue's own chunks never do.
+- **What travels with a job**: the code as `git diff --binary origin/main`, plus untracked files under
+  `src/ scripts/ tests/ public/`. Assets the boxes' bundle lacks go too, up to 200 MB; more fails, and asks for a
+  bundle rebuild. Input files outside the code are sent along; paths inside a JSON file are not rewritten. On the box,
+  each job gets its own tree in `../smt-farm/<job>`: `git archive` of the base, the patch, the bundle hard-linked,
+  `node_modules` linked. The tree is deleted afterwards. Every frame is a pure function of t, so a box draws what this
+  Mac would, up to the GPU vendor's arithmetic (the job records which box drew it).
+- **Who gets what**: stills go to whoever is free. Clips and long jobs go to the fastest free box; a slower one takes
+  them after 2 min of waiting. Speeds start from `drift-farm-nodes.json` (4090 desktops 1.0, the 100 W 5090 laptop
+  0.5) and are learned from measured frame rates (`out/drift/farm/speeds.json`).
 
 ## 0. What a node renders
 
