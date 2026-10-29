@@ -22,13 +22,18 @@
  *   --fps <n>         frame rate before any /manifest (a lane posts none)
  *   --threads <n>     libx264 threads — N lanes share the machine's cores
  *   --preset <p>      libx264 preset (default slow)
- *   --codec prores    seg/<shot>.mov, ProRes 422 HQ on the VideoToolbox engine (intra-only: joins anywhere)
- *   --queue <n>       answer a frame once it is QUEUED, holding at most n frames ahead of ffmpeg, so the page
+ *   --codec prores    seg/<shot>.mov, ProRes 422 HQ on the VideoToolbox engine (intra-only: joins anywhere);
+ *                     proreshq is the same; prores4444: ProRes 4444, 12-bit 4:4:4 (no alpha), same engine.
+ *                     Off macOS (no VideoToolbox) the same names run on prores_ks — 4444 then at 10-bit samples —
+ *                     and two more exist for render nodes: ffv1 (lossless 12-bit 4:4:4, the 12-bit master's
+ *                     intermediate) and hevc10 (NVENC HEVC Main10 previews). scripts/cine-codecs.mjs says why.
+ *   --queue <n>      answer a frame once it is QUEUED, holding at most n frames ahead of ffmpeg, so the page
  *                     renders on while the encoder catches up (0 = answer once ffmpeg took the frame)
  *
  * Routes (all POST):
  *   /manifest                       fps, size, shot/transition list
  *   /frame?shot=D&n=..&w=..&h=..    raw RGBA body -> piped into seg/D.mp4
+ *          [&depth=16]             the body is rgba64le, 16 bits a channel (the 10/12-bit masters: ProRes only)
  *   /endshot?clip=..                that shot is complete: finalise its clip
  *   /audio?clip=..&stem=..&fmt=f32&rate=..&dur=..   a shot's SFX take (the real-time audio pass): interleaved stereo
  *                                   float32 PCM at the context's rate — `stem` mix | engine | water | amb
@@ -47,6 +52,7 @@ import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { HEVC_MAX_LUMA_PS, LANE_CODECS, laneEncoderArgs, laneNote } from './cine-codecs.mjs';
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -63,9 +69,10 @@ const THREADS = arg('threads', null);
 const PRESET = arg('preset', 'slow');
 const CODEC = arg('codec', 'x264');
 const QUEUE = Math.max(0, Number(arg('queue', '0')) || 0);
-if (CODEC !== 'x264' && CODEC !== 'prores') throw new Error(`--codec ${CODEC}: x264 | prores`);
+if (!(CODEC in LANE_CODECS)) throw new Error(`--codec ${CODEC}: ${Object.keys(LANE_CODECS).join(' | ')}`);
 /** a non-edit clip's file: seg/<shot>.mp4, or .mov for ProRes (the mp4 muxer has no ProRes tag) */
-const SEG_EXT = CODEC === 'prores' ? 'mov' : 'mp4';
+const SEG_EXT = LANE_CODECS[CODEC].ext;
+if (laneNote(CODEC) !== null && EDIT === null) console.log(`[sink] --codec ${CODEC}: ${laneNote(CODEC)}`);
 
 if (EDIT === null) mkdirSync(join(OUT, 'seg'), { recursive: true });
 else for (const d of ['video', 'proxy', 'sfx']) mkdirSync(join(OUT, d), { recursive: true });
@@ -175,7 +182,7 @@ let started = 0;
  * page down. Every write is awaited by the request handler, so a slow encoder
  * throttles the render instead of corrupting it.
  */
-function openEncoder(shot, w, h) {
+function openEncoder(shot, w, h, depth = 8) {
   const file = EDIT === null ? join(OUT, 'seg', `${shot}.${SEG_EXT}`) : join(OUT, 'video', `${shot}.mov`);
   if (EDIT !== null && existsSync(file)) console.warn(`\n[sink] OVERWRITING ${file} — pass a new take to keep it`);
   // .part until it closes cleanly. An mp4 only becomes playable when ffmpeg
@@ -185,19 +192,31 @@ function openEncoder(shot, w, h) {
   // only in QuickTime's error dialog.
   const part = `${file}.part`;
   // the edit master: ProRes 422 HQ (profile 3), 10-bit 4:2:2, a constant frame rate
-  // --codec prores (lanes): the same HQ 422 10-bit, on the hardware ProRes engine instead of the CPU
+  // --codec prores | proreshq (lanes): the same HQ 422 10-bit, on the hardware ProRes engine instead of the CPU;
+  // prores4444: 12-bit 4:4:4 on the same engine (p416le in: VideoToolbox takes 16-bit 4:4:4, no alpha plane)
+  // (off macOS, and ffv1 / hevc10 anywhere: scripts/cine-codecs.mjs; null keeps the lines below)
+  const own = EDIT === null ? laneEncoderArgs(CODEC, { threads: THREADS, crf: CRF }) : null;
+  if (CODEC === 'hevc10' && w * h > HEVC_MAX_LUMA_PS) console.warn(`\n[sink] ${shot}: ${w}x${h} is past HEVC's highest level (${HEVC_MAX_LUMA_PS} samples, ≈ 5968²) — NVENC encodes it, many decoders (likely macOS's) will not play it`);
   const codec = EDIT !== null
     ? ['-c:v', 'prores_ks', '-profile:v', '3', '-vendor', 'apl0', '-pix_fmt', 'yuv422p10le']
-    : CODEC === 'prores'
+    : own !== null
+      ? own
+    : CODEC === 'prores4444'
+      ? ['-c:v', 'prores_videotoolbox', '-profile:v', '4444', '-pix_fmt', 'p416le']
+    : CODEC !== 'x264'
       ? ['-c:v', 'prores_videotoolbox', '-profile:v', 'hq', '-pix_fmt', 'p210le']
-      : ['-c:v', 'libx264', '-preset', PRESET, '-crf', CRF, '-pix_fmt', 'yuv420p', ...(THREADS !== null ? ['-threads', THREADS] : [])];
+      // mvrange 511: a 4096² master is level 6, where x264 allows vertical vectors to ±2048 px, but macOS's
+      // decoder (VideoToolbox: DaVinci, QuickTime) fails "Cannot Decode" on any beyond ±512 — the fast streaks
+      // of the opening went "media offline" in DaVinci at 0:08–0:25 and 0:33–0:50 of v11 (2026-10-28)
+      : ['-c:v', 'libx264', '-preset', PRESET, '-crf', CRF, '-pix_fmt', 'yuv420p', '-x264-params', 'mvrange=511', ...(THREADS !== null ? ['-threads', THREADS] : [])];
   const proc = spawn(
     'ffmpeg',
     [
       '-hide_banner', '-loglevel', 'error', '-y',
-      '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${w}x${h}`, '-r', String(fps),
+      '-f', 'rawvideo', '-pix_fmt', depth === 16 ? 'rgba64le' : 'rgba', '-s', `${w}x${h}`, '-r', String(fps),
       '-i', 'pipe:0',
-      '-an', ...codec,
+      // (hevc10 at 8 bit too: its YUV is BT.709 like the 16-bit masters', not swscale's BT.601 default)
+      '-an', ...codec, ...(depth === 16 || CODEC === 'hevc10' ? REC709 : []),
       // moov at the front: one rewrite at close, and the file is seekable
       // immediately rather than only after a full read
       '-movflags', '+faststart',
@@ -240,6 +259,19 @@ function openEncoder(shot, w, h) {
   console.log(`\n[sink] ${shot} -> ${file} (${w}x${h} @ ${fps})`);
   return rec;
 }
+
+/**
+ * A 16-bit frame's RGB → YUV, explicit and FULLY tagged. swscale's default matrix is BT.601 (the 8-bit ProRes clips
+ * come out tagged smpte170m), a master's is BT.709. The tags go on the FRAMES (setparams): the CLI's -color_* options
+ * alone reached the clip as matrix 709 with primaries and transfer "unspecified", and AVFoundation then ignored the
+ * matrix and decoded a 512² test clip as BT.601 (SD size), green 0.5 levels low; tagged 1/1/1 it decodes within 0.13
+ * of the capture. The pixels are the dome master's sRGB-encoded picture; transfer tagged 709 as video masters are
+ * (the tag does not change decoded values, measured).
+ */
+const REC709 = [
+  '-vf', 'scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv',
+  '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv',
+];
 
 const writeFrame = (rec, buf) =>
   new Promise((res, rej) => {
@@ -374,11 +406,18 @@ const server = createServer(async (req, res) => {
       const w = Number(url.searchParams.get('w'));
       const h = Number(url.searchParams.get('h'));
       if (!shot || !w || !h) throw new Error('frame needs ?shot=, ?w= and ?h=');
+      const depth = Number(url.searchParams.get('depth') ?? 8);
+      if (depth !== 8 && depth !== 16) throw new Error(`frame: depth ${depth}, 8 | 16`);
+      // 16 bits into an 8-bit codec would throw the depth away after paying for it
+      if (depth === 16 && (!LANE_CODECS[CODEC].depths.includes(16) || EDIT !== null)) throw new Error('a 16-bit frame needs --codec proreshq | prores4444 | ffv1 | hevc10 (not x264, not --edit)');
+      // and a 12-bit lossless intermediate of an 8-bit picture would be 12 bits of an 8-bit quantisation
+      if (depth === 8 && EDIT === null && !LANE_CODECS[CODEC].depths.includes(8)) throw new Error(`--codec ${CODEC} takes 16-bit frames only (drift-render --depth 16)`);
       const body = await readBody(req);
-      if (body.length !== w * h * 4) {
+      const bpp = depth === 16 ? 8 : 4;
+      if (body.length !== w * h * bpp) {
         // loud: a short frame means the readback was padded or truncated, and
         // ffmpeg would happily encode the resulting diagonal smear
-        throw new Error(`frame is ${body.length} bytes, expected ${w * h * 4} for ${w}x${h}`);
+        throw new Error(`frame is ${body.length} bytes, expected ${w * h * bpp} for ${w}x${h} at ${depth} bit`);
       }
       if (started === 0) started = Date.now();
       // `group`: the clips of ONE take drawn interleaved (the trailer's time-of-day looks, src/cine/recorder.ts `looks`)
@@ -392,9 +431,11 @@ const server = createServer(async (req, res) => {
         const done = [...encoders.entries()].filter(([, r]) => r.group !== group).map(([k]) => k);
         await Promise.all(done.map((k) => closeEncoder(k, 'a new take started before this one ended')));
         for (const k of done) encoders.delete(k);
-        rec = openEncoder(shot, w, h);
+        rec = openEncoder(shot, w, h, depth);
         rec.group = group;
+        rec.depth = depth;
       }
+      if (rec.depth !== depth) throw new Error(`${shot}: a ${depth}-bit frame in a ${rec.depth}-bit take`);
       await enqueueFrame(rec, body);
       rec.frames++;
       if (rec.frames % 24 === 0) process.stdout.write('.');

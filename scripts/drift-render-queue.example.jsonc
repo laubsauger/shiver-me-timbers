@@ -1,0 +1,81 @@
+// The Drift's render queue: scripts/drift-queue.mjs reads this (docs/drift/RENDER-NODE.md, "Queue renders").
+// JSON plus whole-line // comments. Copy it to render-queue.jsonc in the repo root (the queue's default) and edit.
+//
+//   node scripts/drift-queue.mjs scripts/drift-render-queue.example.jsonc --only smoke      the smoke test
+//   node scripts/drift-queue.mjs render-queue.jsonc --dry-run                              what would run
+//   node scripts/drift-queue.mjs render-queue.jsonc                                        everything enabled
+//
+// A job: name, from, to (s of show time), size (px, square master), and any of the defaults below.
+// "chunk" is seconds of SHOW time per chunk: pick it so one chunk renders in about 25 minutes of wall time
+// (the first chunk's log prints its fps). "concat": false keeps only the chunks (8K masters: the joined copy
+// would double the disk use). "enabled": false skips a job. "extra": more drift-render flags, e.g. ["--keep"].
+// The show's end for "to": node scripts/drift-gpu-check.mjs prints it ("the show is … s long").
+{
+  "defaults": {
+    "fps": 30,
+    "ss": 1,
+    "blur": 1,
+    "shutter": 0.5,
+    "codec": "x264",
+    "depth": 8,
+    "lanes": 1,
+    "chunk": 30,
+    "channel": "chrome",
+    "crf": 18,
+    "preset": "medium",
+    "out": "out/drift/queue"
+  },
+  "jobs": [
+    // SMOKE: 2 s of the beach at 512², in two 1 s chunks (two renders, then a join): the whole chain in a few minutes
+    {
+      "name": "smoke",
+      "from": 600,
+      "to": 602,
+      "size": 512,
+      "chunk": 1
+    },
+    // SMOKE, 16-bit: 1 s at 256² through the 12-bit lossless intermediate (FFV1), the 12-bit master's path
+    {
+      "name": "smoke16",
+      "from": 600,
+      "to": 601,
+      "size": 256,
+      "codec": "ffv1",
+      "depth": 16
+    },
+    // ---------------------------------------------------------------------------------------------------------
+    // THE FILM, 8K, 12-BIT (only when the user asks for the master). FFV1 is lossless 12-bit 4:4:4 BT.709: the
+    // samples a ProRes 4444 master holds. The chunks go to the Mac and become ProRes 4444 there (RENDER-NODE.md,
+    // "The 12-bit ProRes 4444 master"). ~2 B/px: about 130 MB a frame, ~3 TB for the whole show at 30 fps —
+    // render it to a big disk ("out"). One lane: an 8K master at ss 1.5 is most of a 24 GB card (watch nvidia-smi
+    // during the first chunk before trying "lanes": 2). "to": the show's end as drift-gpu-check prints it.
+    // To use it, uncomment its lines (trailing commas are fine).
+    //
+    // {
+    //   "name": "film_8k_12bit",
+    //   "from": 0,
+    //   "to": 770,
+    //   "size": 8192,
+    //   "ss": 1.5,
+    //   "blur": 8,
+    //   "codec": "ffv1",
+    //   "depth": 16,
+    //   "lanes": 1,
+    //   "chunk": 5,
+    //   "concat": false,
+    //   "out": "out/drift/masters"
+    // },
+    //
+    // A 4K PREVIEW of the whole show on NVENC (HEVC Main10; 4096² is inside HEVC level 6, 8192² is not):
+    // {
+    //   "name": "film_4k_preview",
+    //   "from": 0,
+    //   "to": 770,
+    //   "size": 4096,
+    //   "codec": "hevc10",
+    //   "depth": 16,
+    //   "lanes": 2,
+    //   "chunk": 60
+    // }
+  ]
+}

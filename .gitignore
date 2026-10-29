@@ -39,6 +39,11 @@ docs/**/*.mov
 tests/zzScratch*
 out/cine
 out/drift
+# the render nodes' data bundles (scripts/drift-bundle.mjs): BlenderKit models inside may not be passed on
+out/drift-bundle/
+# a render node's own config (scripts/drift-node.mjs): where its private bundle source is. Never in this public repo
+# (its state, out/drift/node-state.json, is under out/drift above)
+/drift-node.json
 docs/speedboat/refs/_local/
 !docs/speedboat/concept/*.png
 scripts/blender/**/__pycache__/

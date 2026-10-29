@@ -246,7 +246,14 @@ three should size the chain from the target's options rather than the flag's sta
 
 **MSAA on a cube target fails validation.** `CubeRenderTarget({ samples: 4 })` renders, but its clear pass pairs
 a 4-sample depth attachment with a 1-sample colour one ("depth stencil attachment sample count (4) does not
-match"), and the frame is dropped. Not used. A 2D MSAA target per face, copied into the cube, would work around it.
+match"), and the frame is dropped. The workaround is in use since 2026-10-29: each face draws into one shared 2D
+`RenderTarget` (face size, half-float, `samples: 4`), and the resolved picture is copied into the cube face with
+`renderer.copyTextureToTexture`; the last copy builds the mips (`DomeCapture.setSamples(0 | 4)`, default 4; 0 is the
+old direct-to-cube path, for A/B and as a memory fallback). Alpha-tested foliage sets `alphaToCoverage` so its cut is
+graded in the multisampled pass. Measured on 640 px clips, foliage shimmer at the forest canopy (604 s) fell from 14.0
+to 6.8 with MSAA plus 2 face texels per output pixel. Cost: almost nothing at 2048², 20–70% per frame at 4096², about
+80 B per face texel (an 8192² master at `--ss 1.25` peaks near 23.5 GB; `--ss 2` with MSAA does not fit in 36 GB). MSAA
+does not touch shading aliasing: the raft deck's slats still moiré.
 
 ## 12. The far sea is pixel noise at grazing angles
 
@@ -361,3 +368,13 @@ lane's first frame. Warm the sims up before it: step flowfoam (injection, advect
 sim over the 10–20 s before `from`, without drawing the dome. Both decay exponentially, so the lanes' joins
 would agree to well under a percent, and the film would get the game's whole wake and contact froth for the
 raft, the debris and the dolphin.
+
+## three r186's PCF shadows flicker in offline frames (2026-10-29)
+
+`PCFShadowFilter` (nodes/lighting/ShadowFilterNode.js) takes 5 Vogel-disk taps turned per pixel by interleaved-gradient
+noise on the screen coordinate. Five taps make six grey levels, so every soft edge is dithered, and the dither is pinned
+to each cube face's pixels while the edge moves with the scene: soft shadows boil frame to frame ("jumping left and
+right", the user). It is a pattern meant for TAA, which a film frame never gets. The film sets its own filter on the
+Sun's shadow (`shadow.filterNode = filmShadowFilter`, src/drift/wandering/filmShadowFilter.ts: 16 fixed, tent-weighted,
+hardware-compared taps). Related: the dome's cube faces rendered without MSAA, so alpha-tested and sub-pixel geometry
+aliased; they are multisampled now (finding 11).

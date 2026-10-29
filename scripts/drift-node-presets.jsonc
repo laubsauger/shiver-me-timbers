@@ -1,0 +1,50 @@
+// The Drift's render presets: what `node scripts/drift-node.mjs render <preset>` renders (docs/drift/RENDER-NODE.md).
+// JSON plus whole-line // comments, as the queue's own files (scripts/drift-render-queue.example.jsonc), each preset a
+// queue of its own: "defaults" and "jobs", with any of a job's fields (name from to size fps ss blur shutter codec
+// depth lanes chunk channel crf preset concat msaa extra). Two things differ from a queue file:
+//   "to": "end"  the show's end, asked of the page on this machine (drift-gpu-check prints it too; cached per commit)
+//   "out"        not set here: a preset renders into <renders>/<commit>-<bundle>/ (drift-node.json "renders", default
+//                out/drift/renders), one folder per state of code and data, so "render our current state" never
+//                reuses a chunk of an older one. Resumable within a state: run the same command again.
+// Per run, without editing this file: --set ss=1 · --set msaa=0 · --set blur=8 · --set from=300,to=330 · --only <job>
+//
+// Settings from docs/drift/PIPELINES.md ("--ss") and RENDER-NODE.md: with the faces' 4× MSAA, ss 2 at 2048², 1.5 at
+// 4096², 1.25 at 8192² (record.ts supersample: measured at the forest edge, 2026-10-29). "chunk" is s of show time,
+// sized for ~25 min a chunk from the Mac's rates (0.7 s a frame at 2048², ~1.1 at 4096², 1–4.5 at 8192²); a 4090's
+// first chunk log says its own. Motion blur is off ("blur": 1): 8 sub-frames multiply the time by ~8 — settle it
+// before a master (--set blur=8).
+{
+  "presets": {
+    // the whole chain in a few minutes: the smoke jobs of the example queue (2 s of the beach at 512² in two chunks
+    // and a join; 1 s at 256² through the 16-bit FFV1 path)
+    "smoke": {
+      "jobs": [
+        { "name": "smoke", "from": 600, "to": 602, "size": 512, "chunk": 1 },
+        { "name": "smoke16", "from": 600, "to": 601, "size": 256, "codec": "ffv1", "depth": 16 }
+      ]
+    },
+    // THE WHOLE SHOW to look at: 2048², x264 (.mp4, plays anywhere), one lane. Two lanes may fit a 24 GB card at
+    // 2048² (watch nvidia-smi on the first chunk): --set lanes=2
+    "preview-2k": {
+      "jobs": [
+        { "name": "preview-2k", "from": 0, "to": "end", "size": 2048, "ss": 2, "codec": "x264", "crf": 18, "preset": "medium", "lanes": 1, "chunk": 60 }
+      ]
+    },
+    // A 4K MASTER for DaVinci: ProRes 4444 from the 16-bit capture. Off the Mac its samples are 10-bit (prores_ks);
+    // the 12-bit master is master-8k's FFV1 path. Chunks only (each a clip; a joined copy would double the disk)
+    "master-4k": {
+      "jobs": [
+        { "name": "master-4k", "from": 0, "to": "end", "size": 4096, "ss": 1.5, "codec": "prores4444", "depth": 16, "lanes": 1, "chunk": 30, "concat": false }
+      ]
+    },
+    // THE 8K 12-BIT MASTER: lossless 12-bit FFV1 chunks (~130 MB a frame, ~3 TB for the show: set "renders" in
+    // drift-node.json to a big disk), turned into ProRes 4444 on the Mac (RENDER-NODE.md, "The 12-bit ProRes 4444
+    // master"). ss 1.25 + MSAA peaked near 23.5 GB on the Mac and may not fit a 24 GB card: if the first chunk
+    // fails with a lost device, --set ss=1 (~2 GB less) or --set msaa=0 (the faces without MSAA)
+    "master-8k": {
+      "jobs": [
+        { "name": "master-8k", "from": 0, "to": "end", "size": 8192, "ss": 1.25, "codec": "ffv1", "depth": 16, "lanes": 1, "chunk": 5, "concat": false }
+      ]
+    }
+  }
+}
