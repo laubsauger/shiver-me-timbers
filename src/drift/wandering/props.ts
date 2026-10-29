@@ -8,7 +8,8 @@
  *              (dolphin.ts: its outline and its motion)
  *   case       the blue hard case; in c4 its radio's dial glows
  *   beams      c4: signals made visible, arcing between far stations below the horizon across the sky,
- *              few at first, more as stations answer — thin, slow, soft-edged, warm (direction.md)
+ *              few at first, more as stations answer, until every station answers every other: a mystic rose
+ *              over the dome — thin, slow, soft-edged, warm (direction.md)
  *   field      w3–w4: Drift 3, Act 1's pairs (events.ts, loops.ts) at a breath of their energy, every pair
  *              meeting its partner — no bursts, no remainder: sensed more than seen; and again in w6, over
  *              the eye as it rises into the night, among the stars
@@ -24,6 +25,7 @@ import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
 import { DOLPHIN_SPAN, FLIP_RELEASE, caseOnDeck, createDolphin, flipThrow } from './dolphin';
+import { createHardCase } from './hardCase';
 import { dolphinPose } from './dolphin';
 
 const smooth = (x: number): number => {
@@ -70,6 +72,26 @@ const WALKERS: Array<[number, number]> = [
 const WALK_SPEED = 1.15;
 const WALK_LEAD = 1;
 const WALK_FROM = 7;
+
+/**
+ * THE FIELD BY DAY (w3–w4) was read as faults: "white star-like sparkles near the clouds and thin streaks", a
+ * "lens-flare ring" at the top of the 604 s frame, a round white blob by the waterline (the 2026-10-29 review; a
+ * runtime A/B with the field hidden took every one of them out of the frame, and the stars, the clouds and the bloom
+ * none). They were its white parts against the blue sky — each meeting's flash (a warm-white disc, up to 200 levels
+ * over the sky in 8 bits), a bead's white-hot core and a fresh trail's white head (50–70 levels) — and one loop that
+ * passed 2.5 m from the eye and drew its trail as a ring ~20° across. The direction asks for none of that: "very
+ * faint … matter and antimatter colours meeting and leaving nothing. No fireballs … something you sense more than
+ * see" (drift-narrative/wandering-on/direction.md, W3). So by day: no flashes, no white (loops.ts `hot`), the trails
+ * at 0.4 of their old radiance, and no pair within FIELD_CLEARANCE of the eye. Measured against the same frame with
+ * the field hidden: in the 604 s wide view's open sky 89 pixels more than 10 levels off became 7 (the most 55 → 13);
+ * at 0.031° a pixel (between a 4K and an 8K master's) 5108 → 153 (203 → 56: a trail head's core, amber or blue, a
+ * pixel or two). The night field (w6, among the stars) keeps its look.
+ */
+/** the trails' and the beads' radiance by day (the scene's linear units; the night's: 0.6 × 0.06 and 0.02) */
+const FIELD_DAY_TRAIL = 0.025;
+const FIELD_DAY_BEAD = 0.02;
+/** m: no pair is born nearer the eye than this (a 0.5 m loop at 7 m spans 8°; at 2.5 m it was a 23° ring) */
+const FIELD_CLEARANCE = 7;
 
 /** a walking figure (feet at its origin, facing −z): legs and arms swinging about the hips and shoulders */
 function walker(hex: number, height: number): { group: THREE.Group; stride: (phase: number) => void } {
@@ -148,7 +170,7 @@ const CASE_LOB = 1.0;
 /** m it skids on along the deck once it lands */
 const CASE_SKID = 0.35;
 const G_CASE = 9.81;
-/** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4). Each
+/** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4: LINKS). Each
  * station is a light on a low island on the horizon (STATION_*): the beams start and end at its light, so they
  * point at something (they had met in empty sky just under the horizon: the v9 review) */
 const STATIONS = [-150, -95, -40, 10, 55, 105, 160];
@@ -158,9 +180,12 @@ const STATION_DIST = 7000;
 const STATION_R = 380;
 const STATION_H = 55;
 const BEACON_UP = 6;
-const LINKS: Array<[number, number, number]> = [
-  [2, 3, 9], [3, 4, 15], [1, 2, 20], [4, 5, 25], [0, 3, 30], [5, 6, 34], [2, 5, 38], [1, 4, 42], [0, 6, 46],
-];
+/** EVERY STATION TO EVERY OTHER (the user, 2026-10-28: "connect each to each … have a cool little thing, like
+ * shape appear"; it had been nine of the 21 links, and read lost): the ring of neighbours first, then the
+ * heptagram's chords, then the widest — each round from the front, a beam every 1.8 s from 9 s into c4 */
+const LINKS: Array<[number, number, number]> = [1, 2, 3].flatMap((skip, layer) =>
+  [2, 3, 1, 4, 0, 5, 6].map((a, i): [number, number, number] => [a, (a + skip) % STATIONS.length, 9 + (layer * 7 + i) * 1.8]),
+);
 /** m: the beams' sphere about the eye (inside the far plane), and their tube's radius (soft: brightest at its
  * core, a few pixels across in the master) */
 const BEAM_R = 9000;
@@ -189,8 +214,8 @@ export function createProps(): Props {
   const dolphin = createDolphin();
   const fish = dolphin.group;
   group.add(fish);
-  const caseMesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.4), standIn(0x1f5fa8, 0.45));
-  caseMesh.castShadow = true;
+  // (a moulded hard case, hardCase.ts: 0.55 × 0.22 × 0.40 m about its centre, as the blue box it was)
+  const caseMesh = createHardCase(0x1f5fa8);
   const dialGlow = uniform(0);
   const dialMat = new THREE.MeshBasicNodeMaterial({ fog: false });
   dialMat.colorNode = vec3(1, 0.62, 0.25).mul(dialGlow);
@@ -304,36 +329,24 @@ export function createProps(): Props {
   });
   group.add(stations);
 
+  /** a direction as the dome's fisheye draws it about the zenith (equidistant: the zenith at 0, the horizon at 1) */
+  const flat = (d: THREE.Vector3): THREE.Vector2 => {
+    const r = Math.acos(Math.min(1, Math.max(-1, d.y))) / (Math.PI / 2);
+    const l = Math.hypot(d.x, d.z);
+    return new THREE.Vector2((d.x / l) * r, (d.z / l) * r);
+  };
   for (const [a, b, at] of LINKS) {
-    // from station to station, light to light (on the beams' sphere, along the lights' own directions)
-    const A = beaconDir[a].clone();
-    const B = beaconDir[b].clone();
-    // a circle on the sky through both stations and an apex over the bearing between them (a rainbow's
-    // shape): the wider the link, the higher it reaches (35–70°), never higher than half the stations' spread
-    // (higher, the arc through the apex is the circle's major one: a loop, not an arch)
-    let mid = (STATIONS[a] + STATIONS[b]) / 2;
-    if (Math.abs(STATIONS[a] - STATIONS[b]) > 180) mid += 180;
-    const sep = A.angleTo(B);
-    // (at most 55° up: higher, the arcs between far-apart stations ran through the zenith as straight lines)
-    const C = dirAt(mid, Math.min(25 + 30 * (sep / Math.PI), ((sep * 180) / Math.PI) * 0.4));
-    const n = new THREE.Vector3().subVectors(B, A).cross(new THREE.Vector3().subVectors(C, A)).normalize();
-    const centre = n.clone().multiplyScalar(n.dot(A));
-    const ua = A.clone().sub(centre);
-    const rho = ua.length();
-    ua.normalize();
-    const wa = new THREE.Vector3().crossVectors(n, ua);
-    const angle = (p: THREE.Vector3): number => {
-      const q = p.clone().sub(centre);
-      const x = Math.atan2(q.dot(wa), q.dot(ua));
-      return x < 0 ? x + 2 * Math.PI : x;
-    };
-    // round the circle from A through C to B
-    let toB = angle(B);
-    if (angle(C) > toB) toB -= 2 * Math.PI;
+    // from station to station, light to light (on the beams' sphere, along the lights' own directions): the
+    // STRAIGHT CHORD between them as the fisheye draws the sky about the zenith, so the 21 make the rose's figure
+    // overhead — a neighbour's an arch ~10° up, the widest pass ~20° from the zenith (7 stations: none opposite)
+    const A = flat(beaconDir[a]);
+    const B = flat(beaconDir[b]);
     const pts: THREE.Vector3[] = [];
     for (let i = 0; i <= 64; i++) {
-      const ph = (toB * i) / 64;
-      pts.push(centre.clone().addScaledVector(ua, rho * Math.cos(ph)).addScaledVector(wa, rho * Math.sin(ph)).normalize().multiplyScalar(BEAM_R));
+      const q = A.clone().lerp(B, i / 64);
+      const th = (q.length() * Math.PI) / 2;
+      const l = Math.max(q.length(), 1e-9);
+      pts.push(new THREE.Vector3((q.x / l) * Math.sin(th), Math.cos(th), (q.y / l) * Math.sin(th)).multiplyScalar(BEAM_R));
     }
     const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 160, BEAM_W, 8, false);
     const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
@@ -370,6 +383,7 @@ export function createProps(): Props {
     trailRadiance: uniform(0),
     beadRadiance: uniform(0),
     flashRadiance: uniform(0),
+    hot: uniform(0),
     eye: uniform(new THREE.Vector3()),
     pocket: {
       domeAxis: uniform(new THREE.Vector3(0, 1, 0)),
@@ -524,8 +538,9 @@ export function createProps(): Props {
             to: starts.w5,
             centre: () => [s.fieldEye.x, s.fieldEye.y + 3, s.fieldEye.z - 12],
             radius: 16,
-            eye: () => [s.fieldEye.x, s.fieldEye.y, s.fieldEye.z],
-            clearance: 2.5,
+            // (from the eye where it is at each birth: it glides ~7 m along the beach through w3–w4)
+            eye: (x) => s.coastEyeAt(x).toArray() as Vec3,
+            clearance: FIELD_CLEARANCE,
             loopRadius: [0.15, 0.5],
             loopTime: [1.2, 2.4],
           },
@@ -567,10 +582,13 @@ export function createProps(): Props {
       // at the edge of seeing (direction: "like heat shimmer or dust in sunlight"; brighter, the beads read as
       // stars by day in the v9 review)
       // (at night the eye has opened to the stars: the same radiance read as scribbles over the Milky Way)
-      const dim = t > starts.w6 - 3 ? 0.6 : 1;
-      fieldU.trailRadiance.value = 0.06 * dim;
-      fieldU.beadRadiance.value = 0.02 * dim;
-      fieldU.flashRadiance.value = 0.02 * dim;
+      // (by day still too much: its white flashes, beads and trail heads read as stars and lens streaks in the blue,
+      // the 2026-10-29 review — FIELD_DAY_TRAIL above)
+      const atNight = t > starts.w6 - 3;
+      fieldU.trailRadiance.value = atNight ? 0.06 * 0.6 : FIELD_DAY_TRAIL;
+      fieldU.beadRadiance.value = atNight ? 0.02 * 0.6 : FIELD_DAY_BEAD;
+      fieldU.flashRadiance.value = atNight ? 0.02 * 0.6 : 0;
+      fieldU.hot.value = atNight ? 1 : 0;
 
       // THE WALKERS: from behind the eye on its left, down the wet sand by the waterline, the way the flock went
       const w5 = t - starts.w5 + WALK_LEAD;

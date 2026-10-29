@@ -297,12 +297,16 @@ async function boot(): Promise<void> {
     bloomThreshold: p.bloomThreshold,
     overlayRadiance: seaK >= 1 && !titleOn ? 0 : p.crawlRadiance,
   });
+  /** the sea's ambient occlusion (cine/domeAo.ts): its scene only — Act 1 and 2 are emitters in the void, and
+   * their scale runs from millimetres to galaxies, which a metre-scale term has no meaning in */
+  const seaAo = (): { strength: number; radius: number } => ({ strength: p.seaAo, radius: p.seaAoRadius });
   /** the prepared frame's scenes into the dome's accumulator with `weight`, shared out by the hand-over (each
    * scene's own exposure in its share, so present with `look(1)`) */
   const accumulate = (weight: number, first: boolean): void => {
     if (seaK < 1) {
       dome.setNear(actNear);
       dome.setFar(1e6);
+      dome.setAmbientOcclusion(null);
       dome.accumulate(renderer, scene, eye, p.domeTilt, masterSize, weight * (1 - seaK) * actExposure, first);
     }
     // each of the sea's beats (a dissolve draws two), put in its state just before it is drawn
@@ -311,6 +315,7 @@ async function boot(): Promise<void> {
       sea.update(seaT, seaEye, renderer, ps.beat);
       dome.setNear(0.05);
       dome.setFar(sea.far);
+      dome.setAmbientOcclusion(seaAo());
       dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * ps.weight * endFade * sea.exposure, clear);
       clear = false;
     }
@@ -326,6 +331,7 @@ async function boot(): Promise<void> {
     if (seaK <= 0) {
       dome.setNear(actNear);
       dome.setFar(1e6);
+      dome.setAmbientOcclusion(null);
       dome.render(renderer, scene, eye, p.domeTilt, masterSize, look(actExposure));
       return;
     }
@@ -451,8 +457,12 @@ async function boot(): Promise<void> {
   bootReady();
   loop.start();
   if (q.has('record')) {
-    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight&blur&shutter&ss] — a lane of scripts/drift-render.mjs, or a one-off
+    // ?record[&size&fps&from&to&shot&group&lane&sink&inflight&blur&shutter&ss&depth&msaa] — a lane of scripts/drift-render.mjs, or a one-off
     const num = (k: string, d: number): number => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
+    // &msaa=0: the faces without their 4× MSAA (cine/domeCapture.ts setSamples), the direct-to-cube path. For a render
+    // node whose card cannot hold the multisampled faces of an 8K master: at ss 1.25 they peaked near 23.5 GB on the
+    // Mac, and the studio's cards have 24 GB (docs/drift/RENDER-NODE.md). Anything else keeps the default, 4.
+    if (num('msaa', 4) === 0) dome.setSamples(0);
     const status = window as unknown as { __driftRecord?: { done: boolean; frames?: number; error?: string } };
     status.__driftRecord = { done: false };
     record({
@@ -468,6 +478,7 @@ async function boot(): Promise<void> {
       blur: num('blur', 1),
       shutter: num('shutter', 0.5),
       supersample: num('ss', 1),
+      depth: num('depth', 8) === 16 ? 16 : 8,
     }).then(
       (frames) => (status.__driftRecord = { done: true, frames }),
       (e) => (status.__driftRecord = { done: true, error: String(e) }),

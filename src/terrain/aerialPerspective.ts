@@ -69,6 +69,7 @@
 import * as THREE from 'three/webgpu';
 import {
   cameraPosition,
+  float,
   mix,
   output,
   positionWorld,
@@ -95,6 +96,8 @@ export function createAerialUniforms() {
     range: uniform(new THREE.Vector2(p.hazeStart, p.hazeEnd)),
     curve: uniform(p.hazeCurve),
     strength: uniform(p.hazeStrength),
+    /** m, the near field's air (0: none) — the ocean's own (params hazeNearDistance) */
+    near: uniform(p.hazeNearDistance),
   };
 }
 
@@ -106,6 +109,7 @@ export function updateAerialUniforms(u: AerialUniforms): void {
   (u.range.value as THREE.Vector2).set(p.hazeStart, p.hazeEnd);
   u.curve.value = p.hazeCurve;
   u.strength.value = p.hazeStrength;
+  u.near.value = p.hazeNearDistance;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -119,7 +123,9 @@ type AnyNode = any;
 export function aerialHazeFactor(u: AerialUniforms): AnyNode {
   // XZ distance — see the header for why not 3D
   const camDist = positionWorld.xz.sub(cameraPosition.xz).length();
-  return pow(smoothstep(u.range.x, u.range.y, camDist), u.curve)
+  const nearKeep = u.near.greaterThan(0).select(camDist.div(u.near.max(1)).negate().exp(), float(1));
+  return float(1)
+    .sub(float(1).sub(pow(smoothstep(u.range.x, u.range.y, camDist), u.curve).clamp(0, 1)).mul(nearKeep))
     .clamp(0, 1)
     .mul(u.strength)
     .clamp(0, 1);
@@ -148,8 +154,10 @@ export function aerialHazeFactorCpu(
   end: number,
   curve: number,
   strength: number,
+  near = 0,
 ): number {
   const t = Math.min(Math.max((distance - start) / Math.max(end - start, 1e-6), 0), 1);
   const hermite = t * t * (3 - 2 * t);
-  return Math.min(Math.max(Math.pow(hermite, curve), 0), 1) * strength;
+  const keep = near > 0 ? Math.exp(-distance / near) : 1;
+  return Math.min(Math.max(1 - (1 - Math.min(Math.max(Math.pow(hermite, curve), 0), 1)) * keep, 0), 1) * strength;
 }

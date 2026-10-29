@@ -43,6 +43,7 @@ import {
   abs,
   acos,
   asin,
+  atan,
   cameraPosition,
   cross,
   exp,
@@ -56,6 +57,7 @@ import {
   positionWorld,
   pow,
   select,
+  sin,
   smoothstep,
   sqrt,
   step,
@@ -69,7 +71,8 @@ import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
 import { GLOBAL_ELEV_TEXEL, latLon, loadEarthMaps, mapCoords, sampleBoth, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
-import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, sunDisc, sunGlare, sunlight, towardEye } from './atmosphere';
+import { STAR_SIGMA } from './milkyWay';
+import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, starburst, sunBloom, sunDisc, sunlight, towardEye } from './atmosphere';
 export { EARTH_R };
 import type { LifeState } from './life';
 
@@ -82,6 +85,18 @@ const CLOUD_H = 0.007;
 const KM = 1 / 6371;
 /** the night side's moonlit ambient, against the Sun's light */
 const MOONLIGHT = 0.035;
+/** the Sun's glint off the sea while the planet is small (see the glint, below): its point's peak at STAR_SIGMA
+ * wide (a bright star's), its rays' light (atmosphere.ts starburst) and reach (rad: ~1.5°, a sparkle, not a
+ * flare), the quad it is drawn on (rad across), and the planet's angular radius (rad) over which it goes */
+const GLINT_PEAK = 8;
+const GLINT_BURST = 0.0018;
+const GLINT_RAYS = 0.026;
+const GLINT_QUAD = 0.08;
+/** rad/s each of its rays flickers at (the wind's ripples tilting the facets that mirror the Sun in and out),
+ * none a multiple of another so the sparkle never repeats; and the point's own, slower */
+const GLINT_TWINKLE = [6.1, 7.9, 9.4, 5.3, 8.7, 6.6, 10.2, 7.3];
+const GLINT_PULSE = 4.7;
+const GLINT_FADE: [number, number] = [(0.3 * Math.PI) / 180, (1.5 * Math.PI) / 180];
 
 export interface Earth {
   readonly group: THREE.Group;
@@ -145,6 +160,7 @@ export function createEarth(): Earth {
     sunPresence: uniform(0),
     pixelAngle: uniform(0.0015),
     cloudShift: uniform(0),
+    time: uniform(0),
   };
   const gu = { north: uniform(new THREE.Vector3(0, 1, 0)), zero: uniform(new THREE.Vector3(1, 0, 0)), east: uniform(new THREE.Vector3(0, 0, -1)) };
   const G: GeoFrame = { north: gu.north as unknown as V3, zero: gu.zero as unknown as V3, east: gu.east as unknown as V3 };
@@ -385,7 +401,7 @@ export function createEarth(): Earth {
   sunMat.depthTest = false;
   sunMat.side = THREE.DoubleSide;
   sunMat.blending = THREE.AdditiveBlending;
-  const QUAD = 1.2; // rad across: room for the glare to fall to nothing before the quad's edge
+  const QUAD = 1.6; // rad across: room for the glare to fall to nothing before the quad's edge
   sunMat.positionNode = eyeFacing(sunPos, float(sunDistance * QUAD));
   /** what of the Sun's light reaches the eye along d: none through the planet, reddened through its air */
   const pastEarth = (d: V3): V3 => {
@@ -395,15 +411,17 @@ export function createEarth(): Earth {
   };
   sunMat.colorNode = Fn(() => {
     const q = uv().sub(0.5).mul(2);
-    const r = q.length().mul(QUAD / 2); // rad from the Sun's centre
+    // the quad's plane, rad from the Sun's centre along it, and the true angle (atan: the quad is wide)
+    const o = q.mul(QUAD / 2);
+    const r = atan(o.length());
     const disc = sunDisc(r);
-    // the glare is the eye's (or lens's) response to the whole disc: it goes as the disc sets behind the limb
+    // the glare is the eye's (or lens's) response to the whole disc: it goes as the disc sets behind the limb.
+    // A veil with no edge and the optics' rays (atmosphere.ts sunBloom): an exponential glare read as a lens
+    // flare, the Sun in space "underwhelming" (the user, 2026-10-29)
     const aboveLimb = acos(eyeUp.dot(S).negate().clamp(-1, 1)).sub(asin(float(EARTH_R).div(eyeR)));
     const seen = pastEarth(S).mul(smoothstep(-SUN_ANG, SUN_ANG, aboveLimb));
-    const glare = sunGlare(r);
-    const rays = float(0);
     const fade = float(1).sub(smoothstep(0.6, 1, q.length()));
-    const light = pastEarth(normalize(positionWorld.sub(cameraPosition))).mul(disc).add(seen.mul(glare.add(rays)));
+    const light = pastEarth(normalize(positionWorld.sub(cameraPosition))).mul(disc).add(seen.mul(sunBloom(o, r, P)));
     return vec4(SUN_TINT.mul(light).mul(fade).mul(u.sunPresence), 1);
   })();
   sunMat.name = 'drift-earth-sun';
@@ -432,9 +450,55 @@ export function createEarth(): Earth {
   pointMat.name = 'drift-earth-point';
   const point = billboardMesh(pointMat, 1, 'drift-earth-point');
 
+  // ------------------------------------------------------------------ the glint
+  // THE PLANET FIRST SHOWS AS ONE MORE STAR: a blue point low on the right among thousands, mostly its night
+  // side, the eye never finds it. What finds it is the Sun's image in its sea: from far off a planet's ocean
+  // mirrors the Sun from the one point whose normal halves the way to the Sun and to the eye — on the sunlit
+  // side, toward the limb — and seen from afar that glint is a point as bright as the whole sunlit crescent
+  // around it. As a SPARKLE (the user, 2026-10-29: a round glow read "round and weird"): a pinpoint, the optics'
+  // short rays out of it (atmosphere.ts starburst, as the Sun's own), each flickering on its own as the ripples
+  // tilt the mirroring facets — no veil (any halo of its own read as a disc; the dome's bloom gives it what glow
+  // it has). It comes up with the planet's Sun (the
+  // hand-over from the Milky Way's Sun star) and goes as the disc grows past GLINT_FADE: by then the surface
+  // shades its own glint, and the planet needs no help to be seen. (Not masked by land and cloud: from where the
+  // eye first sees it the point falls near the Bering Strait, and the flare is the crescent's, held for the eye.)
+  const glintN = normalize(S.add(normalize(cameraPosition.sub(C))));
+  const glintAt = C.add(glintN.mul(EARTH_R));
+  const glintDist = glintAt.sub(cameraPosition).length();
+  const glintMu = glintN.dot(S);
+  const glintGain = float(1)
+    .sub(smoothstep(GLINT_FADE[0], GLINT_FADE[1], asin(float(EARTH_R).div(dist).min(1))))
+    .mul(u.presence)
+    .mul(u.sunPresence);
+  // a pinpoint: 0.64 px wide on any master, its light that of a STAR_SIGMA-wide star of peak GLINT_PEAK
+  const glintSigma = P.mul(0.64);
+  const glintMat = new THREE.NodeMaterial();
+  glintMat.transparent = true;
+  glintMat.depthWrite = false;
+  glintMat.depthTest = false;
+  glintMat.side = THREE.DoubleSide;
+  glintMat.blending = THREE.AdditiveBlending;
+  glintMat.positionNode = eyeFacing(glintAt, glintDist.mul(GLINT_QUAD).mul(step(0.0005, glintGain)));
+  glintMat.colorNode = Fn(() => {
+    const q = uv().sub(0.5).mul(2);
+    const o = q.mul(GLINT_QUAD / 2); // rad from the glint, in the quad's plane
+    const r = o.length();
+    const pulse = sin(u.time.mul(GLINT_PULSE)).mul(0.12).add(0.88);
+    const core = exp(r.div(glintSigma).pow(2).negate()).mul(float(STAR_SIGMA).div(glintSigma).pow(2)).mul(GLINT_PEAK).mul(pulse);
+    const flicker = (ray: number): F => sin(u.time.mul(GLINT_TWINKLE[ray]).add(ray * 2.4)).mul(0.225).add(0.775);
+    const rays = starburst(o, P, float(GLINT_RAYS), flicker).mul(GLINT_BURST);
+    const fade = float(1).sub(smoothstep(0.6, 1, q.length()));
+    // the sunlight down to the sea there and back up to the eye: warm, as the grazing paths through the air redden it
+    const light = sunlight(float(EARTH_R), glintMu).mul(towardEye(float(EARTH_R), glintMu, eyeR, eyeUp.dot(normalize(cameraPosition.sub(glintAt)))));
+    return vec4(SUN_TINT.mul(light).mul(rays.add(core)).mul(fade).mul(glintGain), 1);
+  })();
+  glintMat.name = 'drift-earth-glint';
+  const glint = billboardMesh(glintMat, 1, 'drift-earth-glint');
+  glint.renderOrder = 3;
+
   const group = new THREE.Group();
   group.name = 'drift-earth';
-  group.add(surface, clouds, atmosphere, sun, point);
+  group.add(surface, clouds, atmosphere, sun, point, glint);
   return {
     group,
     ready: maps.ready,
@@ -445,6 +509,7 @@ export function createEarth(): Earth {
     },
     update(o) {
       u.cloudShift.value = o.time * CLOUD_DRIFT;
+      u.time.value = o.time;
       du.presence.value = o.drift?.presence ?? 0;
       du.clear.value = o.drift?.clear ?? 0;
       if (o.drift) {
@@ -471,7 +536,7 @@ export function createEarth(): Earth {
       atmosphere.position.copy(o.centre);
     },
     dispose() {
-      for (const m of [surface, clouds, atmosphere, sun, point]) {
+      for (const m of [surface, clouds, atmosphere, sun, point, glint]) {
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();
       }

@@ -58,6 +58,10 @@ export interface LoopUniforms {
   /** the text pocket (pairModel.ts): what is under the text NOW fades, so it reads on a calm sky */
   pocket: PocketUniforms;
   eye: V3;
+  /** 0..1, how far the hot parts burn white: a bead's core and the head of a fresh trail. None: 1, this act's look.
+   * The sea's daytime field (wandering/props.ts) draws them at 0, in their pair's tint only: against a blue day sky a
+   * white point reads as a star and a white curl as a lens streak (the 2026-10-29 review) */
+  hot?: F;
 }
 
 /** m/s, the photons' and gammas' "speed of light" (fast against everything else, still followable) */
@@ -251,7 +255,7 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
     const noise = sin(along).mul(0.5).add(sin(along.mul(2.3).add(1.7)).mul(0.3)).mul(0.5).add(0.5);
     const breakup = mix(float(1), noise.mul(noise), smoothstep(0.9, 2.4, age));
     const tint = mix(U.matter, U.anti, step(q, 0));
-    const hot = exp(age.div(0.12).negate());
+    const hot = U.hot ? exp(age.div(0.12).negate()).mul(U.hot) : exp(age.div(0.12).negate());
     // a trail fades on its pair's own time scale: a long loop's lingers, a quick one's (the wave's) is gone
     const tau = P.loop.mul(0.35).add(0.25).min(1.1);
     const coreC = mix(tint, vec3(1, 0.97, 0.92), hot.mul(0.8)).mul(core).mul(exp(age.div(tau).negate())).mul(5);
@@ -359,7 +363,8 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
     const photonC = vec3(0.85, 0.9, 1).mul(streakShape).mul(40);
     // a hot bead: a white core in a coloured glow
     const beadGlow = exp(p.dot(p).mul(3).negate()).mul(float(1).sub(smoothstep(0.7, 1, p.length())));
-    const beadC = tint.mul(beadGlow).mul(2.2).add(vec3(1, 0.97, 0.92).mul(exp(p.dot(p).mul(60).negate())).mul(20));
+    const core = vec3(1, 0.97, 0.92).mul(exp(p.dot(p).mul(60).negate())).mul(20);
+    const beadC = tint.mul(beadGlow).mul(2.2).add(U.hot ? core.mul(U.hot) : core);
     const burstC = U.light.mul(disc).mul(30);
     const flashC = U.light.mul(disc).mul(60);
     const gammaC = vec3(1, 0.97, 0.9).mul(streakShape).mul(30);

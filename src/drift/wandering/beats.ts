@@ -41,6 +41,10 @@ export interface BeatSpec {
   /** the clouds: how much of the sky they cover, and the cirrus */
   cover: number;
   cirrus: number;
+  /** s: a beat that runs on from the last without a dissolve may bring its light down in a TIME-LAPSE instead —
+   * its Sun from its start elevation to its end one, and its sky from the last beat's cover to its own, over this
+   * many seconds (eased), then held (c4: night falls in a time-lapse, no crossfade) */
+  lapse?: number;
 }
 
 /** s c1 runs on past the landing's end: the slow follow before seafaring */
@@ -57,9 +61,19 @@ export const BEATS: BeatSpec[] = [
   // (a beat that follows without a dissolve takes the Sun where the last left it: c3's had stood 2° further round,
   // and the Sun jumped as the dolphin came, the v9 review)
   { name: 'c3', world: 'open', length: 45, dissolve: 0, sunEl: [1.6, -0.8], sunAz: -22, cover: 0.42, cirrus: 0.2 },
-  { name: 'c4', world: 'open', length: 60, dissolve: 8, sunEl: [-20, -20], sunAz: -24, cover: 0.12, cirrus: 0.08 },
-  { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: 100, cover: 0.4, cirrus: 0.12 },
-  { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: 100, cover: 0.4, cirrus: 0.12 },
+  // (a slow fall into the night, 24 s, not 8: from just after sunset the Milky Way came up "very instant and fast …
+  // like a bad transition", the 2026-10-29 review of v11 — as w6's)
+  // (NIGHT FALLS IN A TIME-LAPSE, not a crossfade: the 8 s dissolve brought the Milky Way up "very instant and fast
+  // … like a bad transition", and a 24 s one still faded it in over a twilight-blue sky — the 2026-10-29 review.
+  // The Sun runs on from c3's last light, its bearing too, down to −20° over 22 s, the clouds thinning with it, and
+  // the stars come out by themselves as the sky darkens (seaSky.ts: they show by the sky's brightness). No runtime
+  // added: c4 is as long as it was.)
+  { name: 'c4', world: 'open', length: 60, dissolve: 0, sunEl: [-0.8, -20], sunAz: -22, cover: 0.12, cirrus: 0.08, lapse: 22 },
+  // (the morning Sun behind us on the SEA side, over the lagoon: on the land side — behind right, as it was — the
+  // forest stood between it and the beach, and the whole beach lay in the trees' long shadow, backlit and dark as we
+  // came in, the raft's shadow thrown back across the shallows at us: the 2026-10-29 review)
+  { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: -125, cover: 0.4, cirrus: 0.12 },
+  { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: -125, cover: 0.4, cirrus: 0.12 },
   { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.24, cirrus: 0.12 },
   { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -68, cover: 0.24, cirrus: 0.12 },
   { name: 'w5', world: 'coast', length: 35, dissolve: 0, sunEl: [1.5, -3], sunAz: -68, cover: 0.24, cirrus: 0.12 },
@@ -115,6 +129,18 @@ export function beatsAt(t: number, c1End: number): Array<{ name: BeatName; weigh
 
 export const spec = (name: BeatName): BeatSpec | undefined => BEATS.find((b) => b.name === name);
 
+/** the clouds of beat `name` at sea time t: its own, or through its time-lapse (`lapse`) eased in from the beat
+ * before's */
+export function beatSky(name: BeatName, t: number, c1End: number): { cover: number; cirrus: number } {
+  const b = spec(name);
+  if (!b) throw new Error(`beatSky: ${name} has no sky of its own`);
+  const i = BEATS.indexOf(b);
+  if (!b.lapse || i === 0) return { cover: b.cover, cirrus: b.cirrus };
+  const a = BEATS[i - 1];
+  const k = smooth((t - beatStarts(c1End).starts[name]) / b.lapse);
+  return { cover: a.cover + (b.cover - a.cover) * k, cirrus: a.cirrus + (b.cirrus - a.cirrus) * k };
+}
+
 /**
  * The Sun at sea time t in beat `name` (not c1, whose Sun is Act 2's), in the eye's level frame: unit, x to the
  * right of the front, y up, z back (the front is −z). It moves from the beat's start elevation to its end one —
@@ -125,7 +151,7 @@ export function beatSun(name: BeatName, t: number, c1End: number): [number, numb
   const b = spec(name);
   if (!b) throw new Error(`beatSun: ${name} has no light of its own`);
   const { starts } = beatStarts(c1End);
-  const u = Math.min(1, Math.max(0, (t - starts[name]) / b.length));
+  const u = b.lapse ? smooth((t - starts[name]) / b.lapse) : Math.min(1, Math.max(0, (t - starts[name]) / b.length));
   const el = ((b.sunEl[0] + (b.sunEl[1] - b.sunEl[0]) * u) * Math.PI) / 180;
   const az = (b.sunAz * Math.PI) / 180;
   return [Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)];
@@ -174,7 +200,7 @@ const POSE_KEYS: PoseKey[] = [
   { beat: 'w1', at: 6, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
 ];
 
-/** s into c4 the sail is struck over: once the night's dissolve is through (a dissolve crossfades a strike) */
+/** s into c4 the sail is struck over, as the night falls */
 const SAIL_STRIKE: [number, number] = [10, 17];
 
 /** the square sail, 0 furled .. 1 set: furled at rest in the debris, set at sea through the dolphin and on into
@@ -251,7 +277,7 @@ export const OPEN_YAW = 0;
  * THE COAST (w1–w5), about one beach: the lagoon island's long gentle shore on its −x side (the game's
  * showcase island), `beach` its middle at the waterline. Beach coordinates: `along` up the beach toward −z,
  * `off` out to sea (toward −x). The eye faces along the beach (−z), which puts the sea on the left and the
- * island front right (in this frame, facing −z, +x is to the right); the morning Sun behind right, the evening
+ * island front right (in this frame, facing −z, +x is to the right); the morning Sun behind left, over the sea, the evening
  * Sun low in the front left, over the sea. Only through the landfall does it look round toward the land
  * (coastLook), slowly, and back along the beach once ashore.
  *
@@ -364,7 +390,13 @@ export function landfall(t: number, c1End: number, from: { x: number; z: number 
 /** rad: how far the eye looks round toward the land (−: to the right) over the landfall, on top of COAST_YAW;
  * eased in as the raft turns in, held as we step off, eased back along the beach once ashore */
 const LOOK = -24 * D;
+/** rad: the turn left toward the flock wheeling over the sea in w4 */
+const BIRD_LOOK = 22 * D;
 export function coastLook(t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
-  return LOOK * (smooth((t - starts.w2 + 12) / 30) - smooth((t - starts.w2 - 34) / 30));
+  // and in w4 round to the left, out over the sea, as the sandpipers wheel there (flock.ts: the flock's own clock
+  // is w4 + 2; it crosses the front at ~9 s and wheels over the sea from ~13 s), back before the vortex overhead
+  // (the 2026-10-29 review: "we should tilt a little to the left to watch the sandpipers")
+  const birds = BIRD_LOOK * (smooth((t - starts.w4 - 11) / 8) - smooth((t - starts.w4 - 25) / 7));
+  return LOOK * (smooth((t - starts.w2 + 12) / 30) - smooth((t - starts.w2 - 34) / 30)) + birds;
 }

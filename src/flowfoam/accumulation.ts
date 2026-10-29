@@ -143,6 +143,11 @@ export interface AccumProfile {
    * 6–24 m sideways within its life — the round cloud of T199.
    */
   wakeChurn?: () => number;
+  /**
+   * An extra velocity field (m/s, world XZ) added to the curl flow this tier advects by — the Drift raft's shed
+   * eddies (hullContact.ts `flowNode`), so its foam and slick are wound round them. Absent: the graph as it was.
+   */
+  extraFlow?: (worldXZ: any) => any;
 }
 
 /** the near tier's profile — `createAccumulation`'s default, exported so a variant can spread it */
@@ -337,9 +342,10 @@ export function createAccumulation(
       const historyY = y.add(int(uShift.y.mul(res).add(0.5).floor()));
       const foamLocal = loadZero(texA, historyX, historyY).r;
       // far tier skips the flow field entirely — pure shift + decay + wake
-      const flow = profile.useFlow
+      const curl = profile.useFlow
         ? flowVectorNode(vec2(wx, wz), flowU, foamLocal.mul(uWakeChurn).add(1))
         : vec2(0, 0);
+      const flow = profile.extraFlow ? curl.add(profile.extraFlow(vec2(wx, wz))) : curl;
       // backward semi-Lagrangian source uv (flowMath.advectLookupUv mirror)
       const su = u.sub(flow.x.mul(uAdvectDt).div(uSize)).add(uShift.x);
       const sv = v.add(flow.y.mul(uAdvectDt).div(uSize)).add(uShift.y);
@@ -455,6 +461,14 @@ export function createAccumulation(
 
   // Ordered A→B→A kernels share one submission per tier.
   const passes = [advectPass, blurPass];
+  /** both state textures to zero (`clear`): a page that replays its wake from a fixed start */
+  const clearPass = Fn(() => {
+    If(instanceIndex.lessThan(uint(res * res)), () => {
+      const at = ivec2(int(int(instanceIndex).mod(int(res))), int(instanceIndex.div(uint(res))));
+      textureStore(texA, at, vec4(0, 0, 0, 0)).toWriteOnly();
+      textureStore(texB, at, vec4(0, 0, 0, 0)).toWriteOnly();
+    });
+  })().compute(res * res);
 
   // --- region state ---
   const center = new THREE.Vector2(0, 0); // texel-snapped world XZ
@@ -539,6 +553,12 @@ export function createAccumulation(
       uFeather.value = p.maskFeather;
       uShift.value.copy(pendingShift);
       renderer.compute(passes);
+      pendingShift.set(0, 0);
+    },
+
+    /** no foam, no slick, no pending shift: the region as it was built (its centre kept) */
+    clear(renderer: THREE.WebGPURenderer): void {
+      renderer.compute(clearPass);
       pendingShift.set(0, 0);
     },
 

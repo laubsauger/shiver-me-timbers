@@ -12,6 +12,9 @@
  *
  * Built by hand rather than with the game's `buildSea`, which always adds the systems that carry state from
  * frame to frame (foam, the wake, spray, rain) or assume one camera (clouds, the planar reflection). Here:
+ *   - the raft's wake (the game's analytic one: bow mound, Kelvin crests, foam lane, glassy slick) does carry
+ *     state, so it is REPLAYED: from a fixed start in each world (the follow; the coast's first dissolve) up to
+ *     t, whenever t is not a short step on from the last (a seek, a lane's first frame) — `wakeTo`;
  *   - the ocean's spectrum phase is ω·t, so `ocean.update(renderer, t)` is pure in t (its params must not
  *     change during the act: a change arms a rebuild spread over frames);
  *   - the sky rig is pure in the hour (no wind given: its wind lines accumulate phase); its key light is aimed
@@ -23,37 +26,48 @@
  * Act 2's turn, which has levelled out by the time it rests.
  */
 import * as THREE from 'three/webgpu';
-import { uniform } from 'three/tsl';
+import { float, positionWorld, texture, uniform, vec3 } from 'three/tsl';
 import { createSky } from '../../sky';
 import { skyParams } from '../../params/sky';
 import { createOceanSim, oceanParams } from '../../ocean';
 import { OceanSurface } from '../../ocean/oceanSurface';
+import { createFlowFoam, type FlowFoam } from '../../flowfoam';
+import { createHullContact, type HullContact } from '../../flowfoam/hullContact';
+import { flowFoamParams, type FlowFoamParams } from '../../params/flowfoam';
+import { raftWakeParams } from '../../params/raftSailing';
 import { oceanSurfaceParams } from '../../params/oceanSurface';
 import { terrainParams } from '../../params/terrain';
 import { vegetationParams } from '../../params/vegetation';
 import { causticsParams } from '../../params/caustics';
 import { createArchipelago, generateIslandSites } from '../../island/archipelago';
+import type { SeabedField } from '../../island/seabed';
 import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
 import { weatherPresets } from '../../weather/presets';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky, sunlightCpu } from './seaSky';
 import { bakeNightSky } from './nightSky';
-import { createRaft } from './raft';
+import { createRaft, raftLogsInPlan } from './raft';
 import { CIRRUS_H, CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
 import { EARTH_R, SUN_E } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
 import { shadowTexelSize, snapShadowCenter } from '../../sky/shadowMath';
 import { createCubeMirror } from './mirror';
-import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, matPieces, type DebrisUniforms } from '../getTheDrift/debrisField';
+import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, matPieces, thingsAt, type DebrisLook, type DebrisUniforms } from '../getTheDrift/debrisField';
 import { createProps } from './props';
 import { DOLPHIN_SPAN, dolphinSplashes } from './dolphin';
 import { createSplashes } from './splash';
 import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
+import { createFilmCoast, type FilmCoast } from './coast';
+import { createForest, createForestGround, litterMask, type Forest } from './forest';
+import { createShoreline } from './shoreline';
+import { filmShadowFilter } from './filmShadowFilter';
+import { createGroundDebris, type GroundDebris } from './groundDebris';
+import { createBeachDressing, type BeachDressing } from './beachDressing';
 import { createPlants } from './plants';
 import { createPalms, palmFeet } from './palms';
-import { C1_FOLLOW, COAST_YAW, airAt, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
+import { C1_FOLLOW, COAST_YAW, airAt, beatSky, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -82,18 +96,79 @@ const WIND_DIR = 0.6;
 const RAFT_DISTANCE = 18;
 const RAFT_OFF_SUN = 45;
 const RAFT_SHEER = 0.35;
-/** the sea: a light air's ripples (between the game's glass and calm presets: glass read too glassy, calm
- * bobbed), over a ground swell: m RMS (its Hs is 4×), s */
-const RIPPLE = { amplitude: 0.15, windSpeed: 2.5, choppiness: 0.75 };
-const SWELL_RMS = 0.08;
+/** the sea: a light breeze's ripples (between the game's glass and calm presets: glass read too glassy, calm
+ * bobbed), over a ground swell: m RMS (its Hs is 4×), s. (A light air's — 2.5 m/s, 0.15, a 0.08 m swell — still
+ * mirrored the clouds whole at the shore and came in flat on the approach: "awfully static", the 2026-10-29 review) */
+const RIPPLE = { amplitude: 0.28, windSpeed: 4, choppiness: 0.8 };
+const SWELL_RMS = 0.13;
 /** rad: where the light air blows TOWARD (a heading: 0 +z, π −z) — every raft sails dead downwind along −z,
  * the open sea's and the coast's eye facing the same way (beats.ts) */
 const WIND_TO = Math.PI;
+/** s: the wake's replay step (the film's frame), and the longest gap a frame may follow the last by and be caught up
+ * in such steps rather than replayed from its world's start */
+const WAKE_DT = 1 / 30;
+const WAKE_CATCHUP = 10;
+/**
+ * THE RAFT'S WATER (the user, 2026-10-29: the raft "doesn't really cause a wake or any kind of displacement… floating
+ * in a completely unimpressed liquid"; of the game wake's trail at raft scale, "way too stripey… super subtle… a weird
+ * painted-on, almost oil-trail look"). The game's analytic wake is a ship's: at the raft's 0.2–1.9 m/s (Fr ≈ 0.1) its
+ * Kelvin trains are sub-metre parallel stripes, its arms and cut thin lines, its stern churn and slick lane a smooth
+ * band of tint and gloss — all of it OFF here. In its place the raft's own near field (flowfoam/hullContact.ts), all
+ * shape and surface but one white collar: the water riding up and slapping on the logs, white only where it slaps,
+ * the bow heap and the trough alongside, short rings off the logs, a stern wash, and the water churned alongside and
+ * astern — its normal broken up so the sky's mirror and the glitter shatter — over a broad band stirred by eddies shed
+ * off the stern corners, its surface heaved into lumps and boils, and the water pushed aside in waves launched along the
+ * track — all of it astern DEPOSITED where the raft was and left in the world (hullContact.ts). On flowFoamParams (this page's own: no game page
+ * builds the film): the near tier 96 m for 0.19 m texels, its centre WAKE_ASTERN m astern of the raft so the
+ * trail's shape reaches ~65 m (a minute at sea speed) before the coarse tier, which carries no shape, takes over; the
+ * foam short-lived and barely diffused (the slaps' white water
+ * goes in seconds; a long-lived, spreading collar became a 14 m tinted swath), no base drift astern (the water stays
+ * where it is: the wake is left in it, not carried off on a conveyor), the ambient curl gentler.
+ */
+const FILM_WAKE_WHITE = '#dfe9e6';
+/** m: the near tier's centre astern of the raft (its 96 m reach from ~30 m ahead to ~65 m astern) */
+const WAKE_ASTERN = 18;
+const FILM_WAKE: Partial<FlowFoamParams> = {
+  regionSize: 96,
+  // (the foam: the logs' slaps at rest, the bow's curl, the aerated clumps astern and the eddies' rings — bubbles that
+  // last seconds; drawn as water turned milky under the surface, oceanSurfaceParams.wakeAeration, so thin coverage
+  // never goes through the lace art that drew it as hair-fine streaks)
+  decayHalfLife: 4,
+  // (the wake scar, hullContact.ts `laneSlick`: the glassy lane lasts a minute or two; inside it the fine ripples are
+  // all but gone, and the middle cascade's mostly — oceanSurfaceParams.wakeSmoothLong)
+  slickHalfLife: 60,
+  slickDamp: 0.9,
+  // (little diffusion: the wake scar widens slowly — σ 1.5 m in a minute — its edges eaten by the eddies; at 0.5 m/√s
+  // the lane had spread to three raft-widths 30 m astern)
+  blurSpread: 0.2,
+  // (the contact line's reach along the view, ocean surfaceMaterial `contactFoamNode`: at the game's 0.35 m it was a
+  // grey veil over the whole submerged face of every log end — "very grey-bright", the user, 2026-10-29 — where the
+  // water meets wood in a line a few centimetres wide)
+  depthThreshold: 0.05,
+  // (the water's own slow drift, along the light air — not astern of the raft: what it leaves stays where it was left)
+  baseFlowSpeed: 0.05,
+  // (the ambient curl gentle and NOT scaled up by the foam it carries: the game's churn, ×(1 + 1.8·foam) on a strength of
+  // 3, ran ~0.8 m/s in the trail and drew every bubble clump out into long parallel filaments within seconds — the
+  // last of the "stripey stuff", found by switching the clumps off, 2026-10-29. The swirl is the shed eddies')
+  noiseStrength: 1,
+  wakeChurn: 0,
+  bowIntensity: 0,
+  cutIntensity: 0,
+  shoulderIntensity: 0,
+  sternIntensity: 0,
+  vortexIntensity: 0,
+  moundIntensity: 0,
+  slickIntensity: 0,
+  transSlope: 0,
+  divSlope: 0,
+  eddySlope: 0,
+  moundSlope: 0,
+};
 /** px: each face of the water's mirror capture */
 const MIRROR_SIZE = 512;
 /** CPU oceans kept, one per instant, least recently used out: the rafts sample the sea at 5 instants 0.3 s apart
- * (raft.ts SAMPLES, SETTLE), which at 30 fps are the instants of the frames 9, 18, 27 and 36 back — kept, each frame
- * computes one new sea, not five. Until they are reached, 5 a frame are new, so the pool must outlast 9 frames of
+ * (raft.ts SAMPLES, SETTLE: centred, t ± 0.6 s), which at 30 fps are the instants of the frames 18 and 9 ahead and 9
+ * and 18 back — kept, each frame computes one new sea, not five. Until they are reached, 5 a frame are new, so the pool must outlast 9 frames of
  * them (45): at 40 it never warmed (~2 MB each) */
 const SEA_POOL = 64;
 /** s: the grid the sea's instants are keyed (and computed) on, so the same instant reached from two frames, or
@@ -116,6 +191,12 @@ const LAPSE_CLOUDS = 6;
 const MAT_SIGMA = 90;
 const MAT_PIECES = 6000;
 const RAFT_BERTH = 7.5;
+/** the people's things set where the eye will be (debrisField.ts thingsAt): m ahead of and right of where it comes to
+ * rest, in front and low in the dome; and one every THINGS_LANE_EVERY s of the raft's way, THINGS_LANE_OFF m to
+ * alternate sides of it (off its berth) */
+const THINGS_AT_REST: Array<[number, number]> = [[9, -4], [12, 3], [16, -9], [21, 7], [26, -2]];
+const THINGS_LANE_EVERY = 6;
+const THINGS_LANE_OFF = 11;
 
 /** what Act 2 hands the sea each frame (metres: x east, y above the mean sea, z north of the field's centre) */
 export interface SeaDrive {
@@ -146,6 +227,16 @@ export interface SeaAct {
   /** put the sea into the state of time t in `beat` (c1 if none) and the eye where it watches from */
   update(t: number, eye: THREE.Object3D, renderer: THREE.WebGPURenderer, beat?: BeatName): void;
   setPixelAngle(rad: number): void;
+  /** the raft's wake (flowfoam: its look is flowFoamParams, live) */
+  readonly wake: FlowFoam;
+  /** the raft's own water round it and astern (flowfoam/hullContact.ts: its `params` are live) */
+  readonly raftWater: HullContact;
+  /** REVIEW ONLY (the drift review scripts' chase and aimed eyes): moves the eye once update has placed it and the
+   * raft, before anything reads the eye (the sky's shadow focus, the surface's grid, the mirror's capture) — an eye
+   * moved after update kept the show eye's mirror, its reflections metres off */
+  reviewEye?: (eye: THREE.Object3D, raft: { x: number; z: number; heading: number }) => void;
+  /** REVIEW ONLY: the sea the rafts float on (the CpuOcean pool) and the ground, at (x, z) and sea time t */
+  probeWater(x: number, z: number, t: number): { sea: number; ground: number };
 }
 
 /** m: the coast's world, west of everything else (the islands kilometres from the flood's debris and the open
@@ -171,15 +262,77 @@ const FILM_TERRAIN = {
   coverBaseColor: 0x55703d,
   coverTipColor: 0x6e8a49,
   coverDryColor: 0x958a5e,
+  // THE LAPPING AT THE WATERLINE (the user, 2026-10-29: "a super sharp line between the water … no lapping waves,
+  // no foam"): the game's swash (terrain/shoreRunup.ts) scaled itself by the sea's swell, and a near-glass sea
+  // starved it to half-height tongues no one could see. A lagoon's own: small waves every 6–7 s running 10–50 cm
+  // of rise up the 1:11 face (1–5 m of sand), whatever the swell, a narrow lace of foam on their edge
+  runupSwellResponse: 0,
+  runupHeightMin: 0.1,
+  runupHeightMax: 0.5,
+  runupPeriod: 6.5,
+  swashFoamWidth: 0.07,
+  swashFoamStrength: 1,
+  swashResidualStrength: 0.6,
+  swashFoamNoiseScale: 1.4,
+  // (the waves arrive a little staggered along the shore: a front 100 m and more long, its timing drifting along it.
+  // At 0.05 (a 20 m phase field) the fronts broke into a few-metre lobes lapping in out of step — "tink tink tink,
+  // as if three-metre-wide waves were coming in", the 2026-10-29 review)
+  runupPhaseScale: 0.009,
 };
 const FILM_FRONDS = { frondColorDark: 0x2e4f2a, frondColorLight: 0x6a8a45 };
+/**
+ * THE SEA'S OWN COLOUR, per world (the user, 2026-10-29: from the flight to the raft the water "goes from blue to
+ * very turquoise"). The game's water is its Sea of Thieves teal (deep #093642, crests #32d0c0) everywhere; the
+ * landing's sea, seen from the air, is the Earth's deep blue, and the 3 s hand-over swapped one for the other.
+ * Open ocean is blue (references §14.2–3: #182465 looking down by a raft, #204f77 mid-distance, #3f648a toward the
+ * horizon), so the open sea takes those: a deep ultramarine body and blue-cyan light through its crests. Turquoise
+ * is the lagoon's, over sand (the shallows tint) — its deep water teal-blue (§12.1: #40737e far, a deep channel
+ * #6b9bc0, §12.3).
+ */
+const SEA_COLOUR: Record<'open' | 'coast', { deepColor: string; sssColor: string; sssMaxMix: number; contactFoamStrength: number }> = {
+  // (the crests' light dimmer and capped lower on the open sea: facing a low Sun the lobe covers the whole sea
+  // toward it, and in a bright blue it read as electric patches — the first try, #2f8fbf at the game's 0.45)
+  // (and the thin line of bubbles where the water meets the logs and the debris, drawn white now (FILM_WAKE_WHITE),
+  // so faint: at 0.7 it was a glowing grey band round every log — the user, 2026-10-29; the white is the slaps',
+  // hullContact.ts)
+  open: { deepColor: '#14253a', sssColor: '#24708c', sssMaxMix: 0.25, contactFoamStrength: 0.2 },
+  // (and on the coast, the water's own foam where it meets the sand, the lip under the swash's lace)
+  coast: { deepColor: '#0a3550', sssColor: '#36b5c2', sssMaxMix: 0.45, contactFoamStrength: 0.2 },
+};
+/** m: the sun shadow map's half-reach (its 8192² texels then 1.1 cm at sea, 2.2 cm on the coast): at sea only the
+ * raft and the debris round it cast anything worth a shadow; on the coast the palms' and the forest's long shadows
+ * at a low Sun reach ~80 m (the reason it was 160) */
+const SHADOW_EXTENT = { sea: 45, coast: 90 };
+/** texels: the PCF filter's radius */
+const SHADOW_FILTER = 2.5;
+/** m: the sun shadow camera's depth range (params/sky: near 50 .. far 2600), what a depth bias is a fraction of */
+const SHADOW_DEPTH_RANGE = 2550;
+/** m of water (along the view) over which the sea fades in from the sand (params/oceanSurface shoreFadeThickness) */
+const SHORE_FADE = 0.6;
 /** m: the shallows tint gone by this depth (the game's 18 m outlasted each island's square seabed grid, whose
  * edge then showed as a straight line in the water) */
 const SHALLOWS = 6;
-/** m: the beach strip kept clear of boulders (beats.ts COAST): either side of its middle, inland, out to sea */
-const BEACH_CLEAR = { along: 60, inland: 25, out: 20 };
 /** m: how far the logs' centreline rides over the sand once aground (their radius, about) */
 const ON_SAND = 0.25;
+
+/**
+ * THE SHADOW ON THE LAGOON FLOOR, WHERE THE SUNLIGHT GOES (the 2026-10-29 review: "the raft should cast a shadow ON
+ * THE WATER, and it's missing"). The floor is lit by the shadow map along the Sun's direction IN AIR, so a low Sun
+ * (9–14° in w1–w2) threw the raft's shadow on 1.5 m of lagoon floor 6–9 m off to the side, detached from it — where
+ * light under water runs refracted, ~42° up at a 9° Sun (Snell, n 1.333), and the shadow lies a metre or two from the
+ * raft. A submerged floor point is therefore shadow-tested where its refracted sunbeam ENTERED the water: up through
+ * the depth to the mean sea (y 0), across toward the Sun by depth·tan θ_water — whatever shades that entry point
+ * (the raft, a palm) shades the floor under it. Above the water it is the point itself. Waves (±0.5 m) bend the
+ * beam further; the mean surface is the honest middle of them.
+ */
+function seabedShadowAt(sunDir: { value: THREE.Vector3 } & THREE.Node<'vec3'>): THREE.Node<'vec3'> {
+  const depth = float(0).sub(positionWorld.y).max(0);
+  const horiz = vec3(sunDir.x, 0, sunDir.z);
+  const cosE = horiz.length().max(1e-4);
+  const sinW = cosE.div(1.333);
+  const tanW = sinW.div(float(1).sub(sinW.mul(sinW)).max(1e-4).sqrt());
+  return positionWorld.add(horiz.div(cosE).mul(depth.mul(tanW))).add(vec3(0, depth, 0));
+}
 
 /**
  * `drive`: Act 2 hands over (see SeaDrive) and c1 comes to rest by `c1End`, then the beats run on (beats.ts);
@@ -201,7 +354,18 @@ export function createSea(
   // the sun's shadow map: twice the game's reach at the same texel (7.8 cm), so a low Sun's long shadows of the
   // island's hills and palms reach the beach instead of stopping at the map's edge 80 m out
   skyParams.shadowExtent = 160;
-  skyParams.shadowMapSize = 4096;
+  // (8192², not 4096²: at 4096 over ±160 m a texel was 7.8 cm — every leaf and pole smaller than one, so their
+  // shadows aliased and crawled frame to frame as the raft bobbed and the eye moved, the raft and the forest
+  // "wildly flickering" once the shadows went to full strength, the 2026-10-29 review. The extent also follows the
+  // world each frame: SHADOW_EXTENT)
+  skyParams.shadowMapSize = 8192;
+  // SHADOWS THAT HOLD (the 2026-10-29 raft review: "are things really casting shadows on each other … the stuff
+  // underneath looks unlit … the inside of the hut is bright"): the game lets 15% of the Sun into every shadow
+  // (shadowIntensity 0.85, a stylised fill) — here the sky's own light is the fill, so a shadow takes the Sun out
+  // entirely. And the depth bias: −0.0004 of the shadow camera's 2.55 km range is a metre, which erased every shadow
+  // cast within a metre of its receiver (the beams under the cabin, the deck under the rails, the logs on the water);
+  // now set per frame from the Sun's elevation (update: THE BIAS FOLLOWS THE SUN)
+  skyParams.shadowIntensity = 1;
   // the game's sky rig for its lights (the sun and the ambient the ocean and the raft are built to read); what
   // they are set to, and the sky itself, come from Act 2's air (seaSky.ts): one sky from orbit to sea
   const sky = createSky({ scene });
@@ -248,44 +412,102 @@ export function createSea(
   });
   // no caustics bound in this page: neutral without the warning
   causticsParams.enabled = false;
+  // THE WATER A LITTLE LESS CLEAR (the 2026-10-29 review: "the water can be ever so slightly less transparent — we see
+  // the boards all the way down"): the extinction the sea sees through (ocean surfaceMaterial `uAbsorption`, per m,
+  // R G B) from the game's Jerlov I (0.36, 0.08, 0.03) to a coastal lagoon's: the logs' submerged halves fade within
+  // ~1 m of light path, deeper water greener and darker. (Read once, at the surface's build and each update; the
+  // film binds no caustics, its other consumer)
+  Object.assign(causticsParams, { submergedAbsorptionR: 0.5, submergedAbsorptionG: 0.17, submergedAbsorptionB: 0.13 });
   oceanSurfaceParams.radialLodPixels = 0;
   oceanSurfaceParams.shallowFullDepth = SHALLOWS;
+  // the water thins to nothing on the sand instead of stopping at a line (the 2026-10-29 shoreline review)
+  oceanSurfaceParams.shoreFadeThickness = SHORE_FADE;
+  oceanSurfaceParams.shoreFadeEdge = 0.12; // (m: only the light through the water fades at the shore; its mirror runs on to the sand, shoreline.ts)
+  // the floor seen through the water straight behind the surface, not along the bent ray (refractionSnell 0): the
+  // bent lookup leaves a cube face near its edges and the floor vanished there — straight-edged pale rectangles and
+  // a "sandbank" line through the shallows that moved with the camera, the 2026-10-29 review (the six faces are
+  // each their own screen, so any screen-space lookup that can leave one does it along the faces' edges)
+  oceanSurfaceParams.refractionSnell = 0;
+  // WHAT IS UNDER THE WATER SEEN THROUGH IT (the 2026-10-29 review: "things below the waterline, like the raft logs,
+  // should be darker — less light reaches them … we can look almost perfectly through the water. There's no
+  // distortion really"): Beer–Lambert over the light's way down to them as well as the view's way back (two-way); the
+  // wave-normal refraction twice the game's and at full strength from 0.4 m of water (the game ramps it in over 6 m,
+  // so logs a few decimetres down never wavered), faded off each face's edges so it never reads across a seam
+  oceanSurfaceParams.submergedLightPath = 1;
+  oceanSurfaceParams.refractionStrength = 0.12;
+  oceanSurfaceParams.refractionDepthFull = 0.4;
+  oceanSurfaceParams.refractionEdgeFade = 0.04;
+  // the humid air's veil over the near field (params hazeNearDistance): ~3% at 200 m, 13% at 1 km, 35% at 3 km —
+  // tropical marine air of ~25 km visibility (Koschmieder, 3.9/V), on land and sea alike (the 2026-10-29 review:
+  // "atmospheric haze is truly missing … above our tree line it looks very pasty")
+  oceanSurfaceParams.hazeNearDistance = 7000;
+  Object.assign(oceanSurfaceParams, SEA_COLOUR.open);
   Object.assign(terrainParams, FILM_TERRAIN);
   Object.assign(vegetationParams, FILM_FRONDS);
 
-  // THE ISLANDS: the test act's one, near the eye; the show's archipelago in the coast's world (w1–w5), the
-  // game's own islands moved west by COAST_AT, its lagoon island the one we land on — their ground the scanned
-  // PBR beach (beachMaterial.ts), not the game's painted one
+  // THE ISLANDS: the test act's one (the game's, near the eye, its scanned stone at the game's own placements);
+  // the show's coast (w1–w6) the film's own set, west of everything by COAST_AT (coast.ts) — both on the scanned
+  // PBR beach (beachMaterial.ts), not the game's painted ground
   const beachTerrain = createBeachTerrain();
+  let land: { group: THREE.Group; seabed: SeabedField; update: FilmCoast['update'] };
+  let beach: { x: number; z: number };
+  let ground: (x: number, z: number) => number;
+  let scannedRocks: ReturnType<typeof createScannedRocks> | undefined;
   let archipelago: ReturnType<typeof createArchipelago> | undefined;
+  let forest: Forest | undefined;
+  let coast: FilmCoast | undefined;
+  /** unit toward this frame's Sun, for the lagoon floor's shadow lookup (`seabedShadowAt`) */
+  const seabedSun = uniform(new THREE.Vector3(0, 1, 0));
+  let groundDebris: GroundDebris | undefined;
+  let beachDressing: BeachDressing | undefined;
+  const forestLight = new THREE.Color();
   if (!o.drive) {
     const bearing = yaw + (ISLAND_LEFT_OF_SUN * Math.PI) / 180;
     const site = { ...generateIslandSites(SEED)[0], position: [-Math.sin(bearing) * ISLAND_DISTANCE, -Math.cos(bearing) * ISLAND_DISTANCE] as [number, number] };
-    archipelago = createArchipelago({ seed: SEED, sites: [site], terrainHooks: beachTerrain.hooks });
-  } else {
-    const sites = generateIslandSites(SEED).map((s) => ({ ...s, position: [s.position[0] + COAST_AT[0], s.position[1] + COAST_AT[1]] as [number, number] }));
-    archipelago = createArchipelago({ seed: SEED, sites, terrainHooks: beachTerrain.hooks });
-  }
-  afloat.add(archipelago.group);
-  // the beach (beats.ts COAST): the lagoon island's shore straight west of its centre
-  const lagoon = archipelago.islands[0];
-  const beach = { x: lagoon.center[0], z: lagoon.center[1] };
-  for (let r = 0; r < 400; r += 0.5) {
-    if (lagoon.heightAt(lagoon.center[0] - r, lagoon.center[1]) < 0) {
-      beach.x = lagoon.center[0] - r;
-      break;
+    const arch = createArchipelago({ seed: SEED, sites: [site], terrainHooks: beachTerrain.hooks });
+    archipelago = arch;
+    land = arch;
+    const lagoon = arch.islands[0];
+    beach = { x: lagoon.center[0], z: lagoon.center[1] };
+    for (let r = 0; r < 400; r += 0.5) {
+      if (lagoon.heightAt(lagoon.center[0] - r, lagoon.center[1]) < 0) {
+        beach.x = lagoon.center[0] - r;
+        break;
+      }
     }
+    ground = (x, z) => lagoon.heightAt(x, z);
+    scannedRocks = createScannedRocks(arch, () => true);
+    afloat.add(scannedRocks.group);
+  } else {
+    const film = createFilmCoast(COAST_AT, beachTerrain.hooks, { high: createForestGround });
+    coast = film;
+    // (the lagoon floor's shadows where the sunlight reaches it through the water: `seabedShadowAt`)
+    (film.materials.terrain.material as THREE.NodeMaterial).receivedShadowPositionNode = seabedShadowAt(seabedSun);
+    land = film;
+    beach = film.beach;
+    ground = film.ground;
+    // the islands' trees (forest.ts), leaves on the forest's edge along the walk: the beach from the raft's w1
+    // course to the point ahead, 5–120 m inland
+    // the water's edge along our beach (shoreline.ts): the swash's sheet, its foam, the break, on the sand's own
+    // swash model
+    const shore = film.materials.terrain.shore;
+    if (!shore) throw new Error('sea: the coast needs the terrain swash (terrainParams.runupEnabled)');
+    film.group.add(
+      createShoreline({
+        ground: film.ground,
+        beach,
+        along: [-320, 420],
+        shore,
+        waterline: film.materials.terrain.uniforms.sand.waterline as unknown as THREE.Node<'float'>,
+        skyDome: seaSky.dome,
+        skySun: seaSky.sunTerm,
+        reflection: mirror.reflection,
+      }).mesh,
+    );
+    forest = createForest(film.islands, { x: [beach.x + 5, beach.x + 120], z: [beach.z - 260, beach.z + 220] }, (m) => film.materials.aerialOutput(m));
+    land.group.add(forest.group);
   }
-  const ground = (x: number, z: number): number => lagoon.heightAt(x, z);
-  // the rocks: scanned stone at the game's own placements (scannedRocks.ts), none in the strip we land and walk
-  // on (2–4 m of them strewn along the shore: the walk would run into them)
-  const scannedRocks = createScannedRocks(archipelago, (x, z) => {
-    if (!o.drive) return true;
-    const along = beach.z - z;
-    const off = beach.x - x;
-    return !(Math.abs(along) < BEACH_CLEAR.along && off > -BEACH_CLEAR.inland && off < BEACH_CLEAR.out);
-  });
-  afloat.add(scannedRocks.group);
+  afloat.add(land.group);
   // the plants: scanned ferns and broad leaves on the ground above our beach, in place of the game's cards and
   // palms (plants.ts) — from the palm line back (scattered over the open sand, backlit by the low Sun, they read
   // as litter in the v9 review)
@@ -296,18 +518,55 @@ export function createSea(
   const palms = o.drive ? createPalms(beach, ground) : undefined;
   if (palms) afloat.add(palms.group);
   if (palms) beachTerrain.setOccluders(palms.occluders);
+  if (forest && coast) {
+    // the leaf litter under the forest's edge and round every foot along the walk (forest.ts litterMask): the
+    // edge's trees and shrubs, and the palms' fronds and husks
+    const feet = [...forest.feet, ...palmFeet(beach).map(([x, z]): [number, number, number] => [x, z, 3])];
+    beachTerrain.setLitter(litterMask(coast.islands[0], feet, [beach.x - 10, beach.z - 280], 520), [beach.x - 10, beach.z - 280], 520);
+    // and the things lying there (groundDebris.ts): roots, branches, bark and low plants at every foot, driftwood
+    // on the strand line (where the beach first stands 1.4 m over the sea: the berm, the highest tides' reach)
+    const strand = (z: number): number => {
+      let lo = beach.x - 20;
+      let hi = beach.x + 60;
+      for (let i = 0; i < 30; i++) {
+        const mid = (lo + hi) / 2;
+        if (ground(mid, z) < 1.4) lo = mid;
+        else hi = mid;
+      }
+      return (lo + hi) / 2;
+    };
+    groundDebris = createGroundDebris({ feet: forest.feet, palms: palmFeet(beach), ground, strand, along: [beach.z - 260, beach.z + 220] });
+    afloat.add(groundDebris.group);
+    // and the beach's small things (beachDressing.ts): coral pebbles and rubble, shells, the wrack line
+    beachDressing = createBeachDressing({ ground, beach, inland: coast.islands[0].inland, palms: palmFeet(beach) });
+    land.group.add(beachDressing.group);
+  }
 
   // a calm sea, near glass (the v6 notes; the game's default is a working sea, Hs ~2.8 m): the game's glass
   // preset with a light air's ripples (RIPPLE) over a long low ground swell (direction.md: the swell lifts and
   // sets the raft down). Set before the spectrum is built, never changed during the act
   Object.assign(oceanParams, weatherPresets.glass.ocean, RIPPLE, { swellAmplitude: SWELL_RMS, swellPeriod: SWELL_PERIOD, windDirection: WIND_TO });
   const ocean = createOceanSim(SEED);
-  const surface = new OceanSurface(ocean, undefined, undefined, {
+  // the raft's wake, at the game raft's scale (its ramp is the galleon's: raftScene.ts), and its own water (FILM_WAKE)
+  Object.assign(flowFoamParams, FILM_WAKE);
+  // (the wake's foam is the logs' white water alone here, so it is drawn white: the game's #70bbb5 is a ship's
+  // aerated green churn, and at the raft it read as a teal paint)
+  oceanSurfaceParams.wakeFoamColor = FILM_WAKE_WHITE;
+  // the wake's thin coverage as bubbles under the surface (aerated, milky turquoise), white only where dense; and the
+  // scar's slick reaching the middle cascade, so the lane reads glassy on a light-air sea (2026-10-29: "no visible
+  // turbulence, no trailing")
+  oceanSurfaceParams.wakeAeration = 2;
+  oceanSurfaceParams.wakeAerationColor = '#86cfc4';
+  oceanSurfaceParams.wakeSmoothLong = 0.7;
+  const raftWater = createHullContact(raftLogsInPlan());
+  const flowFoam = createFlowFoam({ hull: raftWater });
+  flowFoam.setSpeedScale(raftWakeParams.speedScale);
+  const surface = new OceanSurface(ocean, undefined, flowFoam, {
     reflection: mirror.reflection,
     sunLight: sky.sunLight,
     skyDomeColor: seaSky.dome,
     skySunTerm: seaSky.sunTerm,
-    seabed: archipelago.seabed,
+    seabed: land.seabed,
     // the dome's cube target is half-float, as the game's HDR scene target
     hdrSceneTarget: true,
   });
@@ -320,6 +579,10 @@ export function createSea(
   // 30 recomputes a frame on the open sea, ~60 ms, most of the frame (engine-findings.md). A pool of oceans
   // sharing one spectrum, each holding the last instant it was asked about, computes each instant once.
   const seas = Array.from({ length: SEA_POOL }, () => ({ at: Number.NaN, sea: new CpuOcean(SEED, oceanParams, { ...raftSeaParams, updateEveryTicks: 0 }, ocean.spectrum) }));
+  // the sea the rafts float on shoals over the same floor the drawn sea does (§V.8): without it the raft rode the
+  // open ocean's swell over the lagoon's 2 m sand flat, where the drawn swell is flattened — out of the water on
+  // every crest as it came in (the 2026-10-29 review: "the logs stand out of the water")
+  for (const s of seas) s.sea.setSeabed(land.seabed, -land.seabed.openHeight);
   // (a Map's order is its recency: a hit moves to the back, the front is evicted)
   const seaSlot = new Map<number, (typeof seas)[number]>();
   let unused = seas.length;
@@ -398,17 +661,24 @@ export function createSea(
   const hoistAt = (t: number): number => smooth01((t - followStart - HOIST[0]) / (HOIST[1] - HOIST[0]));
   const wayAt = (t: number): number => COURSE_SPEED * smooth01((t - followStart - WAY[0]) / (WAY[1] - WAY[0]));
   const speedOf = (t: number): number => (t < beats.starts.c2 ? wayAt(t) : speedAt(t, beats.starts));
+  /** sailedFrom's sums after each whole step, [x the next step starts at, out.x, out.z]: the same additions in the
+   * same order, so the same result, without walking the whole way again (the wake's replay asks at every step) */
+  const sailedSteps: Array<[number, number, number]> = [];
   /** the way made since the follow began, in the field's frame as it lay then: along the raft's own heading */
   const sailedFrom = (t: number, out: THREE.Vector3): THREE.Vector3 => {
     out.set(0, 0, 0);
     const h = 0.1;
-    for (let x = followStart + WAY[0]; x < t; x += h) {
+    let x = followStart + WAY[0];
+    let k = 0;
+    for (; k < sailedSteps.length && t - x >= h; k++) [x, out.x, out.z] = sailedSteps[k];
+    for (; x < t; x += h) {
       const step = Math.min(h, t - x);
       const m = x + step / 2;
       const v = speedOf(m) * step;
       const hd = yaw + raftPose(m, c1End, restPose).heading + Math.PI;
       out.x += Math.sin(hd) * v;
       out.z += Math.cos(hd) * v;
+      if (step === h && k === sailedSteps.length) sailedSteps.push([x + h, out.x, out.z]), k++;
     }
     return out;
   };
@@ -436,10 +706,39 @@ export function createSea(
   }
   const berth = (data: ReturnType<typeof debrisPieces>): ReturnType<typeof debrisPieces> =>
     [raftInField, ...lane].reduce((d, q) => clearOf(d, q.x, q.z, RAFT_BERTH), data);
-  const debris = o.drive ? createDebrisField(berth(debrisPieces()), du as unknown as DebrisUniforms) : undefined;
+  // what the sea gives the pieces (debrisField.ts DebrisLook): the sky its wet wood mirrors, and the swell they ride —
+  // the ocean's two long cascades at the piece (the short chop is what slaps them, not what lifts them)
+  const debrisLook: DebrisLook = {
+    sky: seaSky.dome,
+    swell: (xz) => [0, 1].map((i) => texture(ocean.cascades[i].displacement, xz.div(ocean.cascades[i].domain).fract()).y).reduce((a, b) => a.add(b)) as THREE.Node<'float'>,
+  };
+  const debris = o.drive ? createDebrisField(berth(debrisPieces()), du as unknown as DebrisUniforms, debrisLook) : undefined;
+  const nearDebris = debris ? createDebrisField(berth(matPieces(raftInField.x, raftInField.z, MAT_SIGMA, MAT_PIECES)), du as unknown as DebrisUniforms, { ...debrisLook, tilt: true, scans: true }) : undefined;
+  // THE PEOPLE'S THINGS WHERE THE EYE WILL BE (the user's story note, 2026-10-29: "without someone telling me the story it
+  // doesn't become apparent"; sunken-world-cues.md cue 2): a crate, a plastic drum, a lifebuoy, a jerrycan… afloat a
+  // few metres in front of where the eye comes to rest after the landing, and along the raft's way, off its berth
+  const thingSpots: Array<[number, number]> = [];
+  if (o.drive) {
+    const eyeInField = restAt.clone().applyAxisAngle(UP, -restTurn);
+    const f = front.clone().applyAxisAngle(UP, -restTurn);
+    const rgt = right.clone().applyAxisAngle(UP, -restTurn);
+    for (const [ahead, side] of THINGS_AT_REST) {
+      thingSpots.push([eyeInField.x + f.x * ahead + rgt.x * side, eyeInField.z + f.z * ahead + rgt.z * side]);
+    }
+    lane.forEach((q, i) => {
+      if (i % THINGS_LANE_EVERY !== 3 || i + 1 >= lane.length) return;
+      const dx = lane[i + 1].x - q.x;
+      const dz = lane[i + 1].z - q.z;
+      const l = Math.hypot(dx, dz) || 1;
+      const side = (i / THINGS_LANE_EVERY) % 2 < 1 ? 1 : -1;
+      thingSpots.push([q.x - (dz / l) * side * THINGS_LANE_OFF, q.z + (dx / l) * side * THINGS_LANE_OFF]);
+    });
+  }
+  const things = o.drive ? createDebrisField(berth(thingsAt(thingSpots)), du as unknown as DebrisUniforms, { ...debrisLook, tilt: true, scans: true }) : undefined;
   if (debris) {
     afloat.add(debris);
-    debris.add(createDebrisField(berth(matPieces(raftInField.x, raftInField.z, MAT_SIGMA, MAT_PIECES)), du as unknown as DebrisUniforms));
+    if (nearDebris) debris.add(nearDebris);
+    if (things) debris.add(things);
   }
   // the far rafts, about the eye
   const farRafts = o.drive ? FAR_RAFTS.map(() => createRaft(floating, { far: true })) : [];
@@ -497,14 +796,79 @@ export function createSea(
   const v = new THREE.Vector3();
   /** a direction `bearing` rad right of a front turned `turn` rad about y */
   const across = (turn: number, bearing: number, out: THREE.Vector3): THREE.Vector3 => out.set(Math.sin(bearing), 0, -Math.cos(bearing)).applyAxisAngle(UP, turn);
-  return {
+
+  // THE WAKE, replayed (see the header). Two worlds shed one: the sea (from the follow, when the raft gets way on:
+  // before it, it drifts with the field) and the coast (from w1's dissolve in). Across that dissolve the coast's
+  // owns it; the coast is kilometres from the sea, so neither world draws the other's.
+  type WakeWorld = 'sea' | 'coast';
+  const wakeFrom: Record<WakeWorld, number> = { sea: followStart, coast: beats.starts.w1 - spec('w1')!.dissolve / 2 };
+  const wakeEye = new THREE.Vector3();
+  const wakeAcross = new THREE.Vector3();
+  /** the raft at sea time t in `w` (update's own placement of it, the raft alone) */
+  const raftOn = (t: number, w: WakeWorld): { x: number; z: number; heading: number; speed: number } => {
+    const pose = raftPose(t, c1End, restPose);
+    if (w === 'sea') {
+      sailingEye(t, wakeEye);
+      across(yaw, pose.bearing, wakeAcross);
+      return { x: wakeEye.x + wakeAcross.x * pose.distance, z: wakeEye.z + wakeAcross.z * pose.distance, heading: yaw + pose.heading + Math.PI, speed: speedOf(t) };
+    }
+    const c = coastEye(t, c1End, beach);
+    across(COAST_YAW, pose.bearing, wakeAcross);
+    if (t > beats.starts.w2) {
+      const at = coastEye(beats.starts.w2, c1End, beach);
+      const p0 = raftPose(beats.starts.w2, c1End, restPose);
+      across(COAST_YAW, p0.bearing, wakeAcross);
+      const from = { x: at.x + wakeAcross.x * p0.distance, z: at.z + wakeAcross.z * p0.distance };
+      const run = landfall(t, c1End, from, beach);
+      const a = landfall(t - 0.5, c1End, from, beach);
+      const b = landfall(t + 0.5, c1End, from, beach);
+      return { x: run.x, z: run.z, heading: run.heading, speed: Math.hypot(b.x - a.x, b.z - a.z) };
+    }
+    return { x: c.x + wakeAcross.x * pose.distance, z: c.z + wakeAcross.z * pose.distance, heading: COAST_YAW + pose.heading + Math.PI, speed: travelled(t - 0.5, t + 0.5, c1End) };
+  };
+  /** the world whose wake is held, and the sea time it is at (NaN: none yet, or cleared before its start) */
+  let wakeWorld: WakeWorld | null = null;
+  let wakeT = Number.NaN;
+  /** bring the wake of world `w` to sea time t: on in steps from where it is, or replayed from the world's start */
+  const wakeTo = (t: number, w: WakeWorld, renderer: THREE.WebGPURenderer): void => {
+    if (t < wakeFrom[w]) {
+      if (wakeWorld !== w || !Number.isNaN(wakeT)) flowFoam.reset(renderer, t);
+      wakeWorld = w;
+      wakeT = Number.NaN;
+      return;
+    }
+    if (wakeWorld !== w || !(t >= wakeT) || t - wakeT > WAKE_CATCHUP) {
+      flowFoam.reset(renderer, wakeFrom[w]);
+      wakeWorld = w;
+      wakeT = wakeFrom[w];
+    }
+    while (t - wakeT > 1e-6) {
+      const dt = Math.min(WAKE_DT, t - wakeT);
+      wakeT = t - wakeT - dt > 1e-6 ? wakeT + dt : t;
+      const r = raftOn(wakeT, w);
+      const fx = Math.sin(r.heading);
+      const fz = Math.cos(r.heading);
+      flowFoam.setCenter(r.x - fx * WAKE_ASTERN, r.z - fz * WAKE_ASTERN);
+      flowFoam.setFlowDir([Math.sin(WIND_TO), Math.cos(WIND_TO)]);
+      flowFoam.setShip([r.x, r.z], r.heading, r.speed, raft.hull.stemZ, raft.hull.transomZ, raft.hull.beam);
+      // (the chop that slaps the logs runs with the sea's own wind)
+      raftWater.setPose(r.x, r.z, r.heading, r.speed, wakeT, WIND_TO);
+      raftWater.advance(dt);
+      flowFoam.advanceWake(dt);
+      flowFoam.update(renderer, dt);
+    }
+  };
+  const act: SeaAct = {
     scene,
     far: FAR,
     total,
+    wake: flowFoam,
+    raftWater,
+    probeWater: (x, z, t) => ({ sea: heightAt(x, z, t), ground: ground(x, z) }),
     get exposure() {
       return seaSky.exposure;
     },
-    ready: Promise.all([ready, cloudData.ready, beachTerrain.ready, scannedRocks.ready, plants?.ready, palms?.ready]).then(() => undefined),
+    ready: Promise.all([ready, debris?.ready, nearDebris?.ready, things?.ready, cloudData.ready, beachTerrain.ready, scannedRocks?.ready, forest?.ready, coast?.ready, groundDebris?.ready, beachDressing?.ready, plants?.ready, palms?.ready, raft.ready]).then(() => undefined),
     passes(t) {
       return o.drive ? beatsAt(t, c1End).map((p) => ({ beat: p.name, weight: p.weight })) : [{ beat: 'c1', weight: 1 }];
     },
@@ -513,6 +877,7 @@ export function createSea(
       du.pixelAngle.value = rad;
       if (splashes) (splashes.uniforms.pixelAngle as unknown as { value: number }).value = rad;
       props?.setPixelAngle(rad);
+      seaSky.setPixelAngle(rad);
     },
     update(t, eye, renderer, beat = 'c1') {
       // a node frame of its own for each beat drawn: three renders a light's shadow map once per camera per
@@ -536,6 +901,13 @@ export function createSea(
         eye.position.set(0, EYE_HEIGHT, 0);
         eye.rotation.set(0, yaw, 0);
         sun.copy(testSun);
+        // (review scripts only, the test act: a day–night cycle driven per frame — window.__seaSun(t) → [elevation,
+        // azimuth left of the eye's front], deg; scratch clouds review)
+        const cycle = (globalThis as { __seaSun?: (t: number) => [number, number] }).__seaSun?.(t);
+        if (cycle) {
+          const [el, az] = [(cycle[0] * Math.PI) / 180, (cycle[1] * Math.PI) / 180];
+          sun.set(-Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)).applyAxisAngle(UP, yaw);
+        }
         raftX = raftAt.x;
         raftZ = raftAt.z;
         raftHeading = yaw - raftRight + Math.PI / 2 + RAFT_SHEER;
@@ -600,17 +972,44 @@ export function createSea(
         sun.set(...beatSun(beat, t, c1End)).applyAxisAngle(UP, eyeYaw);
       }
       eye.updateMatrixWorld();
+      if (act.reviewEye) {
+        act.reviewEye(eye, { x: raftX, z: raftZ, heading: raftHeading });
+        eye.updateMatrixWorld();
+      }
       // what each world holds
       if (debris) debris.visible = world === 'flood' || world === 'open';
       for (const r of farRafts) r.group.visible = sailing;
-      archipelago.group.visible = world === 'coast' || world === 'test';
-      scannedRocks.group.visible = archipelago.group.visible;
-      if (plants) plants.group.visible = archipelago.group.visible;
-      if (palms) palms.group.visible = archipelago.group.visible;
+      land.group.visible = world === 'coast' || world === 'test';
+      if (scannedRocks) scannedRocks.group.visible = land.group.visible;
+      if (plants) plants.group.visible = land.group.visible;
+      if (groundDebris) groundDebris.group.visible = land.group.visible;
+      if (palms) palms.group.visible = land.group.visible;
       const flockT = o.drive ? t - beats.starts.w4 - 2 : t - FLOCK_START;
       if (flock) flock.visible = world === 'test' || (world === 'coast' && flockT > -1);
 
       skyParams.timeOfDay = hour;
+      // the shadow map's reach, per world (SHADOW_EXTENT), and its filter: a few texels of PCF, so an edge is a
+      // gradient a texel can slide along rather than a step that jumps
+      skyParams.shadowExtent = world === 'coast' || world === 'test' ? SHADOW_EXTENT.coast : SHADOW_EXTENT.sea;
+      sky.sunLight.shadow.radius = SHADOW_FILTER;
+      // the film's own filter: 16 fixed taps, no screen-space dither (filmShadowFilter.ts)
+      if ((sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode !== filmShadowFilter) {
+        (sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode = filmShadowFilter;
+      }
+      // THE BIAS FOLLOWS THE SUN (the 2026-10-29 raft clip: whole walls flickering lit/shadowed frame to frame — shadow
+      // acne): a surface the Sun grazes drops by texel/tan(elevation) across one shadow texel, and a fixed 5 cm depth
+      // bias (set to keep the contact shadows) was a fraction of that at a 9–14° morning Sun — its own shadow map
+      // shadowed it, in patches that moved with the map. So the depth bias is that drop (×1.5) and the normal bias a
+      // texel and a half: at a high Sun a few cm, so the contact shadows stay; at a low one what acne needs, no more
+      {
+        const texelM = (2 * skyParams.shadowExtent) / skyParams.shadowMapSize;
+        const tanEl = Math.max(Math.tan(Math.asin(Math.min(1, Math.max(0.087, sun.y)))), 0.087);
+        // (capped at 0.2 m: at the w3–w5 Sun of 1–6° the full drop reached 0.6 m and erased the contact shadow of
+        // anything smaller — every pebble and shell on the beach)
+        const depthM = Math.min(0.2, (1.5 * texelM) / tanEl);
+        skyParams.shadowBias = -depthM / SHADOW_DEPTH_RANGE;
+        skyParams.shadowNormalBias = 1.5 * texelM;
+      }
       sky.setShadowFocus(eye.position.x, 0, eye.position.z);
       sky.update(hour);
       // the key light aimed at this act's Sun (the rig aims it from its own hour), its frustum centre snapped to
@@ -626,12 +1025,14 @@ export function createSea(
       // (the time-lapse hurries the clouds: their clock runs LAPSE_CLOUDS × at its middle)
       cu.time.value = sailing ? t + lapsedClouds(t) : t;
       cu.sun.value.copy(sun);
+      seabedSun.value.copy(sun);
       // c1's clouds form as thin veils over most of their field and thicken (coverage rising from zero only
       // pops scattered lumps into the sky); each later beat has its own sky
       const formed = d ? d.clouds : 1;
-      cu.coverage.value = b ? b.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
+      const beatClouds = b ? beatSky(b.name, t, c1End) : undefined;
+      cu.coverage.value = beatClouds ? beatClouds.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
       cu.presence.value = formed;
-      cu.cirrusCover.value = b ? b.cirrus : CIRRUS_COVER * formed;
+      cu.cirrusCover.value = beatClouds ? beatClouds.cirrus : CIRRUS_COVER * formed;
       if (sailing && t < followStart + LAPSE[1]) {
         // c1's sky turns into c2's through the time-lapse, across the beats' boundary (c2's own sky only once it is
         // done: switched at the boundary, the cover stepped there)
@@ -648,8 +1049,14 @@ export function createSea(
       atCloud(CLOUD_TOP, cu.sunTop.value);
       atCloud(CIRRUS_H, cu.sunCirrus.value);
       cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
+      // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
+      // sea's clock: clouds.ts)
+      seaSky.updateClouds(renderer, t);
       sky.sunLight.color.copy(seaSky.sunColour);
       sky.sunLight.intensity = SUN_E;
+      forest?.setEye(eye.position);
+      beachDressing?.setEye(eye.position);
+      forest?.setSun(sun, forestLight.copy(seaSky.sunColour).multiplyScalar(SUN_E));
       if (hemi) {
         hemi.color.copy(seaSky.irradiance);
         hemi.groundColor.copy(seaSky.irradiance).multiplyScalar(0.15);
@@ -657,8 +1064,8 @@ export function createSea(
       }
       (scene.fog as THREE.Fog).color.copy(seaSky.horizon);
       ocean.update(renderer, t);
-      if (archipelago.group.visible) {
-        archipelago.update(
+      if (land.group.visible) {
+        land.update(
           {
             time: t,
             windDir,
@@ -708,14 +1115,21 @@ export function createSea(
         du.sunLight.value.set(seaSky.sunColour.r, seaSky.sunColour.g, seaSky.sunColour.b).multiplyScalar(SUN_E / Math.PI);
         du.skyLight.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
       }
+      // (the world drawn sheds the wake only where it owns it: the coast's through their dissolve)
+      if (o.drive && world !== 'test') {
+        const w: WakeWorld = world === 'coast' ? 'coast' : 'sea';
+        if (w === (t >= wakeFrom.coast ? 'coast' : 'sea')) wakeTo(t, w, renderer);
+      }
       proxy.position.copy(eye.position);
       proxy.updateMatrixWorld();
+      // (the ocean re-reads its params in update: each pass of a dissolve its own world's water)
+      Object.assign(oceanSurfaceParams, SEA_COLOUR[world === 'coast' ? 'coast' : 'open']);
       surface.update(proxy, t, sun);
       // (on the coast, the islands' ground, rocks and low plants stay out of it: mirrored, even clipped at the
       // waterline, the far islands reflected as teal blocks, not dark mirror images — tried 2026-10-27, cause not
       // isolated, likely the terrain's own under-water tint near y = 0; the palms, the raft and the people are
       // mirrored)
-      const underwater = world === 'coast' ? [archipelago.group, scannedRocks.group, ...(plants ? [plants.group] : [])] : [];
+      const underwater = world === 'coast' ? [land.group, ...(scannedRocks ? [scannedRocks.group] : []), ...(plants ? [plants.group] : [])] : [];
       // (before the mirror's capture, or the flock and the spray reflect the frame before)
       fu.time.value = flockT;
       fu.sun.value.copy(sun);
@@ -743,4 +1157,5 @@ export function createSea(
       mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
     },
   };
+  return act;
 }

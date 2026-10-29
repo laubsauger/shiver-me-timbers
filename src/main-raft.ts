@@ -83,7 +83,7 @@ async function boot(): Promise<void> {
   });
   const raft = state.ships[0];
   placeRaftAtStart(raft, sea.sierra.start);
-  const vessel = buildRaftVessel(app, sea);
+  const vessel = buildRaftVessel(app, sea, { quality: settings.get().graphics.quality });
   const waterAt = (x: number, z: number): number => sea.cpuOcean.heightAt(x, z, state.time);
 
   const followCam = new FollowCam(app.camera, app.renderer.domElement);

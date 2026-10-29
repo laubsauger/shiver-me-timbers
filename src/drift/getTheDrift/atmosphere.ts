@@ -156,6 +156,69 @@ export const sunDisc = (r: F): F => smoothstep(0.0052, 0.0042, r).mul(60);
  * stars (a precise cross or star reads as a graphic, not as light) */
 export const sunGlare = (r: F): F => exp(r.div(0.008).negate()).mul(4).add(exp(r.div(0.035).negate()).mul(0.35)).add(exp(r.div(0.16).negate()).mul(0.035));
 
+// ------------------------------------------------------------------ a point too bright to look at (Act 2)
+// The user, 2026-10-29: the Sun in space "underwhelming … still looks like a lens flare", the Earth's glint "a
+// little bit round and weird … it should be more sparkly". sunGlare's halos each have a scale, and a scale
+// reads as an edge: a disc of light with a rim, the lens-flare look. A point that bright is seen through a veil
+// with no scale (the eye's and a lens's scatter falls as a power of the angle) and through the diffraction of
+// the optics, as thin rays straight out of it: the camera's starburst, the eye's lashes. The Sun from space and
+// the Sun's glint off the Earth's sea share both (the same rays, the same turn), so they read as one light.
+
+/** where the rays' 1/r fall starts (rad: inside it they are lost in the point's own glare) and how much further
+ * red reaches than blue along them (a ray spreads with the wavelength) */
+const BURST_CORE = 0.002;
+const BURST_RGB = vec3(1.12, 1, 0.86);
+/** the rays (deg from the sprite's right, toward its up): four long ones a little off square and four faint
+ * short ones between (a sparkle, not a cross — an even cross of equal rays reads as a drawn symbol) */
+const BURST = [
+  { turn: 12, weight: 1, reach: 1 },
+  { turn: 102, weight: 1, reach: 0.85 },
+  { turn: 57, weight: 0.3, reach: 0.5 },
+  { turn: 147, weight: 0.3, reach: 0.45 },
+] as const;
+/** the rays come in pairs, one each way along a line: `twinkle` is asked for BURST_RAYS of them */
+export const BURST_RAYS = BURST.length * 2;
+
+/**
+ * A point's starburst: its rays at offset `o` from it (rad, in the plane of an eye-facing sprite: x right, y up),
+ * light per unit of the rays' light per rad of length near the point; they fall as 1/r and run out by `len`
+ * (rad). A ray is far narrower than any pixel, so it is drawn ~1 px wide (`px`: rad per pixel) with its light
+ * per length kept — thinner and brighter on a finer master, the same light on every one. `twinkle(ray)` scales
+ * each ray (0..BURST_RAYS − 1; default all 1).
+ */
+export function starburst(o: THREE.Node<'vec2'>, px: F, len: F, twinkle?: (ray: number) => F): V3 {
+  const r = length(o);
+  // (a ray narrower than ~1 px beads along its length where it crosses the pixel rows at a slant)
+  const w = px;
+  const fall = float(BURST_CORE).div(r.add(BURST_CORE));
+  let sum = vec3(0) as V3;
+  BURST.forEach((b, k) => {
+    const a = (b.turn * Math.PI) / 180;
+    const along = o.x.mul(Math.cos(a)).add(o.y.mul(Math.sin(a)));
+    const across = o.x.mul(Math.sin(a)).sub(o.y.mul(Math.cos(a)));
+    const line = exp(across.div(w).pow(2).negate()).div(w.mul(Math.sqrt(Math.PI)));
+    const reach = BURST_RGB.mul(len.mul(b.reach));
+    const end = vec3(1).sub(smoothstep(reach.mul(0.25), reach, vec3(r)));
+    const t = twinkle ? select(along.greaterThanEqual(0), twinkle(k), twinkle(k + BURST.length)) : float(1);
+    sum = sum.add(end.mul(line.mul(fall).mul(t).mul(b.weight))) as V3;
+  });
+  return sum;
+}
+
+/** the veil around a point too bright to look at, r rad from it: 1 at ~3°, rising as r^−1.5 to ~125 at its
+ * centre, rolling off past ~20° (softly: it has no edge anywhere) */
+export const pointGlare = (r: F): F => pow(float(0.05).div(r.add(0.002)), 1.5).mul(exp(r.div(0.4).pow(2).negate()));
+
+/** THE SUN FROM SPACE (the Milky Way's Sun star as the eye closes on it, the Earth's Sun after it — one look, so
+ * the hand-over between the two is not seen): its veil (pointGlare at ~3°: it fills its part of the dome), its
+ * rays' light (starburst) and how far they reach (rad) */
+const SUN_VEIL = 0.6;
+const SUN_BURST = 0.014;
+const SUN_RAYS = 0.3;
+/** the Sun's veil and rays (colour: the caller's tint) at offset `o` from it (rad, `r` its length), `px` rad per pixel */
+export const sunBloom = (o: THREE.Node<'vec2'>, r: F, px: F): V3 =>
+  vec3(pointGlare(r).mul(SUN_VEIL)).add(starburst(o, px, float(SUN_RAYS)).mul(SUN_BURST)) as V3;
+
 /**
  * The air's light along a ray from o in direction d (unit), planet centre C, toward the Sun S (unit): the
  * single-scattered sunlight it gathers out to space or to the ground, and its transmittance. 32 steps,

@@ -176,6 +176,17 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     const fz = m[10];
     const now = frame.time;
     const motion = sampleMotion(object, Math.atan2(fx, fz), now);
+    /**
+     * A PURE SAIL (opt-in, `userData.sailPure = { time, yawRate }`: The Drift's offline frames). Everything below
+     * that remembers — the damping toward the wind, the turn rate from the last draw, the flutter phase's integral
+     * — runs on the renderer's own clock and on whatever was drawn last. A film frame is rendered on its own, out
+     * of order, in parallel lanes, and through a dissolve the SAME raft is drawn twice a frame in two worlds turned
+     * differently: the cloth swung between them every frame and snapped when the dissolve ended (the 2026-10-29
+     * review, "popping at 8:16"). A pure sail takes its target shape directly, the caller's turn rate, and a flutter
+     * phase at the rate of a sail in no luff (the constant-rate holding fix the history below records) on the
+     * caller's clock. The game never sets it.
+     */
+    const pure = object.userData.sailPure as { time: number; yawRate: number } | undefined;
     // the ship-level half of the wind state, published once per frame by
     // rigTrim.updateRig — hull heading, way through the water, gust phases
     const wf = readSailWindFrame(object);
@@ -189,7 +200,7 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
         windSpeed: wf.windSpeed ?? oceanParams.windSpeed,
         shipVelX: wf.shipVelX,
         shipVelZ: wf.shipVelZ,
-        yawRate: motion.yawRate,
+        yawRate: pure ? pure.yawRate : motion.yawRate,
         gustPhase: wf.gustPhase,
         gustPhaseB: wf.gustPhaseB,
         // §B86-2: this sail's own saturating wind, if its class set one
@@ -199,7 +210,7 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     );
     // exp-damped: cloth has inertia, it does not snap with the rudder
     let s = smoothed.get(object);
-    if (s === undefined) {
+    if (s === undefined || pure) {
       s = { ...target };
       smoothed.set(object, s);
     } else {
@@ -243,7 +254,12 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
       f = { phase: sailPhaseSeed(dim.width, dim.drop) };
       flutter.set(object, f);
     }
-    f.phase = wrapTau(f.phase + sailFlutterRate(s.luff, p) * motion.dt);
+    if (pure) {
+      const dim = sailDimensions(object);
+      f.phase = wrapTau(sailPhaseSeed(dim.width, dim.drop) + sailFlutterRate(0, p) * pure.time);
+    } else {
+      f.phase = wrapTau(f.phase + sailFlutterRate(s.luff, p) * motion.dt);
+    }
     flutterPhase.value = f.phase;
     object.userData.sailFlutterPhase = f.phase;
 

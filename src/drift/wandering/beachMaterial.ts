@@ -4,7 +4,8 @@
  * the game's own terrain blend, through its ground hook (terrain/sandMaterial.ts TerrainBlendHooks) — so the
  * waterline, the swash, the water lighting over the shallows and the aerial haze all stay the game's:
  *
- *   sand_dry      ambientCG Ground027   pale fine beach sand
+ *   sand_dry      ambientCG Ground027   pale fine beach sand: its colour's grain only
+ *   sand_relief   Poly Haven aerial_beach_02   the dry sand's shape: a 20 m scan of a smooth beach
  *   sand_wet      ambientCG Ground061   wet, smooth sand at the waterline
  *   rock          Poly Haven rock_boulder_dry   where the ground is too steep to hold sand or cover
  *   grass         Poly Haven sparse_grass       the cover above the beach
@@ -23,9 +24,12 @@
  * Ambient occlusion, so the low Sun's direct light still reaches under them.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, Loop, abs, cameraViewMatrix, dFdx, dFdy, exp, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, Loop, abs, cameraPosition, cameraViewMatrix, dFdx, dFdy, exp, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, uniform, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
 import type { TerrainBlendHooks } from '../../terrain/sandMaterial';
 import { fbm2 } from '../../terrain/noise';
+import { WRACK } from './beachDressing';
+import { swashAt, swashClock } from './shoreline';
+import { coordFilter } from '../../ship/bandLimit';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -42,12 +46,41 @@ const LAYERS = {
 } as const;
 type Layer = keyof typeof LAYERS;
 
+/** the dry sand's albedo, linear: coral sand's warm off-white (references §12.4, sunlit #e6d9c1) — the scan's grain
+ * rides on it in luminance only */
+const SAND_DRY = vec3(0.6, 0.55, 0.45);
+/** wet sand's albedo, linear: a neutral grey-beige under half the dry's (wet sand drinks the light) */
+const SAND_WET = vec3(0.26, 0.25, 0.225);
+/** m of rise above the live sea the wet band reaches: its mean, and the full swing of its wander along the beach */
+const WET_RISE = [0.6, 0.3] as const;
+/** THE SWASH'S UPPER LIMIT, beachDressing.ts LIMIT and its placement (`zones`): m over the sea of the line's middle,
+ * how far it wanders (fbm2 at 17 m), its half-width in height; its clumps (fbm2 at 5.3 m); how strongly the grit
+ * tints the sand at the line's core */
+const SWASH_LIMIT = { height: 0.62, wander: 0.06, half: 0.07, strength: 0.32 };
+/** m: the dry sand's relief scan (aerial_beach_02), its real size — bound as sand_dry's second map */
+const RELIEF_TILE = 20;
+/** the relief scan's slopes taken to this share. Its median slope is 2–3° at 2–8 cm, its ripple patches and pits
+ * ~10°; at the w3–w5 Sun, 1–6° up, a facet tilted by the Sun's own elevation takes double the sunlight or none. At
+ * 0.6 the scan's 5–10 cm clumps still mottled the beach blue-grey at 4° (wrack_650, the 16:9 review stills); at 0.4
+ * what is left is the broad undulations, the odd ripple patch and pit catching the light */
+const RELIEF_GAIN = 0.4;
+/** the relief's mip footprint over the pixel's (see relief()): near the eye, and from FAR_AT m on */
+const RELIEF_BLUR = [2.5, 6] as const;
+/** m from the eye the relief's blur and the grain's contrast hand over across */
+const FAR_AT = [2, 6] as const;
+
 export interface BeachTerrain {
   hooks: TerrainBlendHooks;
   ready: Promise<void>;
   /** what hides the sky from the ground: (x, z) m, radius m, strength 0..1 — a palm's crown, a trunk's foot */
   setOccluders(list: Array<[number, number, number, number]>): void;
+  /** where leaf litter lies on the ground (forest.ts litterMask): LITTER_RES² weights 0..255 over the square from
+   * `origin` (world x, z) `size` m on a side */
+  setLitter(mask: Uint8Array, origin: [number, number], size: number): void;
 }
+
+/** texels a side of the litter mask */
+export const LITTER_RES = 1024;
 
 /** the most occluders the ground reads (each a few ALU per terrain fragment) */
 const MAX_OCCLUDERS = 112;
@@ -64,7 +97,8 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
     t.colorSpace = THREE.NoColorSpace;
     return t;
   };
-  const maps = Object.fromEntries((Object.keys(LAYERS) as Layer[]).map((l) => [l, { a: tex(`${l}_albedo_rough`), b: tex(`${l}_normal_ao_h`) }])) as Record<
+  // (the dry sand's second map is the relief scan's, not Ground027's own: see the SAND section below)
+  const maps = Object.fromEntries((Object.keys(LAYERS) as Layer[]).map((l) => [l, { a: tex(`${l}_albedo_rough`), b: tex(l === 'sand_dry' ? 'sand_relief_normal_ao_h' : `${l}_normal_ao_h`) }])) as Record<
     Layer,
     { a: THREE.Texture; b: THREE.Texture }
   >;
@@ -80,8 +114,10 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   const offB = sin(vec2(3, 7).mul(indexCell.add(1))) as V2;
 
   /** one layer flat on the ground: albedo (linear), roughness, tangent normal (xy), AO — without a repeat */
-  const flat = (layer: Layer) => {
-    const [tw, th] = LAYERS[layer];
+  const flat = (layer: Layer, k = 1) => {
+    const [tw0, th0] = LAYERS[layer];
+    const tw = tw0 * k;
+    const th = th0 * k;
     const p = positionWorld.xz;
     const uv = vec2(p.x.div(tw), p.y.negate().div(th)) as V2;
     // (explicit gradients: the offsets jump at an index step, and an implicit sample there takes the smallest mip)
@@ -97,6 +133,45 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
     const n = mix(B1.xy.mul(2).sub(1) as V2, B2.xy.mul(2).sub(1) as V2, w) as V2;
     return { albedo: linear(a.rgb as V3), rough: a.a as F, n, ao: mix(B1.z, B2.z, w) as F, h: mix(B1.w, B2.w, w) as F };
   };
+
+  /** the dry sand's relief (sand_dry's second map, the 20 m scan): tangent normal (xy) and AO, without a repeat on
+   * an index field of its own, slower than the tiles' (its features are metres apart, not centimetres) */
+  const relief = () => {
+    const p = positionWorld.xz;
+    const uv = vec2(p.x.div(RELIEF_TILE), p.y.negate().div(RELIEF_TILE)) as V2;
+    const ri = fbm2(p.div(61).add(vec2(17.3, 4.1)), 2).mul(6) as F;
+    const rA = sin(vec2(3, 7).mul(ri.floor())) as V2;
+    const rB = sin(vec2(3, 7).mul(ri.floor().add(1))) as V2;
+    // (sampled RELIEF_BLUR × blurrier than the pixel asks: the scan's 5 mm texels carry a speckle of grain clumps,
+    // slopes to 25°, that a few metres off is a pixel's size — a fine gritty mottle, sky-blue in its shadows, at the
+    // w3–w5 Sun. "I'd much rather have stuff disappear than look noisy" (the user, 2026-10-29). At the eye's feet a
+    // little of the grain is kept)
+    const blur = mix(float(RELIEF_BLUR[0]), float(RELIEF_BLUR[1]), smoothstep(FAR_AT[0], FAR_AT[1], positionWorld.sub(cameraPosition).length())) as F;
+    const gx = dFdx(uv).mul(blur);
+    const gy = dFdy(uv).mul(blur);
+    const B1 = texture(maps.sand_dry.b, uv.add(rA)).grad(gx, gy) as V4;
+    const B2 = texture(maps.sand_dry.b, uv.add(rB)).grad(gx, gy) as V4;
+    // (the hand-over biased by the two heights, so it runs round a ripple patch or a pit, not through it)
+    const w = smoothstep(0.2, 0.8, ri.fract().sub(B1.w.sub(B2.w).mul(0.5))) as F;
+    return { n: mix(B1.xy.mul(2).sub(1) as V2, B2.xy.mul(2).sub(1) as V2, w) as V2, ao: mix(B1.z, B2.z, w) as F };
+  };
+
+  // THE LEAF LITTER under the trees and round every foot (the user, 2026-10-29: shrubs "poke out of the sand
+  // straight up"): a mask laid by forest.ts (setLitter), empty until then. Half-float red, the seabed's own format,
+  // unmipped (a smooth field of half-metre texels). setLitter hands each sampling node a NEW texture: rewriting
+  // the first one's data and flagging it never reached the GPU here — the litter read zero everywhere.
+  const litterOf = (data: Uint16Array): THREE.DataTexture => {
+    const t = new THREE.DataTexture(data, LITTER_RES, LITTER_RES, THREE.RedFormat, THREE.HalfFloatType);
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    t.needsUpdate = true;
+    return t;
+  };
+  let litterTex = litterOf(new Uint16Array(LITTER_RES * LITTER_RES));
+  const litterNodes: Array<{ value: THREE.Texture }> = [];
+  const litterAt = uniform(new THREE.Vector2(0, 0));
+  const litterInv = uniform(1);
 
   // THE SKY HIDDEN BY THE PALMS (see the header)
   const occData = Array.from({ length: MAX_OCCLUDERS }, () => new THREE.Vector4(0, 0, 1, 0));
@@ -128,20 +203,93 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   const hooks: TerrainBlendHooks = {
     ground(ctx) {
       const N = normalWorldGeometry;
+      // THE TERRAIN'S WEIGHTS AS SCALARS. ctx.shoreW (and so ctx.groundW, mixed by it) reaches this hook as a vec2:
+      // groundCover.ts multiplies the shore band's wobble by periodResolved(bandCoord), the band-limit of a vec2
+      // coordinate, which is a vec2. In mix(vec3, vec3, w) TSL widens that w to vec3(x, y, 0), so the BLUE channel of
+      // the beach's albedo and the world-z of its shading normal were the ROCK layer's (triplanar rock_boulder_dry,
+      // 1.8 m) and the cover's, not the sand's: the rock's blotches in blue, its normal map's tilt in z — the
+      // "lavender pits" and gold crests all over the beach under the w3–w5 Sun (the 2026-10-29 reviews; found by
+      // rendering the beach with a white albedo × groundW: blue came out exactly 0). float() takes the x component
+      const groundW = float(ctx.groundW) as F;
+      const shoreW = float(ctx.shoreW) as F;
       const dry = flat('sand_dry');
       const wet = flat('sand_wet');
       const grass = flat('grass');
       const leaves = flat('forest_floor');
 
 
-      // sand: dry above the wet band, wet in it, foam where the swash is
-      const sandA = mix(dry.albedo, wet.albedo, ctx.sand.wet) as V3;
-      // (the swash's foam: the line on its moving edge and the lace stranded behind it; none without run-up)
-      const foam = ctx.sand.swash ? (ctx.sand.swash.foam as F) : float(0);
-      const foamed = mix(sandA, vec3(0.86, 0.88, 0.86), foam.mul(0.8).clamp(0, 1)) as V3;
-      const sandR = mix(dry.rough, wet.rough.mul(0.45), ctx.sand.wet) as F;
-      const sandN = mix(dry.n, wet.n, ctx.sand.wet) as V2;
-      const sandAO = mix(dry.ao, wet.ao, ctx.sand.wet) as F;
+      // SAND (the v11 review: "the beach looks very cheap"; the 2026-10-29 reviews: "very gritty and regular … it
+      // looks hyper tiled", and "lavender"). A coral beach's dry sand is soft, pale warm off-white and fine-grained;
+      // its shape low broad undulations, a rare soft patch of wind ripples, the odd pit (references §12.4, §12.8):
+      //  · its COLOUR a warm off-white (SAND_DRY; §12.4, sunlit #e6d9c1) with the Ground027 scan's grain in its
+      //    luminance only, at 0.7–0.35 of its contrast (its hue's orange and green specks are a temperate beach's debris);
+      //    away from the eye the same scan at 4.3× (9.5 m), so its 2.2 m tile does not repeat; under it all two slow
+      //    swells of tone (23 m, 7 m), drier and paler here, damper there, as a real beach is;
+      //  · its SHAPE the 20 m aerial_beach_02 scan (relief(), RELIEF_GAIN), not Ground027's own normals: trampled
+      //    lumps every 10–20 cm, median slope 21° and still 6° at the quarter they were last drawn at. Under the
+      //    w3–w5 Sun, 1–6° up, every lump was lit gold on one side and sky-lit on the other: the whole beach one
+      //    regular mottle. (Mipmapped, the relief's centimetre grain fades to its mean with distance by itself.)
+      const LUM = vec3(0.2126, 0.7152, 0.0722);
+      const dryFar = flat('sand_dry', 4.3);
+      const far = smoothstep(4, 22, positionWorld.sub(cameraPosition).length()) as F;
+      // (the scan's mean linear luminance is 0.476)
+      const grain = mix(dry.albedo, dryFar.albedo, far.mul(0.65)).dot(LUM).div(0.476) as F;
+      const macro = fbm2(positionWorld.xz.div(23), 3).mul(0.2).add(fbm2(positionWorld.xz.div(7).add(31.7), 2).mul(0.08)).add(0.86) as F;
+      // (the grain's contrast at 0.7 at the eye's feet, where a pixel is a millimetre or two, half that from FAR_AT on)
+      const grainK = mix(float(0.7), float(0.35), smoothstep(FAR_AT[0], FAR_AT[1], positionWorld.sub(cameraPosition).length())) as F;
+      const dryA = SAND_DRY.mul(mix(float(1), grain, grainK)).mul(macro) as V3;
+      const rel = relief();
+      const dryN = rel.n.mul(RELIEF_GAIN) as V2;
+      // THE WET BAND (the user, 2026-10-29: "the wet sand should be a little longer and darker"): the sand the swash
+      // keeps wet, from the water up WET_RISE of rise (5–8 m of the 1:11 face), its top soft and wandering along the
+      // beach; a shade darker for half a metre above that. Wet sand drinks the light: a neutral grey-beige under half
+      // the dry sand's albedo (the wet scan's grain in its luminance only), glossy (its roughness, ~0.6, at 0.45:
+      // the wet face mirrors the sky), its shape the dry sand's smoothed by the swash: the wet scan's own ripples, a
+      // regular one every few cm everywhere, only a trace of it
+      const rise = float(ctx.sand.depthBelow).negate() as F;
+      const wetTop = fbm2(positionWorld.xz.div(9).add(vec2(3.1, 8.7)), 2).sub(0.5).mul(WET_RISE[1]).add(WET_RISE[0]) as F;
+      // (the swash's own events, shoreline.ts swashAt: the sand dark under each run-up's water and drying behind it)
+      const swE = swashAt(rise, positionWorld.xz, swashClock as unknown as F);
+      const damp = float(1).sub(smoothstep(wetTop.sub(0.3), wetTop.add(0.08), rise)).max(swE.wet) as F;
+      const wetA = SAND_WET.mul(mix(float(1), wet.albedo.dot(LUM).div(0.54), 0.5)) as V3;
+      const margin = float(1).sub(smoothstep(wetTop, wetTop.add(0.5), rise)).mul(0.1) as F;
+      // sand: dry above the wet band, wet in it, foam where the swash is. UNDER WATER it is the lagoon's white coral
+      // sand, neutral grey-beige (§12.4: #9a9888 under 20–50 cm); the water's own absorption turns it turquoise
+      const submerged = smoothstep(0.05, 0.5, float(ctx.sand.depthBelow)) as F;
+      const sandA0 = mix(mix(dryA.mul(float(1).sub(margin)), wetA, damp), vec3(0.42, 0.41, 0.37), submerged) as V3;
+      // THE SWASH'S UPPER LIMIT (the dressing's recommendation, 2026-10-29): where the last waves dropped what they
+      // carried, a faint band of shell grit and dried foam along the line beachDressing.ts lays its pebbles and
+      // shells on — the same height, wander and clumps as its placement (SWASH_LIMIT), so the decal carries the line
+      // on past the ~27 m where those pieces fade out, as the wrack line's decal does. Pale shell and darker grit in
+      // 4 cm specks (their mean from where a pixel spans half a speck: no sparkle at distance), darker where it is wet
+      const limitMid = fbm2(positionWorld.xz.div(17).add(vec2(3.1, 0)), 2).sub(0.5).mul(2 * SWASH_LIMIT.wander).add(SWASH_LIMIT.height) as F;
+      const limitOff = positionWorld.y.sub(limitMid).div(SWASH_LIMIT.half) as F;
+      const limitClump = smoothstep(0.35, 0.7, fbm2(positionWorld.xz.div(5.3).add(vec2(11, 0)), 3)).mul(1.4).add(0.3) as F;
+      const limitBand = exp(limitOff.mul(limitOff).negate()).mul(limitClump).clamp(0, 1).mul(float(1).sub(submerged)) as F;
+      const gritPx = (coordFilter(positionWorld.xz) as V2).x.max((coordFilter(positionWorld.xz) as V2).y) as F;
+      const speck = mix(noise(0.04), float(0.5), smoothstep(0.015, 0.04, gritPx)) as F;
+      const grit = mix(vec3(0.66, 0.6, 0.55), vec3(0.36, 0.34, 0.32), speck).mul(mix(float(1), float(0.6), damp)) as V3;
+      const sandA = mix(sandA0, grit, limitBand.mul(SWASH_LIMIT.strength)) as V3;
+      // the swash's moving sheet of water: a film over the sand, darker, mirror-smooth (the game's sand did this in
+      // its own albedo, which this hook replaces — the tongues had gone invisible)
+      const sheet = smoothstep(0.0003, 0.002, swE.depth) as F;
+      // (clear water over sand: the sand under the sheet a little darker still, no tint of its own — the sheet's
+      // surface, its mirror and its foam, is shoreline.ts)
+      // (and the sand the water has just left, for a few seconds: glazed, darker still — where the backwash strands
+      // its foam, on sand it has just wet, not on dry-looking sand: the 2026-10-29 review of beach_600)
+      const glazed = swE.fresh.mul(sheet.oneMinus()) as F;
+      const filmed = mix(sandA.mul(float(1).sub(glazed.mul(0.18))), wetA.mul(0.85), sheet) as V3;
+      // (its foam is the shoreline layer's, on the water's own surface)
+      const foamed = filmed;
+      // (dry sand is matte: the scan's roughness, ~0.5, made it a satin sheen mirroring the blue sky)
+      const sandR0 = mix(dry.rough.max(0.88), wet.rough.mul(0.45), damp) as F;
+      // (the water's mirror is the shoreline layer's: the sand under it is wet sand, not a second mirror — at 0.04 it
+      // took the low Sun as a key-light highlight of its own, one compact blob under the sheet)
+      // (glazed at 0.2: glossier than the wet sand's ~0.28, never the mirror the water itself is — at 0.04 the sand
+      // under the sheet took the low Sun as one compact highlight)
+      const sandR = mix(sandR0, float(0.2), glazed.mul(0.8)) as F;
+      const sandN = mix(dryN, dryN.mul(0.6).add(wet.n.mul(0.1)), damp).mul(sheet.oneMinus()) as V2;
+      const sandAO = mix(mix(rel.ao, float(1), 0.5), wet.ao, damp) as F;
       // the cover: dry grass with patches of leaf-litter soil, the litter's autumn colours dulled toward the soil
       const patch = smoothstep(0.35, 0.7, noise(11)) as F;
       const litter = mix(vec3(leaves.albedo.dot(vec3(0.2126, 0.7152, 0.0722))).mul(vec3(1.05, 0.98, 0.88)), leaves.albedo, 0.25) as V3;
@@ -150,10 +298,30 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       const coverN = mix(grass.n, leaves.n, patch) as V2;
       const coverAO = mix(grass.ao, leaves.ao, patch) as F;
 
-      const groundA = mix(coverA, foamed, ctx.shoreW) as V3;
-      const groundR = mix(coverR, sandR, ctx.shoreW) as F;
-      const groundN2 = mix(coverN, sandN, ctx.shoreW) as V2;
-      const groundAO = mix(coverAO, sandAO, ctx.shoreW) as F;
+      // the litter: the forest floor's dead leaves, sand showing through them, kept off the wet sand
+      const litterNode = texture(litterTex, positionWorld.xz.sub(litterAt).mul(litterInv));
+      litterNodes.push(litterNode as unknown as { value: THREE.Texture });
+      const lit = litterNode.r.mul(smoothstep(0.35, 0.9, rise)) as F;
+      // (dead leaves, brown and darker than the sand, the sand only showing through a little)
+      // (the scan's leaves are a temperate autumn's, reddish: taken toward their own luminance in a dry brown)
+      const leafLum = leaves.albedo.dot(vec3(0.2126, 0.7152, 0.0722)) as F;
+      const litterA = mix(mix(vec3(leafLum).mul(vec3(1.0, 0.78, 0.52)), leaves.albedo, 0.25), dryA, 0.15).mul(0.9) as V3;
+      // THE WRACK LINE on the sand (beachDressing.ts WRACK; the user, 2026-10-29: "some pebbles on the beach could
+      // be a thing"): where the highest tides leave dried seagrass and leaves, a band round 1 m over the sea that
+      // wanders along the beach, broken into clumps — the line beachDressing.ts lays its leaves, twigs and sticks
+      // on, carried on here out to where they are too small to draw (the same noise at the same coordinates as its
+      // CPU twin, wrackAt). The forest floor's leaves, already sampled, taken to the wrack's dry brown (~0.15
+      // linear, darker than the litter), lying only where the scan has a leaf (its brighter half), the sand showing
+      // between them: a band of the scan's whole tone read as a stain, lavender under the evening sky. (Its distance
+      // from the band's middle squared by hand: WGSL's pow of a negative base is undefined.)
+      const wrackOff = positionWorld.y.sub(fbm2(positionWorld.xz.div(WRACK.wanderScale).add(vec2(7.3, 0)), 2).sub(0.5).mul(2 * WRACK.wander).add(WRACK.height)).div(WRACK.half);
+      const wrackClump = smoothstep(WRACK.clump[0], WRACK.clump[1], fbm2(positionWorld.xz.div(WRACK.clumpScale).add(vec2(1.9, 0)), 3));
+      const wrack = exp(wrackOff.mul(wrackOff).negate()).mul(wrackClump).mul(smoothstep(0.18, 0.3, leafLum)).mul(0.9) as F;
+      const sandW = mix(foamed, vec3(leafLum).mul(vec3(0.9, 0.62, 0.4)), wrack) as V3;
+      const groundA = mix(mix(coverA, sandW, shoreW), litterA, lit) as V3;
+      const groundR = mix(mix(coverR, mix(sandR, leaves.rough, wrack), shoreW), leaves.rough, lit) as F;
+      const groundN2 = mix(mix(coverN, mix(sandN, leaves.n.mul(0.5), wrack), shoreW), leaves.n, lit) as V2;
+      const groundAO = mix(mix(coverAO, mix(sandAO, leaves.ao, wrack), shoreW), leaves.ao, lit) as F;
       // the flat layers' tangent normal about the geometric one (u along +x, v along −z)
       const T = vec3(1, 0, 0).sub(N.mul(N.x)).normalize();
       const Bv = N.cross(T);
@@ -181,9 +349,9 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       const rockN = vec3(0, tx.y, tx.x).mul(wx).add(vec3(ty.x, 0, ty.y).mul(wy)).add(vec3(tz.x, tz.y, 0).mul(wz)).add(N).normalize() as V3;
       const rockAO = bx.z.mul(wx).add(by.z.mul(wy)).add(bz.z.mul(wz)) as F;
 
-      const albedo = mix(linear(rockA4.rgb as V3).mul(rockAO), groundA.mul(groundAO), ctx.groundW);
-      const roughness = mix(rockA4.a, groundR, ctx.groundW);
-      const nWorld = mix(rockN, groundN, ctx.groundW).normalize();
+      const albedo = mix(linear(rockA4.rgb as V3).mul(rockAO), groundA.mul(groundAO), groundW);
+      const roughness = mix(rockA4.a, groundR, groundW);
+      const nWorld = mix(rockN, groundN, groundW).normalize();
       const normal = cameraViewMatrix.mul(vec4(nWorld, 0)).xyz.normalize();
       // (no painted glitter on scanned sand)
       return { albedo, roughness, normal, emissiveGate: float(0), ao: skyOcclusion };
@@ -192,6 +360,17 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   return {
     hooks,
     ready: Promise.all(loads).then(() => undefined),
+    setLitter(mask, origin, size) {
+      if (mask.length !== LITTER_RES * LITTER_RES) throw new Error(`beach: litter mask of ${mask.length}, not ${LITTER_RES}²`);
+      const half = new Uint16Array(mask.length);
+      for (let i = 0; i < mask.length; i++) half[i] = THREE.DataUtils.toHalfFloat(mask[i] / 255);
+      const was = litterTex;
+      litterTex = litterOf(half);
+      for (const node of litterNodes) node.value = litterTex;
+      was.dispose();
+      litterAt.value.set(origin[0], origin[1]);
+      litterInv.value = 1 / size;
+    },
     setOccluders(list) {
       if (list.length > MAX_OCCLUDERS) throw new Error(`beach: ${list.length} occluders, at most ${MAX_OCCLUDERS}`);
       occData.forEach((v, i) => (i < list.length ? v.set(...list[i]) : v.set(0, 0, 1, 0)));

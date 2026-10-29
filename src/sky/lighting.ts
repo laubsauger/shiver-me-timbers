@@ -32,7 +32,7 @@
 import * as THREE from 'three/webgpu';
 import type { SkyParams } from '../params/sky';
 import { shadowTexelSize, snapShadowCenter } from './shadowMath';
-import { shadow } from 'three/tsl';
+import { Fn, float, shadow } from 'three/tsl';
 import type { KeyLight } from './moonCycle';
 import { updateParticleLighting } from './particleLighting';
 import {
@@ -44,6 +44,9 @@ import {
   sunColor,
   type Rgb,
 } from './sunCycle';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union (surfaceMaterial.ts convention)
+type TslNode = any;
 
 /**
  * §V.72. Read the key's LINEAR radiance scale off the light this file writes.
@@ -64,6 +67,22 @@ import {
 export function keyRadianceScale(light: THREE.DirectionalLight): number {
   const v = (light.userData as { keyRadianceScale?: unknown }).keyRadianceScale;
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, 1) : 1;
+}
+
+/**
+ * The shared sun shadow node for a material that samples it BY HAND (the
+ * ocean surface, the caustics water receivers), or a constant 1 — fully lit —
+ * when the renderer has shadow maps off.
+ *
+ * three's own lighting already skips shadows when `renderer.shadowMap.enabled`
+ * is false (AnalyticLightNode.setupShadow). A ShadowNode wired straight into a
+ * colour graph does not: it still registers its updateBefore, finds no shadow
+ * map, and crashes on `null.depthTexture`. Decided per material build, from
+ * the builder's renderer, so with shadows on the graph holds the very same
+ * shared node and nothing changes.
+ */
+export function sunShadowOrLit(node: TslNode): TslNode {
+  return Fn((builder) => (builder.renderer.shadowMap.enabled ? node : float(1)))();
 }
 
 function mulRgb(c: Rgb, tint: Rgb): Rgb {

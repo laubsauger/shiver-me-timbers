@@ -1,7 +1,7 @@
 /**
  * Act 3's sandpipers (drift-narrative/wandering-on/direction.md, W4): the flock that takes off as one
- * vortex, with no leader — baked by scripts/drift-flock-bake.py to keyframes (2400 birds, 15 keys/s), read
- * here as a float texture (one row per key, one texel per bird: xyz, w = 1 while flying) and interpolated
+ * vortex, with no leader — baked by scripts/drift-flock-bake.py to keyframes (10 000 birds, 15 keys/s), read
+ * here as a float texture (per key, rows of texels, one per bird: xyz, w = 1 while flying) and interpolated
  * with Catmull–Rom, so every frame is a pure function of the flock's own time.
  *
  * A bird is a small dark silhouette (body and swept wings) stretched along its flight, a pixel at least (what it gains in size it gives
@@ -17,11 +17,17 @@ import { billboardMesh } from '../undertime/billboard';
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 
+/** how much further a bird rolls than its turn alone needs (see the bank) */
+const ROLL_GAIN = 2.6;
+
 export interface FlockData {
   texture: THREE.DataTexture;
   birds: number;
   keys: number;
   hz: number;
+  /** texels per row, and rows per key (a flock wider than a texture may be is laid out over several) */
+  width: number;
+  rows: number;
   ready: Promise<void>;
 }
 
@@ -29,21 +35,23 @@ export function loadFlock(base = `${import.meta.env.BASE_URL}drift/flock/`): Flo
   const texture = new THREE.DataTexture(new Uint16Array(4), 1, 1, THREE.RGBAFormat, THREE.HalfFloatType);
   texture.minFilter = THREE.NearestFilter;
   texture.magFilter = THREE.NearestFilter;
-  const data: FlockData = { texture, birds: 1, keys: 1, hz: 15, ready: Promise.resolve() };
+  const data: FlockData = { texture, birds: 1, keys: 1, hz: 15, width: 1, rows: 1, ready: Promise.resolve() };
   data.ready = fetch(base + 'flock-keys.json')
     .then((r) => {
       if (!r.ok) throw new Error(`flock: ${r.status} (run scripts/drift-flock-bake.py)`);
       return r.json();
     })
-    .then((j: { birds: number; keys: number; hz: number }) => {
+    .then((j: { birds: number; keys: number; hz: number; width?: number; rows?: number }) => {
       data.birds = j.birds;
       data.keys = j.keys;
+      data.width = j.width ?? j.birds;
+      data.rows = j.rows ?? 1;
       data.hz = j.hz;
       return fetch(base + 'flock-keys.f16');
     })
     .then((r) => r.arrayBuffer())
     .then((b) => {
-      texture.image = { data: new Uint16Array(b), width: data.birds, height: data.keys };
+      texture.image = { data: new Uint16Array(b), width: data.width, height: data.keys * data.rows };
       texture.needsUpdate = true;
     });
   return data;
@@ -78,7 +86,11 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
   const k = U.time.mul(data.hz).clamp(0, data.keys - 1.001);
   const k1 = k.floor();
   const u = k.sub(k1);
-  const at = (dk: number) => textureLoad(data.texture, ivec2(int(bird), int(clamp(k1.add(dk), 0, data.keys - 1)))) as unknown as THREE.Node<'vec4'>;
+  // (texel: column bird mod width, row key·rows + bird ÷ width)
+  const col = int(instanceIndex).mod(data.width);
+  const row = int(instanceIndex).div(data.width);
+  const at = (dk: number) =>
+    textureLoad(data.texture, ivec2(col, int(clamp(k1.add(dk), 0, data.keys - 1)).mul(data.rows).add(row))) as unknown as THREE.Node<'vec4'>;
   const a0 = at(-1);
   const a1 = at(0);
   const a2 = at(1);
@@ -96,9 +108,18 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
   // tilts from straight down toward the outside of the turn by the bank angle (tan = lateral g / 9.8)
   const fwd = normalize(vel.add(vec3(1e-4, 0, 0)));
   const lateral = acc.sub(fwd.mul(acc.dot(fwd)));
-  const bank = normalize(vec3(0, -9.8, 0).sub(lateral));
-  // the belly lights when it faces the sun, and shows when it also faces the eye (we are below the flock)
-  const shows = smoothstep(-0.1, 0.5, bank.dot(U.sun)).mul(smoothstep(-0.2, 0.3, bank.dot(view)));
+  // (rolled ROLL_GAIN× the centripetal estimate: a bird in a murmuration rolls far more than its turn needs — it
+  // banks to turn AND to spill and steer — 40–70° in the turns of the reference footage, where the estimate gave
+  // 10–25° and the belly flash hardly showed, the 2026-10-29 review: "seeing if we see the white belly effect at all")
+  const bank = normalize(vec3(0, -9.8, 0).sub(lateral.mul(ROLL_GAIN)));
+  // which side the eye sees: the white belly, or the dark back once the bird has rolled past the line of sight
+  // (sandpipers "flash between black and white", the client's Ocean Shores reference); edge-on, the wings thin to
+  // a line and the bird nearly vanishes — a turn running through the body blinks it out and back
+  const facing = bank.dot(view);
+  const seesBelly = smoothstep(-0.12, 0.12, facing);
+  const thin = mix(float(0.3), float(1), smoothstep(0.05, 0.6, facing.abs()));
+  const sunOnBelly = smoothstep(-0.1, 0.5, bank.dot(U.sun));
+  const sunOnBack = smoothstep(-0.1, 0.5, bank.dot(U.sun).negate());
   // sandpipers are ~20 cm long, 40 cm across the wings; at least a pixel and a half, paid back as strength
   const wanted = float(0.3);
   const drawn = max(wanted, U.pixelAngle.mul(1.5).mul(dist));
@@ -112,7 +133,7 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
   // span opens and closes, so the flock shimmers as live birds do instead of drifting as specks
   const beat = sin(U.time.mul(18.8).add(bird.mul(2.399))).mul(0.5).add(0.5);
   const span = mix(float(0.45), float(1), beat);
-  const quad = pos.add(along.mul(corner.y.mul(size).mul(0.55))).add(across.mul(corner.x.mul(size).mul(1.7).mul(span)));
+  const quad = pos.add(along.mul(corner.y.mul(size).mul(0.55).mul(thin))).add(across.mul(corner.x.mul(size).mul(1.7).mul(span)));
   const material = new THREE.NodeMaterial();
   material.transparent = true;
   material.depthWrite = false;
@@ -135,10 +156,14 @@ export function createFlock(data: FlockData, U: FlockUniforms): THREE.InstancedM
     // (the low Sun's colour half taken back to its brightness: at a pixel or two a warm-lit belly read as an
     // orange speck, "confetti" — the v8 notes)
     const sunGrey = mix(U.sunLight, vec3(U.sunLight.dot(vec3(0.2126, 0.7152, 0.0722))), 0.5);
-    const back = vec3(0.07, 0.065, 0.06).mul(U.skyLight.add(sunGrey.mul(0.2)));
-    const belly = vec3(0.8, 0.78, 0.74).mul(U.skyLight.add(sunGrey.mul(shows.mul(0.7))));
-    const c = mix(back, belly, shows);
-    const a = wing.mul(min(coverage.mul(1.4), 1)).mul(U.presence).mul(smoothstep(0.02, 0.4, flying.add(0.3)));
+    const back = vec3(0.07, 0.065, 0.06).mul(U.skyLight.add(sunGrey.mul(sunOnBack.mul(0.3).add(0.2))));
+    // (a belly faces down: the sky's light reaches it only off the sea and the sand, ~a fifth; lit by the full
+    // sky it matched the sky and the whole flock was gone, the first sixth-bake look)
+    // (and the Sun's full light on a belly turned to it: at half of it, a banked belly toward the low Sun came out
+    // no brighter than the sky behind it — the flash is the one thing in a murmuration brighter than the sky)
+    const belly = vec3(0.8, 0.78, 0.74).mul(U.skyLight.mul(0.2).add(sunGrey.mul(sunOnBelly)));
+    const c = mix(back, belly, seesBelly);
+    const a = wing.mul(min(coverage.mul(1.4), 1)).mul(thin.sqrt()).mul(U.presence).mul(smoothstep(0.02, 0.4, flying.add(0.3)));
     return vec4(c, a);
   })();
   material.name = 'drift-flock';

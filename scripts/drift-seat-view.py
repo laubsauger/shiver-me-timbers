@@ -63,6 +63,7 @@ f = (W / 2) / math.tan(math.radians(a.fov) / 2)
 px, py = np.meshgrid(np.arange(W) + 0.5 - W / 2, np.arange(H) + 0.5 - H / 2)
 cam_dirs = np.stack([px / f, -py / f, np.ones_like(px)], -1)  # camera space: x right, y up, z forward
 cam_dirs /= np.linalg.norm(cam_dirs, axis=-1, keepdims=True)
+cam_dirs = cam_dirs.astype(np.float32)  # (float32 through the per-frame maths: half the work of float64)
 
 # ---------------------------------------------------------------- natural head movement: a few slow, small
 # sinusoids per axis (periods 6–19 s), seeded, so a re-run gives the same take
@@ -108,19 +109,24 @@ S, FPS, DUR = probe(a.src)
 t1 = a.t1 if a.t1 is not None else DUR
 dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', str(a.t0), '-t', str(t1 - a.t0), '-i', a.src, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
                        stdout=subprocess.PIPE)
+# the source's sound (a cut with the score under it), if it has any, cut to the same span
 enc = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{W}x{H}', '-r', str(FPS), '-i', '-',
+                        '-ss', str(a.t0), '-t', str(t1 - a.t0), '-i', a.src, '-map', '0:v', '-map', '1:a?', '-c:a', 'copy', '-shortest',
                         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', a.crf, '-pix_fmt', 'yuv420p', a.dst], stdin=subprocess.PIPE)
 room = np.array([6, 6, 7], np.float32)
 n = 0
 oc = eye - C
 cc = oc @ oc - R * R  # < 0: the eye is inside the dome sphere
+# (float32 vectors, or every product with the float32 rays is promoted back to float64)
+eye, C, AXIS, FRONT, RIGHT, oc = (v.astype(np.float32) for v in (eye, C, AXIS, FRONT, RIGHT, oc))
 while True:
     buf = dec.stdout.read(S * S * 3)
     if len(buf) < S * S * 3:
         break
-    master = np.frombuffer(buf, np.uint8).reshape(S, S, 3).astype(np.float32)
+    # (kept 8-bit: only the gathered taps go to float, not all 4096² of the frame)
+    master = np.frombuffer(buf, np.uint8).reshape(S, S, 3)
     t = a.t0 + n / FPS
-    w = cam_dirs @ head(t).T  # world ray directions
+    w = cam_dirs @ head(t).T.astype(np.float32)  # world ray directions
     b = w @ oc
     hit = -b + np.sqrt(np.maximum(b * b - cc, 0))
     d = (eye + w * hit[..., None] - C) / R
@@ -134,8 +140,11 @@ while True:
     y0 = np.clip(np.floor(y).astype(int), 0, S - 2)
     fx = np.clip(x - x0, 0, 1)[..., None]
     fy = np.clip(y - y0, 0, 1)[..., None]
-    img = (master[y0, x0] * (1 - fx) * (1 - fy) + master[y0, x0 + 1] * fx * (1 - fy)
-           + master[y0 + 1, x0] * (1 - fx) * fy + master[y0 + 1, x0 + 1] * fx * fy)
+    # the four taps by flat index (one take each, cheaper than 2-D fancy indexing)
+    flat = master.reshape(-1, 3)
+    i00 = y0 * S + x0
+    img = (flat.take(i00, 0).astype(np.float32) * (1 - fx) * (1 - fy) + flat.take(i00 + 1, 0) * fx * (1 - fy)
+           + flat.take(i00 + S, 0) * (1 - fx) * fy + flat.take(i00 + S + 1, 0) * fx * fy)
     img = np.where((el >= 0)[..., None], img, room)
     if a.eye_level:
         # the viewer's own horizontal: rays at 0° elevation from this seat, dotted every few degrees

@@ -44,6 +44,7 @@ import { fetchFieldSampleNode, type FetchField } from '../ocean/fetchField';
 import { developmentRatioNode, fetchBandGainNode } from '../ocean/fetch';
 import { swellShadowGainNode } from '../ocean/swellShadow';
 import { causticsParams } from '../params/caustics';
+import { sunShadowOrLit } from '../sky/lighting';
 import {
   createCausticsUniforms,
   createShoalingUniforms,
@@ -144,10 +145,10 @@ export class Caustics {
     this.fetchField = field;
   }
 
-  /** the sun shadow node the ocean already published, or undefined */
+  /** the sun shadow node the ocean already published (1 with shadow maps off), or undefined */
   private sharedShadow(): TslNode | undefined {
     const slot = this.sunLight?.shadow as unknown as { shadowNode?: TslNode } | undefined;
-    return slot?.shadowNode;
+    return slot?.shadowNode === undefined ? undefined : sunShadowOrLit(slot.shadowNode);
   }
 
   /**

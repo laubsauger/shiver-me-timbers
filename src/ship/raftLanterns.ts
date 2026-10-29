@@ -11,7 +11,7 @@
  * In the raft's own frame (ShipAssembly.group's local space): x across, y up, z toward the bow, as the blueprint.
  */
 import * as THREE from 'three/webgpu';
-import { float, sin, uniform, vec3 } from 'three/tsl';
+import { cameraPosition, float, mix, normalWorld, positionWorld, sin, uniform, vec3 } from 'three/tsl';
 import { raftParams, type RaftParams } from '../params/raft';
 import { raftLayout } from './raftPartsLayout';
 
@@ -59,6 +59,7 @@ export function createRaftLanterns(p: RaftParams = raftParams, o: { lights?: boo
   const uNight = uniform(0);
   const uTime = uniform(0);
   const frameMat = new THREE.MeshStandardNodeMaterial({ color: 0x2a241d, roughness: 0.55, metalness: 0.6 });
+  const waxMat = new THREE.MeshStandardNodeMaterial({ color: 0xe6dcc4, roughness: 0.55, metalness: 0 });
   const corners: Array<[number, number]> = [];
   for (const sx of [-1, 1]) for (const z of zs) corners.push([sx * out, z]);
   corners.forEach(([x, z], i) => {
@@ -67,15 +68,41 @@ export function createRaftLanterns(p: RaftParams = raftParams, o: { lights?: boo
     const y = eaveTip - DROP;
     lantern.position.set(x, y, z);
     // the glass: a candle's flicker, each its own (two slow sines and a quick one, never out)
-    const glassMat = new THREE.MeshBasicNodeMaterial({ fog: false });
     const ph = i * 1.7;
     const flicker = float(0.82)
       .add(sin(uTime.mul(1.3).add(ph)).mul(0.07))
       .add(sin(uTime.mul(3.1).add(ph * 2.3)).mul(0.05))
       .add(sin(uTime.mul(11.7).add(ph * 0.7)).mul(0.03));
-    glassMat.colorNode = vec3(CANDLE.r, CANDLE.g, CANDLE.b).mul(uNight.mul(flicker).mul(GLOW).add(0.04));
-    const glass = new THREE.Mesh(new THREE.CylinderGeometry(GLASS.r, GLASS.r * 1.1, GLASS.h, 10), glassMat);
+    // GLASS, NOT A BROWN TUBE (the 2026-10-29 review: unlit, the lanterns read as "solid brown … they need to at
+    // least hint at being transparent"): a clear chimney you see the candle through — faint where you look straight
+    // through it, brighter at its edges (Fresnel), catching the sky — and, lit, the candle's glow filling it, the
+    // glass going milky with the light it scatters
+    const glow = uNight.mul(flicker);
+    const view = cameraPosition.sub(positionWorld).normalize();
+    const edge = float(1).sub(normalWorld.dot(view).abs()).pow(3);
+    const glassMat = new THREE.MeshStandardNodeMaterial({ color: 0xdfe6e4, roughness: 0.06, metalness: 0, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+    glassMat.opacityNode = mix(float(0.1).add(edge.mul(0.55)), float(0.9), glow.min(1));
+    glassMat.emissiveNode = vec3(CANDLE.r, CANDLE.g, CANDLE.b).mul(glow.mul(GLOW));
+    const glass = new THREE.Mesh(new THREE.CylinderGeometry(GLASS.r, GLASS.r * 1.1, GLASS.h, 14, 1, true), glassMat);
+    glass.renderOrder = 3;
     lantern.add(glass);
+    // inside it: the candle stub, its wick, and the flame's own small glow (lit only)
+    const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.019, 0.06, 10), waxMat);
+    candle.position.y = -GLASS.h / 2 + 0.03;
+    lantern.add(candle);
+    const flameMat = new THREE.MeshBasicNodeMaterial({ fog: false, transparent: true, depthWrite: false });
+    flameMat.colorNode = vec3(1, 0.7, 0.35).mul(glow.mul(GLOW * 2.5));
+    flameMat.opacityNode = glow.min(1);
+    const flame = new THREE.Mesh(new THREE.SphereGeometry(0.009, 8, 6).scale(1, 2.2, 1), flameMat);
+    flame.position.y = -GLASS.h / 2 + 0.075;
+    lantern.add(flame);
+    // the guard wires round the glass
+    for (let w = 0; w < 4; w++) {
+      const a = (w / 4) * Math.PI * 2 + 0.4;
+      const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.0025, 0.0025, GLASS.h, 4), frameMat);
+      wire.position.set(Math.cos(a) * GLASS.r * 1.18, 0, Math.sin(a) * GLASS.r * 1.18);
+      lantern.add(wire);
+    }
     const cap = new THREE.Mesh(new THREE.ConeGeometry(GLASS.r * 1.35, 0.06, 10), frameMat);
     cap.position.y = GLASS.h / 2 + 0.03;
     lantern.add(cap);

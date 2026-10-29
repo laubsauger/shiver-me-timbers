@@ -139,20 +139,95 @@ class Accumulator {
   }
 }
 
+/**
+ * THE 16-BIT CAPTURE (`depth` 16, the 10/12-bit masters). The 8-bit target quantises the picture to 256 levels
+ * before the encoder sees it, and a dark sky gradient then bands whatever the codec: a 4K night frame measured
+ * 1.6 levels across the zenith (out/drift/bitdepth_8_10_12_712s.png). Here the frame is drawn into a half-float
+ * target in LINEAR light (a non-output target gets no colour conversion from three, and WebGPU has no sRGB
+ * half-float format), then one quad pass sRGB-encodes it into an `rgba16unorm` target, which is read back as
+ * rgba64le — the encoder gets 16 bits a channel and quantises once, to its own depth.
+ *
+ * The half-float target is SHARED by every capture of one renderer: the encode runs in `unbind`, right after the
+ * frame is drawn, so the next frame cannot draw into it first. At 8K a target is 512 MB, and the ring of captures
+ * (record.ts) would otherwise hold one per slot (the 8K benchmark lost its GPU device to memory pressure). No depth
+ * buffer: the drift's master is a full-screen present pass.
+ */
+const linearTargets = new WeakMap<THREE.WebGPURenderer, { target: THREE.RenderTarget; users: number }>();
+
+function linearTarget(renderer: THREE.WebGPURenderer, width: number, height: number): THREE.RenderTarget {
+  let shared = linearTargets.get(renderer);
+  if (shared === undefined) {
+    const target = new THREE.RenderTarget(width, height, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.NoColorSpace, depthBuffer: false, samples: 0 });
+    target.texture.minFilter = target.texture.magFilter = THREE.NearestFilter;
+    shared = { target, users: 0 };
+    linearTargets.set(renderer, shared);
+  }
+  if (shared.target.width !== width || shared.target.height !== height) shared.target.setSize(width, height);
+  return shared.target;
+}
+
+class Encoder16 {
+  readonly out: THREE.RenderTarget;
+  private readonly quad: THREE.QuadMesh;
+
+  constructor(
+    private renderer: THREE.WebGPURenderer,
+    width: number,
+    height: number,
+  ) {
+    // rgba16unorm needs the `texture-formats-tier1` feature (three requests every feature the adapter has); without
+    // it three falls back to rgba16uint, which a float fragment output cannot write — fail loud instead
+    const device = (renderer.backend as { device?: GPUDevice }).device;
+    if (device !== undefined && !device.features.has('texture-formats-tier1')) throw new Error('cine: 16-bit capture needs the WebGPU feature texture-formats-tier1 (rgba16unorm)');
+    this.out = new THREE.RenderTarget(width, height, { type: THREE.UnsignedShortType, format: THREE.RGBAFormat, colorSpace: THREE.NoColorSpace, depthBuffer: false, samples: 0 });
+    this.out.texture.normalized = true;
+    const m = new THREE.NodeMaterial();
+    // the GPU's own sRGB encode is what the 8-bit target applies (rgba8unorm-srgb): the same curve, 16 bits deep
+    m.fragmentNode = vec4(sRGBTransferOETF(texture(linearTarget(renderer, width, height).texture).rgb) as THREE.Node<'vec3'>, 1);
+    m.depthTest = false;
+    m.depthWrite = false;
+    this.quad = new THREE.QuadMesh(m);
+  }
+
+  encode(): void {
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    r.setRenderTarget(this.out);
+    this.quad.render(r);
+    r.setRenderTarget(prev);
+  }
+
+  dispose(): void {
+    this.out.dispose();
+    (this.quad.material as THREE.Material).dispose();
+  }
+}
+
 export class Capture {
   private target: THREE.RenderTarget | null = null;
   private prev: THREE.RenderTarget | null = null;
   private packed: Uint8Array | null = null;
   /** one accumulator per LOOK (recorder.ts `looks`): the looks of one subframe are summed side by side */
   private accs: Accumulator[] = [];
+  private enc: Encoder16 | null = null;
 
-  /** `samples` set = the supersampled path (Accumulator); undefined = the original single-sample capture */
+  /**
+   * `samples` set = the supersampled path (Accumulator); undefined = the original single-sample capture.
+   * `depth` 16 = the 16-bit capture (see Encoder16), single-sample only: `grab` then returns rgba64le bytes.
+   */
   constructor(
     private renderer: THREE.WebGPURenderer,
     public width: number,
     public height: number,
     readonly samples?: number,
-  ) {}
+    readonly depth: 8 | 16 = 8,
+  ) {
+    if (depth === 16 && samples !== undefined) throw new Error('cine: the 16-bit capture has no supersampled path');
+    if (depth === 16) {
+      linearTarget(renderer, width, height);
+      linearTargets.get(renderer)!.users++;
+    }
+  }
 
   resize(width: number, height: number): void {
     if (width === this.width && height === this.height) return;
@@ -162,6 +237,8 @@ export class Capture {
     this.target = null;
     for (const a of this.accs) a.dispose();
     this.accs = [];
+    this.enc?.dispose();
+    this.enc = null;
     this.packed = null;
   }
 
@@ -202,6 +279,12 @@ export class Capture {
       this.renderer.setRenderTarget((this.accs[look] as Accumulator).sub);
       return;
     }
+    if (this.depth === 16) {
+      this.enc ??= new Encoder16(this.renderer, this.width, this.height);
+      this.prev = this.renderer.getRenderTarget();
+      this.renderer.setRenderTarget(linearTarget(this.renderer, this.width, this.height));
+      return;
+    }
     if (this.target === null) {
       this.target = new THREE.RenderTarget(this.width, this.height, {
         type: THREE.UnsignedByteType,
@@ -219,21 +302,25 @@ export class Capture {
   unbind(): void {
     this.renderer.setRenderTarget(this.prev);
     this.prev = null;
+    // the shared linear target into this capture's own, before any other frame can draw into it (Encoder16)
+    this.enc?.encode();
   }
 
-  /** tightly packed, top-down RGBA — ready to POST as-is */
+  /** tightly packed, top-down RGBA (8 bit), or rgba64le with `depth` 16 — ready to POST as-is */
   async grab(look = 0): Promise<Uint8Array> {
-    const t = this.samples !== undefined ? (this.accs[look]?.out ?? null) : this.target;
+    const t = this.depth === 16 ? (this.enc?.out ?? null) : this.samples !== undefined ? (this.accs[look]?.out ?? null) : this.target;
     if (t === null) throw new Error('cine: grab() without bind()');
     const w = this.width;
     const h = this.height;
-    const raw = (await stage(
+    const read = (await stage(
       this.renderer.readRenderTargetPixelsAsync(t, 0, 0, w, h) as Promise<unknown>,
       30000,
       'readRenderTargetPixelsAsync',
-    )) as Uint8Array;
+    )) as Uint8Array | Uint16Array;
+    // (a 16-bit readback is a Uint16Array of the same padded rows: unpadded here as bytes)
+    const raw = read instanceof Uint8Array ? read : new Uint8Array(read.buffer, read.byteOffset, read.byteLength);
 
-    const row = w * 4;
+    const row = w * (this.depth === 16 ? 8 : 4);
     const stride = Math.ceil(row / 256) * 256;
     if (stride === row && raw.length === row * h) return raw;
     if (this.packed === null) this.packed = new Uint8Array(row * h);
@@ -248,6 +335,15 @@ export class Capture {
     this.target = null;
     for (const a of this.accs) a.dispose();
     this.accs = [];
+    this.enc?.dispose();
+    this.enc = null;
     this.packed = null;
+    if (this.depth === 16) {
+      const shared = linearTargets.get(this.renderer);
+      if (shared && --shared.users <= 0) {
+        shared.target.dispose();
+        linearTargets.delete(this.renderer);
+      }
+    }
   }
 }

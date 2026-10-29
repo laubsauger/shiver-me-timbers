@@ -134,6 +134,10 @@ export interface DriftParams {
   domeTilt: number;
   /** px — cube face resolution for dome capture */
   domeFace: number;
+  /** 0..1 — the sea acts' ambient occlusion (cine/domeAo.ts): how much of it their indirect light takes (0: off) */
+  seaAo: number;
+  /** m — how far an occluder reaches in the sea acts (contact and crevice scale: a log's girth, a trunk's foot) */
+  seaAoRadius: number;
 }
 
 export const driftParams: DriftParams = registerParams(
@@ -204,6 +208,10 @@ export const driftParams: DriftParams = registerParams(
     crawlPocketAz: 40,
     domeTilt: 15,
     domeFace: 1024,
+    seaAo: 1,
+    // (1.8 m, not the 1 m it was built at: at 1 m it darkened by at most 20/255, and the trees and the raft still
+    // read "pasted on" — the reach of a crown's or a cabin's shade is metres, 2026-10-29)
+    seaAoRadius: 1.8,
   },
   {
     first: { min: 0, max: 60, step: 0.5 },
@@ -262,5 +270,7 @@ export const driftParams: DriftParams = registerParams(
     crawlPocket: { min: 0, max: 1, step: 0.01 },
     crawlPocketAz: { min: 10, max: 120, step: 1 },
     domeTilt: { min: 0, max: 30, step: 0.5 },
+    seaAo: { min: 0, max: 1, step: 0.01 },
+    seaAoRadius: { min: 0.1, max: 4, step: 0.05 },
   },
 );

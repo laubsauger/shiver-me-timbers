@@ -30,33 +30,59 @@ the arms flat into a ring within seconds: tried). It tightens, then opens, and t
 before. Inside the vortex the birds still keep apart and still carry their own turbulence; alignment and
 cohesion give way to it.
 
+Sixth bake (2026-10-28, the client's references — sandpiper murmurations at Ocean Shores and the Bay of Fundy —
+and the v11 review: the flock read as thin, scattered specks, never one body): a murmuration's own model.
+Ten thousand birds, a metre apart, each heeding its 7 nearest (StarDisplay: Hildenbrandt, Carere & Hemelrijk
+2010), the border birds holding in hardest, so the body has an edge; turning by the inertial spin model
+(Cavagna et al. 2015), so a turn runs through the body as a wave, and the white bellies flash across it with
+the turn; nothing steers them but an area of air that wanders over the beach (free within it, drawn back from
+beyond). The vortex comes once, for ~10 s; before and after it the shapes are the flock's own.
+
   out/drift/data/.venv/bin/python -I scripts/drift-flock-bake.py public/drift/flock
 """
 
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
 
-N = 2400
+# (FLOCK_N: a smaller flock for a quick look while tuning)
+N = int(os.environ.get('FLOCK_N', 10000))
 DURATION = 75.0  # s
 DT = 1 / 60
 KEY_HZ = 15
 SEED = 2100
+# the key texture: a flock wider than a GPU texture may be (8192 texels) is laid out over several rows per key,
+# split evenly (no padding to speak of)
+ROWS = -(-N // 8192)
+TEX_W = -(-N // ROWS)
 
 rng = np.random.default_rng(SEED)
 
-# on the wet sand and in the swash along the waterline (x −8): a band 40 m long, 20–60 m ahead
-pos = np.stack([rng.uniform(-11, -5, N), np.zeros(N), -rng.uniform(20, 60, N)], -1).astype(np.float64)
-vel = np.zeros((N, 3))
-# the startle wave runs from the far end toward us
-takeoff = 1.2 + (pos[:, 2] + 60) / 12 + rng.normal(0, 0.15, N)
+# Seventh bake (2026-10-29, the review of v11: the birds "appear so weirdly in the far, far back and sit on the
+# water in this strange way … either they keep flying or they fly away"; "a little closer to the camera so that we
+# see the shapes every once in a while"; "we will have a forest where we can have them appear in and out"): the
+# flock is never on the ground. It comes in FLYING over the forest on our right (hidden behind the canopy until it
+# clears it), sweeps low past us along the waterline, close enough for the birds' shapes to read, wheels out over
+# the sea, forms the vortex overhead, and leaves down the beach ahead and over the forest there, gone behind the
+# trees — where the wanderers walk on after it (w5).
+pos = np.stack([rng.uniform(55, 85, N), rng.uniform(12, 18, N), -rng.uniform(30, 70, N)], -1).astype(np.float64)
+e0 = np.stack([-0.85 + rng.normal(0, 0.05, N), rng.normal(0, 0.03, N), 0.25 + rng.normal(0, 0.05, N)], -1)
+vel = e0 / np.linalg.norm(e0, axis=1, keepdims=True) * 10.0
+# each bird's spin (the inertial spin model: a turn is a quantity the bird carries and hands on, so a turn runs
+# through the flock as a wave instead of spreading out and dying, as measured in starlings: Attanasi et al. 2014)
+spin = np.zeros((N, 3))
+# (all aloft from the start: no startle, no takeoff)
+takeoff = np.full(N, -5.0)
 landed_at = np.full(N, np.inf)
-# each bird's own turbulence: three slow sines at its own rates and phases (m/s²)
-NOISE = 3.2
+# each bird's own cruising speed (sandpipers fly ~10–14 m/s) and its own turbulence: three slow sines (m/s²)
+CRUISE = rng.normal(11.0, 0.8, N)
+NOISE = 0.9
 nf = rng.uniform(0.25, 0.9, (N, 3))
 nph = rng.uniform(0, 2 * np.pi, (N, 3))
 # where they come down: the waterline ahead — near enough to see them settle (at ~200 m, the flock shrank to nothing
@@ -65,31 +91,62 @@ LAND = np.array([-8.0, 0.0, -90.0])
 # m: below this a flying bird pulls up out of its dive, the harder the nearer the sand and the steeper the dive (a
 # soft lift under 3 m let the dives reach the sand at full speed: "smashing on the ground quite hard", v10)
 PULL_UP = 7.0
-# THE VORTEX: s it holds (eased in and out over V_EASE), its axis (vertical, through this point: just ahead of
-# the audience, overhead), the arms' reach (m), their pitch, the rim's airspeed (m/s), the core's share of the
+# deg: the lowest the flock flies as seen from the audience's eye — seen from 1.6 m up, a body skimming 2–5 m
+# over the sea 50 m off sat on the horizon and read as crashing into the water (the 2026-10-29 review of the
+# seventh bake)
+SEEN_ABOVE = 7.0
+# m: the band over which the floor's lift eases in and out
+FLOOR_SOFT = 6.0
+# m: the nearest a bird comes to the audience's eye
+EYE_CLEAR = 14.0
+# THE RULES (StarDisplay, Hildenbrandt, Carere & Hemelrijk 2010, with the inertial spin model's turning):
+# m: closer than this a bird moves off its neighbour (a sandpiper spans ~0.4 m; the flock's own spacing comes out
+# near a metre), and how hard
+R_SEP = 0.8
+K_SEP = 40.0
+# cohesion toward the 7 neighbours' centre, much stronger for a bird on the border (its neighbours all lie to one
+# side): what gives a murmuration its sharp edge
+K_COH = 1.2
+# the spin: alignment's pull on it (1/s²), its friction (1/s): underdamped, so a turn overshoots a little and
+# travels; the most a bird turns (rad/s, ~3 g at cruise)
+J_ALIGN = 7.0
+ETA = 2.0
+MAX_TURN = 3.2
+# THE AREA the flock keeps to (where the air and the shore hold it, not a leader): a centre that wanders, a
+# radius it may roam freely within, and a band of height about the centre's
+R_AREA = 18.0
+K_AREA = 0.6
+BAND = 6.0
+K_ALT = 1.6
+# THE VORTEX, once, briefly (the v11 review: "this vortex showing up once briefly, and before or after have
+# them be organic"): s it holds (eased in and out over V_EASE), its axis (vertical, through this point: just ahead
+# of the audience, overhead), the arms' reach (m), their pitch, the rim's airspeed (m/s), the core's share of the
 # birds and its reach (m), and the funnel: the height at the arms' inner end (m) and its rise per metre out
-VORTEX = (7.0, 25.0)
-V_EASE = 4.0
+VORTEX = (28.0, 38.0)
+V_EASE = 3.0
 V_AXIS = np.array([-2.0, 0.0, -8.0])
 V_R = (13.0, 30.0)
 V_CORE = 0.12
 V_CORE_R = (3.0, 11.0)
 V_WIND = 1 / np.tan(np.radians(13))
 V_SPEED = 11.0
-V_BASE = 13.0
+V_BASE = 24.0
 V_RISE = 0.55
 
 
+def smooth(x):
+    x = np.clip(x, 0, 1)
+    return x * x * (3 - 2 * x)
+
+
 def vortex_weight(t: float) -> float:
-    a = np.clip((t - VORTEX[0]) / V_EASE, 0, 1)
-    b = np.clip((VORTEX[1] - t) / V_EASE, 0, 1)
-    return float(a * a * (3 - 2 * a) * b * b * (3 - 2 * b))
+    return float(smooth((t - VORTEX[0]) / V_EASE) * smooth((VORTEX[1] - t) / V_EASE))
 
 
 def vortex_squeeze(t: float) -> float:
     """the radii's scale: it tightens to its narrowest mid-way, then opens past where it began"""
     u = np.clip((t - VORTEX[0]) / (VORTEX[1] - VORTEX[0]), 0, 1)
-    return float(1 - 0.3 * np.sin(np.pi * min(1, u * 1.4)) + 0.35 * max(0, u - 0.7) / 0.3)
+    return float(1 - 0.3 * np.sin(np.pi * min(1, u * 1.4)) + 0.12 * max(0, u - 0.7) / 0.3)
 
 
 def arm_angle(r: np.ndarray, arm: np.ndarray) -> np.ndarray:
@@ -105,29 +162,53 @@ v_theta0 = None
 v_phase = 0.0
 
 
-def wind_centre(t: float) -> np.ndarray:
-    """where the air carries the flock: up off the waterline, a big loop over the front, across the zenith and
-    round, then away down the beach and down to the sand (the body follows it as one; nothing pulls a bird to a
-    radius, so no ring forms)"""
-    w = 2 * np.pi / 22
-    # (third bake, the v9 review: the loop kept 12–45 m out in front, a cloud low over the beach; the direction
-    # wants it "wheeling up over the audience, across the zenith" — now it swings up in front, over our heads
-    # at ~17 m at t ≈ 15 s, and round to the front again)
-    loop = np.array([-3 + np.sin(w * (t - 4)) * 22, 17 + np.sin(w * 2 * (t - 4)) * 5, -14 - np.cos(w * (t - 4)) * 20])
-    start = np.array([-8.0, 5.0, -40.0])
-    rise = np.clip((t - 1.5) / 4, 0, 1)
-    rise = rise * rise * (3 - 2 * rise)
-    away = np.clip((t - 30) / 14, 0, 1)
-    away = away * away * (3 - 2 * away)
-    down = np.clip((t - 42) / 10, 0, 1)
-    far = np.array([-8.0, 9.0 * (1 - down) + 0.5 * down, LAND[2] + 5.0])
-    return (start * (1 - rise) + loop * rise) * (1 - away) + far * away
+def area_centre(t: float) -> np.ndarray:
+    """the centre of the air the flock keeps to (seventh bake): in over the forest on the right, a low sweep past
+    us along the waterline (the shapes read: ~6–15 m off), out over the sea to wheel there (~90 m off, one body,
+    the flashes of its turns), in over the audience for the vortex, held on its own axis; then a second, higher pass
+    along the surf and away down the beach ahead and over the forest there, behind the trees"""
+    keys_ = [
+        (0.0, (62.0, 15.0, -45.0)),
+        # (across the front, never at us: the pass crosses the view ~30 m ahead and 10 m up, left to right of the
+        # line of sight — straight in at the eye read as birds flying into the audience, "scary and spooky", the
+        # 2026-10-29 review)
+        (5.0, (22.0, 19.0, -40.0)),
+        (9.0, (0.0, 18.5, -30.0)),
+        (13.0, (-26.0, 21.0, -34.0)),
+        (17.0, (-55.0, 26.0, -80.0)),
+    ]
+    w = 2 * np.pi / 18
+    wheel = np.array([-50 - np.sin(w * (t - 17)) * 18, 28 + np.sin(w * 2 * (t - 17) + 1) * 8, -85 - np.cos(w * (t - 17)) * 16])
+    over = np.array([V_AXIS[0], V_BASE + 4, V_AXIS[2]])
+    after = [
+        (VORTEX[1] + 2, (-16.0, 23.0, -20.0)),
+        (VORTEX[1] + 9, (-14.0, 20.0, -55.0)),
+        (VORTEX[1] + 17, (6.0, 20.0, -110.0)),
+        (VORTEX[1] + 26, (70.0, 18.0, -160.0)),
+        (DURATION, (120.0, 18.0, -200.0)),
+    ]
+
+    def path(ks, t):
+        if t <= ks[0][0]:
+            return np.array(ks[0][1])
+        for (t0, a), (t1, b) in zip(ks, ks[1:]):
+            if t <= t1:
+                k = smooth((t - t0) / (t1 - t0))
+                return np.array(a) * (1 - k) + np.array(b) * k
+        return np.array(ks[-1][1])
+
+    c = path(keys_, t) if t < 17 else wheel
+    c = c * (1 - smooth((t - VORTEX[0] + 9) / 6)) + over * smooth((t - VORTEX[0] + 9) / 6)
+    return c * (1 - smooth((t - VORTEX[1]) / 3)) + path(after, t) * smooth((t - VORTEX[1]) / 3)
 
 
-def wind_axis(t: float) -> np.ndarray:
-    """the axis the body turns about inside itself, leaning slowly (the flock folds over)"""
-    a = np.array([np.sin(t * 0.37) * 0.8, 1.0, np.cos(t * 0.29) * 0.6])
-    return a / np.linalg.norm(a)
+def rotate(e: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """turn unit vectors e by the rotation vectors w (rad), renormalised"""
+    a = np.linalg.norm(w, axis=1, keepdims=True)
+    k = w / np.maximum(a, 1e-9)
+    c, s = np.cos(a), np.sin(a)
+    r = e * c + np.cross(k, e) * s + k * (k * e).sum(1, keepdims=True) * (1 - c)
+    return r / np.linalg.norm(r, axis=1, keepdims=True)
 
 
 keys = []
@@ -138,6 +219,11 @@ for step in range(n_steps + 1):
     if step % key_every == 0:
         keys.append(pos.astype(np.float32).copy())
     flying = (t >= takeoff) & (t < landed_at)
+    # the first wingbeats (none in the seventh bake: aloft from the start)
+    born = flying & (np.linalg.norm(vel, axis=1) == 0)
+    if born.any():
+        e0 = np.stack([-0.35 + rng.normal(0, 0.2, born.sum()), np.full(born.sum(), 0.85), -0.3 + rng.normal(0, 0.2, born.sum())], -1)
+        vel[born] = e0 / np.linalg.norm(e0, axis=1, keepdims=True) * 3.0
     idx = np.nonzero(flying)[0]
     vw = vortex_weight(t)
     if v_r is None and t >= VORTEX[0]:
@@ -159,35 +245,32 @@ for step in range(n_steps + 1):
     if len(idx):
         p = pos[idx]
         v = vel[idx]
-        # topological neighbours: the 7 nearest flying birds
-        d = p[:, None, :] - p[None, :, :]
-        d2 = (d * d).sum(-1)
-        np.fill_diagonal(d2, np.inf)
+        sp = np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
+        e = v / sp
+        F = np.zeros_like(p)
         k = min(7, len(idx) - 1)
-        acc = np.zeros_like(p)
+        e_nb = e
         if k > 0:
-            nn = np.argpartition(d2, k, axis=1)[:, :k]
-            nd = d[np.arange(len(idx))[:, None], nn]  # self − neighbour
-            nd2 = d2[np.arange(len(idx))[:, None], nn]
-            sep = (nd / np.maximum(nd2, 0.04)[..., None] * (nd2 < 2.6)[..., None]).sum(1) * 2.4
-            ali = (v[nn].mean(1) - v) * 1.4
-            coh = (p[nn].mean(1) - p) * 0.32
-            acc += sep + (ali + coh) * (1 - 0.8 * vw)
-        # the air: carries the body toward where the loop is now; the body turns slowly within itself about
-        # its own centre (a fold, not an orbit)
-        free = np.zeros_like(p)
-        c = wind_centre(t)
+            # topological neighbours: the 7 nearest flying birds, wherever they are
+            dd, nn = cKDTree(p).query(p, k=k + 1)
+            dd, nn = dd[:, 1:], nn[:, 1:]
+            off = p[:, None, :] - p[nn]  # self − neighbour
+            close = np.clip(1 - dd / R_SEP, 0, None)[..., None]
+            F += (off / np.maximum(dd, 0.05)[..., None] * close).sum(1) * K_SEP
+            unit = -off / np.maximum(dd, 1e-6)[..., None]
+            border = np.linalg.norm(unit.mean(1), axis=1, keepdims=True)
+            F += (p[nn].mean(1) - p) * K_COH * (0.25 + 3 * border * border) * (1 - 0.7 * vw)
+            e_nb = e[nn].mean(1)
+        # the area: free within R_AREA of its centre, drawn back beyond it; a band of height about the centre's
+        c = area_centre(t)
         to = c - p
-        dist = np.linalg.norm(to, axis=1, keepdims=True) + 1e-6
-        free += to / dist * np.minimum(dist * 0.35, 9.5)
-        mid = p.mean(0)
-        r = p - mid
-        rl = np.linalg.norm(r, axis=1, keepdims=True) + 1e-6
-        # the fold, capped (a straggler far out must not be flung), and a faint pull to the body's centre so
-        # it never comes apart into separate flocks
-        free += np.cross(wind_axis(t), r) / rl * np.minimum(rl * 0.35, 2.5)
-        free += -r / rl * np.clip(rl - 18, 0, 20) * 0.05
-        acc += free * (1 - vw)
+        hd = np.hypot(to[:, 0], to[:, 2])[:, None] + 1e-6
+        # (held tighter through the pass across the front, so the body comes by as one, not spread toward us)
+        r_area = R_AREA - 11.0 * smooth((t - 4) / 2) * smooth((12 - t) / 2)
+        pull = np.minimum((hd - r_area).clip(0) * K_AREA * (1 + 1.5 * (R_AREA - r_area) / 11.0), 6.0) * (1 - vw)
+        F[:, [0, 2]] += to[:, [0, 2]] / hd * pull
+        dy = to[:, 1:2]
+        F[:, 1:2] += np.clip(np.sign(dy) * (np.abs(dy) - BAND).clip(0) * K_ALT, -5, 5) * (1 - vw)
         # the vortex: each bird toward its own place on its arm, turning with the pattern (clockwise from
         # above: the angle falls)
         if vw > 0:
@@ -196,25 +279,47 @@ for step in range(n_steps + 1):
             goal = np.stack([V_AXIS[0] + rad * np.cos(th), V_BASE + (rad - V_R[0]) * V_RISE, V_AXIS[2] - rad * np.sin(th)], -1)
             # d(goal)/dθ · dθ/dt: the tangent, at the pattern's speed there
             gvel = np.stack([np.sin(th), np.zeros_like(th), np.cos(th)], -1) * (V_SPEED * v_r[idx] / V_R[1])[:, None]
-            acc += ((goal - p) * 1.1 + (gvel - v) * 1.6) * vw
-        # each its own turbulence (the body is never one rigid shape)
-        acc += NOISE * np.sin(nf[idx] * t * 2 * np.pi + nph[idx]) * np.array([1.0, 0.45, 1.0])
+            F += ((goal - p) * 1.1 + (gvel - v) * 1.6) * vw
+        # KEEP OFF THE AUDIENCE: within EYE_CLEAR of the eye a bird is pushed away from it, hard (a flock that came
+        # at the eye was the review's complaint, and in the vortex overhead the core's lowest birds came near)
+        to_eye = p - np.array([0.0, 1.6, 0.0])
+        de = np.linalg.norm(to_eye, axis=1, keepdims=True) + 1e-6
+        F += to_eye / de * (np.clip(EYE_CLEAR - de, 0, None) * 14.0)
+        # each its own turbulence (small: a murmuration is very nearly all one heading)
+        F += NOISE * np.sin(nf[idx] * t * 2 * np.pi + nph[idx]) * np.array([1.0, 0.45, 1.0])
         # lift off the sand for the first seconds of flight; then a soft lift, rising as they near the sand
         # (no floor to bounce off), until the landing: near the landing ground they let themselves down
         since = (t - takeoff[idx])[:, None]
-        landing = (t > 44) & (np.linalg.norm(p - LAND, axis=1, keepdims=True) < 40)
-        near = np.maximum(0, PULL_UP - p[:, 1:2]) / PULL_UP
-        pull = near * 6.0 + near * near * 16.0 + np.maximum(0, -v[:, 1:2]) * near * 4.0
-        acc[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, pull)
-        v = v + acc * DT
+        # (never down: the seventh bake's flock leaves over the trees)
+        landing = np.zeros((len(idx), 1), bool)
+        # (the floor rises with distance from the audience, so the flock never sits lower than SEEN_ABOVE over the
+        # horizon as seen from the eye: a body a few metres over the sea 50 m off reads as down on the water)
+        hd_eye = np.hypot(p[:, 0:1], p[:, 2:3])
+        floor = np.maximum(PULL_UP, 1.6 + np.tan(np.radians(SEEN_ABOVE)) * hd_eye)
+        # a SOFT floor: the lift eases in from FLOOR_SOFT m above it and grows smoothly below, so the flock is steered
+        # off the water as one body and no edge forms (a clamp, and a stiff floor, both flattened its underside into a
+        # ruled line along the floor — "a super sharp line they never pass below", the 2026-10-29 review)
+        near = np.clip((floor + FLOOR_SOFT - p[:, 1:2]) / (2 * FLOOR_SOFT), 0, None)
+        near = np.minimum(near * near, 4.0)
+        lift = near * 16.0 + np.maximum(0, -v[:, 1:2]) * near * 4.0
+        F[:, 1:2] += np.where(since < 1.2, 5.0, 0.0) + np.where(landing, -1.5, lift)
+        # the turn: the spin gains from the neighbours' heading and from what pushes the bird sideways, and
+        # loses to friction; it turns the heading (the steady turn under a sideways push is F/speed, as flight's)
+        torque = np.cross(e, e_nb) * J_ALIGN * (1 - 0.85 * vw) + np.cross(e, F) / sp * ETA
+        s = spin[idx] + (torque - ETA * spin[idx]) * DT
+        s -= e * (s * e).sum(1, keepdims=True)
+        sl = np.linalg.norm(s, axis=1, keepdims=True)
+        s *= np.minimum(1, MAX_TURN / np.maximum(sl, 1e-9))
+        spin[idx] = s
+        e = rotate(e, s * DT)
+        # the speed: back toward its own cruise, and what pushes it along its heading
+        # (slower in the first wingbeats and coming in to land; in the vortex the inner birds wheel slower)
+        sp = sp + ((F * e).sum(1, keepdims=True) * 0.6 + (CRUISE[idx, None] - sp) * 0.8) * DT
+        lo = np.where(since < 1.0, 2.0, np.where(landing, 3.0, 7.0 - 3.0 * vw))
+        hi = np.where(landing, 7.0, 15.0)
+        v = e * np.clip(sp, lo, hi)
         if v_r is not None:
             v_phase += DT / vortex_squeeze(t)
-        sp = np.linalg.norm(v, axis=1, keepdims=True) + 1e-6
-        # sandpipers fly ~10–14 m/s; slower in the first wingbeats and coming in to land
-        # (in the vortex the inner birds wheel slower, with the pattern)
-        lo = np.where(since < 1.0, 2.0, np.where(landing, 3.0, 9.0 - 6.0 * vw))
-        hi = np.where(landing, 7.0, 14.0)
-        v = v / sp * np.clip(sp, lo, hi)
         vel[idx] = v
         pos[idx] = p + v * DT
         # down on the sand: they stay
@@ -222,14 +327,26 @@ for step in range(n_steps + 1):
         landed_at[low] = t
         pos[low, 1] = 0
         vel[low] = 0
-        pos[idx, 1] = np.maximum(pos[idx, 1], 0.0)
+        # (never on the ground: a bird drawn at the sand's height would read as landed, and the key's `flying`
+        # flag would hide it — the seventh bake's flock stays aloft)
+        pos[idx, 1] = np.maximum(pos[idx, 1], 1.2)
+    if step % 300 == 0 and len(idx) > 8:
+        q = pos[idx]
+        nnd = cKDTree(q).query(q, k=2)[0][:, 1]
+        ev = vel[idx] / (np.linalg.norm(vel[idx], axis=1, keepdims=True) + 1e-9)
+        ext = np.sqrt(np.linalg.eigvalsh(np.cov((q - q.mean(0)).T)))[::-1] * 2
+        print(f't {t:5.1f}  flying {len(idx):5d}  nnd {np.median(nnd):.2f} m  polar {np.linalg.norm(ev.mean(0)):.2f}  '
+              f'extent {ext.round(1)} m  centre {q.mean(0).round(1)}', flush=True)
 keys = np.stack(keys)  # (frames, birds, 3)
-print('keys', keys.shape, 'altitude range', keys[..., 1].min(), keys[..., 1].max())
-# float16 RGBA rows: one row per key, one texel per bird (xyz, w = 1 while flying, 0 on the sand)
+print('keys', keys.shape, 'altitude range', keys[..., 1].min(), keys[..., 1].max(), 'landed', np.isfinite(landed_at).sum(), 'of', N)
+# float16 RGBA: per key, ⌈N / TEX_W⌉ rows of TEX_W texels, one per bird (xyz, w = 1 while flying, 0 on the sand)
 flyingK = (keys[..., 1] > 0.05).astype(np.float32)
-data = np.concatenate([keys, flyingK[..., None]], -1).astype('<f2')
+rows = ROWS
+data = np.zeros((keys.shape[0], rows * TEX_W, 4), np.float32)
+data[:, :N] = np.concatenate([keys, flyingK[..., None]], -1)
+data = data.astype('<f2')
 data.tofile(OUT / 'flock-keys.f16')
-(OUT / 'flock-keys.json').write_text(f'{{"birds": {N}, "keys": {keys.shape[0]}, "hz": {KEY_HZ}, "duration": {DURATION}}}')
+(OUT / 'flock-keys.json').write_text(f'{{"birds": {N}, "keys": {keys.shape[0]}, "hz": {KEY_HZ}, "duration": {DURATION}, "width": {TEX_W}, "rows": {rows}}}')
 print(OUT / 'flock-keys.f16', data.nbytes / 1e6, 'MB')
 
 # a CPU preview in dome space: equidistant fisheye, zenith at the centre, the front at the bottom

@@ -162,8 +162,10 @@ const LEDGER: readonly LedgerEntry[] = [
     source: surfaceMaterialSource,
     // B125: +1 CALL SITE, +0 BINDINGS. The Snell lookup reads the SAME shared
     // viewport DepthTexture at the refracted UV (straight probe, Snell lookup,
-    // wave-bent lookup: 3 call sites, ONE texture).
-    sites: 6,
+    // wave-bent lookup: 3 call sites, ONE texture). The Drift's shore fade (params shoreFadeThickness, built
+    // only when it is on): +1 CALL SITE, +0 BINDINGS — the same shared DepthTexture straight behind the fragment,
+    // and the seabed field already bound for the shallows tint.
+    sites: 7,
     // 3 displacement (sampleDisp, once per cascade — still three separate 2D
     // textures, see the vertex-stage note in the header) + ONE derivatives
     // ARRAY texture for all three cascades (sampleDeriv → sampleCascadeLayer,
@@ -180,7 +182,7 @@ const LEDGER: readonly LedgerEntry[] = [
     // vertex stage at all; see the header.
     vertexTextures: 3,
     vertexSamplers: 3,
-    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×3=1, viewportTexture()=1',
+    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×4=1, viewportTexture()=1',
   },
   {
     file: 'src/ocean/oceanTextures.ts',

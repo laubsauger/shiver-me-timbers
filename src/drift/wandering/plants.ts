@@ -36,13 +36,14 @@ export interface Plants {
  * m over the sea and no steeper than `maxSlope` (rise per metre); `ground` the island's height.
  */
 export function createPlants(
-  archipelago: Archipelago,
+  /** the game's islands, whose own cover and palms these replace (none on the film's coast) */
+  archipelago: Archipelago | undefined,
   ground: (x: number, z: number) => number,
   area: { x0: number; x1: number; z0: number; z1: number },
   o: { minH: number; maxH: number; maxSlope: number; feet?: Array<[number, number]> },
   base = `${import.meta.env.BASE_URL}drift/pbr/`,
 ): Plants {
-  for (const island of archipelago.islands) {
+  for (const island of archipelago?.islands ?? []) {
     island.cover.group.removeFromParent();
     island.palms.mesh.removeFromParent();
   }
@@ -70,6 +71,12 @@ export function createPlants(
         const mat = (m.material as THREE.MeshStandardMaterial).clone();
         mat.alphaMap = alpha;
         mat.alphaTest = 0.5;
+        // the cut as COVERAGE where the pass is multisampled (the dome's faces, cine/domeCapture.ts): three r186 turns
+        // the alpha into a one-pixel ramp past the 0.5 contour, smoothstep(0.5, 0.5 + fwidth(a), a), and 4× MSAA
+        // writes it as a quarter of the pixel at a time — a leaf's edge no longer an all-or-nothing speck that flips
+        // from frame to frame (the user, 2026-10-29: "still very grizzly with the vegetation"). Single-sampled passes
+        // (the shadow map, the occlusion's pre-pass) cut where they cut before: nothing left at a ≤ 0.5
+        mat.alphaToCoverage = true;
         mat.transparent = false;
         mat.side = THREE.DoubleSide;
         variants.push(new THREE.Mesh(geo, mat));

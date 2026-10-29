@@ -675,6 +675,14 @@ export function createWakeInjector(p: FlowFoamParams) {
       uTrackMax.value.set(aabb.maxX, aabb.maxZ);
     },
 
+    /** forget the history: no track, the odometer and the mound's lag at rest (a page that replays its wake) */
+    reset(): void {
+      track.samples.length = 0;
+      track.primed = false;
+      track.odo = 0;
+      moundSpeed = 0;
+    },
+
     /** push live param values (called from index.update each tick, §V16) */
     pushParams(): void {
       uKelvinTan.value = Math.tan((p.kelvinAngle * Math.PI) / 180);

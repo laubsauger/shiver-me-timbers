@@ -9,9 +9,11 @@
  * irradiance for the ambient, and the colour along the horizon for the haze the water and land melt into.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, If, acos, cameraPosition, cubeTexture, exp, float, max, min, mix, normalize, positionWorld, select, uniform, vec3, vec4 } from 'three/tsl';
+import { Fn, If, acos, cameraPosition, cubeTexture, exp, float, max, min, mix, normalize, positionWorld, select, smoothstep, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
-import { REFLECTED, cirrus, cloudMarch, type CloudData, type CloudUniforms } from './clouds';
+import { STAR_SIGMA } from '../getTheDrift/milkyWay';
+import { CLOUD_BASE, FULL, REFLECTED, cirrus, cloudMarch, createCloudLight, type CloudData, type CloudQuality, type CloudUniforms } from './clouds';
+import { airTo, shafts } from './cloudAir';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
@@ -31,6 +33,8 @@ export interface SeaSky {
   readonly sunTerm: (dir: V3) => V3;
   /** the eye (world, m above the mean sea) and the unit toward the Sun */
   update(eye: THREE.Vector3, sun: THREE.Vector3): void;
+  /** rad per pixel of what is being drawn (the stars are drawn as wide as one) */
+  setPixelAngle(rad: number): void;
   /** CPU: the sunlight's colour at the sea (transmittance, white = 1, 0 once set) */
   readonly sunColour: THREE.Color;
   /** CPU: the sky's irradiance on an up-facing surface (linear) */
@@ -39,6 +43,9 @@ export interface SeaSky {
   readonly horizon: THREE.Color;
   /** the eye's adaptation: exposure that opens as the light falls, only partly (night stays night) */
   readonly exposure: number;
+  /** the clouds' light for this instant (clouds.ts: the light volume, the march's jitter): once the clouds'
+   * uniforms are set, before the sky is drawn; `clock` (s): the sea's (clouds.ts CloudLight.update) */
+  updateClouds(renderer: THREE.WebGPURenderer, clock?: number): void;
 }
 
 /** sky irradiance (luminance) that needs no adaptation (the Sun ~30° up), how far the eye adapts (0..1, as a
@@ -143,12 +150,19 @@ const NIGHT_GAIN = 1 / 14;
  * the night's millionfold fall into a few stops, so their light alone would show them by day) */
 const STAR_CONTRAST = 0.002;
 
-/** m: the marine haze between the eye and a cloud (its light falls to 1/e over this) */
-const CLOUD_HAZE = 18000;
+/** m: how far along a view ray the light shafts are marched (the air under the cloud layer; past it the low Sun's
+ * shafts have gone into the haze), and in how many steps */
+const SHAFT_REACH = 30000;
+const SHAFT_STEPS = 24;
+/** the shafts pushed past the physics toward the Sun (the user, at the v11 review: "push the god rays more"): the
+ * shadowed light taken away this many times over within ~30° of it. At 1 the shadows of a cumulus field 10–30 km
+ * off take ~5% of the low sky's light, and the rays they draw are there but unseen; pushed everywhere, the shadows
+ * of the clouds overhead hung in the blue away from the Sun as dark smudges */
+const SHAFT_GAIN = 3;
 
-/** the far sea's mean-square wave slope: Cox–Munk's clean surface, 0.003 + 0.00512·U, at the sea's light air,
- * 2.5 m/s (sea.ts RIPPLE) */
-const FAR_SLOPE2 = 0.003 + 0.00512 * 2.5;
+/** the far sea's mean-square wave slope: Cox–Munk's clean surface, 0.003 + 0.00512·U, at the sea's light breeze,
+ * 4 m/s (sea.ts RIPPLE) */
+const FAR_SLOPE2 = 0.003 + 0.00512 * 4;
 /** the far sea's glitter at most, against the Sun's disc (the glint's peak, past what the eye resolves) */
 const FAR_GLINT_MAX = 0.5;
 
@@ -171,33 +185,78 @@ export function skyIrradiance(r0: number, sun: THREE.Vector3): Rgb {
 }
 
 export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms }): SeaSky {
-  const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R) };
+  const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R), pixelAngle: uniform(0.0015) };
   const S = u.sun as unknown as V3;
   const eyeR = u.eyeR as unknown as THREE.Node<'float'>;
   const o = vec3(0, eyeR, 0);
   const C = vec3(0, 0, 0);
   const toGalaxy = uniform(night ? night.toGalaxy : new THREE.Matrix3());
-  // the galaxy behind the air, dimmed along the ray (none below the horizon)
-  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>, sky: V3): V3 => {
+  // the galaxy behind the air, dimmed along the ray (none below the horizon): its glow from the bake, its stars
+  // as points `width` rad wide (nightSky.ts)
+  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>, sky: V3, width: THREE.Node<'float'>): V3 => {
     if (!night) return vec3(0);
-    const seen = float(STAR_CONTRAST).div(sky.dot(vec3(0.2126, 0.7152, 0.0722)).add(STAR_CONTRAST));
-    return cubeTexture(night.texture, toGalaxy.mul(d)).rgb.mul(T).mul(seen).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3;
+    const g = toGalaxy.mul(d);
+    const lum = sky.dot(vec3(0.2126, 0.7152, 0.0722));
+    const seen = float(STAR_CONTRAST).div(lum.add(STAR_CONTRAST));
+    // a star shows by its PEAK against the sky: drawn narrower than the bake drew it, its peak is (STAR_SIGMA /
+    // width)² brighter for the same light, so a sky that much brighter hides it as the old star was hidden — or
+    // the brightest came through the blue day sky of a 4K master as sharp dots (the night is not touched: its
+    // sky is far under STAR_CONTRAST either way)
+    const seenStar = float(STAR_CONTRAST).div(lum.mul(float(STAR_SIGMA).div(width).pow(2)).add(STAR_CONTRAST));
+    const light = cubeTexture(night.texture, g).rgb.mul(seen).add(night.stars(g, width).mul(seenStar));
+    return light.mul(T).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3;
   };
-  // the clouds over the sky by their opacity; the haze in front of them takes them into the sky's own colour
-  const withClouds = (behind: V3, light: V3, d: V3, quality?: typeof REFLECTED): V3 => {
-    if (!clouds) return behind;
+  // a star as wide as the pixel it lands on (0.64 px, milkyWay.ts's width where pixels are coarse), so it is one
+  // sharp point at every resolution; never wider than the bake drew it (nightSky.ts: no wider fits its cells)
+  const starWidth = min(u.pixelAngle.mul(0.64), STAR_SIGMA);
+  // THE CLOUDS IN THE SKY: what shows through a cloud is the sky beyond it, what lies in front of it the air's own
+  // light and transmittance over that stretch (cloudAir.ts) — L = (1 − α)·sky + α·L_air(0→d) + T_air(0→d)·L_cloud
+  // (L_cloud is already weighted by α: the old blend weighted it again, and every thin edge came out dark). The
+  // light volume (clouds.ts) is marched once per frame, `updateClouds`; the sunlight on each sample is the air's
+  const cloudLight = clouds ? createCloudLight(clouds.data, clouds.uniforms) : undefined;
+  const cloudEye = new THREE.Vector3();
+  const sunAt = (h: THREE.Node<'float'>, mu: THREE.Node<'float'>): V3 => sunlight(float(EARTH_R).add(h.mul(MM)), mu, GROUND).mul(SUN_E) as V3;
+  const withClouds = (behind: V3, d: V3, quality: CloudQuality = FULL): V3 => {
+    if (!clouds || !cloudLight) return behind;
+    const over = (sky: V3, c: { light: V3; alpha: THREE.Node<'float'>; dist: THREE.Node<'float'> }, steps: number): V3 => {
+      const out = sky.toVar();
+      If(c.alpha.greaterThan(1e-4), () => {
+        const air = airTo(o, C, d, S, c.dist, steps, cloudLight.jitter, GROUND);
+        out.assign(mix(sky, air.L, c.alpha).add(air.T.mul(c.light)));
+      });
+      return out as unknown as V3;
+    };
     // the cirrus first (it is behind the cumulus), then the cumulus over it
-    const ci = cirrus(cameraPosition, d, clouds.data, clouds.uniforms);
-    const kc = exp(ci.dist.div(-CLOUD_HAZE * 3));
-    const sky = behind.mul(ci.alpha.oneMinus()).add(ci.light.mul(kc)).add(light.mul(kc.oneMinus()).mul(ci.alpha));
-    const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms, quality);
-    const k = exp(c.dist.div(-CLOUD_HAZE));
-    return mix(sky, c.light.mul(k).add(light.mul(k.oneMinus())), c.alpha) as V3;
+    const sky = over(behind, cirrus(cameraPosition, d, clouds.data, clouds.uniforms), Math.max(2, quality.airSteps >> 1));
+    const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms, { quality, light: cloudLight, sunAt });
+    const lit = over(sky, c, quality.airSteps);
+    if (quality !== FULL) return lit;
+    // THE LIGHT SHAFTS (cloudAir.ts): the air under the layer, up to its base (SHAFT_REACH at most; to a cloud's
+    // front where one hides what is behind it), less the sunlight the clouds' shadows keep from it
+    const R = EARTH_R / MM;
+    const r0 = cameraPosition.y.add(R);
+    const muV = d.y.max(0);
+    const k = float(CLOUD_BASE).sub(cameraPosition.y).mul(cameraPosition.y.add(2 * R + CLOUD_BASE));
+    const toBase = k.div(r0.mul(muV).add(r0.mul(r0).mul(muV.mul(muV)).add(k).sqrt())).min(SHAFT_REACH);
+    const reach = mix(toBase, toBase.min(c.dist), c.alpha);
+    const lost = shafts(o, C, d, S, reach, SHAFT_STEPS, cloudLight.jitter, GROUND, (t) => cloudLight.sunThrough(cameraPosition.add(d.mul(t)), cameraPosition));
+    // (taken as a share of the sky's luminance, its hue kept: pushed per channel, the orange the haze scatters
+    // near the Sun came off three times over and left the sky around it magenta)
+    const gain = mix(float(1), float(SHAFT_GAIN), smoothstep(0.85, 1, d.dot(S)));
+    const Y = vec3(0.2126, 0.7152, 0.0722);
+    const share = lost.dot(Y).mul(gain).div(lit.dot(Y).max(1e-6)).min(0.75);
+    return lit.mul(share.oneMinus()) as V3;
   };
   const dome = (dir: V3): V3 => {
-    const d = normalize(dir);
+    // (what the water mirrors: a ripple tilted toward the eye sends its reflection below the horizon, where the
+    // scatter meets the dark ground — black dashes over the whole sea and the shore's foam, the 2026-10-29 review.
+    // The water there sees the sky just over the horizon instead: held a hair above it)
+    const d0 = normalize(dir);
+    const d = normalize(vec3(d0.x, d0.y.max(0.003), d0.z));
     const air = scatter(o, d, C, S, GROUND);
-    return withClouds(air.light.add(starsAlong(d, air.T, air.hitGround, air.light)) as V3, air.light, d, REFLECTED);
+    // (the stars in it as wide as the bake drew them: a ripple turns the mirrored sky faster than the pixels
+    // step, and a pixel-wide star there would flicker from frame to frame)
+    return withClouds(air.light.add(starsAlong(d, air.T, air.hitGround, air.light, float(STAR_SIGMA))) as V3, d, REFLECTED);
   };
   const sunTerm = (dir: V3): V3 => {
     const d = normalize(dir);
@@ -230,7 +289,7 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     const r = acos(d.dot(S).clamp(-1, 1));
     // the disc through the air along this ray; its glare goes with the Sun's own light (and with it as it sets)
     const sun = SUN_TINT.mul(sunDisc(r).mul(select(hitGround, float(0), float(1))).mul(sunlight(eyeR, d.y, GROUND)).add(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r))));
-    const colour = withClouds(light.add(sun).add(starsAlong(d, T, hitGround, light)) as V3, light, d).toVar();
+    const colour = withClouds(light.add(sun).add(starsAlong(d, T, hitGround, light, starWidth)) as V3, d).toVar();
     If(hitGround, () => {
       colour.assign(farSea(d, light, T).add(SUN_TINT.mul(sunlight(eyeR, S.y, GROUND).mul(sunGlare(r)))));
     });
@@ -259,9 +318,16 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     get exposure() {
       return exposure;
     },
+    setPixelAngle(rad) {
+      u.pixelAngle.value = rad;
+    },
+    updateClouds(renderer, clock) {
+      cloudLight?.update(renderer, cloudEye, clock);
+    },
     update(eye, sun) {
       const r0 = EARTH_R + Math.max(0, eye.y) * MM;
       mesh.position.copy(eye);
+      cloudEye.copy(eye);
       u.sun.value.copy(sun);
       u.eyeR.value = r0;
       if (lastSun.equals(sun) && lastR === r0) return;

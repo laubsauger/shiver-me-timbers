@@ -24,6 +24,10 @@ const FILES: Record<Kind, string> = {
   bent: 'bent_palm_v1/bent_palm_v1.glb',
   fan: 'palm_pritchardia_pacifica_small/palm_pritchardia_pacifica_small.glb',
 };
+/** each kind's bark against its maps' (the user, 2026-10-29: "too bright of a bark" — the trunks read near white in
+ * the low Sun). A weathered coconut trunk is grey-brown, ~15% albedo; the maps' linear means: dense 0.29 (in
+ * luminance), bent 0.21, coconut 0.12 (already a dark red-brown), the fan palm's left as it was */
+const BARK: Record<Kind, number> = { dense: 0.5, coconut: 1, bent: 0.7, fan: 1 };
 /** m: each kind's height range */
 const HEIGHT: Record<Kind, [number, number]> = { dense: [8, 12], coconut: [7, 10], bent: [8, 9], fan: [2.4, 3.6] };
 
@@ -146,6 +150,9 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
       alphaTest: Math.max(0.4, mat.alphaTest),
       side: THREE.DoubleSide,
     });
+    // (the cut as coverage in the dome's 4× multisampled faces, cine/domeCapture.ts — a frond's leaflets a pixel
+    // wide were all-or-nothing specks, the 2026-10-29 beach review; plants.ts says how)
+    leaf.alphaToCoverage = true;
     const toEye = cameraPosition.sub(positionWorld).normalize();
     const nv = normalWorld.dot(toEye);
     const nl = normalWorld.dot(uSun);
@@ -160,15 +167,15 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
     leaf.name = `${mat.name}-lit-through`;
     return leaf;
   };
-  /** a trunk's own material, as a node material that sways with its crown */
-  const trunkOf = (mat: THREE.MeshStandardMaterial): THREE.MeshStandardNodeMaterial => {
+  /** a trunk's own material, as a node material that sways with its crown, its bark darkened (BARK) */
+  const trunkOf = (mat: THREE.MeshStandardMaterial, kind: Kind): THREE.MeshStandardNodeMaterial => {
     const trunk = new THREE.MeshStandardNodeMaterial({
       map: mat.map,
       normalMap: mat.normalMap,
       roughnessMap: mat.roughnessMap,
       metalnessMap: mat.metalnessMap,
       aoMap: mat.aoMap,
-      color: mat.color,
+      color: mat.color.clone().multiplyScalar(BARK[kind]),
       roughness: mat.roughness,
       metalness: mat.metalness,
       vertexColors: mat.vertexColors,
@@ -197,7 +204,7 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
         const geo = m.geometry.clone().applyMatrix4(m.matrixWorld);
         geo.translate(-cx, -box.min.y, -cz);
         const mats = (Array.isArray(m.material) ? m.material : [m.material]) as THREE.MeshStandardMaterial[];
-        const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : trunkOf(mat)));
+        const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : trunkOf(mat, kind)));
         parts.push(new THREE.Mesh(geo, Array.isArray(m.material) ? drawn : drawn[0]));
       });
       const feet = new Float32Array(mine.length * 4);

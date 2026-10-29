@@ -95,11 +95,23 @@ import type { ShipMaterialHandle } from './woodMaterial';
  */
 const PANEL_SEAM = 0.028;
 
+/**
+ * OPT-IN: a scene whose key light is aimed at a Sun of its OWN rather than at the rig's hour (the film's acts:
+ * drift/wandering/sea.ts aims the rig's light at each act's Sun) keeps this vector equal to that light's
+ * direction (toward the sun), so the sails' lee darkening and backlit glow face the Sun the shadows come from.
+ * null — the game — derives it from the hour as always.
+ */
+export const shipSunDirectionOverride: { direction: THREE.Vector3 | null } = { direction: null };
+
 /** live sun direction (toward the sun), re-derived from the same pure
  *  function + params the sky rig uses — no wiring through main.ts */
 export const uShipSunDirection = /*@__PURE__*/ uniform(
   new THREE.Vector3(0.4, 0.75, 0.3).normalize(),
 ).onRenderUpdate((): void => {
+  if (shipSunDirectionOverride.direction !== null) {
+    uShipSunDirection.value.copy(shipSunDirectionOverride.direction);
+    return;
+  }
   const d = sunDirection(skyParams.timeOfDay, skyParams.latitude);
   uShipSunDirection.value.set(d[0], d[1], d[2]);
 });

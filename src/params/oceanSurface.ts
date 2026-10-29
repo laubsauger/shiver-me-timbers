@@ -872,6 +872,14 @@ export const oceanSurfaceParams = registerParams(
     hazeCurve: 1.7,
     /** haze cap at the rim — must be 1 or the disc edge shows against sky */
     hazeStrength: 1.0,
+    /**
+     * NEAR-FIELD AIR (m; 0 = off, the game's look exactly): an exponential extinction on top of the haze ramp,
+     * `1 − (1 − ramp)·e^(−d/this)` — the humid air's veil over everything a few hundred metres off, which the ramp,
+     * eased in from `hazeStart`, cannot give (it is ~0 under a kilometre). The Drift's coast sets it (the 2026-10-29
+     * review: "atmospheric haze is truly missing … it looks very pasty"). Land and sea share it (aerialPerspective.ts),
+     * so a shore never seams.
+     */
+    hazeNearDistance: 0,
     /** 0..1 how much of the sun glint survives full haze */
     glintHazePenetration: 0.45,
     /** far cutoff for slope detail — beyond this the sea is glass under haze */
@@ -917,11 +925,58 @@ export const oceanSurfaceParams = registerParams(
      */
     transmissionFloor: 0.45,
     /**
+     * Shore fade (The Drift's beach, 2026-10-29: "a very sharp edge … between the deeper water and the sand"):
+     * the water's OPACITY ramps from 0 where it meets the ground to 1 over this much water along the view (m,
+     * the depth-buffer thickness the refraction already probes). Even at zero depth the water above kept 10% of
+     * its body colour and its capped mirror, so its line on the sand was a hard step; real water thins to nothing
+     * there. 0 = off, and the material graph is then exactly what it was (build-time gate: the game is untouched).
+     */
+    shoreFadeThickness: 0,
+    /**
+     * Shore fade on the TRANSMITTED light only (The Drift's beach, 2026-10-29: "a very sharp edge from where the
+     * lapping water transitions into the deep water"). Water reflects the sky by the same Fresnel at any depth; only
+     * what comes up through it — the body colour, the sand seen through — thins with depth. With this > 0 (m) the
+     * shore fade above (shoreFadeThickness) fades the transmitted light to the scene behind instead of fading the
+     * whole water out, the reflection runs at full Fresnel to the waterline, and the water's opacity itself goes to 0
+     * only over this last bit of water along the view, so its line on the sand is no depth-test contour. The swash
+     * sheet on the sand (drift/wandering/shoreline.ts) carries the same reflection on from there. Live; only built
+     * where shoreFadeThickness > 0, and 0 = the plain shore fade (the game: both 0, its graph untouched).
+     */
+    shoreFadeEdge: 0,
+    /**
      * B125: look the see-through scene up along the REFRACTED ray (1) instead of the straight view ray (0, the old
      * lookup, reproduced exactly). At a low lens the straight ray hung the submerged hull and outboard legs under the
      * boat, where her reflection is; the refracted ray squashes them up to the waterline (surfaceRefraction.ts). Live.
      */
     refractionSnell: 1,
+    /**
+     * TWO-WAY LIGHT PATH (The Drift, 2026-10-29: "things below the waterline… should be darker — less light reaches
+     * them … we can look almost perfectly through the water"): a submerged thing is seen by light that first came DOWN
+     * through the water to it, then back up the view ray — Beer–Lambert over the way down too: + this × its depth
+     * under the surface (m, from the straight view path; 1 = the full two-way path). 0 = off, and the graph is
+     * exactly what it was (build-time gate: the game is untouched).
+     */
+    submergedLightPath: 0,
+    /**
+     * Fade the wave-normal refraction offset to nothing within this fraction of the viewport from its edge (0 = off,
+     * build-time). A lookup off the frame — a dome cube face — reads its clamped edge texel: straight-edged smears along
+     * the seams. Faded at the edges, the offset can be stronger everywhere else and still never leave the face.
+     */
+    refractionEdgeFade: 0,
+    /**
+     * AERATED WAKE WATER on the analytic wake (The Drift, 2026-10-29: "no visible turbulence, no trailing"): the wake's
+     * foam coverage read as bubbles UNDER the surface — the body turned a milky `wakeAerationColor` by 1 − e^(−this ×
+     * coverage), under the reflection — with the white surface lace kept to dense coverage only (0.35 → 0.75). The sim
+     * backend's W8 path does the same with its own terms. 0 = off, and the graph is exactly what it was (build-time).
+     */
+    wakeAeration: 0,
+    wakeAerationColor: '#7cc4bc',
+    /**
+     * How much of the wake's capillary damping (flowfoam `wakeSmoothNode`, the glassy slick) also reaches the MIDDLE
+     * cascade (8–40 m waves), 0..1. The game damps only the fine cascade, which on a light-air sea carries too little
+     * of the visible ripple for a slick lane to read (The Drift's raft, 2026-10-29). 0 = off (build-time).
+     */
+    wakeSmoothLong: 0,
 
     // ── underside (§V.24/§V.25: camera below the waterline) ─────────────
     /** total-internal-reflection ceiling colour seen outside Snell's window */
@@ -1018,6 +1073,7 @@ export const oceanSurfaceParams = registerParams(
     sparkleGrazeEnd: { min: 0, max: 1.5, step: 0.01 },
     foamThreshold: { min: -1, max: 1.5, step: 0.01 },
     hazeStart: { min: 50, max: 8000, step: 10 },
+    hazeNearDistance: { min: 0, max: 50000, step: 100 },
     hazeEnd: { min: 200, max: 20000, step: 50 },
     hazeCurve: { min: 0.5, max: 4, step: 0.05 },
     hazeStrength: { min: 0, max: 1, step: 0.01 },
@@ -1026,7 +1082,13 @@ export const oceanSurfaceParams = registerParams(
     normalFadeEnd: { min: 100, max: 20000, step: 50 },
     refractionStrength: { min: 0, max: 0.3, step: 0.005 },
     transmissionFloor: { min: 0, max: 0.9, step: 0.01 },
+    shoreFadeThickness: { min: 0, max: 2, step: 0.01 },
+    shoreFadeEdge: { min: 0, max: 0.5, step: 0.005 },
     refractionSnell: { min: 0, max: 1, step: 1 },
+    submergedLightPath: { min: 0, max: 2, step: 0.05 },
+    refractionEdgeFade: { min: 0, max: 0.2, step: 0.005 },
+    wakeAeration: { min: 0, max: 8, step: 0.1 },
+    wakeSmoothLong: { min: 0, max: 1, step: 0.01 },
     underWindowBrightness: { min: 0, max: 3, step: 0.01 },
     underWindowSoftness: { min: 0.01, max: 0.5, step: 0.01 },
   },

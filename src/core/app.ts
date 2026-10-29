@@ -82,6 +82,10 @@ export class App {
       'maxSamplersPerShaderStage',
       'maxStorageTexturesPerShaderStage',
       'maxUniformBuffersPerShaderStage',
+      // the Drift's 8K dome master: its cube faces pass the default 8192 px at 2× supersampling (~9000 px), and
+      // an 8192² frame's readback is the default buffer cap exactly (Apple M3: 16384 px, 4 GB)
+      'maxTextureDimension2D',
+      'maxBufferSize',
     ] as const) {
       const supported = adapter?.limits?.[key];
       if (typeof supported === 'number') requiredLimits[key] = supported;

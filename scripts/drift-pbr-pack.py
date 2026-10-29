@@ -6,7 +6,12 @@ WebGPU fragment stage may bind with room for the terrain's own:
   <layer>_albedo_rough.png   RGB colour (sRGB, as scanned), A roughness
   <layer>_normal_ao_h.png    RG the OpenGL normal's x, y (z is rebuilt), B ambient occlusion, A height
 
-  out/drift/data/.venv/bin/python -I scripts/drift-pbr-pack.py public/drift/pbr
+A RELIEF layer is the second map alone: `sand_relief` is the dry sand's shape (Poly Haven aerial_beach_02, a 20 m
+scan of a smooth beach: low broad undulations, a few soft wind-ripple patches and pits), drawn under the colour of
+sand_dry in place of that scan's own normals — Ground027's trampled lumps, median slope 21°, which under the w3–w5
+Sun (1–6° up) covered the beach in lit crests and sky-lit pits (the 2026-10-29 reviews: "very gritty and regular").
+
+  out/drift/data/.venv/bin/python -I scripts/drift-pbr-pack.py public/drift/pbr [layer ...]
 """
 
 import sys
@@ -61,7 +66,34 @@ LAYERS = {
     'grass': lambda: ph('sparse_grass'),
 }
 
+def ph_relief(asset: str) -> dict:
+    d = ROOT / asset
+    return {
+        'normal': rgb(d / f'{asset}_nor_gl_4k.jpg'),
+        'ao': grey(d / f'{asset}_ao_4k.jpg'),
+        'height': grey(d / f'{asset}_disp_4k.jpg'),
+    }
+
+
+RELIEF = {
+    'sand_relief': lambda: ph_relief('aerial_beach_02'),
+}
+
+# (layer names after the root: pack only those)
+ONLY = set(sys.argv[2:])
+for name, load in RELIEF.items():
+    if ONLY and name not in ONLY:
+        continue
+    m = load()
+    h, w = m['normal'].shape[:2]
+    fit = lambda a: a if a.shape[:2] == (h, w) else np.asarray(Image.fromarray(a).resize((w, h), Image.LANCZOS))
+    b = np.dstack([m['normal'][..., 0], m['normal'][..., 1], fit(m['ao']), fit(m['height'])]).astype(np.uint8)
+    Image.fromarray(b, 'RGBA').save(OUT / f'{name}_normal_ao_h.png', optimize=False, compress_level=6)
+    print(name, f'{w}x{h}', 'relief only')
+
 for name, load in LAYERS.items():
+    if ONLY and name not in ONLY:
+        continue
     m = load()
     h, w = m['colour'].shape[:2]
     fit = lambda a: a if a.shape[:2] == (h, w) else np.asarray(Image.fromarray(a).resize((w, h), Image.LANCZOS))

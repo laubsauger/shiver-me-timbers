@@ -36,13 +36,26 @@ import { shipFlagParams, shipMaterialParams } from '../../params/ship';
 import { refreshShipMaterials } from '../../ship/pieceMaterials';
 import { writeSailWindFrame } from '../../ship/sailFrame';
 import { createRaftLanterns } from '../../ship/raftLanterns';
+import { blueprintAabb } from '../../ship/previewRaft';
+import { waterlineFromBlueprint, waterlineFromBox } from '../../sea-physics/hullContact';
+import { raftLayout } from '../../ship/raftPartsLayout';
+import { createRaftLook, filmWaterline } from '../../ship/raftLook';
+import { dressRaft } from '../../ship/raftDress';
 
-/** s the sea's height is averaged over, and how many instants */
+/** s the sea's height is averaged over, and how many instants — CENTRED on t (t ± SETTLE/2: the film's sea is a pure
+ * function of time, so the instants ahead are as known as those behind). A trailing window lagged the swell by
+ * SETTLE/2: over the lagoon's shoaled swell (half a metre a second at its steepest) the raft rode 12–14 cm high on
+ * falling water and as low on rising (545–551 s, measured against the CpuOcean under it) — its logs out of the
+ * water, "floating ON it" (2026-10-29) */
 const SETTLE = 1.2;
 const SAMPLES = 5;
 
 export interface RaftProp {
   readonly group: THREE.Group;
+  /** its waterline's ends (m along the bow axis, +z) and full breadth: what its wake is shed from (raft/raftScene.ts's own) */
+  readonly hull: { stemZ: number; transomZ: number; beam: number };
+  /** resolves once its film dressing (raftLook.ts's scans, raftProps.ts's models) is loaded: await before drawing */
+  readonly ready: Promise<void>;
   /**
    * the raft's pose at time t, at (x, z) on the sea heading `heading` rad (0: bow toward +z); `sun` and `sky`
    * are the light there against the day's (0..1: the sunlight's luminance, the sky's irradiance); `windTo` and
@@ -60,6 +73,20 @@ const STILL_SAIL = { sailFlutterAmp: 0.015, sailLuffFlap: 0, sailGustAmp: 0, sai
  * way and full at rest; the waves keep their wind. */
 const FILM_SAIL_WIND_REF = 1.4;
 
+/** the lanterns' glass and light against the game's full night (the user, 2026-10-29: "tone down the lights ever so
+ * slightly on the boat, especially going into the night") */
+const LANTERNS = 0.72;
+/** its logs in plan (m: x to starboard, the bow +z): the blueprint's own layout (raftPartsLayout.ts) */
+export function raftLogsInPlan(): Array<{ x: number; r: number; zStern: number; zBow: number }> {
+  return raftLayout(raftParams).logs.map((l) => ({ x: l.x, r: l.r, zStern: l.zStern, zBow: l.zBow }));
+}
+
+/** the fore guaras' depth in the film (0 hauled clear … 1 fully down: ShipAssembly.setGuaraDepths): their heads
+ * 2 cm over their collars, under anything the main course sweeps */
+const FORE_GUARA_DEPTH = 0.8;
+/** REVIEW ONLY: `drift.html?raftplain` draws the hero raft as the game builds it, undressed (an A/B against
+ * raftLook.ts / raftDress.ts) */
+const PLAIN = typeof location !== 'undefined' && new URLSearchParams(location.search).has('raftplain');
 /** `far`: a raft seen only on the horizon (its lanterns carry no point lights: raftLanterns.ts) */
 export function createRaft(heightAt: (x: number, z: number, t: number) => number, o: { far?: boolean } = {}): RaftProp {
   // (read into each sail's shape as the blueprint is built)
@@ -68,7 +95,11 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   const deckField = buildRaftDeckField(blueprint);
   // the deck material reads the active deck water at construction (raft/raftScene.ts): bound, never stepped
   setActiveDeckWater(createDeckWater({ source: deckField }));
-  const assembly = new ShipAssembly(blueprint, createPieceMaterialCache(createDeckFieldTexture(deckField)));
+  const pieceMaterials = createPieceMaterialCache(createDeckFieldTexture(deckField));
+  // THE HERO RAFT'S OWN SURFACES (raftLook.ts: scans with parallax for the walls, the thatch and the boards; a
+  // fibre sheen on the hemp and the mats) — a far raft is a few pixels on the horizon and keeps the game's
+  const look = o.far || PLAIN ? null : createRaftLook(pieceMaterials, { tier: 'film' });
+  const assembly = new ShipAssembly(blueprint, look?.factory ?? pieceMaterials);
   assembly.setSailTint(raftMaterialParams.sailTint);
   // set full once; hoisted and furled after by the continuous trim (the cloth's drop, the yard's hoist)
   Object.assign(shipMaterialParams, STILL_SAIL);
@@ -91,6 +122,13 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   const group = new THREE.Group();
   group.name = 'drift-raft';
   group.add(assembly.group);
+  // …and dressed for a close camera (raftDress.ts: worn edges, the cabin's frame, real stores for the boxes)
+  const dressed = look ? dressRaft(assembly.group, blueprint, look.factory, { tier: 'film' }) : null;
+  look?.track(assembly.group);
+  // the fore centreboards worked down to just proud of their collars (the user: "the blades on the front pierce
+  // the sail in some moments" — at the blueprint's half depth they stood a metre up under the course, which the
+  // cloth sweeps through as the yard is lowered and hoisted); the aft pair, clear of the sail, as built
+  if (look) assembly.setGuaraDepths([FORE_GUARA_DEPTH, FORE_GUARA_DEPTH, FORE_GUARA_DEPTH]);
   // the lanterns under the roof's corners (the game's), lit as the sunlight goes
   const lanterns = createRaftLanterns(undefined, { lights: !o.far });
   assembly.group.add(lanterns.group);
@@ -100,8 +138,15 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   const ambientLift = shipMaterialParams.sailAmbientLift;
   const flagLift = shipFlagParams.flagAmbientLift;
 
+  // (the loft finds no hull section on the logs: the box fallback, as the game's raft)
+  const box = blueprintAabb(blueprint);
+  const beamHalf = Math.max(box.max[0], -box.min[0]);
+  const waterline = waterlineFromBlueprint(blueprint) ?? waterlineFromBox(box.max[2], box.min[2], beamHalf);
+
   return {
     group,
+    hull: { stemZ: waterline.bowZ, transomZ: waterline.sternZ, beam: beamHalf * 2 },
+    ready: Promise.all([look?.ready, dressed?.ready]).then(() => undefined),
     update(t, x, z, heading, light, sails = 0, speed = 0, windTo, windSpeed) {
       for (const id of sailIds) {
         assembly.setSailDropScale(id, sails);
@@ -117,20 +162,25 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
           windDirection: windTo,
           windSpeed,
         });
+        // (a film frame's sail: its shape a pure function of this frame, sailDriver.ts — not of the frame and the
+        // world drawn before it)
+        assembly.sailMesh(id).userData.sailPure = { time: t, yawRate: 0 };
       }
-      // lit from last light (the sunlight at a seventh of the day's) to full night
+      // lit from last light (the sunlight at a seventh of the day's) to full night, a little under the game's
+      // (LANTERNS)
       const dusk = Math.min(1, Math.max(0, 1 - light.sun / 0.15));
-      lanterns.update(dusk * dusk * (3 - 2 * dusk), t);
+      lanterns.update(LANTERNS * dusk * dusk * (3 - 2 * dusk), t);
       shipMaterialParams.sailBacklitStrength = backlit * light.sun;
       shipMaterialParams.sailAmbientLift = ambientLift * light.sky;
       shipFlagParams.flagAmbientLift = flagLift * light.sky;
       refreshShipMaterials();
+      look?.update();
       const c = Math.cos(heading);
       const s = Math.sin(heading);
       // least squares h = a + b·u + d·v over the contacts (u across, v along the raft), averaged in time
       let su = 0, sv = 0, suu = 0, svv = 0, suv = 0, sh = 0, shu = 0, shv = 0, n = 0;
       for (let k = 0; k < SAMPLES; k++) {
-        const tk = t - (SETTLE * k) / (SAMPLES - 1);
+        const tk = t + SETTLE / 2 - (SETTLE * k) / (SAMPLES - 1);
         for (const [u, , v] of contacts) {
           // raft local (u across, v toward the bow, +z) turned by the heading about y → world
           const wx = x + u * c + v * s;
@@ -150,6 +200,15 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
       euler.set(-Math.atan(slopeV), heading, Math.atan(slopeU));
       group.quaternion.setFromEuler(euler);
       group.updateMatrixWorld(true);
+      if (!o.far) {
+        // the live waterline for the logs' under-water term (raftLook.ts `filmWaterline`): the sea at t itself, a
+        // plane through the centre from four taps 2 m out — not the settle average the pose rides on
+        const h0 = heightAt(x, z, t);
+        const sx = (heightAt(x + 2, z, t) - heightAt(x - 2, z, t)) / 4;
+        const sz = (heightAt(x, z + 2, t) - heightAt(x, z - 2, t)) / 4;
+        filmWaterline.centre.value.set(x, z, h0);
+        filmWaterline.slope.value.set(sx, sz);
+      }
     },
   };
 }

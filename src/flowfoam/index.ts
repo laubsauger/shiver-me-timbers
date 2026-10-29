@@ -86,6 +86,7 @@ import { bandSlopeVariance, createSimFoamField, type HullBurialInput, type PropW
 import { createSimWakeField, type WakeFieldFn } from './simInjection';
 import { bandKeepNode } from './slickInjection';
 import { createWakeInjector } from './wakeInjection';
+import type { HullContact } from './hullContact';
 import { WAKE_SHIP_TIER } from '../wake/wakeCalibration';
 import { WAKE_MAX_VESSELS, WakeSim, type WakeSimTier } from '../wake/wakeSim';
 
@@ -158,6 +159,13 @@ export interface FlowFoamOptions {
    * single-hull graph, bit-identical). Construction-time.
    */
   vessels?: number;
+  /**
+   * The Drift raft's near field (hullContact.ts): its collar, displacement, rings and churned water added to the
+   * analytic wake's field in both tiers, its eddies to their advection, and the roughness it banks (a negative
+   * slick) raising the sea's fine ripples in `wakeSmoothNode`. Analytic backend only. Absent (every game page): the
+   * graph as it was, byte for byte.
+   */
+  hull?: HullContact;
 }
 
 /**
@@ -213,9 +221,20 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   /** the cascades' slope totals the ambient σ was last measured from (no per-tick allocation) */
   const ambientKey = new Float64Array(8);
   let ambientKeyCount = -1;
+  const hull = opts.hull;
+  if (hull && wakeSim) throw new Error('flowfoam: the hull near field rides the analytic wake only');
+  /** the analytic wake, plus the hull's near field where one is given (sums: one surface, one dose per channel) */
+  const analyticField = hull
+    ? (worldXZ: any, detail = true, texel?: any): any => {
+        const w = wake.wakeFieldNode(worldXZ, detail, texel);
+        const h = hull.fieldNode(worldXZ, detail, texel);
+        return { rate: w.rate.add(h.rate), elev: w.elev.add(h.elev) };
+      }
+    : wake.wakeFieldNode;
+  const hullFlow: Partial<AccumProfile> = hull ? { extraFlow: (worldXZ: any) => hull.flowNode(worldXZ) } : {};
   const acc = simField
     ? createAccumulation(p, flowU, simField.field, { ...nearProfile(p), blurSlope: false, simFoam: simFoam!.rateNode, ...churnProfile })
-    : createAccumulation(p, flowU, wake.wakeFieldNode);
+    : createAccumulation(p, flowU, analyticField, hull ? { ...nearProfile(p), ...hullFlow } : undefined);
   acc.uniforms.uWaterHeight.value = opts.waterHeight ?? 0;
   // Coarse FAR tier: the same analytic wake, accumulated over a region several
   // hundred metres across so the trail does not simply stop at the near
@@ -249,7 +268,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         carryOrientation: vessels > 0,
         ...churnProfile,
       })
-    : createAccumulation(p, flowU, wake.wakeFieldNode, farProfile);
+    : createAccumulation(p, flowU, analyticField, { ...farProfile, ...hullFlow });
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
   const uFarBlendStart = uniform(p.farBlendStart);
@@ -550,6 +569,20 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       wakeAdvanced = true;
     },
 
+    /**
+     * BACK TO NOTHING, at flow time `at`: no track, no foam or slick in either tier. For a page whose frames
+     * are each a pure function of time (the Drift: drift/wandering/sea.ts) — it replays the wake from a fixed
+     * start, so every frame sees the same history however it was reached. Analytic backend only: the sim
+     * wake's solver state is not cleared.
+     */
+    reset(renderer: THREE.WebGPURenderer, at = 0): void {
+      wake.reset();
+      hull?.reset();
+      acc.clear(renderer);
+      far.clear(renderer);
+      time = at;
+    },
+
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */
     update(renderer: THREE.WebGPURenderer, dt: number): void {
       /**
@@ -817,7 +850,10 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         farWeight(worldXZ),
       );
       // §V44 bounded at SOURCE: clamp the coverage, not the result
-      return float(1).sub(slick.clamp(0, 1).mul(uSlickDamp.clamp(0, 1)));
+      const smooth = float(1).sub(slick.clamp(0, 1).mul(uSlickDamp.clamp(0, 1)));
+      // the Drift raft's churned water banks roughness as a NEGATIVE slick (hullContact.ts `roughen`): there the fine
+      // ripples are raised, not damped. Band-limited as the slick is (it fades to 1 with the same keep weight)
+      return hull ? smooth.add(slick.negate().clamp(0, 1).mul(hull.roughGainNode)) : smooth;
     },
 
     /**

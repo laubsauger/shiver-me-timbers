@@ -79,6 +79,7 @@ import {
 } from './surfaceGeometry';
 import {
   seabedHeightLodNode,
+  seabedHeightNode,
   seabedShallowFactorNode,
   type SeabedField,
 } from '../island/seabed';
@@ -102,6 +103,7 @@ import { activeBoatLightPool, boatLightPoolNode } from './boatLightPool';
 import { wakeLedIrradianceNode } from '../flowfoam/wakeLight';
 import { activeHullMask, hullMaskOceanNode } from './hullVolumeMask';
 import { markAoExempt } from '../core/aoReceiver';
+import { sunShadowOrLit } from '../sky/lighting';
 
 export interface OceanSurfaceMaterial {
   material: THREE.MeshBasicNodeMaterial;
@@ -444,6 +446,13 @@ export function buildOceanSurfaceMaterial(
   );
   const uRefractStrength = uniform(sp.refractionStrength);
   const uTransmitFloor = uniform(sp.transmissionFloor);
+  const uShoreFade = uniform(sp.shoreFadeThickness);
+  const uShoreEdge = uniform(sp.shoreFadeEdge);
+  const uLightPath = uniform(sp.submergedLightPath);
+  const uRefractEdge = uniform(sp.refractionEdgeFade);
+  const uWakeAeration = uniform(sp.wakeAeration);
+  const uWakeAerColor = uniform(color(sp.wakeAerationColor));
+  const uWakeSmoothLong = uniform(sp.wakeSmoothLong);
   const uRefractSnell = uniform(sp.refractionSnell);
   const uCameraFar = uniform(5000); // synced from the live camera in update()
   // haze target colour: driven per frame from the scene fog / sky horizon
@@ -452,6 +461,7 @@ export function buildOceanSurfaceMaterial(
   const uHaze = uniform(new THREE.Vector2(sp.hazeStart, sp.hazeEnd));
   const uHazeCurve = uniform(sp.hazeCurve);
   const uHazeStrength = uniform(sp.hazeStrength);
+  const uHazeNear = uniform(sp.hazeNearDistance);
   const uGlintHaze = uniform(sp.glintHazePenetration);
   const uUnderCeiling = uniform(color(sp.underCeilingColor));
   const uUnderWindow = uniform(new THREE.Vector2(sp.underWindowBrightness, sp.underWindowSoftness));
@@ -971,9 +981,11 @@ export function buildOceanSurfaceMaterial(
     // expression, not a second one, so they cannot drift.
     const deriv0 = sampleDeriv(0);
     const deriv1 = sampleDeriv(1);
+    // (params wakeSmoothLong: the slick damps the middle cascade too — built only when on)
+    const smoothMid = sp.wakeSmoothLong > 0 ? mix(float(1), wakeSmooth, uWakeSmoothLong) : null;
     const derLong = deriv0
       .mul(normLod[0].mul(shoal[0]))
-      .add(deriv1.mul(normLod[1].mul(shoal[1])))
+      .add(smoothMid ? deriv1.mul(normLod[1].mul(shoal[1])).mul(smoothMid) : deriv1.mul(normLod[1].mul(shoal[1])))
       .mul(normFade)
       .toVar();
     // §T.193: the shoaling harmonic's own slope, gated like the band it rides on
@@ -1263,11 +1275,31 @@ export function buildOceanSurfaceMaterial(
     const shadowSlot = sunLight.shadow as unknown as { shadowNode?: TslNode };
     const node = shadowSlot.shadowNode ?? shadow(sunLight);
     shadowSlot.shadowNode = node;
-    shadowMask = vec3(node).x.clamp(0, 1);
+    shadowMask = vec3(sunShadowOrLit(node)).x.clamp(0, 1);
   }
 
   // §T.209 boat LED light pools: opt-in at build (speedboat page only); absent ⇒ no node, bit-identical sea
   const boatPool = activeBoatLightPool();
+
+  /** (params shoreFadeThickness / shoreFadeEdge) 0 where the water meets the ground, 1 `width` m of water further
+   * out — `behind` m of it straight behind this fragment, the depth-buffer thickness the refraction probes. Only AT
+   * THE GROUND: see SHORE FADE at the material's opacity */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  const shoreFadeOver = (behind: any, width: any): any => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+    let fade: any = smoothstep(float(0), width.max(1e-3), behind);
+    if (seabed) {
+      const ray = vec3(worldXZ.x, totalDisp.y, worldXZ.y).sub(cameraPosition);
+      const rayLen = ray.length().max(1e-3);
+      const down = ray.y.negate().div(rayLen).max(0.02);
+      const column = totalDisp.y.sub(seabedHeightNode(seabed, worldXZ)).max(0);
+      // the view-z thickness as a path along the ray (the Snell lookup's own conversion)
+      const path = behind.mul(rayLen.div(linearDepth().mul(uCameraFar).max(1e-3)));
+      const ground = smoothstep(float(-0.3), float(0), path.sub(column.div(down).mul(0.7)));
+      fade = mix(float(1), fade, ground);
+    }
+    return fade;
+  };
 
   const colorNode = Fn(() => {
     // FIRST, and inside the Fn on purpose — see buildSurfaceSlope's header.
@@ -1277,7 +1309,9 @@ export function buildOceanSurfaceMaterial(
     // Hoisted: three terms want this exact ramp — the far-field foam damp, the
     // final haze mix, and the §V.56 handover below — and it costs a `pow`.
     // It used to be computed twice with the same arguments.
-    const hazeRamp = pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve).clamp(0, 1);
+    // (and the near field's air, params hazeNearDistance: 0 keeps the ramp exactly as it was)
+    const nearKeep = uHazeNear.greaterThan(0).select(camDist.div(uHazeNear.max(1)).negate().exp(), float(1));
+    const hazeRamp = float(1).sub(float(1).sub(pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve).clamp(0, 1)).mul(nearKeep)).clamp(0, 1);
     const hazeT = hazeRamp.mul(uHazeStrength).clamp(0, 1).toVar();
     /**
      * §V.56 HANDOVER: the pigment floor protects WATER, never ATMOSPHERE.
@@ -1520,9 +1554,15 @@ export function buildOceanSurfaceMaterial(
     const lookupValid = snellOn.lessThan(0.5).or(snellOnScreen);
     // at snellOn 0 this is the straight fetch again (same texel), so the old graph's values are reproduced exactly
     const lookupDepth = linearDepth(viewportDepthTexture(lookupUV));
-    const refractedUV = lookupUV.add(refractionOffsetNode(
-      normalWorld, cameraViewMatrix, screenSize, uRefractStrength,
-    ).mul(refractRamp));
+    const waveOffset = refractionOffsetNode(normalWorld, cameraViewMatrix, screenSize, uRefractStrength).mul(refractRamp);
+    // (params refractionEdgeFade: the offset faded out toward the frame's edges, so it never reads off a dome face;
+    // built only when on)
+    const edgeRoom = lookupUV.min(vec2(1, 1).sub(lookupUV));
+    const refractedUV = lookupUV.add(
+      sp.refractionEdgeFade > 0
+        ? waveOffset.mul(smoothstep(float(0), uRefractEdge.max(1e-4), edgeRoom.x.min(edgeRoom.y)))
+        : waveOffset,
+    );
     const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
     const refraction = refractionDepthNode(lookupDepth, sceneDepthBehind, ownDepth);
     const thicknessMeters = refraction.depth.sub(ownDepth).max(0).mul(uCameraFar);
@@ -1545,8 +1585,16 @@ export function buildOceanSurfaceMaterial(
     const floorFade = seabed
       ? seabedFloorFadeNode(thicknessMeters, uShallowFullDepth, Math.max(-seabed.openHeight, 1e-3))
       : float(1);
+    // (params submergedLightPath: + the way the light came DOWN to what is seen, its depth under the surface along the
+    // straight view path — the view-z thickness as a ray length, the Snell lookup's own conversion, × the ray's dip)
+    const lightPath = sp.submergedLightPath > 0
+      ? thicknessMeters.add(
+          thicknessMeters.mul(eyeDist.div(ownDepth.mul(uCameraFar).max(1e-3)))
+            .mul(eyeRay.y.negate().div(eyeDist).max(0)).mul(uLightPath),
+        )
+      : thicknessMeters;
     const seeThrough = uAbsorption
-      .mul(thicknessMeters)
+      .mul(lightPath)
       .negate()
       .exp()
       .mul(refraction.visible.and(lookupValid).select(float(1), float(0)))
@@ -1784,7 +1832,15 @@ export function buildOceanSurfaceMaterial(
     // per-channel mix: `seeThrough` is a vec3, so the floor comes through the
     // column already reddened-out and blue-shifted. No separate tint — the
     // curve IS the tint (see `uAbsorption`).
-    const transmitted = mix(waterCol, sceneCol, seeThrough.mul(0.9));
+    const throughBody = mix(waterCol, sceneCol, seeThrough.mul(0.9));
+    // (params shoreFadeEdge: at the shore the transmitted light thins to the scene behind — the sand — over
+    // shoreFadeThickness of water, and the reflection below stays; built only where the shore fade is)
+    // (and the water's own hue with it: the pigment floor below re-tints the composited water toward the body's hue,
+    // which at the shore is no longer there — unfaded, it painted the last metre of thin water turquoise)
+    const shoreBody = sp.shoreFadeThickness > 0
+      ? mix(float(1), shoreFadeOver(probeThickness, uShoreFade), uShoreEdge.greaterThan(0).select(float(1), float(0)))
+      : float(1);
+    const transmitted = sp.shoreFadeThickness > 0 ? mix(sceneCol, throughBody, shoreBody) : throughBody;
     // §V.24 forbids "opaque-wall water @ grazing/shallow view", and Schlick
     // alone produces exactly that: F→1 deletes the submerged geometry. Cap the
     // mirror in proportion to `seeThrough`, so the floor exists ONLY where
@@ -2048,6 +2104,16 @@ export function buildOceanSurfaceMaterial(
         // dense engine wash still reveals the displaced water beneath it.
         wakeAmount = froth.mul(uWakeFoamDepth).negate().exp().oneMinus().mul(0.9).mul(foamGain);
       }
+      // AERATED WAKE WATER on the analytic wake (params wakeAeration; built only when on): the coverage as bubbles under
+      // the surface — the body taking a milky tint, under the reflection, as the sim's W8 path does — and the white
+      // lace kept to dense coverage (the slaps, a bow's curl), where thin coverage drawn through the lace art read as
+      // hair-fine streaks
+      if (sp.wakeAeration > 0 && flowFoam && !flowFoam.wakeWhiteNode && wakeCoverageW8) {
+        const aer = float(1).sub(wakeCoverageW8.mul(uWakeAeration).negate().exp()).mul(foamGain).mul(whitecapAmount.oneMinus());
+        col.addAssign((uWakeAerColor as unknown as THREE.Node<'vec3'>).mul(lightWrap).sub(transmitted).mul(aer).mul(reflWeight.oneMinus()));
+        // @band-limited-elsewhere: a VALUE gate on the filtered wake coverage sample, no spatial period
+        wakeAmount = wakeAmount.mul(smoothstep(0.35, 0.75, wakeCoverageW8));
+      }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));
     } else {
@@ -2081,13 +2147,15 @@ export function buildOceanSurfaceMaterial(
     const colLo = col.r.min(col.g).min(col.b);
     const colChroma = colHi.sub(colLo).div(colHi.max(1e-4));
     // smoothstep(e0,e1,x) with e0 > e1: 1 at chroma 0, 0 at the floor (§V23)
-    const pigNeed = smoothstep(uPigFloor.x, float(0), colChroma)
+    const pigBase = smoothstep(uPigFloor.x, float(0), colChroma)
       .mul(uPigFloor.y.clamp(0, 1))
       // §V.56 handover — see `waterness`. Without this the floor fires on the
       // warm, low-chroma horizon haze (a legitimately lit atmosphere, not a
       // grey wash) and repaints the whole band in the water's hue.
       .mul(waterness)
       .mul(float(1).sub(foamAmount.clamp(0, 1)));
+    // (params shoreFadeEdge: the water's hue thins at the shore with its body; built only where the shore fade is)
+    const pigNeed = sp.shoreFadeThickness > 0 ? pigBase.mul(shoreBody) : pigBase;
     const tintLum = bodyTint.dot(vec3(0.2126, 0.7152, 0.0722)).max(1e-4);
     col.assign(mix(col, col.mul(bodyTint).div(tintLum), pigNeed));
 
@@ -2656,6 +2724,25 @@ export function buildOceanSurfaceMaterial(
   // (an alpha-0 sheet, NOT maskNode's discard: a discard costs the whole sea its early depth test, +2–2.8 ms measured)
   const hullMask = activeHullMask();
   if (hullMask) material.opacityNode = hullMaskOceanNode(hullMask);
+  // SHORE FADE (params shoreFadeThickness): opacity 0 where the water meets the ground, 1 a little water further
+  // out — the same depth-buffer thickness the refraction probes (straight behind this fragment). Built only when
+  // on, so a world that never asks for it keeps its graph as it was.
+  if (sp.shoreFadeThickness > 0) {
+    const behind = linearDepth(viewportDepthTexture(screenUV)).sub(linearDepth()).max(0).mul(uCameraFar);
+    // (params shoreFadeEdge > 0: only the last bit of water fades the surface out, its reflection included — the rest
+    // of the shore fade is on the transmitted light, in the colour above)
+    // ONLY AT THE GROUND (the Drift's raft, 2026-10-29: "floating ON the water — no contact line"). The thickness
+    // read above is to whatever is behind the water — a log, a hull, a plank as much as the sand — so every floating
+    // thing stood in a clear ring, its submerged half drawn as if dry, its contact foam faded out with the water. The
+    // seabed says where the ground is: the water's path down to it along this view. A thing much nearer than that is
+    // afloat, and the water in front of it keeps its opacity (shoreFadeOver). (The seabed is already bound in this
+    // stage for the shallows tint: no new binding.)
+    // (the last bit of water wanders along the shore, 0.4–1.6 × shoreFadeEdge: one width everywhere drew the
+    // water's end as one even line)
+    const edgeWidth = uShoreEdge.mul(valueNoise(worldXZ.mul(0.9)).mul(0.6).add(valueNoise(worldXZ.mul(3.1).add(7.7)).mul(0.6)).add(0.4));
+    const fade = shoreFadeOver(behind, uShoreEdge.greaterThan(0).select(edgeWidth, uShoreFade));
+    material.opacityNode = hullMask ? hullMaskOceanNode(hullMask).mul(fade) : fade;
+  }
   // §V.24: transparent flag routes the mesh into the transparent pass where
   // viewportSharedTexture/viewportDepthTexture hold the opaque scene behind.
   material.transparent = true;
@@ -2776,10 +2863,18 @@ export function buildOceanSurfaceMaterial(
     );
     uRefractStrength.value = sp.refractionStrength;
     uTransmitFloor.value = sp.transmissionFloor;
+    uShoreFade.value = sp.shoreFadeThickness;
+    uShoreEdge.value = sp.shoreFadeEdge;
+    uLightPath.value = sp.submergedLightPath;
+    uRefractEdge.value = sp.refractionEdgeFade;
+    uWakeAeration.value = sp.wakeAeration;
+    (uWakeAerColor.value as THREE.Color).set(sp.wakeAerationColor);
+    uWakeSmoothLong.value = sp.wakeSmoothLong;
     uRefractSnell.value = Math.min(1, Math.max(0, Number.isFinite(sp.refractionSnell) ? sp.refractionSnell : 1));
     (uHaze.value as THREE.Vector2).set(sp.hazeStart, sp.hazeEnd);
     uHazeCurve.value = sp.hazeCurve;
     uHazeStrength.value = sp.hazeStrength;
+    uHazeNear.value = sp.hazeNearDistance;
     uGlintHaze.value = sp.glintHazePenetration;
     (uUnderCeiling.value as THREE.Color).set(sp.underCeilingColor);
     (uUnderWindow.value as THREE.Vector2).set(

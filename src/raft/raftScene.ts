@@ -46,6 +46,8 @@ import { ropeParams } from '../params/ropes';
 import { raftMaterialParams } from '../params/raftMaterials';
 import { blueprintAabb } from '../ship/previewRaft';
 import { createRaftLanterns } from '../ship/raftLanterns';
+import { createRaftLook, type RaftLookTier } from '../ship/raftLook';
+import { dressRaft } from '../ship/raftDress';
 
 /**
  * §T W2b: the raft sails on the SIM wake. `raft.html?wake=analytic` builds the
@@ -81,7 +83,14 @@ export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather:
 }
 export type RaftSea = ReturnType<typeof buildRaftSea>;
 
-export function buildRaftVessel(app: App, sea: RaftSea) {
+/**
+ * `quality`: the graphics preset (ui/settingsStore). THE RAFT'S LOOK is the film's (the user, 2026-10-29: "ONE raft
+ * for game and film … the game's raft to use the same improved assets"): ship/raftLook.ts's scanned surfaces,
+ * raftDress.ts's worn geometry, frame and interior, raftStores.ts's stores, raftSailWear.ts's sewn sails — the
+ * preset sets only what they cost (RaftLookTier: the parallax march's steps), never what they are.
+ * `?raftplain` builds the raft as it was, undressed (an A/B).
+ */
+export function buildRaftVessel(app: App, sea: RaftSea, o: { quality?: RaftLookTier } = {}) {
   const blueprint = buildRaftBlueprint();
   // the raft writer's field (§T.92), never the galleon's (§V.18): it serves
   // the walker, the deck-water solver and the plank relief alike
@@ -90,7 +99,9 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
   setActiveDeckWater(deckWater);
   // §T.40's one-set-per-class cache, the same factory main.ts builds (§V95)
   const materials = createPieceMaterialCache(createDeckFieldTexture(deckField));
-  const assembly = new ShipAssembly(blueprint, materials);
+  const plain = typeof location !== 'undefined' && new URLSearchParams(location.search).has('raftplain');
+  const look = plain ? null : createRaftLook(materials, { tier: o.quality ?? 'medium' });
+  const assembly = new ShipAssembly(blueprint, look?.factory ?? materials);
   assembly.setSailTint(raftMaterialParams.sailTint);
   assembly.group.traverse((o) => {
     if (o.name.startsWith('hull') || o.name.includes('-hull') || o.name.startsWith('log')) {
@@ -102,6 +113,10 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
     }
   });
   app.scene.add(assembly.group);
+  // …worn, framed, furnished and stowed (the stores load after: `ready`)
+  const dressed = look ? dressRaft(assembly.group, blueprint, look.factory, { tier: o.quality ?? 'medium' }) : null;
+  look?.track(assembly.group);
+  const ready = Promise.all([look?.ready, dressed?.ready]).then(() => undefined);
   // the lanterns under the roof's corners, lit at dusk (raftFrame updates them from the Sun)
   const lanterns = createRaftLanterns();
   assembly.group.add(lanterns.group);
@@ -137,7 +152,7 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
 
   return {
     blueprint, deckField, assembly, deckWater, ropes, riggingPlan, hullContact, wetline,
-    stemZ, transomZ, beamHalf, updateRopes, lanterns,
+    stemZ, transomZ, beamHalf, updateRopes, lanterns, ready,
   };
 }
 export type RaftVessel = ReturnType<typeof buildRaftVessel>;

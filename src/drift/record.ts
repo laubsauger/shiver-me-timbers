@@ -47,9 +47,24 @@ export interface DriftRecordOptions {
   /**
    * cube faces this many times the resolution the master needs (linear; 1 = matched, `faceSizeFor`): the master
    * then averages several face texels a pixel through the faces' mips — anti-aliasing for the sea's fine
-   * detail at the horizon and for thin far things, at ~ss² the face shading
+   * detail at the horizon and for thin far things, at ~ss² the face shading.
+   *
+   * The faces' EDGES are multisampled besides (4× MSAA, cine/domeCapture.ts `setSamples`), which settles the
+   * foliage, the rigging and the pebbles about as much as ss 2 does alone, for little shading; together they do
+   * best, so the 2× planned for the 8K master is now 1.25 (2026-10-29, measured at the forest edge, 604 s):
+   *   8192², ss 1.25 + MSAA: 5632 px faces, ~23.5 GB in the page's GPU process; quieter foliage than ss 2 alone
+   *     (frame-to-frame noise 8.5 against 9.0 at 1.25 and 2 face texels a pixel) and ~18 % faster (at 4096²:
+   *     1.13 / 1.05 s a frame against 1.38 / 1.28 at the forest edge / the raft);
+   *   8192², ss 2 + MSAA: 9024 px faces, ~34 GB — does not fit; ss 2 without: 27.6 GB, and noisier;
+   *   4096²: ss 1.5 + MSAA (7.5 against 9.0, the time of ss 2 alone); 2048²: ss 2 + MSAA (MSAA costs ~nothing there).
+   * ss 1 + MSAA (4512 px faces at 8K, ~21.5 GB) where memory is short: as quiet at the edges as ss 2 alone was.
    */
   supersample?: number;
+  /**
+   * bits a channel the frames leave in: 8 (RGBA, the default) or 16 (rgba64le, the 10/12-bit ProRes masters —
+   * capture.ts Encoder16; the sink must encode ProRes: cine-sink.mjs --codec proreshq | prores4444)
+   */
+  depth?: 8 | 16;
   onProgress?: (frame: number, frames: number) => void;
 }
 
@@ -102,7 +117,10 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
   const frames = frameCount(from, o.to, fps);
   const groupQ = o.group ? `&group=${encodeURIComponent(o.group)}` : '';
   const shotQ = encodeURIComponent(shot);
-  const slots = Array.from({ length: K }, () => ({ cap: new Capture(deps.renderer, size, size), done: Promise.resolve() }));
+  const depth = o.depth ?? 8;
+  if (depth !== 8 && depth !== 16) throw new Error(`drift record: depth ${String(depth)}, 8 | 16`);
+  const depthQ = depth === 16 ? '&depth=16' : '';
+  const slots = Array.from({ length: K }, () => ({ cap: new Capture(deps.renderer, size, size, undefined, depth), done: Promise.resolve() }));
   if (!o.lane) await post(sink, 'manifest', JSON.stringify({ fps, width: size, height: size, shots: [{ id: shot, frames, from, to: o.to }] }));
   let chain: Promise<void> = Promise.resolve();
   let n = 0;
@@ -136,7 +154,7 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
         // as a Blob: Chrome uploads a typed-array body at ~40 MB/s (440 ms for one 2160² frame, five times the
         // frame's render), a Blob at ~1 GB/s (17 ms; docs/drift/engine-findings.md). The Blob copies the bytes,
         // so the capture's reused buffer is free again at once.
-        await post(sink, `frame?shot=${shotQ}&n=${frame}&w=${size}&h=${size}${groupQ}`, new Blob([px as Uint8Array<ArrayBuffer>]));
+        await post(sink, `frame?shot=${shotQ}&n=${frame}&w=${size}&h=${size}${groupQ}${depthQ}`, new Blob([px as Uint8Array<ArrayBuffer>]));
         if (frame % GC_EVERY === GC_EVERY - 1) (globalThis as { gc?: () => void }).gc?.();
         o.onProgress?.(frame + 1, frames);
       });
