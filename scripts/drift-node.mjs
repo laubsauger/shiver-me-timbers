@@ -784,7 +784,14 @@ async function worker() {
     if (record) saveState({ bundle: record });
     say(`farm: bundle ${movedLine(moved, record)}`);
     beat({ bundleSync: { ...moved, content: record?.content?.slice(0, 12) ?? null, at: new Date().toISOString() }, step: undefined });
-    if (have() !== want) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) is not the hub's newest (now ${have()?.slice(0, 6) ?? 'none'} here): publish it on the Mac (node scripts/drift-bundle.mjs --manifest-only, seconds)`);
+    if (have() === null) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) could not be synced: this machine has none after the sync`);
+    // A JOB PACKED BEFORE A NEWER BUNDLE WAS PUBLISHED runs on the newer one. The sync always brings the hub's
+    // newest, so a job still asking for another bundle after it was packed against an older one, and is now queued
+    // behind a publish (the 2026-10-30 night: an agent's `drift-bundle --manifest-only` at 03:35 failed every job
+    // queued before it, 7 of them, "the job's asset bundle (efb658) is not the hub's newest"). The newest bundle is
+    // the same Mac's public/ a little later, and the job's own files (its overlay) still win over the linked ones,
+    // so it draws what the job would have drawn had it been packed a minute later.
+    if (have() !== want) say(`farm: the job was packed against bundle ${want.slice(0, 6)}; running it on the hub's newer ${have().slice(0, 6)} (its own files still win)`);
   };
   // (the head this worker last restarted to pull: once per head, header of onPulse below)
   let restartedFor = loadState().restartedFor ?? null;
