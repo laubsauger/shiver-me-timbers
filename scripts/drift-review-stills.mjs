@@ -71,7 +71,18 @@ const { page, sinkUrl, run, close } = await openDriftPage({
 });
 try {
   if (SETUP) console.log('[review] setup:', JSON.stringify(await run(SETUP)));
-  for (const s of shots) {
+  // IN SHOW-TIME ORDER, not the file's: the sea's wake is replayed from its world's start whenever a shot lies more than
+  // 10 s past the one before, or before it (src/drift/wandering/sea.ts wakeTo) — 25–35 s a shot on a 4090 — while a
+  // shot a few seconds on is caught up in steps (0.2–0.4 s; measured on windows-monster, 2026-10-30). Each still is
+  // still written under its own name. (A caught-up wake is sea.ts's own trade against a replayed one: the same within
+  // its 10 s catch-up, as the realtime page has always drawn it)
+  const order = [...shots].sort((a, b) => a.t - b.t);
+  const jumps = (list) => list.slice(1).filter((x, i) => x.t < list[i].t || x.t - list[i].t > 10).length;
+  const asGiven = jumps(shots);
+  const sorted = jumps(order);
+  if (asGiven > sorted) console.log(`[review] shots drawn in show-time order: as listed they jump back or >10 s ${asGiven} time(s), sorted ${sorted} (each jump replays the sea's wake, ~30 s on a 4090)`);
+  else if (sorted > 2) console.log(`[review] ${sorted} gaps of >10 s between shots: each replays the sea's wake (~30 s on a 4090)`);
+  for (const s of order) {
     const t0 = Date.now();
     frame = null;
     await aim(page, s, DOME);

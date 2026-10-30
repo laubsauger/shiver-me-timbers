@@ -378,3 +378,24 @@ right", the user). It is a pattern meant for TAA, which a film frame never gets.
 Sun's shadow (`shadow.filterNode = filmShadowFilter`, src/drift/wandering/filmShadowFilter.ts: 16 fixed, tent-weighted,
 hardware-compared taps). Related: the dome's cube faces rendered without MSAA, so alpha-tested and sub-pixel geometry
 aliased; they are multisampled now (finding 11).
+
+## 16. A jump in show time costs 25–35 s a shot (2026-10-30, open)
+
+Measured on windows-monster (RTX 4090, Chrome's shader cache warm), a V8 CPU profile around each `__drift.record()`
+of one 640 px review still in a booted page (`drift-review-page.mjs`): the first still at t = 604 s took 32.5 s —
+`writeBuffer` 10.9 s, `copyExternalImageToTexture` 3.1 s, 8.9 s waiting on the GPU, about 4–5 s building TSL nodes,
+`createShaderModule` 0.25 s; the next at 604.5 s took 0.19 s; then t = 400 s took 30 s again (13.8 s waiting, ~10 s
+of TSL node building, 1.5 s of GC). 604 → 605 took 0.37 s, 604 → 640 took 27 s, and back to 604 after 400 took 24.6 s.
+
+**The wake's replay.** `wakeTo()` (src/drift/wandering/sea.ts) resets the flow foam to its world's start (`wakeFrom`:
+the sea's follow start, the coast's w1 dissolve) whenever t lies more than `WAKE_CATCHUP` (10 s) past the wake, or
+before it, and steps it at 1/30 s to t — flowfoam's update, the raft's water and their buffer writes, every step. It
+is how every frame stays a pure function of t; the price is (t − world start) × 30 GPU steps per jump. Its last step
+is partial (`wakeT = t`), which is why a forward catch-up from an off-grid state is not bit-identical to a replay.
+Proposed (with the wake's owner): keep the state on the 1/30 s grid and catch up for any forward jump; failing that,
+replay from max(world start, t − W), W the wake's decay horizon, with `drift-farm.mjs consistency` numbers at the chunk
+seams. Meanwhile `drift-review-stills.mjs` draws its shots in show-time order.
+
+**The materials' rebuild on a switch of world (open).** The ~10 s of TSL node building at the jump to 400 s (the sea,
+from the coast) is materials being built again; the likely cause is the set of lights or the world's environment
+changing the materials' cache keys when the scene switches world. Not looked into yet.
