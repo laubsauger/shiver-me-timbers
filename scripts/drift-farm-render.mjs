@@ -8,7 +8,15 @@
  * and a chunk of 20 s of show is the longest a review job waits.
  *
  *   node scripts/drift-farm.mjs render --from 0 --to 770 [--chunk 20] [--size 2048] [--priority low]
- *        [--fps 30] [--lanes 1] [--out out/drift/preview/<commit>/] [-- <more drift-render.mjs flags>]
+ *        [--fps 30] [--lanes 1] [--box <name>] [--out out/drift/preview/<commit>/] [-- <more drift-render.mjs flags>]
+ *   node scripts/drift-farm.mjs render --flat 2048 --from 0 --to 770 …      [-- <more drift-review-clip.mjs flags>]
+ *
+ *   --flat <width>  THE 16:9 VERSION instead of the dome master (the user, 2026-10-30: the whole show "in both
+ *                   formats at 2K"): each chunk a drift-review-clip.mjs over its range — the flat rectilinear view of
+ *                   the focus zone through the real pipeline (dome.setFlat), the show's eye, as the review clips — at
+ *                   <width>×<width>·9/16, its own default supersampling. Its frames are the dome master's, t = from +
+ *                   n/fps (both draw through __drift.record), so the two versions line up frame for frame
+ *   --box <name>    every chunk on that box (a measurement); by default whichever box is free
  *
  * THE CODE STATE is this checkout's, as for any farm job (HEAD's base on origin + the diff + untracked files), packed
  * ONCE for every chunk; the assets are the bundle the boxes sync. THE CHUNKS are cut on whole frames (every frame is a
@@ -61,6 +69,9 @@ async function main() {
   const size = Number(arg('size', '2048'));
   const fps = Number(arg('fps', '30'));
   const lanes = Number(arg('lanes', '1'));
+  const flat = arg('flat', null) === null ? null : Number(arg('flat'));
+  if (flat !== null && !(flat > 0 && flat % 2 === 0)) throw new Error(`--flat ${arg('flat')}: an even width in px`);
+  const box = arg('box', null);
   const priority = arg('priority', 'low');
   if (!['low', 'normal', 'high'].includes(priority)) throw new Error(`--priority ${priority}: low | normal | high`);
   const head = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
@@ -68,10 +79,11 @@ async function main() {
   const out = resolve(ROOT, arg('out', `out/drift/preview/${head}${dirty ? '+dirty' : ''}`));
   const chunksDir = join(out, 'chunks');
   mkdirSync(chunksDir, { recursive: true });
-  const chunks = chunksOf(from, to, chunk, fps).map((c) => ({ ...c, file: join(chunksDir, `chunk_${stamp(c.from)}-${stamp(c.to)}.mp4`) }));
+  const kind = flat ? `_flat${flat}` : '';
+  const chunks = chunksOf(from, to, chunk, fps).map((c) => ({ ...c, file: join(chunksDir, `chunk_${stamp(c.from)}-${stamp(c.to)}${kind}.mp4`) }));
   const have = chunks.filter((c) => existsSync(c.file) && frameCountOf(c.file) === c.frames);
   const todo = chunks.filter((c) => !have.includes(c));
-  say(`[${from}, ${to}) s at ${size}², ${fps} fps: ${chunks.length} chunks of ${chunk} s (${have.length} here already), ${priority} priority → ${out}`);
+  say(`[${from}, ${to}) s, ${flat ? `16:9 ${flat}×${Math.round((flat * 9) / 16 / 2) * 2}` : `dome ${size}²`}, ${fps} fps: ${chunks.length} chunks of ${chunk} s (${have.length} here already), ${priority} priority${box ? `, on ${box}` : ''} → ${out}`);
 
   const { packState, submit } = await import('./drift-farm-client.mjs');
   const token = (await import('node:fs')).readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8');
@@ -81,12 +93,30 @@ async function main() {
   const packed = todo.length > 0 ? await packState({ root: ROOT, stage, say }) : null;
   let done = have.length;
   const t0 = Date.now();
+  // CTRL-C / SIGTERM CANCELS EVERY CHUNK it sent, and ends (the coordinator, 2026-10-30: a SIGINT to the full-show
+  // preview cancelled nothing and left it running — every submit had its own handler, and the process waited on them)
+  const sent = new Set();
+  const call = (path) => fetch(`${hub}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) });
+  let stopping = false;
+  const stop = async (sig) => {
+    if (stopping) process.exit(130);
+    stopping = true;
+    say(`${sig}: cancelling ${sent.size} chunk job(s)`);
+    await Promise.allSettled([...sent].map((id) => call(`/farm/jobs/${id}/cancel`)));
+    rmSync(stage, { recursive: true, force: true });
+    say('cancelled; the chunks already here stay (the same command resumes)');
+    process.exit(130);
+  };
+  process.on('SIGINT', () => void stop('SIGINT'));
+  process.on('SIGTERM', () => void stop('SIGTERM'));
   const results = await Promise.all(
     todo.map(async (c) => {
       const tag = `${c.from}–${c.to} s`;
       const r = await submit({
-        root: ROOT, hub, token: JSON.parse(token).token, prefer: 'any', weight: lanes, priority, stage, packed,
-        argv: ['node', 'scripts/drift-render.mjs', '--size', String(size), '--fps', String(fps), '--from', String(c.from), '--to', String(c.to), '--channel', 'chrome', '--lanes', String(lanes), '--out', c.file, ...extra],
+        root: ROOT, hub, token: JSON.parse(token).token, prefer: box ?? 'any', weight: flat ? 1 : lanes, priority, stage, packed, signals: false, onQueued: (id) => sent.add(id),
+        argv: flat
+          ? ['node', 'scripts/drift-review-clip.mjs', '--from', String(c.from), '--to', String(c.to), '--fps', String(fps), '--width', String(flat), '--channel', 'chrome', '--allow-long', '--allow-large', '--out', c.file, ...extra]
+          : ['node', 'scripts/drift-render.mjs', '--size', String(size), '--fps', String(fps), '--from', String(c.from), '--to', String(c.to), '--channel', 'chrome', '--lanes', String(lanes), '--out', c.file, ...extra],
         // (one line a chunk: queued, its box, its end; the render's own lines stay in the hub's job log)
         say: (m) => {
           if (/queued|done on|failed on|cancelled|requeued|hub does not answer/.test(m)) say(`${tag}: ${m.replace(/^farm: /, '')}`);
@@ -106,7 +136,7 @@ async function main() {
     process.exit(1);
   }
   const F = chunks.reduce((a, c) => a + c.frames, 0);
-  const joined = joinClips(chunks.map((c) => c.file), join(out, `show_${from}-${to}.mp4`), F, join(chunksDir, 'concat.txt'), say);
+  const joined = joinClips(chunks.map((c) => c.file), join(out, `show_${from}-${to}${flat ? '_flat' : ''}.mp4`), F, join(chunksDir, `concat${kind}.txt`), say);
   say(joined ? `done: ${joined}, ${F} frames, ${results.filter(Boolean).length} chunk(s) rendered now in ${((Date.now() - t0) / 60000).toFixed(1)} min` : 'the join failed (above): the chunks are all there');
   process.exit(joined ? 0 : 1);
 }

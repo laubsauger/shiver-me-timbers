@@ -79,6 +79,8 @@
  *   node scripts/drift-farm.mjs render --from 0 --to 770 --chunk 20 --size 2048 --priority low
  *                                              a whole render in chunks over every free box, joined on this Mac
  *                                              (scripts/drift-farm-render.mjs)
+ *   node scripts/drift-farm.mjs cancel --agent <name> | --all-low | <id> …   every unfinished job of an agent, every
+ *                                              unfinished low one, or those ids
  */
 import { execFile, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -451,6 +453,11 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
   const sweep = () => {
     for (const job of jobs.values()) {
       if (!['preparing', 'running'].includes(job.state) || now() - Math.max(job.heardAt ?? 0, bootAt) < LEASE_MS) continue;
+      // (a job someone cancelled is not given back to the queue when its box goes quiet: it is over)
+      if (job.cancelRequested) {
+        save(transition(job, 'cancelled', { endedAt: now(), last: `${job.node} went quiet after the cancel` }));
+        continue;
+      }
       const tries = (job.attempts ?? 0) + 1;
       save(tries >= 2
         ? transition(job, 'failed', { error: `${job.node} stopped answering (twice)`, endedAt: now(), attempts: tries })
@@ -662,6 +669,19 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       if (p[1] === 'claim' && req.method === 'GET') {
         const node = url.searchParams.get('node');
         if (!node || !hints().some((n) => n.name === node)) return deny(res, 400, `node ${node}: not in drift-farm-nodes.json`), true;
+        // SOMEONE ELSE ON ITS GPU (&busy=<who>): answered at once with the pulse, and never a claim — a job handed to
+        // it was lost (its worker reads only the headers then), went quiet for a lease and was given back, twice:
+        // linux-monster with ComfyUI on its card, 2026-10-30, "linux-monster stopped answering (twice)"
+        const busy = url.searchParams.get('busy');
+        if (busy !== null) {
+          if (claims.get(node)) {
+            claims.get(node).res.writeHead(204, replyHeaders(node, false)).end();
+            clearTimeout(claims.get(node).timer);
+            claims.delete(node);
+          }
+          workers.set(node, { ...(workers.get(node) ?? {}), node, at: now(), state: 'busy-foreign', why: busy.slice(0, 120), job: null });
+          return res.writeHead(204, replyHeaders(node)).end(), true;
+        }
         // not accepting (header): never in `claims`, so dispatch never sees it. Removed: answered at once (its worker
         // waits minutes); paused, draining: held like a claim (it asks again in 25 s); the state in the header
         const fs = farmStateOf(node);
@@ -837,8 +857,30 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   else if (what === 'consistency') await import('./drift-consistency.mjs');
   // a whole render in chunks over the farm's free boxes, joined here (scripts/drift-farm-render.mjs)
   else if (what === 'render') await import('./drift-farm-render.mjs');
+  // CANCEL BY WHO OR WHAT: every unfinished job of an agent (its submitter's name: DRIFT_AGENT, or "claude <session>"),
+  // every unfinished low-priority job, or jobs by id — through the same loopback control as the dashboard's button
+  else if (what === 'cancel') {
+    const rest = process.argv.slice(3);
+    const at = (k) => (rest.includes(k) ? rest[rest.indexOf(k) + 1] : null);
+    const agent = at('--agent');
+    const allLow = rest.includes('--all-low');
+    const ids = rest.filter((a, i) => !a.startsWith('--') && rest[i - 1] !== '--agent');
+    if (!agent && !allLow && ids.length === 0) {
+      console.error('usage: node scripts/drift-farm.mjs cancel --agent <name> | --all-low | <job id> …');
+      process.exit(2);
+    }
+    const st = await (await fetch(`${base}/api`)).json();
+    const open = (st.farm?.jobs ?? []).filter((j) => !FINAL.has(j.state));
+    const pick = open.filter((j) => ids.includes(j.id) || (agent && j.submitter?.agent === agent) || (allLow && j.priority === 'low'));
+    for (const j of pick) {
+      const r = await fetch(`${base}/farm/jobs/${j.id}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      console.log(`${j.id} ${j.state}${j.node ? ` on ${j.node}` : ''} (${j.submitter?.agent ?? '?'}, ${j.priority ?? 'normal'}): ${r.ok ? 'cancel sent' : `${r.status} ${await r.text()}`}`);
+    }
+    console.log(`${pick.length} of ${open.length} unfinished job(s) cancelled`);
+    process.exit(0);
+  }
   else {
-    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}\n       node scripts/drift-farm.mjs consistency [--boxes a,b] [--width 960] [--shots file] [--no-mac]\n       node scripts/drift-farm.mjs render --from 0 --to 770 [--chunk 20] [--size 2048] [--priority low] [--out dir] [-- drift-render flags]`);
+    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}\n       node scripts/drift-farm.mjs consistency [--boxes a,b] [--width 960] [--shots file] [--no-mac]\n       node scripts/drift-farm.mjs render --from 0 --to 770 [--chunk 20] [--size 2048] [--priority low] [--out dir] [-- drift-render flags]\n       node scripts/drift-farm.mjs cancel --agent <name> | --all-low | <job id> …`);
     process.exit(2);
   }
 }

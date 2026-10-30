@@ -482,6 +482,29 @@ describe('the door', () => {
     expect((await claimAs('windows-monster', '100.77.131.101'))?.id).toBe(low);
   });
 
+  // linux-monster with ComfyUI on its card, 2026-10-30: its worker said "busy" on each claim, the hub held that as a
+  // claim and handed it a job, which the worker never read — "linux-monster stopped answering (twice)"
+  it('a box whose GPU someone else holds is answered at once and never handed a job', async () => {
+    const id = await newJob(['node', 'scripts/drift-review-stills.mjs']);
+    from = '100.77.131.101';
+    const r = await call('/farm/claim?node=windows-monster&busy=ComfyUI%2018%20GB', { token: null });
+    expect(r.status).toBe(204);
+    expect(hub.jobs().find((j) => j.id === id)?.state).toBe('queued');
+    expect(hub.view().workers.find((w: { node: string }) => w.node === 'windows-monster')).toMatchObject({ state: 'busy-foreign', why: 'ComfyUI 18 GB' });
+    // the next box asking takes it
+    expect((await claimAs('eeg-msi', '100.126.127.68'))?.id).toBe(id);
+  });
+
+  it('a cancelled job whose box goes quiet ends cancelled — it is not given back to the queue', async () => {
+    const id = await newJob(['node', 'scripts/drift-review-stills.mjs']);
+    await claimAs('eeg-msi', '100.126.127.68');
+    from = '127.0.0.1';
+    await control(`/farm/jobs/${id}/cancel`, {});
+    now += LEASE_MS + 1;
+    hub.sweep();
+    expect(hub.jobs().find((j) => j.id === id)?.state).toBe('cancelled');
+  });
+
   it('removed: its claim is answered at once with its state (the worker asks again in minutes)', async () => {
     from = '127.0.0.1';
     expect((await control('/farm/nodes/windows-monster/state', { state: 'removed' })).status).toBe(200);

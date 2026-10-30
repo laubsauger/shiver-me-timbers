@@ -424,7 +424,7 @@ export function submitterOf(env = process.env, pid = process.pid, host = hostnam
  * PRIORITIES). `packed`: a { payload, meta } already made by packState (drift-farm.mjs render: one code state for
  * every chunk). → { code } or { fallback: why }
  */
-export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, priority = 'normal', say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main', packed = null }) {
+export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, priority = 'normal', say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main', packed = null, signals = true, onQueued = () => {} }) {
   const call = api(hub, token);
   const t0Submit = Date.now();
   if (prefer === 'auto' && priority === 'low') prefer = 'any';
@@ -442,13 +442,17 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' || prefer === 'any' ? null : prefer, weight, priority, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
   await upload(call, `/farm/jobs/${id}/payload`, payload);
   say(`farm: job ${id} queued${prefer === 'auto' || prefer === 'any' ? '' : ` for ${prefer}`}${priority !== 'normal' ? ` at ${priority} priority` : ''}; following it here (Ctrl-C cancels it)`);
+  onQueued(id);
+  // (Ctrl-C cancels it; `signals: false` — a caller with many jobs, drift-farm-render.mjs — handles the signals itself)
   let cancelled = false;
   const onSig = () => {
     cancelled = true;
     call(`/farm/jobs/${id}/cancel`, { method: 'POST', body: {} }).catch(() => {});
   };
-  process.on('SIGINT', onSig);
-  process.on('SIGTERM', onSig);
+  if (signals) {
+    process.on('SIGINT', onSig);
+    process.on('SIGTERM', onSig);
+  }
   let from = 0;
   const t0 = Date.now();
   let job;
@@ -558,6 +562,12 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     lines.push(l);
     say(l);
   };
+  // PREPARING SAYS SO TOO: a status every 10 s while the payload, the bundle and the tree are made (a bundle sync is
+  // minutes), so the hub's lease does not run out on a box that is working, and a cancel is heard before the run
+  const prep = setInterval(() => flush(), 10_000);
+  const stopIfCancelled = () => {
+    if (cancel) throw Object.assign(new Error('cancelled from the dashboard while preparing'), { cancelled: true });
+  };
   try {
     await holdOn('payload', async () => {
       const res = await call(`/farm/jobs/${job.id}/payload`, { raw: true, timeoutMs: 3_600_000 });
@@ -576,16 +586,21 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     const meta = JSON.parse(readFileSync(join(jobDir, 'job', 'meta.json'), 'utf8'));
     timing.payloadMs = Date.now() - t0;
     lap();
+    stopIfCancelled();
     await ensureBundle(meta.bundle);
     timing.bundleMs = lap();
+    stopIfCancelled();
     const { tree } = await applyState({ main, jobDir, tar, say: note });
     timing.treeMs = lap();
+    stopIfCancelled();
     for (const o of job.outs) mkdirSync(join(jobDir, 'out', String(o.i)), { recursive: true });
     const argv = resolveArgv(job.argv, { jobDir, outs: job.outs, inputs: job.inputs });
     // inside the box's render slots: the checkout's slot folder, whoever else renders there (DRIFT_FARM off: no loop)
     const cmd = [join(tree, 'scripts', 'drift-slot.mjs'), '--weight', String(job.weight ?? 1), '--', ...argv];
+    clearInterval(prep);
     note(`farm: running ${job.label} on ${tree}`);
     await tell({ state: 'running' });
+    stopIfCancelled();
     const tRun = Date.now();
     const tick = setInterval(() => flush(), 2000);
     // RESULTS AS THEY COME (the user, 2026-10-30: "the way back obviously has to be fast too … bam bam bam"): a still
@@ -675,6 +690,12 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     await tell({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error: `exit ${r.code}` } : {}) });
     return { state, exitCode: r.code, fps: progress.fps };
   } catch (e) {
+    clearInterval(prep);
+    if (e.cancelled) {
+      note(`farm: ${e.message}: not run`);
+      await tell({ state: 'cancelled' }).catch(() => {});
+      return { state: 'cancelled', exitCode: null };
+    }
     note(`farm: FAILED: ${e.message}`);
     await tell({ state: 'failed', error: String(e.message).slice(0, 500) }).catch((e2) => say(`farm: could not tell the hub (${e2.message}): it requeues the job when its lease runs out`));
     return { state: 'failed', exitCode: null, error: e.message };
