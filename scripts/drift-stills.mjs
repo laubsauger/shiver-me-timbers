@@ -18,6 +18,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
+import { chromeLaunchOptions } from './drift-chrome.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -62,7 +63,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => void close().then
 try {
   vite = await createServer({ root: ROOT, clearScreen: false, logLevel: 'warn', cacheDir: join(ROOT, 'node_modules/.vite-drift-stills'), server: { port: 5293, strictPort: true, hmr: false, watch: null } });
   await vite.listen();
-  browser = await chromium.launch({ channel: flag('channel', 'chromium'), headless: true });
+  // (the machine's GPU flags, drift-chrome.mjs: on Linux, headless Chrome has no WebGPU adapter without them)
+  browser = await chromium.launch({ ...chromeLaunchOptions(flag('channel', 'chromium')), headless: true });
   const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
   page.on('console', (m) => m.type() === 'error' && console.log('[console]', m.text().slice(0, 300)));
   page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 300)));

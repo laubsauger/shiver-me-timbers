@@ -29,6 +29,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
+import { chromeLaunchOptions, gpuArgs } from './drift-chrome.mjs';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -111,8 +112,11 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     // own dep cache, so it never fights another server's optimiser
     vite = await createServer({ root: ROOT, clearScreen: false, logLevel: 'warn', cacheDir: join(ROOT, cacheDir), server: { port, strictPort: true, hmr: false, watch: null } });
     await vite.listen();
-    // --expose-gc: the page collects every few frames, or each POST body stays in its memory (record.ts GC_EVERY)
-    browser = await chromium.launch({ channel, headless: true, args: ['--js-flags=--expose-gc'] });
+    // --expose-gc: the page collects every few frames, or each POST body stays in its memory (record.ts GC_EVERY);
+    // and the machine's GPU flags (drift-chrome.mjs: Linux needs --enable-unsafe-webgpu and Vulkan, or headless Chrome
+    // has no WebGPU adapter — linux-monster's first farm clip, 2026-10-30, waited 240 s on the page's WebGPU gate)
+    const gpu = gpuArgs();
+    browser = await chromium.launch({ ...chromeLaunchOptions(channel, gpu.args), headless: true });
     const page = await browser.newPage({ viewport: { width: 256, height: 256 } });
     const seen = new Set();
     // a module the server could not build (a syntax error mid-edit, a missing import) answers 500 and the page never
@@ -129,10 +133,18 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
       console.log('[console error]', m.text().slice(0, 300));
     });
     await page.goto(`http://localhost:${port}/drift.html?paused${query ? `&${query}` : ''}`);
-    // the first boot builds every shader and loads ~150 MB of Earth maps: minutes on a cold machine
-    const booted = page.waitForFunction(() => '__drift' in window, null, { timeout: 240_000 });
+    // the first boot builds every shader and loads ~150 MB of Earth maps: minutes on a cold machine. The page's
+    // WebGPU gate (src/core/gate.ts: no adapter after its 6 s wait) ends the wait at once, with the reason
+    const booted = page.waitForFunction(() => '__drift' in window || /requires\s+WebGPU/.test(document.body?.innerText ?? ''), null, { timeout: 240_000 });
     booted.catch(() => {}); // when the boot failure wins the race, this one rejects later, as the browser closes
-    await Promise.race([booted, bootFailure]);
+    try {
+      await Promise.race([booted, bootFailure]);
+    } catch (e) {
+      throw new Error(`${e.message}${seen.size ? `\n  the page's errors: ${[...seen].map((t) => t.slice(0, 200)).join(' | ')}` : '\n  (no error in the page: still building shaders or loading assets?)'}`);
+    }
+    if (!(await page.evaluate(() => '__drift' in window))) {
+      throw new Error(`drift.html shows its "requires WebGPU" gate: this Chrome (${channel}) found no WebGPU adapter. GPU flags from ${gpu.from}: ${gpu.args.join(' ') || '(none)'} — node scripts/drift-gpu-check.mjs says which flags work here`);
+    }
     await page.evaluate(() => {
       const d = window.__drift;
       const D = Math.PI / 180;

@@ -23,7 +23,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const NODE_CHROME_FILE = join(ROOT, 'out/drift/node-chrome.json');
+// (DRIFT_NODE_CHROME: a farm job's tree is not the box's checkout; the worker points it at the checkout's file, the one
+// drift-gpu-check.mjs --save wrote for this machine)
+export const NODE_CHROME_FILE = process.env.DRIFT_NODE_CHROME || join(ROOT, 'out/drift/node-chrome.json');
 
 /** the platform's GPU flags when nothing overrides them */
 export const PLATFORM_GPU_ARGS = {
