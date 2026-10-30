@@ -71,6 +71,12 @@ export interface OceanSurfaceOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
   skySunTerm?: (dir: any) => any;
   /**
+   * FILM OPT-IN: the sunlight's transmittance through the clouds to a world point — their shadows on the sea's
+   * sun-lit terms (surfaceMaterial `cloudSun`). Absent → no cloud shadows (the game).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  cloudSun?: (p: any) => any;
+  /**
    * True when the scene is rendered into a HALF-FLOAT pass target rather than
    * straight to the canvas — i.e. when post-processing is on. The §V24
    * scene-colour copy has to be allocated in that format or WebGPU rejects
@@ -122,6 +128,11 @@ export class OceanSurface {
   /** guards the one-shot warning below */
   private warnedHdrMismatch = false;
   private surface: OceanSurfaceMaterial;
+  /** the sea's key radiance, haze colour and key direction, as it sets them each frame — read-only (The Drift's
+   * swash draws its water as this sea draws its own, drift/wandering/shoreline.ts) */
+  get lightUniforms(): Pick<OceanSurfaceMaterial, 'sunColorUniform' | 'hazeColorUniform' | 'sunDirectionUniform'> {
+    return { sunColorUniform: this.surface.sunColorUniform, hazeColorUniform: this.surface.hazeColorUniform, sunDirectionUniform: this.surface.sunDirectionUniform };
+  }
   private grid: SurfaceGridOptions;
   /**
    * §V.30b QUANTISED EYE HEIGHT (m) the radial LOD is evaluated at — half
@@ -163,6 +174,7 @@ export class OceanSurface {
       opts.skyDomeColor,
       opts.fetch,
       opts.skySunTerm,
+      opts.cloudSun,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);

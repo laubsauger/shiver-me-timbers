@@ -554,6 +554,12 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, opt:
         const e: F[] = new Array(OCTAVES);
         e[OCTAVES - 1] = exp(tau.div(-(2 ** (OCTAVES - 1)))).toVar() as F;
         for (let k = OCTAVES - 2; k >= 0; k--) e[k] = e[k + 1].mul(e[k + 1]) as F;
+        // (at τ → 0 these octaves sum to twice the single-scattered light — Wrenninge's known gain in thin media.
+        // Weighting each by the chance of that many scatterings in the cloud about the point (a Poisson count in its
+        // optical depth) was tried for the 2026-10-29 "flat 255 blobs" near the Sun: there it took only 4–21% off,
+        // and the small cumulus 50° from the Sun went from 205/179/151 to 164/146/129 in sRGB, faint grey smudges. The
+        // small cells are all fringe, an optical depth of 1–2 where a real cumulus that size is ~10, and the octaves
+        // are what makes them read as cloud away from the Sun; the clipping near it was the grade's, domeCapture.ts)
         let ms = e[0].mul(phases[0]) as F;
         for (let k = 1; k < OCTAVES; k++) ms = ms.add(e[k].mul(phases[k]).mul(0.5 ** k)) as F;
         const powder = float(1).sub(exp(odNear.mul(-SIGMA * 2)).mul(powderK));

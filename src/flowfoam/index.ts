@@ -363,6 +363,9 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     regionUniforms: acc.uniforms,
     /** screen-space depth-compare mask factory for the water material (§V10) */
     maskNodeFactory: intersectionMaskNode,
+    /** the flow's live uniforms (its base drift direction and speed, its clock): what a consumer anchoring its own
+     * pattern to the drifting water reads (ocean surfaceMaterial's film wake lace) */
+    flowUniforms: flowU,
 
     /** coarse long-range wake texture (R = foam mask), stable identity */
     get farFoamTexture(): THREE.StorageTexture {

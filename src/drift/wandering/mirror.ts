@@ -8,7 +8,7 @@
  * mirror: ONE cube capture from the eye mirrored under the water (x, −y, z), of everything but the sea and the
  * sky, cleared transparent. For flat water the scene a ray reflected up from the surface meets is exactly what
  * that capture sees along the reflected direction; waves bend the lookup with the facet's own normal, and blur
- * it with its tilt and the distance.
+ * it with its tilt and the distance, and by the spread of the reflected rays across the pixel (`shade`).
  *
  * CLIPPED AT THE WATERLINE by an OBLIQUE NEAR PLANE (`clipToWater`): each face's near plane is the water, so
  * nothing under it is drawn — not the floating things' submerged halves (they had reflected as dark undersides
@@ -21,7 +21,7 @@
  * It plugs into the ocean through the same hook (ReflectionShadeInput → colour).
  */
 import * as THREE from 'three/webgpu';
-import { cubeTexture, float, mix, reflect, smoothstep, uniform } from 'three/tsl';
+import { cubeTexture, dFdx, dFdy, float, log2, mix, reflect, smoothstep, uniform } from 'three/tsl';
 import type { PlanarReflection } from '../../reflection';
 import type { ReflectionShadeInput } from '../../reflection/reflectionShading';
 
@@ -90,7 +90,17 @@ export function createCubeMirror(size: number, far: number): CubeMirror {
     const r = reflect(input.viewDirection.negate(), input.normalWorld);
     const tilt = float(1).sub(input.normalWorld.y.clamp(0, 1).mul(input.normalWorld.y.clamp(0, 1))).max(0).sqrt();
     const far = smoothstep(FADE[0], FADE[1], input.camDist);
-    const s = cubeTexture(target.texture, r).level(tilt.mul(BLUR_TILT).add(far.mul(BLUR_FAR)).clamp(0, 6));
+    // THE PIXEL'S OWN SPREAD OF REFLECTED RAYS (the 2026-10-29 AA review: "water seen past the raft deck is blocky",
+    // before and after MSAA). The level was the facet's tilt and the distance alone, so where the ripples turn the
+    // reflected ray faster than a mirror texel per pixel, each pixel took ONE texel of the beach, the forest or the
+    // raft from wherever its facet pointed: the sand and the trees came back as hard-edged sand-coloured blocks and
+    // flecks in the lagoon behind the raft (a 16:9 still at 545 s, fov 30, from the show's eye — unchanged with the
+    // raft hidden, its aeration off or the refraction off; a 512 px face texel is 0.18°, 7–8 pixels of that view).
+    // So the level is also the one the hardware would take from the ray's own derivatives — the spread across the
+    // pixel in mirror texels (a face spends size/2 texels a radian at its centre) — and the larger of the two wins:
+    // a choppy patch averages what its facets see, calm water stays as sharp as the capture.
+    const spread = dFdx(r).length().max(dFdy(r).length()).mul(size / 2).max(1e-6);
+    const s = cubeTexture(target.texture, r).level(log2(spread).max(tilt.mul(BLUR_TILT).add(far.mul(BLUR_FAR))).clamp(0, 6));
     const coverage = s.a.clamp(0, 1);
     // premultiplied: the transparent clear blended in under the geometry
     const seen = s.rgb.div(coverage.max(1e-3));

@@ -944,6 +944,17 @@ export const oceanSurfaceParams = registerParams(
      */
     shoreFadeEdge: 0,
     /**
+     * The Drift's swash sim (drift/wandering/swashSim.ts): world x0, z0, x1, z1 of the beach strip where the
+     * simulated water is the whole surface. The sea fades out over it only inside the band the sim's water fades in
+     * over (4–6 m in from its seaward edge, x0, where the sim's waves come in; 8–12 m in from its ends), so no sand
+     * ever shows between the two. x1 ≤ x0 = off
+     * (the game: the graph untouched). Read at build.
+     */
+    shoreSimX0: 0,
+    shoreSimZ0: 0,
+    shoreSimX1: 0,
+    shoreSimZ1: 0,
+    /**
      * B125: look the see-through scene up along the REFRACTED ray (1) instead of the straight view ray (0, the old
      * lookup, reproduced exactly). At a low lens the straight ray hung the submerged hull and outboard legs under the
      * boat, where her reflection is; the refracted ray squashes them up to the waterline (surfaceRefraction.ts). Live.
@@ -957,6 +968,15 @@ export const oceanSurfaceParams = registerParams(
      * exactly what it was (build-time gate: the game is untouched).
      */
     submergedLightPath: 0,
+    /**
+     * REFRACTED PATH (The Drift, 2026-10-30, the sunken agent's measurement): with the straight lookup
+     * (refractionSnell 0) the water's Beer–Lambert ran along the STRAIGHT view ray below the surface — at 10° down to a
+     * 1.5 m floor ~9 m of water where the light actually crosses ~2 m, so nothing on the lagoon floor read beyond a few
+     * metres and the shallows looked murkier than a lagoon's. 1: the path the light takes, the depth / cos θt (θt from
+     * Snell, n = 1.333), the lookup itself kept straight; between, a mix (live once built). 0 at build = off, the
+     * graph as it was (the game).
+     */
+    refractedLightPath: 0,
     /**
      * Fade the wave-normal refraction offset to nothing within this fraction of the viewport from its edge (0 = off,
      * build-time). A lookup off the frame — a dome cube face — reads its clamped edge texel: straight-edged smears along
@@ -1086,6 +1106,7 @@ export const oceanSurfaceParams = registerParams(
     shoreFadeEdge: { min: 0, max: 0.5, step: 0.005 },
     refractionSnell: { min: 0, max: 1, step: 1 },
     submergedLightPath: { min: 0, max: 2, step: 0.05 },
+    refractedLightPath: { min: 0, max: 1, step: 0.05 },
     refractionEdgeFade: { min: 0, max: 0.2, step: 0.005 },
     wakeAeration: { min: 0, max: 8, step: 0.1 },
     wakeSmoothLong: { min: 0, max: 1, step: 0.01 },

@@ -171,8 +171,9 @@ export interface HullContactParams {
 }
 
 export const HULL_CONTACT_DEFAULTS: HullContactParams = {
-  slapFoam: 0.8,
-  bowFoam: 0.4,
+  // (low: with the foam's 7 s life a raft lying still built a solid collar, drawn as a teal pool round it at nightfall)
+  slapFoam: 0.12,
+  bowFoam: 0.06,
   collarWidth: 0.1,
   chopSpread: 0.45,
   chopLengths: [6.5, 4.2, 2.8],
@@ -188,20 +189,23 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   rippleReach: 1,
   churnReach: 0.8,
   churnWay: 1,
-  shedSpacing: 3.2,
-  shedStrength: 0.5,
-  eddyCore: 0.9,
-  eddySpread: 0.03,
+  // (a blunt body sheds an eddy off each side in turn, ~1.5 beams apart: Strouhal ≈ 0.2 on its 5.4 m beam)
+  shedSpacing: 8,
+  shedStrength: 0.8,
+  // (a core a third of the beam: turns once in ~25 s at landing speed; a 0.9 m core spun foam into hair)
+  eddyCore: 1.9,
+  eddySpread: 0.04,
   eddyDecay: 22,
   eddyLife: 75,
-  eddyDimple: 0.06,
-  stirRadius: 2,
+  eddyDimple: 0.04,
+  // (the turbulent wake as wide as the beam, its eddies 8 m apart: blobs of half a beam overlap into one band)
+  stirRadius: 3,
   stirSpread: 0.06,
   stirDecay: 30,
   roughSlope: 0.5,
   roughLengths: [0.8, 0.55],
   spiral: 0.4,
-  roughen: 0,
+  roughen: 0.12,
   roughGain: 2.2,
   lumpHeight: 0.045,
   lumpLength: 1.5,
@@ -218,12 +222,19 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   // curved hairs in the clear lagoon at 518 s. The one-boot A/B, 2026-10-29: with the seabed's shadow lookup off, the
   // slick off, the coast hidden, the eddies' flow off or the bow's curl off they stayed; with these clumps off they
   // went; at 0.04/0.08 per m/s they were gone/faint. Kept under the lace's 0.35 coverage they are the milky tint alone)
-  aerFoam: 0.05,
+  // (OFF, 2026-10-30: the clumps' coverage drew the fanned straight smears behind the stern — a farm A/B at 545 s, clumps
+  // off removed them, the eddies, rings, roughness and push waves off did not; cause not yet found)
+  aerFoam: 0,
   aerReach: 6,
   aerCell: 1.7,
-  ringFoam: 0.5,
-  curlFoam: 1.2,
-  pushHeight: 0.14,
+  // (0: the rings, wound by their eddies' shear, were the fanned straight streaks off the stern corners at 545 s — the
+  // 2026-10-30 farm A/B: rings off or eddies off removed them, the clumps and the push waves did not)
+  ringFoam: 0,
+  // (0: the bow's curl was laid as a central streak the raft then sailed over and left astern)
+  curlFoam: 0,
+  // (0.05: a physical bow wave's few centimetres at this Froude number — at 0.14 the launches summed into big V-arms of
+  // crests, the Kelvin wake faked; the 2026-10-30 review: "the Kelvin wake stays physically tiny")
+  pushHeight: 0.05,
   pushLength: 2.2,
   pushDecay: 10,
   pushEvery: 0.4,
@@ -241,6 +252,9 @@ const EPS = 1e-6;
 const BLEND = 0.2;
 /** m: past this off the logs the near terms are not evaluated (each is e-folded well inside it) */
 const REACH = 5;
+/** the share of the chop's slaps that lay white water off the sides under way (see the collar). 0: laid continuously
+ * as the raft moves, they drew a line along each side of its track (2026-10-30) */
+const UNDER_WAY_SLAP = 0;
 /** m: the forward-difference step of the boils' slope (a dome is ~2 m across) */
 const BOIL_STEP = 0.25;
 /** m off the logs over which the pressure field's troughs open out (none at the logs: see the displacement term) */
@@ -270,6 +284,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const uPose = uniform(new THREE.Vector4(0, 0, 0, 1));
   /** (U m/s, step time s, chop toward x, z) */
   const uMotion = uniform(new THREE.Vector4(0, 0, 0, -1));
+  /** the stern's centre (x, z) and the direction it moves through the water (unit x, z): where the wake is LAID */
+  const uCourse = uniform(new THREE.Vector4(0, 0, 0, 1));
   /** (slapFoam, bowFoam, collarWidth, chopSpread) */
   const uFoam = uniform(new THREE.Vector4());
   /** (runup, runupReach, churnReach, churnWay) */
@@ -311,7 +327,9 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   /** (boilHeight, boilCell, boilSlick, boilPeriod) */
   const uBoil = uniform(new THREE.Vector4());
 
-  const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0, t: 0 };
+  const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0, t: 0, cx: 0, cz: 1 };
+  /** m/s: the water's own drift this step (the current that carries the raft and its wake alike) */
+  const drift = { x: 0, z: 0 };
   let odo = 0;
   let shed = 0;
   const eddies: Array<Eddy & { dimple: number }> = [];
@@ -376,6 +394,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       const elev = float(0).toVar();
       /** how churned the water is (0..∞, saturated below): alongside and just astern, from the near block */
       const churn = float(0).toVar();
+      /** 0..~1: the water worked alongside the logs (roughened, `roughen`) */
+      const alongside = float(0).toVar();
       /** m off the logs (large away from the raft): the trail's lumps keep clear of them (see the lumps below) */
       const offLogs = float(REACH).toVar();
       const rel = worldXZ.sub(vec2(uPose.x, uPose.y));
@@ -435,8 +455,14 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         // bow drew its own, nine parallel streaks combing out astern. The slaps' white water is for a raft lying still
         // (drifting, aground); under way the foam is the stern's churned patches (`patchFoam`), laid where a
         // world-anchored pattern says, not where the hull's edges are
+        // Under way the SIDES still slap (the 2026-10-29 review of 545 s: the contact line "artificial and very straight
+        // … too intense", where it should be "thin, broken, intermittent … where the chop slaps"): a share of the slaps,
+        // off the sides only (|nv| small: a bow or stern face under way lays a line astern), each a dash of white the
+        // raft leaves behind a metre or two long — intermittent with the chop's own rise, broken by the patches
         const still = smoothstep(0.6, 0.25, U);
-        const white = slap.mul(lee).mul(uFoam.x).add(bowFace.mul(uFoam.y)).mul(still);
+        const sideFace = smoothstep(0.45, 0.2, nv.abs());
+        const slapsUnderWay = slap.mul(sideFace).mul(UNDER_WAY_SLAP).mul(still.oneMinus());
+        const white = slap.mul(lee).mul(uFoam.x).add(bowFace.mul(uFoam.y)).mul(still).add(slapsUnderWay.mul(uFoam.x));
         const collar = out.div(uFoam.z.max(0.03)).negate().exp().mul(smoothstep(-0.25, 0, d));
         foam.assign(white.mul(collar).mul(patch));
         // THE BOW'S CURL under way (`curlFoam`): white where the leading logs' faces push into the water — the centre
@@ -444,17 +470,25 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         const curl = smoothstep(0.55, 0.9, nv).mul(smoothstep(halfBeam * 0.55, halfBeam * 0.35, u.abs()))
           .mul(smoothstep(bow - 3, bow - 1.5, v)).mul(U).mul(uCurl);
         foam.addAssign(curl.mul(collar).mul(patch.mul(0.6).add(0.4)));
-        // THE WAKE SCAR's source (`laneSlick`): under the logs and over the apron astern, its edge ragged in the world
+        // THE WAKE SCAR's source (`laneSlick`): over the apron ASTERN of the transom only, its edge ragged in the world.
+        // Not under and alongside the logs: laid there, the water beside the hull was glassy — "very plasticky" round the
+        // nearest logs (the 2026-10-29 review); alongside, the water the hull works is ROUGHENED instead (`roughen`)
         const ragged = fbm2(worldXZ.mul(0.18).add(vec2(3.1, 17.9)), 2).sub(0.5).mul(2).mul(uLane.z);
         const laneHalf = float(halfBeam).add(ragged);
-        const laneArea = smoothstep(laneHalf.add(0.5), laneHalf.sub(0.5), u.abs())
-          .mul(smoothstep(float(stern).sub(uLane.y).sub(0.5), float(stern).sub(uLane.y).add(0.5), v))
-          .mul(smoothstep(bow + 0.5, bow - 0.5, v));
+        // (the zones astern in the frame of the stern's MOTION through the water, from its centre: the trail is laid
+        // where the stern has been, along its course — a raft crabbing 20° through its turn in to the beach laid it
+        // off to one side in the hull's own frame, 2026-10-30)
+        const sr = worldXZ.sub(vec2(uCourse.x, uCourse.y));
+        const vC = sr.dot(vec2(uCourse.z, uCourse.w));
+        const uC = sr.dot(vec2(uCourse.w, uCourse.z.negate()));
+        const laneArea = smoothstep(laneHalf.add(0.5), laneHalf.sub(0.5), uC.abs())
+          .mul(smoothstep(uLane.y.negate().sub(0.5), uLane.y.negate().add(0.5), vC))
+          .mul(smoothstep(0.3, -0.5, vC));
         slick.assign(uLane.x.mul(uLane.w).mul(laneArea));
         // AERATED CLUMPS (`aerFoam`): over the first `aerReach` m astern, where world-anchored cells say
-        const behind = float(stern).sub(v);
+        const behind = vC.negate();
         const aerZone = smoothstep(-0.6, 0.6, behind).mul(smoothstep(uAer.y, uAer.y.mul(0.4), behind))
-          .mul(smoothstep(halfBeam + 1, halfBeam - 0.5, u.abs()));
+          .mul(smoothstep(halfBeam + 1, halfBeam - 0.5, uC.abs()));
         const cell = cellular2(worldXZ.div(uAer.z).add(vec2(7.7, 2.3)));
         const clumps = smoothstep(0.42, 0.12, cell.x).mul(cell.z.mul(0.6).add(0.4));
         foam.addAssign(uAer.x.mul(U).mul(aerZone).mul(clumps));
@@ -462,6 +496,10 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         const working = slap.add(U.mul(0.4)).add(0.25).min(2);
         churn.assign(smoothstep(stern + 2, stern - 1, v).mul(0.5).add(0.5)
           .mul(out.div(uRun.z.max(0.1)).negate().exp()).mul(U.mul(uRun.w)));
+        // the water the hull works ALONGSIDE (within churnReach of the logs, ahead of the transom), roughened: the
+        // slaps' chop and ripples, at rest as under way — never calmer than the open sea round it
+        alongside.assign(out.div(uRun.z.max(0.1)).negate().exp().mul(smoothstep(-0.5, 0.2, d)).mul(smoothstep(float(stern).sub(0.5), float(stern).add(0.5), v))
+          .mul(working.mul(0.5).add(0.4)));
         if (detail) {
           // ── 2. DISPLACEMENT: η = min(gain·U²/2g, heapMax)·Cp(c)·e^(−d⁺/reach), c = the core's normal on the bow axis
           // Cp: 1 at the stem (stagnation), sideCp abeam (the flow speeding past), sternCp at the transom
@@ -664,7 +702,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         slope.addAssign(pushSlope.mul(clearP).mul(bandKeep(uPushLength, texel)));
       }
       // the churned water banks roughness (a negative slick: see `roughen`) — between the boils; glassy on their tops
-      const banked = slick.add(uBoil.z.mul(boilTop)).sub(uRoughen.mul(stir).mul(boilTop.oneMinus()));
+      const banked = slick.add(uBoil.z.mul(boilTop)).sub(uRoughen.mul(stir.mul(0.3).add(alongside)).mul(boilTop.oneMinus()));
       // (the far tier takes the slick alone: its 2.5 m texels and 12 s foam life turned the bubbles into a broad milky
       // sheet with angular edges; bubbles are near-field, seconds old)
       return { rate: vec4(detail ? foam : float(0), banked, slope.x, slope.y), elev };
@@ -690,20 +728,40 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
     },
 
     /** this step's pose: centre (m), heading (rad, 0 = bow toward +z), way through the water (m/s), sea time (s),
-     * and the heading the wind's chop runs toward (rad) */
-    setPose(x: number, z: number, heading: number, speed: number, t: number, chopTo: number): void {
+     * the heading the wind's chop runs toward (rad), and the COURSE through the water (rad; default the heading) —
+     * where the stern actually goes, which the wake astern is laid along */
+    setPose(x: number, z: number, heading: number, speed: number, t: number, chopTo: number, course = heading): void {
       pose.x = x;
       pose.z = z;
       pose.fx = Math.sin(heading);
       pose.fz = Math.cos(heading);
+      pose.cx = Math.sin(course);
+      pose.cz = Math.cos(course);
+      uCourse.value.set(x + pose.fx * stern, z + pose.fz * stern, pose.cx, pose.cz);
       pose.speed = Number.isFinite(speed) ? Math.max(0, speed) : 0;
       pose.t = t;
       uPose.value.set(x, z, pose.fx, pose.fz);
       uMotion.value.set(pose.speed, t, Math.sin(chopTo), Math.cos(chopTo));
     },
 
+    /** the water's own drift (m/s, world) for the steps that follow: the eddies and the launched waves ride it, as the
+     * accumulation's foam and slick do (the page sets the same as flowfoam's base flow) */
+    setCurrent(x: number, z: number): void {
+      drift.x = Number.isFinite(x) ? x : 0;
+      drift.z = Number.isFinite(z) ? z : 0;
+    },
+
     /** one replay step of `dt` s at the pose last set: the odometer, the eddies shed off the stern corners, the uniforms */
     advance(dt: number): void {
+      // what was laid drifts with the water
+      for (const e of eddies) {
+        e.x += drift.x * dt;
+        e.z += drift.z * dt;
+      }
+      for (const q of pushes) {
+        q.x += drift.x * dt;
+        q.z += drift.z * dt;
+      }
       const prev = odo;
       odo += pose.speed * Math.max(0, dt);
       const spacing = Math.max(0.5, p.shedSpacing);
@@ -711,12 +769,13 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       for (let n = Math.floor(prev / spacing) + 1; n * spacing <= odo; n++) {
         const side = shed++ % 2 === 0 ? -1 : 1;
         const off = halfBeam + 0.3;
-        const aft = stern - 0.6;
         eddies.push({
-          x: pose.x + pose.fz * side * off + pose.fx * aft,
-          z: pose.z - pose.fx * side * off + pose.fz * aft,
+          x: pose.x + pose.fz * side * off + pose.fx * stern - pose.cx * 0.6,
+          z: pose.z - pose.fx * side * off + pose.fz * stern - pose.cz * 0.6,
           // port (side −1) turns +x → +z: the water by the hull dragged forward, the water outboard still
-          gamma: -side * p.shedStrength * pose.speed * 2 * halfBeam,
+          // Γ such that the water at the core's edge turns at shedStrength·U·0.3 (a bluff wake's eddies run at ~¼ of the
+          // way): Lamb–Oseen's v(rc) = 0.72·Γ/(2π·rc)
+          gamma: (-side * p.shedStrength * 0.3 * pose.speed * 2 * Math.PI * p.eddyCore) / 0.72,
           dimple: p.eddyDimple * pose.speed,
           born: pose.t,
         });
@@ -732,7 +791,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         // (each launch its own height, 0.3–1× — a hash of its slot: launches of one height every 0.4 s summed into a
         // regular train of concentric arcs, drawn in the glitter as ruled stripes near the eye, 2026-10-29)
         const h = Math.abs(Math.sin(slot * 12.9898) * 43758.5453) % 1;
-        if (pose.speed > 0.05) pushes.push({ x: pose.x, z: pose.z, rx: pose.fz, rz: -pose.fx, born: pose.t, amp: p.pushHeight * pose.speed * (0.3 + 0.7 * h * h) });
+        if (pose.speed > 0.05) pushes.push({ x: pose.x, z: pose.z, rx: pose.cz, rz: -pose.cx, born: pose.t, amp: p.pushHeight * pose.speed * (0.3 + 0.7 * h * h) });
       }
       const pushLife = HULL_PUSHES * every;
       while (pushes.length > 0 && (pushes.length > HULL_PUSHES || pose.t - pushes[0].born > pushLife)) pushes.shift();
@@ -776,7 +835,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       uStir.value.set(Math.min(p.stirDecay, p.eddyLife / 2.5), p.roughSlope, p.roughLengths[0], p.roughLengths[1]);
       uRoughen.value = Math.max(0, p.roughen);
       uRoughGain.value = Math.max(0, p.roughGain);
-      uLane.value.set(p.laneSlick, p.laneApron, p.laneRagged, smooth01(pose.speed / 0.5));
+      // (the scar's dose with the way the raft makes as it is laid: the newest wake fades as it slows)
+      uLane.value.set(p.laneSlick, p.laneApron, p.laneRagged, Math.min(1.5, pose.speed / 1.2));
       uAer.value.set(p.aerFoam, p.aerReach, Math.max(0.3, p.aerCell), p.ringFoam);
       uCurl.value = p.curlFoam;
       uLump.value.set(p.lumpHeight, Math.max(0.1, p.lumpLength), p.lumpFineHeight, Math.max(0.1, p.lumpFineLength));
@@ -785,6 +845,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
 
     /** back to calm water: no eddies, the odometer at 0 (a page that replays its wake from a fixed start) */
     reset(): void {
+      drift.x = 0;
+      drift.z = 0;
       odo = 0;
       shed = 0;
       eddies.length = 0;

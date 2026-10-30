@@ -20,7 +20,8 @@
  * skew off, its response fast, so the belly is the wind's alone — a steady sail on a light steady air, the same
  * in every frame. `sails` hoists it (0 furled: the cloth gone, the yard lowered; 1 set) as a continuous trim.
  *
- * Not yet: the ropes (a Verlet solve carried frame to frame) and the deck water (a simulation).
+ * The ropes: not the game's (a Verlet solve carried frame to frame) but its plan, laid afresh each frame between the
+ * same live sockets (raftRigLines.ts). Not yet: the deck water (a simulation).
  */
 import * as THREE from 'three/webgpu';
 import { buildRaftBlueprint } from '../../ship/raftBlueprint';
@@ -41,6 +42,7 @@ import { waterlineFromBlueprint, waterlineFromBox } from '../../sea-physics/hull
 import { raftLayout } from '../../ship/raftPartsLayout';
 import { createRaftLook, filmWaterline } from '../../ship/raftLook';
 import { dressRaft } from '../../ship/raftDress';
+import { createRaftRigLines } from './raftRigLines';
 
 /** s the sea's height is averaged over, and how many instants — CENTRED on t (t ± SETTLE/2: the film's sea is a pure
  * function of time, so the instants ahead are as known as those behind). A trailing window lagged the swell by
@@ -125,6 +127,10 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
   // …and dressed for a close camera (raftDress.ts: worn edges, the cabin's frame, real stores for the boxes)
   const dressed = look ? dressRaft(assembly.group, blueprint, look.factory, { tier: 'film' }) : null;
   look?.track(assembly.group);
+  // its rigging — the game's plan, laid each frame between the live sockets (raftRigLines.ts): sheets, braces, lifts,
+  // halyards and stays, so no clew or yard hangs free (the user, 2026-10-30: the topsail and the mizzen "don't really
+  // have a connection to the top with any kind of ropes")
+  const rig = look ? createRaftRigLines(assembly, blueprint, look.factory('lashing', 'base'), group) : null;
   // the fore centreboards worked down to just proud of their collars (the user: "the blades on the front pierce
   // the sail in some moments" — at the blueprint's half depth they stood a metre up under the course, which the
   // cloth sweeps through as the yard is lowered and hoisted); the aft pair, clear of the sail, as built
@@ -200,6 +206,7 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
       euler.set(-Math.atan(slopeV), heading, Math.atan(slopeU));
       group.quaternion.setFromEuler(euler);
       group.updateMatrixWorld(true);
+      rig?.update(1 - Math.min(1, Math.max(0, sails)));
       if (!o.far) {
         // the live waterline for the logs' under-water term (raftLook.ts `filmWaterline`): the sea at t itself, a
         // plane through the centre from four taps 2 m out — not the settle average the pose rides on

@@ -20,10 +20,15 @@ import {
 } from '../getTheDrift/atmosphere';
 
 type V3 = THREE.Node<'vec3'>;
+type F = THREE.Node<'float'>;
 
 /** m → Mm */
 const MM = 1e-6;
 const ATMOS_TOP = EARTH_R + 0.1;
+
+/** 0..1: how much of the clouds' shadow `SeaSky.cloudSun` casts, on everything that takes it (the sea, the sand and
+ * the seabed, the swash, the beach's pieces) — 1 the film; live (an A/B, a dial) */
+export const cloudShadow = uniform(1);
 
 export interface SeaSky {
   readonly mesh: THREE.Mesh;
@@ -31,6 +36,11 @@ export interface SeaSky {
   readonly dome: (dir: V3) => V3;
   /** the Sun's disc toward a direction (what the water transmits of it, looking up from below) */
   readonly sunTerm: (dir: V3) => V3;
+  /** the clouds' shadow at a world point under them: the sunlight's transmittance through the layer (clouds.ts
+   * CloudLight.sunThrough, the light volume the clouds are lit by — so the shadows drift with them, a pure function
+   * of the clouds' clock, soft over the volume's 100 m cells as a shadow cast from 1.2 km by a 0.5° Sun is); none
+   * without clouds */
+  readonly cloudSun?: (p: V3) => F;
   /** the eye (world, m above the mean sea) and the unit toward the Sun */
   update(eye: THREE.Vector3, sun: THREE.Vector3): void;
   /** rad per pixel of what is being drawn (the stars are drawn as wide as one) */
@@ -92,7 +102,7 @@ function skylightCpu(r: number, mu: number, air: Air): Rgb {
 }
 
 /** CPU twin of `scatter`: the sky's radiance toward d (unit, y up) from radius r0 on the +y axis */
-export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, steps = 48, air: Air = GROUND): Rgb {
+export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, steps = 48, air: Air = GROUND, maxDist = Infinity, through?: Rgb): Rgb {
   const mie = BETA_M * air.mie;
   const b = r0 * d.y;
   const c = r0 * r0;
@@ -100,7 +110,9 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
   const tTop = -b + Math.sqrt(Math.max(0, discTop));
   const discGnd = b * b - c + EARTH_R * EARTH_R;
   const tGnd = discGnd > 0 ? -b - Math.sqrt(discGnd) : -1;
-  const t1 = tGnd > 0 ? tGnd : tTop;
+  // (`maxDist`, Mm: the in-scatter of a path that ends there — the airlight in front of a far island, farAir.ts —
+  // and `through`, if given, the path's transmittance)
+  const t1 = Math.min(tGnd > 0 ? tGnd : tTop, maxDist);
   const ds = t1 / steps;
   let odR = 0;
   let odM = 0;
@@ -141,6 +153,7 @@ export function radianceCpu(r0: number, d: THREE.Vector3, S: THREE.Vector3, step
   const g2 = MIE_G * MIE_G;
   const phaseM = ((3 * (1 - g2)) / (8 * Math.PI * (2 + g2))) * (1 + mu * mu) / Math.pow(1 + g2 - 2 * MIE_G * mu, 1.5);
   const iso = air.ms / (4 * Math.PI);
+  if (through) for (let k = 0; k < 3; k++) through[k] = Math.exp(-(BETA_R_RGB[k] * odR + mie * 1.1 * odM + (air.ozone ? OZONE_RGB[k] * odO : 0)));
   return [0, 1, 2].map((k) => (inR[k] * BETA_R_RGB[k] * phaseR + inM[k] * mie * phaseM + (msR[k] * BETA_R_RGB[k] + msM[k] * mie) * iso) * SUN_E) as Rgb;
 }
 
@@ -193,11 +206,12 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
   const toGalaxy = uniform(night ? night.toGalaxy : new THREE.Matrix3());
   // the galaxy behind the air, dimmed along the ray (none below the horizon): its glow from the bake, its stars
   // as points `width` rad wide (nightSky.ts)
-  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>, sky: V3, width: THREE.Node<'float'>): V3 => {
+  const starsAlong = (d: V3, T: V3, hitGround: THREE.Node<'bool'>, sky: V3, width: THREE.Node<'float'>, points = true): V3 => {
     if (!night) return vec3(0);
     const g = toGalaxy.mul(d);
     const lum = sky.dot(vec3(0.2126, 0.7152, 0.0722));
     const seen = float(STAR_CONTRAST).div(lum.add(STAR_CONTRAST));
+    if (!points) return cubeTexture(night.texture, g).rgb.mul(seen).mul(T).mul(select(hitGround, float(0), float(NIGHT_GAIN))) as V3;
     // a star shows by its PEAK against the sky: drawn narrower than the bake drew it, its peak is (STAR_SIGMA /
     // width)² brighter for the same light, so a sky that much brighter hides it as the old star was hidden — or
     // the brightest came through the blue day sky of a 4K master as sharp dots (the night is not touched: its
@@ -254,9 +268,13 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     const d0 = normalize(dir);
     const d = normalize(vec3(d0.x, d0.y.max(0.003), d0.z));
     const air = scatter(o, d, C, S, GROUND);
-    // (the stars in it as wide as the bake drew them: a ripple turns the mirrored sky faster than the pixels
-    // step, and a pixel-wide star there would flicker from frame to frame)
-    return withClouds(air.light.add(starsAlong(d, air.T, air.hitGround, air.light, float(STAR_SIGMA))) as V3, d, REFLECTED);
+    // (the galaxy's glow in it, but no star as a point: the water's ripples, a few pixels each near the raft and far
+    // under one at the horizon, never mirror a star as one — the point stars, even as wide as the bake drew them, came
+    // through the rippled mirror as a dotted cyan line along the night sea's horizon (the QA sweep of 2026-10-30,
+    // s_0455; with the sea hidden it went, with its glints and its foam off it stayed). And nothing at the water's
+    // last few degrees, where every ray the far ripples tip under the horizon is held at the one height above it)
+    const stars = starsAlong(d, air.T, air.hitGround, air.light, float(STAR_SIGMA), false).mul(smoothstep(0.01, 0.08, d0.y));
+    return withClouds(air.light.add(stars) as V3, d, REFLECTED);
   };
   const sunTerm = (dir: V3): V3 => {
     const d = normalize(dir);
@@ -312,6 +330,7 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     mesh,
     dome,
     sunTerm,
+    cloudSun: cloudLight ? (p: V3) => mix(float(1), cloudLight.sunThrough(p, cameraPosition), cloudShadow) as F : undefined,
     sunColour,
     irradiance,
     horizon,

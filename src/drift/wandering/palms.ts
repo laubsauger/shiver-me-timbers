@@ -10,12 +10,14 @@
  *
  * Placed along the top of the beach (beats.ts COAST: `along` up the beach toward −z, `off` out to sea toward
  * −x), seeded, each scaled to a height of its own and leaning a little toward the sea, as palms on a beach do.
- * The walk runs at off −8; nothing stands nearer than off −13.
+ * The walk runs at off −8; nothing stands nearer than off −13. And THROUGH THE ISLAND (`inlandSlots`): coconut palms
+ * scattered and clustered all over our island's forest, standing out of its canopy (forest.ts).
  */
 import * as THREE from 'three/webgpu';
 import { atan, attribute, cameraPosition, diffuseColor, float, length, normalWorld, positionLocal, positionWorld, sin, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
+import { fbm2Cpu } from '../../terrain/noiseCpu';
 
 type Kind = 'dense' | 'coconut' | 'bent' | 'fan';
 const FILES: Record<Kind, string> = {
@@ -69,7 +71,85 @@ export function palmFeet(beach: { x: number; z: number }): Array<[number, number
 /** the share of the light a frond lets through (a coconut leaflet: thin, ~a quarter in the green) */
 const TRANSMIT = 0.45;
 
-type Slot = { along: number; off: number; kind: Kind; lean: number; turn: number; h: number };
+/** a palm's place, kind, lean (rad) and the way it leans (`dir`, rad about the vertical from toward the sea, −x),
+ * its turn about its trunk (rad), height (m), and its colour (a multiplier on its maps': fronds, bark) */
+type Slot = { along: number; off: number; kind: Kind; lean: number; turn: number; h: number; dir?: number; tint?: [THREE.Color, THREE.Color] };
+
+/**
+ * PALMS THROUGH THE ISLAND (the user, 2026-10-30, on the landing approach: "suddenly they are not palm trees
+ * anymore … too much of a homogeneous canopy … too evenly distributed"; the frame had palms only along the beach's
+ * front row, over an even broadleaf mass with tall rounded crowns on the ridge). On a real motu the coconut palms
+ * stand all through the forest and over it: from the water the skyline is palm heads — in groves and clumps, alone
+ * here and there, leaning every way, of every height — above a lower broadleaf canopy (forest.ts: 7–13 m now).
+ *
+ * INLAND_PALMS of them over our island's forest from INLAND_FROM m in (behind the edge trees' rows; the beach's own
+ * palms stand in front) to INLAND_TO, along the stretch of coast the film sees (INLAND_ALONG), where a slow field (PALM_GROVE m across) makes groves and stretches without: a palm is kept
+ * by its grove's density, densest in the first ~100 m behind the edge trees (from the water those make the skyline;
+ * the first round, 240 of them thinned over 160 m, put only a few heads above the edge trees at 575 s). Heights INLAND_H
+ * (m: over the canopy and the edge trees' 7–15 m; a coconut grows to 25 m), the
+ * lean up to INLAND_LEAN (rad) any way. Each its own colour (PALM_HUE, PALM_VALUE: ±; the fronds a little toward
+ * yellow-green, the bark in value only), and one in DEAD_SHARE with its fronds browned (dying, or a dry year). Their
+ * shadows are not drawn (they fall inland, onto the canopy, with the Sun over the sea in w1–w5; a shadow pass of 4M
+ * triangles saved).
+ */
+const INLAND_PALMS = 340;
+const INLAND_FROM = 30;
+/** m: where on the island they stand — along the beach (beats.ts `along`: the coast seen from the raft's run in, w1–w2,
+ * and from the beach, w3–w6) and at most this far inland (the island's far side is never seen from it) */
+const INLAND_ALONG: [number, number] = [-420, 445];
+const INLAND_TO = 240;
+const PALM_GROVE = 70;
+const INLAND_H: [number, number] = [13, 22];
+const INLAND_LEAN = 0.26;
+const PALM_HUE = 0.1;
+const PALM_VALUE = 0.14;
+const DEAD_SHARE = 0.08;
+/** the fronds' bias toward a coconut's yellow-green, and a browned crown's (multipliers on the maps' colour) */
+const FROND_BIAS: [number, number, number] = [1.06, 1.02, 0.86];
+const FROND_DEAD: [number, number, number] = [1.35, 0.95, 0.55];
+
+/** an island to scatter palms through: its land's box (world m), its ground, and m inland of its shore */
+export interface PalmIsland {
+  box: { x: [number, number]; z: [number, number] };
+  heightAt: (x: number, z: number) => number;
+  inland: (x: number, z: number) => number;
+}
+
+/** a palm's colour (PALMS THROUGH THE ISLAND), seeded */
+function palmTint(r: () => number, dead: boolean): [THREE.Color, THREE.Color] {
+  const hue = PALM_HUE * (2 * r() - 1);
+  const value = 1 + PALM_VALUE * (2 * r() - 1);
+  const bias = dead ? FROND_DEAD : FROND_BIAS;
+  const frond = new THREE.Color(value * (1 + hue) * bias[0], value * bias[1], value * (1 - 1.4 * hue) * bias[2]);
+  // (the bark only darker, if anything: "too bright of a bark", BARK)
+  const bark = new THREE.Color().setScalar(0.82 + 0.2 * r());
+  return [frond, bark];
+}
+
+/** the palms through the island (PALMS THROUGH THE ISLAND), in beach coordinates */
+function inlandSlots(isl: PalmIsland, beach: { x: number; z: number }, taken: Slot[]): Slot[] {
+  const r = rng(5311);
+  const out: Slot[] = [];
+  const all = (): Slot[] => [...taken, ...out];
+  const near = (along: number, off: number, d: number): boolean => all().some((s) => Math.hypot(s.along - along, s.off - off) < d);
+  for (let i = 0; out.length < INLAND_PALMS && i < 60000; i++) {
+    const x = isl.box.x[0] + (isl.box.x[1] - isl.box.x[0]) * r();
+    const z = beach.z - (INLAND_ALONG[0] + (INLAND_ALONG[1] - INLAND_ALONG[0]) * r());
+    const inland = isl.inland(x, z);
+    if (inland < INLAND_FROM || inland > INLAND_TO || isl.heightAt(x, z) < 0.8) continue;
+    const grove = fbm2Cpu(x / PALM_GROVE + 3.1, z / PALM_GROVE - 1.7, 3);
+    const keep = Math.min(1, Math.max(0, (grove - 0.38) / 0.24)) * (0.25 + 0.75 * Math.exp(-(inland - INLAND_FROM) / 90));
+    if (r() > keep) continue;
+    const along = beach.z - z;
+    const off = beach.x - x;
+    // (a clump's palms 3–6 m apart, as they come up from fallen nuts)
+    if (near(along, off, 3 + 3 * r())) continue;
+    const kind: Kind = r() < 0.8 ? 'dense' : 'coconut';
+    const h = INLAND_H[0] + (INLAND_H[1] - INLAND_H[0]) * Math.pow(r(), 0.8);
+    out.push({ along, off, kind, lean: 0.03 + INLAND_LEAN * r() * r(), turn: r() * Math.PI * 2, h, dir: r() * Math.PI * 2, tint: palmTint(r, r() < DEAD_SHARE) });
+  }
+  return out;
+}
 
 /** the palms' places, seeded: the two by hand, clusters along the top of the beach, the fan palms under them */
 function palmSlots(): Slot[] {
@@ -94,10 +174,14 @@ function palmSlots(): Slot[] {
   return slots;
 }
 
-export function createPalms(beach: { x: number; z: number }, ground: (x: number, z: number) => number, base = `${import.meta.env.BASE_URL}drift/pbr/blenderkit/`): Palms {
+export function createPalms(beach: { x: number; z: number }, ground: (x: number, z: number) => number, island?: PalmIsland, base = `${import.meta.env.BASE_URL}drift/pbr/blenderkit/`): Palms {
   const group = new THREE.Group();
   group.name = 'drift-palms';
   const slots = palmSlots();
+  // (the beach's palms take their colours too, from a seed of their own: PALMS THROUGH THE ISLAND)
+  const rt = rng(5207);
+  for (const s of slots) s.tint = palmTint(rt, false);
+  const inland = island ? inlandSlots(island, beach, slots) : [];
 
   const uSun = uniform(new THREE.Vector3(0, 1, 0));
   const uSunLight = uniform(new THREE.Vector3());
@@ -189,14 +273,15 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
   const ready = Promise.all(
     (Object.keys(FILES) as Kind[]).map(async (kind) => {
       const mine = slots.filter((s) => s.kind === kind);
-      if (!mine.length) return;
+      const theirs = inland.filter((s) => s.kind === kind);
+      if (!mine.length && !theirs.length) return;
       const g = await loader.loadAsync(base + FILES[kind]);
       g.scene.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(g.scene);
       const height = box.max.y - box.min.y;
       const cx = (box.min.x + box.max.x) / 2;
       const cz = (box.min.z + box.max.z) / 2;
-      const parts: THREE.Mesh[] = [];
+      const parts: Array<THREE.Mesh & { fronds?: boolean }> = [];
       g.scene.traverse((o) => {
         const m = o as THREE.Mesh;
         if (!m.isMesh) return;
@@ -205,32 +290,46 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
         geo.translate(-cx, -box.min.y, -cz);
         const mats = (Array.isArray(m.material) ? m.material : [m.material]) as THREE.MeshStandardMaterial[];
         const drawn = mats.map((mat) => (mat.alphaTest > 0 || mat.transparent ? leafOf(mat) : trunkOf(mat, kind)));
-        parts.push(new THREE.Mesh(geo, Array.isArray(m.material) ? drawn : drawn[0]));
+        const part: THREE.Mesh & { fronds?: boolean } = new THREE.Mesh(geo, Array.isArray(m.material) ? drawn : drawn[0]);
+        // (a mesh of fronds takes its palm's frond colour; one with any bark in it, the bark's)
+        part.fronds = mats.every((mat) => mat.alphaTest > 0 || mat.transparent);
+        parts.push(part);
       });
-      const feet = new Float32Array(mine.length * 4);
-      const crowns = new Float32Array(mine.length * 3);
-      const matrices = mine.map((s, i) => {
-        const x = beach.x - s.off;
-        const z = beach.z - s.along;
-        const k = s.h / height;
-        // lean toward the sea (−x), turned about its own trunk
-        const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), s.lean).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.turn));
-        const foot = new THREE.Vector3(x, ground(x, z) - 0.15, z);
-        feet.set([foot.x, foot.y, foot.z, s.h], i * 4);
-        crowns.set(new THREE.Vector3(0, s.h * (s.kind === 'fan' ? 0.75 : 0.92), 0).applyQuaternion(q).add(foot).toArray(), i * 3);
-        return new THREE.Matrix4().compose(foot, q, new THREE.Vector3(k, k, k));
-      });
-      for (const p of parts) {
-        p.geometry.setAttribute('palmFoot', new THREE.InstancedBufferAttribute(feet, 4));
-        p.geometry.setAttribute('palmCrown', new THREE.InstancedBufferAttribute(crowns, 3));
-        const inst = new THREE.InstancedMesh(p.geometry, p.material, matrices.length);
-        matrices.forEach((m, i) => inst.setMatrixAt(i, m));
-        inst.instanceMatrix.needsUpdate = true;
-        inst.castShadow = true;
-        inst.receiveShadow = true;
-        inst.computeBoundingSphere();
-        inst.name = `drift-palm-${kind}`;
-        group.add(inst);
+      // the beach's palms, and those through the island (no shadows: PALMS THROUGH THE ISLAND)
+      for (const [set, name, shadows] of [[mine, kind, true], [theirs, `${kind}-inland`, false]] as const) {
+        if (!set.length) continue;
+        const feet = new Float32Array(set.length * 4);
+        const crowns = new Float32Array(set.length * 3);
+        const matrices = set.map((s, i) => {
+          const x = beach.x - s.off;
+          const z = beach.z - s.along;
+          const k = s.h / height;
+          // lean toward the sea (−x; or `dir` round from it), turned about its own trunk
+          const q = new THREE.Quaternion()
+            .setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.dir ?? 0)
+            .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), s.lean))
+            .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.turn - (s.dir ?? 0)));
+          const foot = new THREE.Vector3(x, ground(x, z) - 0.15, z);
+          feet.set([foot.x, foot.y, foot.z, s.h], i * 4);
+          crowns.set(new THREE.Vector3(0, s.h * (s.kind === 'fan' ? 0.75 : 0.92), 0).applyQuaternion(q).add(foot).toArray(), i * 3);
+          return new THREE.Matrix4().compose(foot, q, new THREE.Vector3(k, k, k));
+        });
+        for (const p of parts) {
+          const geo = p.geometry.clone();
+          geo.setAttribute('palmFoot', new THREE.InstancedBufferAttribute(feet, 4));
+          geo.setAttribute('palmCrown', new THREE.InstancedBufferAttribute(crowns, 3));
+          const inst = new THREE.InstancedMesh(geo, p.material, matrices.length);
+          matrices.forEach((m, i) => {
+            inst.setMatrixAt(i, m);
+            inst.setColorAt(i, set[i].tint![p.fronds ? 0 : 1]);
+          });
+          inst.instanceMatrix.needsUpdate = true;
+          inst.castShadow = shadows;
+          inst.receiveShadow = true;
+          inst.computeBoundingSphere();
+          inst.name = `drift-palm-${name}`;
+          group.add(inst);
+        }
       }
     }),
   ).then(() => undefined);

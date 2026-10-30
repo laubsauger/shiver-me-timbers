@@ -65,7 +65,7 @@ import { foamSourceAgesNode } from '../flowfoam/foamAge';
 import type { FlowFoam } from '../flowfoam';
 import { contactFoamNode } from '../flowfoam/intersectionMask';
 import { flowFoamParams } from '../params/flowfoam';
-import { valueNoise2 as valueNoise } from '../terrain/noise';
+import { hash2, valueNoise2 as valueNoise } from '../terrain/noise';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 // §V.33: the water's per-channel extinction K_d has ONE owner and it is not
 // this file — see `uAbsorption` below. Params module only, so no import cycle
@@ -216,6 +216,10 @@ const MICRO_AMP_SCALE = Math.sqrt(
  * specular door.
  */
 const COX_MUNK_CALM_SLOPE_VAR = 0.003;
+/** m: the film wake lace's world coordinate is wrapped this often (its noise kept in float32's good range far out) */
+const LACE_WRAP = 4096;
+/** the film wake lace's filaments and blotches (0 = off: only dense coverage white, see the wake composite) */
+const LACE_FILAMENTS = 0;
 
 /**
  * §V.44 ceiling on the sun lobe's radiance, in scene-linear units BEFORE
@@ -274,6 +278,13 @@ export function buildOceanSurfaceMaterial(
    * in force there.
    */
   skySunTerm?: (dir: TslNode) => TslNode,
+  /**
+   * FILM OPT-IN: the clouds' shadow — the sunlight's transmittance through the cloud layer to a world point (the
+   * Drift's `SeaSky.cloudSun`, clouds.ts `CloudLight.sunThrough`). It darkens every sun-lit term with the sun's
+   * shadow map (`shade`: the wrap light, the body's scatter, the foam's sun, the glint road and its sparkle) and
+   * never the reflected sky. Absent (the game) → no node, the sea unchanged.
+   */
+  cloudSun?: (p: TslNode) => TslNode,
 ): OceanSurfaceMaterial {
   /**
    * §V24 scene-colour copy target — and a §V28-class silent failure if it is
@@ -448,6 +459,7 @@ export function buildOceanSurfaceMaterial(
   const uTransmitFloor = uniform(sp.transmissionFloor);
   const uShoreFade = uniform(sp.shoreFadeThickness);
   const uShoreEdge = uniform(sp.shoreFadeEdge);
+  const uRefractedPath = uniform(sp.refractedLightPath);
   const uLightPath = uniform(sp.submergedLightPath);
   const uRefractEdge = uniform(sp.refractionEdgeFade);
   const uWakeAeration = uniform(sp.wakeAeration);
@@ -856,6 +868,14 @@ export function buildOceanSurfaceMaterial(
   const totalDisp = clip
     ? vec3(rawDisp.x, clip.clipped, rawDisp.z)
     : rawDisp;
+  /**
+   * FILM OPT-IN: the clouds' shadow here (`cloudSun`), a `varying` as the fetch gain above is, and for the same
+   * reason: the cloud light volume is two filterable 3D textures, and the FRAGMENT stage has one sampler spare
+   * (§V.40) — sampled there, they would have overrun it and the sea would never have drawn. In the vertex stage they
+   * take 2 of its 10 spare. The shadow is metres-to-hundreds-of-metres soft (the volume's 100 m cells), so the grid's
+   * interpolation loses nothing. Absent (the game) → no node, no binding.
+   */
+  const cloudVary = cloudSun ? varying(cloudSun(vec3(worldXZ.x, totalDisp.y, worldXZ.y))) : null;
 
   /**
    * §V.30b: the drawn vertex is the LOD-placed grid point plus the displacement
@@ -1451,7 +1471,9 @@ export function buildOceanSurfaceMaterial(
     const fresnel = uFresnelR0
       .add(float(1).sub(uFresnelR0).mul(pow(float(1).sub(cosTheta), 5)))
       .clamp(0, 1);
-    const shade = mix(float(1), shadowMask, uShadowStrength);
+    // (and under the clouds' shadows, film only: the open notes' "cloud shadows on the sea")
+    const shadeMap = mix(float(1), shadowMask, uShadowStrength);
+    const shade = (cloudVary ? shadeMap.mul(cloudVary as TslNode) : shadeMap) as typeof shadeMap;
     // Sun-elevation gate: below the low edge there is no direct sun at all
     // (§B: at 18.5h the sun has SET, which is why the water went dead — not a
     // shader gate). The high edge must stay LOW or a horizon-kissing sunset
@@ -1587,12 +1609,17 @@ export function buildOceanSurfaceMaterial(
       : float(1);
     // (params submergedLightPath: + the way the light came DOWN to what is seen, its depth under the surface along the
     // straight view path — the view-z thickness as a ray length, the Snell lookup's own conversion, × the ray's dip)
-    const lightPath = sp.submergedLightPath > 0
-      ? thicknessMeters.add(
-          thicknessMeters.mul(eyeDist.div(ownDepth.mul(uCameraFar).max(1e-3)))
-            .mul(eyeRay.y.negate().div(eyeDist).max(0)).mul(uLightPath),
-        )
+    // (params refractedLightPath: the view's way back along the REFRACTED ray — the depth under the surface over
+    // cos θt, θt from Snell at n = WATER_IOR — not the straight ray's ~4–5× longer one at a grazing view; the lookup
+    // stays straight. Deep water stays deep: the path is at least the depth, ≤ 1.5× it at grazing)
+    const straightLen = thicknessMeters.mul(eyeDist.div(ownDepth.mul(uCameraFar).max(1e-3)));
+    const dip = eyeRay.y.negate().div(eyeDist).max(0);
+    const viewPath = sp.refractedLightPath > 0
+      ? mix(thicknessMeters, straightLen.mul(dip).div(float(1).sub(float(1).sub(dip.mul(dip)).div(WATER_IOR * WATER_IOR)).max(1e-4).sqrt()), uRefractedPath)
       : thicknessMeters;
+    const lightPath = sp.submergedLightPath > 0
+      ? viewPath.add(straightLen.mul(dip).mul(uLightPath))
+      : viewPath;
     const seeThrough = uAbsorption
       .mul(lightPath)
       .negate()
@@ -1918,12 +1945,14 @@ export function buildOceanSurfaceMaterial(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeMaskFresh: any = null;
       let wakeCoverageW8: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any -- W8: the mask's coverage (wakeWhiteNode)
+      let wakeOnlyCoverage: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any -- the flowfoam coverage alone (wakeAeration)
       let wakeContactW8: any = float(0); // eslint-disable-line @typescript-eslint/no-explicit-any -- W8: hull-contact share of it
       {
         wakeFresh = flowFoam?.wakeFoamFreshnessNode ? flowFoam.wakeFoamFreshnessNode(worldXZ) : null;
         const wakeCoverage = flowFoam
           ? flowFoam.foamSampleNode(worldXZ).clamp(0, 1)
           : float(0);
+        wakeOnlyCoverage = wakeCoverage;
         const shoreState = foam ? foam.shoreSampleNode(worldXZ) : null;
         const shoreCoverage = shoreState ? shoreState.x : float(0);
         const shoreFresh = shoreState ? shoreState.y.div(shoreState.x.max(1e-5)).clamp(0, 1) : float(0);
@@ -2108,11 +2137,49 @@ export function buildOceanSurfaceMaterial(
       // the surface — the body taking a milky tint, under the reflection, as the sim's W8 path does — and the white
       // lace kept to dense coverage (the slaps, a bow's curl), where thin coverage drawn through the lace art read as
       // hair-fine streaks
-      if (sp.wakeAeration > 0 && flowFoam && !flowFoam.wakeWhiteNode && wakeCoverageW8) {
-        const aer = float(1).sub(wakeCoverageW8.mul(uWakeAeration).negate().exp()).mul(foamGain).mul(whitecapAmount.oneMinus());
+      // The bubbles are the WAKE's (flowfoam's coverage alone): the contact line and the shore's swash are not aerated
+      // water, and tinting them drew a uniform milky-cyan rule along every log (the 2026-10-29 review of 545 s: "the
+      // waterline looks kind of artificial and very straight … too intense")
+      if (sp.wakeAeration > 0 && flowFoam && !flowFoam.wakeWhiteNode && wakeCoverageW8 && wakeOnlyCoverage) {
+        const aer = float(1).sub(wakeOnlyCoverage.mul(uWakeAeration).negate().exp()).mul(foamGain).mul(whitecapAmount.oneMinus());
         col.addAssign((uWakeAerColor as unknown as THREE.Node<'vec3'>).mul(lightWrap).sub(transmitted).mul(aer).mul(reflWeight.oneMinus()));
-        // @band-limited-elsewhere: a VALUE gate on the filtered wake coverage sample, no spatial period
-        wakeAmount = wakeAmount.mul(smoothstep(0.35, 0.75, wakeCoverageW8));
+        // THE WAKE'S WHITE, ITS OWN (the 2026-10-30 review: "these stripey bits … way too straight smears, something
+        // that we would never see on the water"): the whitecap lace art drew the wake's coverage as dead-straight
+        // parallel lines (one farm A/B: the lace off removed them, the aeration off did not). Foam behind a slow hull
+        // is broken, CURVED filaments and blotches that spread and fade (turbulent water, its bubbles and surfactant;
+        // ship-wake slick and foam literature): here iso-lines of a domain-warped noise, cut into pieces, with blotches
+        // where it is dense — anchored to the water (drifting with flowfoam's own base flow, its clock), sampled
+        // wrapped every LACE_WRAP m (the coast's world is 40 km out: a noise there quantises), its filaments faded to
+        // their mean once a pixel outgrows them
+        const fu = flowFoam.flowUniforms;
+        const q = worldXZ.sub(fu.uFlowDir.mul(fu.uBaseSpeed.mul(fu.uTime))).div(LACE_WRAP).fract().mul(LACE_WRAP);
+        const lfbm = (c: any, oct: number): any => {
+          let sum: any = float(0);
+          let amp = 0.5;
+          let freq = 1;
+          for (let i = 0; i < oct; i++) {
+            sum = sum.add(valueNoise(c.mul(freq)).mul(amp));
+            amp *= 0.5;
+            freq *= 2.03;
+          }
+          return sum.div(1 - Math.pow(0.5, oct));
+        };
+        const warp = vec2(lfbm(q.mul(0.3), 2), lfbm(q.mul(0.3).add(vec2(7.1, 2.9)), 2)).sub(0.5).mul(2.4);
+        const ln = lfbm(q.mul(1.4).add(warp), 3);
+        // @band-limited-elsewhere: the filaments fade to their mean below (`resolvedLace`)
+        const fil = float(1).sub(ln.sub(0.5).abs().mul(5)).clamp(0, 1);
+        const pieces = smoothstep(0.38, 0.6, lfbm(q.mul(0.7).add(vec2(13.7, 5.1)), 2));
+        const blot = smoothstep(0.6, 0.8, lfbm(q.mul(0.55).add(warp.mul(0.5)).add(vec2(3.3, 9.7)), 3));
+        // @band-limited-elsewhere: this IS the band limit (the pixel's footprint against the filaments' ~0.1 m width)
+        const resolvedLace = smoothstep(0.12, 0.05, fwidth(q).length());
+        const filament = mix(float(0.12), fil.mul(fil).mul(pieces), resolvedLace);
+        const cover = wakeOnlyCoverage.clamp(0, 1);
+        // @band-limited-elsewhere: VALUE gates on the filtered wake coverage sample
+        // (OFF for now — LACE_FILAMENTS 0: in the last farm round, 2026-10-30, the filaments still read as fanned smears
+        // in a grazing view behind the raft. Only dense coverage is drawn white; thin coverage is the aeration tint alone)
+        const laceW = filament.max(blot.mul(0.8)).mul(smoothstep(0.04, 0.35, cover)).mul(LACE_FILAMENTS)
+          .add(smoothstep(0.6, 0.95, cover).mul(0.5)).clamp(0, 1);
+        wakeAmount = laceW.mul(0.85).mul(foamGain).mul(whitecapAmount.oneMinus());
       }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));
@@ -2209,8 +2276,13 @@ export function buildOceanSurfaceMaterial(
     // band-limited where it is built (`cellSize` from `pixWorld`, above) and
     // dissolved into its own mean by `resolvable` below.
     // @band-limited-elsewhere — hash of an integer lattice index, no gradient
-    const sparkleHash = cell.dot(vec2(127.1, 311.7)).sin().mul(43758.5453).fract();
-    const phase = cell.dot(vec2(269.5, 183.3)).sin().mul(19741.77).fract();
+    // SIN-FREE (tests/gpuSinHash.test.ts): fract(sin(n)·43758) differs between Apple's and NVIDIA's GPUs by up to
+    // 0.75, so the Mac and the render farm drew different sparkles. hash2 of an integer is the same on every GPU;
+    // the cell taken mod 4096 first (exact for whole numbers) so its input stays small enough for hash2's fract to
+    // keep its bits — the film's sea lies 40 km out, a 5.6 cm cell's index ~7·10⁵ there
+    const cellH = cell.mod(4096);
+    const sparkleHash = hash2(cellH);
+    const phase = hash2(cellH.add(vec2(17, 59)));
     const wobble = phase.mul(6.28).add(timeUniform.mul(0.9)).sin().mul(0.05);
     // density threshold: sparse outside the sun path, dense inside it
     const thr = mix(uSparkleDensity.x, uSparkleDensity.y, glintTrain);
@@ -2297,8 +2369,8 @@ export function buildOceanSurfaceMaterial(
     // within the cell. It picks WHERE the glint sits; the glint's own extent is
     // `radPix`, sized in pixels against the footprint.
     // @band-limited-elsewhere — hash of an integer lattice index, no gradient
-    const jx = cell.add(vec2(0.37, 0.11)).dot(vec2(419.2, 371.9)).sin().mul(29831.3).fract();
-    const jz = cell.add(vec2(0.71, 0.53)).dot(vec2(213.7, 157.3)).sin().mul(17635.9).fract();
+    const jx = hash2(cellH.add(vec2(101, 37)));
+    const jz = hash2(cellH.add(vec2(43, 211)));
     const inset = radPix.div(cellPix).min(0.5);
     const jitter = vec2(jx, jz).mul(float(1).sub(inset.mul(2))).add(inset);
     const distPix = cellUv.sub(cell).sub(jitter).mul(cellPix).length();
@@ -2740,7 +2812,18 @@ export function buildOceanSurfaceMaterial(
     // (the last bit of water wanders along the shore, 0.4–1.6 × shoreFadeEdge: one width everywhere drew the
     // water's end as one even line)
     const edgeWidth = uShoreEdge.mul(valueNoise(worldXZ.mul(0.9)).mul(0.6).add(valueNoise(worldXZ.mul(3.1).add(7.7)).mul(0.6)).add(0.4));
-    const fade = shoreFadeOver(behind, uShoreEdge.greaterThan(0).select(edgeWidth, uShoreFade));
+    let fade = shoreFadeOver(behind, uShoreEdge.greaterThan(0).select(edgeWidth, uShoreFade));
+    // (params shoreSimX0…Z1: none over the film's swash sim, whose water is the surface there; built only when set)
+    if (sp.shoreSimX1 > sp.shoreSimX0) {
+      const [x0, z0, x1, z1] = [sp.shoreSimX0, sp.shoreSimZ0, sp.shoreSimX1, sp.shoreSimZ1];
+      // (the sea goes only where the sim's water is already whole: past the band the sim fades in over — 1–4 m in
+      // from its seaward edge, 8 m from its ends — so no sand ever shows between the two)
+      const inside = smoothstep(float(x0 + 4), float(x0 + 6), worldXZ.x)
+        .mul(smoothstep(float(z0 + 8), float(z0 + 12), worldXZ.y))
+        .mul(smoothstep(float(z1 - 8), float(z1 - 12), worldXZ.y))
+        .mul(smoothstep(float(x1), float(x1 - 0.5), worldXZ.x));
+      fade = fade.mul(float(1).sub(inside));
+    }
     material.opacityNode = hullMask ? hullMaskOceanNode(hullMask).mul(fade) : fade;
   }
   // §V.24: transparent flag routes the mesh into the transparent pass where
@@ -2865,6 +2948,7 @@ export function buildOceanSurfaceMaterial(
     uTransmitFloor.value = sp.transmissionFloor;
     uShoreFade.value = sp.shoreFadeThickness;
     uShoreEdge.value = sp.shoreFadeEdge;
+    uRefractedPath.value = Math.min(1, Math.max(0, sp.refractedLightPath));
     uLightPath.value = sp.submergedLightPath;
     uRefractEdge.value = sp.refractionEdgeFade;
     uWakeAeration.value = sp.wakeAeration;

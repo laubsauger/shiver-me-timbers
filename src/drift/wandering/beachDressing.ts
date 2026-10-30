@@ -48,7 +48,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { attribute, exp, float, mix, positionLocal, positionWorld, smoothstep, texture, uniform, uv, vec3 } from 'three/tsl';
+import { attribute, exp, float, mix, positionLocal, positionWorld, smoothstep, texture, uniform, uv, vec3, vertexStage } from 'three/tsl';
 import { fbm2Cpu } from '../../terrain/noiseCpu';
 import { rng } from '../undertime/web';
 import { beatStarts, coastEye } from './beats';
@@ -280,8 +280,9 @@ const INLAND: [number, number] = [-1, 30];
 const FOOT = { spread: 2.2, dark: 0.35, tall: 0.4, darkMax: 0.7, lip: 0.04 };
 /** m the footprint floats over the sand (with a depth offset): the terrain mesh is ground() at half-metre vertices */
 const FOOT_LIFT = 0.008;
-/** linear albedo of the dry sand (beachMaterial.ts's dry layer, measured): what clings to a piece's foot */
-const SAND: [number, number, number] = [0.52, 0.43, 0.34];
+/** linear albedo of the dry sand (beachMaterial.ts's dry layer, measured): what clings to a piece's foot, and what
+ * the sea's hemisphere light bounces up from the beach (sea.ts) */
+export const SAND_ALBEDO: [number, number, number] = [0.52, 0.43, 0.34];
 
 export interface BeachDressing {
   readonly group: THREE.Group;
@@ -477,7 +478,7 @@ export function placeBeachDressing(o: DressingSite): Record<DressingKind, Dressi
 
 /** the dressing of our beach (placeBeachDressing), its scans loaded from `base` and instanced, each piece with its
  * contact footprint */
-export function createBeachDressing(o: DressingSite & { base?: string }): BeachDressing {
+export function createBeachDressing(o: DressingSite & { base?: string; cloudSun?: (p: THREE.Node<'vec3'>) => THREE.Node<'float'> }): BeachDressing {
   const { ground, beach } = o;
   const base = o.base ?? `${import.meta.env.BASE_URL}drift/pbr/`;
   const group = new THREE.Group();
@@ -523,7 +524,15 @@ export function createBeachDressing(o: DressingSite & { base?: string }): BeachD
     // it covered nearly all a sunk pebble shows, ~1–2 cm, and the pale coral read as brown sand)
     const over = positionWorld.y.sub(anchor.y);
     const sanded = float(1).sub(smoothstep(0.001, anchor.w.mul(0.04).add(0.003), over)).mul(0.5);
-    m.colorNode = mix(own, vec3(...SAND), sanded);
+    m.colorNode = mix(own, vec3(...SAND_ALBEDO), sanded);
+    // (the light the sunlit sand bounces up onto a piece's shaded side is the scene's: sea.ts's hemisphere light
+    // takes it as its ground colour on the coast — without it, the second pass's sticks, leaves and pebbles "read
+    // blue-grey under the evening sky light", their shaded sides lit by the blue sky alone)
+    // (the clouds' shadows on its sunlight, as on the sand it lies on: seaSky.ts cloudSun, read at the vertex)
+    if (o.cloudSun) {
+      const through = vertexStage(o.cloudSun(positionWorld));
+      (m as unknown as { receivedShadowNode: unknown }).receivedShadowNode = (s: THREE.Node<'float'>) => s.mul(through);
+    }
     m.name = `drift-beach-${src.name}`;
     made.set(key, m);
     return m;

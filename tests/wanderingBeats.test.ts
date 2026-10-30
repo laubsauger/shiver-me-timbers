@@ -1,6 +1,7 @@
 /**
  * Part C and Act 3 on one clock (src/drift/wandering/beats.ts). Time passes in dissolves (the user's call,
- * 2026-10-27): the light and the surroundings crossfade, the camera never stops. So the tests hold the parts
+ * 2026-10-27): the light and the surroundings crossfade, the camera never stops — or, where a beat runs on in one
+ * shot, in a time-lapse (c4's nightfall, the 2026-10-29 review). So the tests hold the parts
  * that make that true: every instant is drawn by one beat, or two crossfading, and only at the planned
  * dissolves; where the eye is against the raft, and where it goes on the coast, change smoothly and slowly
  * (a jump there is a cut, a jolt is "stop and go"); and within a beat the Sun moves only slowly ("real time").
@@ -12,6 +13,9 @@ const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
 const rest: RaftPose = { bearing: 0.26, distance: 18, heading: -1.5, height: 3 };
 const beach = { x: -39310, z: 150 };
+
+/** deg between two unit vectors */
+const deg = (a: number[], b: number[]): number => (Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * 180) / Math.PI;
 
 describe('the beats after the landing', () => {
   it('moves the Sun on without a jump wherever a beat follows another without a dissolve', () => {
@@ -54,10 +58,12 @@ describe('the beats after the landing', () => {
       expect(ps.reduce((s, p) => s + p.weight, 0)).toBeCloseTo(1, 9);
       if (ps.length === 2) dissolving.add(ps[1].name);
     }
-    // the time-of-day jumps: c3's last light to c4's night, the night to w1's morning, w2's late morning to w3's
-    // golden hour, w5's dusk to the outro's night; nowhere else — not c1 into c2, one continuous shot whose Sun
-    // is scripted down to c2's (two worlds crossfaded there showed two suns and two rafts)
-    expect([...dissolving].sort()).toEqual(['c4', 'w1', 'w3', 'w6']);
+    // the time-of-day jumps: the night to w1's morning, w2's late morning to w3's golden hour, w5's dusk to the
+    // outro's night; nowhere else — not c1 into c2, one continuous shot whose Sun is scripted down to c2's (two
+    // worlds crossfaded there showed two suns and two rafts), and not c3 into c4 any more: night falls there in a
+    // time-lapse in one shot (the 2026-10-29 review: a dissolve brought the Milky Way up "very instant and fast …
+    // like a bad transition"; the lapse test below holds it)
+    expect([...dissolving].sort()).toEqual(['w1', 'w3', 'w6']);
     // a dissolve is centred on its beat's start and lasts what the beat says
     for (const b of BEATS.filter((x) => x.dissolve > 0)) {
       expect(beatsAt(starts[b.name] - b.dissolve / 2 - 0.01, c1End)).toHaveLength(1);
@@ -132,22 +138,51 @@ describe('the beats after the landing', () => {
     expect(landfall(starts.w2 + 50, c1End, from, beach)).toEqual(landfall(starts.w5, c1End, from, beach));
   });
 
-  it('looks round toward the land only slowly, and is back along the beach for the flock', () => {
+  it('looks round toward the land and to the birds only slowly, and is back along the beach between', () => {
+    // (every turn of the dome's eye at most ~1.5°/s at its fastest: the dome's comfort, docs/drift/WORKING-NOTES.md —
+    // camera turns "about 1° a second or less" — a turn the whole audience is carried through; the w4 look toward
+    // the sandpipers was 22° over 8 s, 4.7°/s, and is 10° over 10 s now, the user not being able to judge its speed
+    // from a 16:9 view, 2026-10-30)
     const h = 0.1;
     let fastest = 0;
     for (let t = starts.w1; t < total; t += h) fastest = Math.max(fastest, (Math.abs(coastLook(t + h, c1End) - coastLook(t, c1End)) / h) * (180 / Math.PI));
-    expect(fastest).toBeLessThan(1.5);
+    expect(fastest).toBeLessThanOrEqual(1.5);
     expect(coastLook(starts.w1 + 10, c1End)).toBeCloseTo(0, 9);
     expect(coastLook(starts.w4, c1End)).toBeCloseTo(0, 9);
+    // w4: round to the left, out over the sea where the flock wheels ("we should tilt a little to the left to watch
+    // the sandpipers", the 2026-10-29 review), and back along the beach before the wanderers come past in w5
+    const D = Math.PI / 180;
+    expect(coastLook(starts.w4 + 20, c1End) / D).toBeGreaterThan(8);
+    expect(coastLook(starts.w5, c1End)).toBeCloseTo(0, 9);
   });
 
   it('moves the Sun within a beat as real time would, slowly', () => {
-    const deg = (a: number[], b: number[]): number => (Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * 180) / Math.PI;
-    for (const b of BEATS) {
+    // (direction.md: "within a beat the light runs in real time, slowly (under 0.15°/s)"; time passes between
+    // beats, in a dissolve — or, where a beat says so, in a time-lapse, the next test)
+    for (const b of BEATS.filter((x) => !x.lapse)) {
       const h = 1;
       let fastest = 0;
       for (let t = starts[b.name]; t < starts[b.name] + b.length; t += h) fastest = Math.max(fastest, deg(beatSun(b.name, t, c1End), beatSun(b.name, t + h, c1End)) / h);
-      expect(fastest).toBeLessThan(0.15);
+      expect(fastest, b.name).toBeLessThan(0.15);
+    }
+  });
+
+  it('lets a time-lapse beat bring its light down in one continuous run, then hold it as real time again', () => {
+    // (c4: night falls in a time-lapse in place of a dissolve — the 2026-10-29 review — so the Sun may move fast
+    // there, but never jump: eased in from where the beat before left it, still again once the lapse is run, so the
+    // night after it is a night, not a Sun still sinking)
+    const lapsed = BEATS.filter((x) => x.lapse);
+    expect(lapsed.length).toBeGreaterThan(0);
+    for (const b of lapsed) {
+      const s = starts[b.name];
+      const span = Math.abs(b.sunEl[1] - b.sunEl[0]);
+      const h = 1 / 30;
+      let fastest = 0;
+      for (let t = s; t < s + b.lapse!; t += h) fastest = Math.max(fastest, deg(beatSun(b.name, t, c1End), beatSun(b.name, t + h, c1End)) / h);
+      // continuous: no faster than the eased run's own peak (1.5 × its span over its length), so no step anywhere
+      expect(fastest, b.name).toBeLessThan((1.5 * span) / b.lapse! + 0.01);
+      // and done: from the lapse's end to the beat's, the Sun stands
+      expect(deg(beatSun(b.name, s + b.lapse!, c1End), beatSun(b.name, s + b.length - 0.01, c1End)), b.name).toBeLessThan(0.01);
     }
   });
 });

@@ -7,11 +7,13 @@
  *
  *   - OUR ISLAND is a MOTU, a low, long island on a lagoon's reef: a white beach on its lagoon side, a berm, the
  *     island behind it 2–3 m over the sea (its height is its trees: forest.ts), a sand flat a couple of metres
- *     deep running 300 m out to where the lagoon floor drops away, and a sandbar trailing off its point ahead;
+ *     deep running 300 m out to where the lagoon floor drops away, and ahead a spit curving out into the lagoon;
+ *     not an even bar from the air but a bay and a point behind the walk, a neck and a wide wooded lobe (OURS_PLAN);
  *   - ACROSS THE LAGOON, three more motus (wide low bands of trees on a white rim) and a HIGH ISLAND, an eroded
  *     volcano 7 km off: "from sea level, islands are low slivers" — Tubuai spans 63° and peaks 3.2° up (§12.6).
- *   - ON THE HIGH ISLAND'S SUMMIT, a guyed radio mast with one red lamp still blinking (radioTower.ts): the hill was
- *     a mountaintop over a drowned coast, not a tropical island (the user, 2026-10-29: the first sunken-world cue).
+ *   - A RADIO TOWER ON EVERY ISLAND (radioTower.ts, the network's beacons): a heavy mast on the high island's summit,
+ *     a guyed relay on motu 2, a self-supporting tower on motu 1, and one inland on ours, glimpsed over the trees —
+ *     the hills were mountaintops over a drowned coast, not tropical islands (the user, 2026-10-29).
  *
  * Every shape is a pure function of position, built once: its own terrain meshes on the game's terrain material
  * (the scanned beach through `hooks`, the swash, the wet sand, the water light over the shallows, the haze), and
@@ -30,7 +32,10 @@ import type { WaterLevelFn } from '../../island/archipelago';
 import type { TerrainBlendHooks } from '../../terrain/sandMaterial';
 import type { AerialUniforms } from '../../terrain/aerialPerspective';
 import { fbm2Cpu, gradNoise2Cpu } from '../../terrain/noiseCpu';
-import { createRadioTower, summitOf } from './radioTower';
+import { FILM_COAST, HIGH_SECOND, HIGH_SECOND_MAST, OURS_MAST, createRadioTower, ridgeSite, summitOf, terrainAir } from './radioTower';
+import { farAir } from './farAir';
+import type { MastAir, MastSite } from '../../radio/mast';
+import { stationOf } from '../../radio/network';
 
 type Keys = Array<[number, number]>;
 
@@ -179,9 +184,68 @@ const OURS_WIDTH = monotone([
   [560, -60],
   [800, -240],
 ]);
+/**
+ * OUR ISLAND'S PLAN, beyond the walk (the user, 2026-10-30, from the air: "does it really need to be such an even
+ * width? Couldn't it be a little more interestingly shaped? … this perfectly straight and even bar, unnecessarily so";
+ * the plan approved the same night). On top of the shore and width above, each a smooth bump with compact support
+ * ((1 − u²)², so it leaves its neighbours with no kink), m:
+ *
+ *   the lagoon shore   a bay 55 m in at along −282; a small point 30 m out at −505 (both `cove`s: flat-bottomed);
+ *                      and ahead, past the point at +380, a SPIT curving out into the lagoon (its shore
+ *                      0.00194·(along − 380)² further out: ~30 m at +500, ~130 m at +640), wooded down its middle,
+ *                      sinking away past +700
+ *   the ocean shore    a NECK at −400, the island ~90 m across (it was ~285); a wide wooded LOBE at −680, ~400 m
+ *                      across (~265); bays 90 m in at −930, 45 m in at +330, and a shallow one 40 m in at +60; and
+ *                      outside the walk's stretch a wander of its own (±~25 m over ~180 m)
+ *
+ * THE WALK IS UNTOUCHED: no lagoon-side bump reaches along −175..+380 (w2–w5's beach, the swash sim's domain at along
+ * −110..+90, the dressing, the plants and the palms, the forest's fine walk box at −220..+260), so the beach's ground
+ * is what it was to a micrometre (tests/driftCoastPlan.test.ts; the forest floor behind the berm, which feels the far
+ * shore, ≤ 3 cm). Our island's radio tower (radioTower.ts OURS_MAST, along +250, 120 m inland) stands where it stood.
+ */
+const plan = (along: number, at: number, half: number): number => {
+  const u = (along - at) / half;
+  return Math.abs(u) < 1 ? (1 - u * u) ** 2 : 0;
+};
+/** a bay's or a point's: flat across its middle third, eased out to nothing at ±half (a round bay, where `plan`'s
+ * peak drew the lagoon shore in a V: the first aerial) */
+const cove = (along: number, at: number, half: number): number => smooth(1, 0.35, Math.abs(along - at) / half);
+/** the spit: its width (m, lagoon shore to the far shore), handed over from the island's own past +360 */
+// (wide enough for a line of trees down its middle — the forest grows from 27 m inland (forest.ts): a bare 40–60 m
+// strip of sand was a thread on the horizon from the beach, the first round's sunset view; across the off axis the
+// spit is wider than it is truly across by 1/cos of its curve, ~1.3 at +600)
+const SPIT_WIDTH = monotone([
+  [360, 100],
+  [440, 95],
+  [520, 110],
+  [600, 115],
+  [660, 75],
+  [700, 10],
+  [760, -90],
+  [820, -200],
+]);
+/** a shore's own wander along it (m: ±1 over ~`wave` m), so no bump is a drawn arc */
+const shoreWander = (along: number, wave: number, seed: number): number => gradNoise2Cpu(along / wave, seed).v * 1.6;
+export const OURS_PLAN = {
+  /** m the lagoon shore moves out (+, toward −x) or in: none over the walk (−175..+380), and only past it wandering */
+  shore: (along: number): number => {
+    const beyond = smooth(-175, -260, along) + smooth(380, 460, along);
+    return -55 * cove(along, -282, 107) + 30 * cove(along, -505, 90) + 0.00194 * Math.max(0, along - 380) ** 2 + 8 * beyond * shoreWander(along, 120, 7.3);
+  },
+  /** m across, the plan's: the island's own with the ocean side's neck, lobe, bays and wander (the spit's past +360).
+   * Over −290..+275 only a shallow bay 250 m behind the walk's beach at +60: the beach and the swash's sand do not feel
+   * the ocean shore (motuHeight's smooth min is the plain min there, the far profile > 0.8 m over the near one), the
+   * scrub and the forest floor behind the berm by ≤ 3 cm (tests/driftCoastPlan.test.ts) */
+  width: (along: number): number => {
+    const away = smooth(-290, -340, along) + smooth(275, 320, along);
+    const own =
+      OURS_WIDTH(along) - 210 * plan(along, -400, 90) + 130 * plan(along, -680, 170) - 90 * plan(along, -930, 60) - 40 * plan(along, 60, 110) - 45 * plan(along, 330, 55) + 18 * away * shoreWander(along, 180, 2.9);
+    return own + (SPIT_WIDTH(along) - own) * smooth(360, 420, along);
+  },
+};
 const OURS: MotuShape = {
-  shore: OURS_SHORE,
-  width: OURS_WIDTH,
+  shore: (along) => OURS_SHORE(along) + OURS_PLAN.shore(along),
+  width: OURS_PLAN.width,
   front: OURS_FRONT,
   back: OURS_BACK,
   detail: (along, off, sf, sb) => {
@@ -212,6 +276,12 @@ const OURS: MotuShape = {
     return h;
   },
 };
+
+/** our island's ground (m over the sea) at beach coordinates (along, off); `plan` false: as it stood before OURS_PLAN
+ * (the tests hold the walk's beach to it) */
+export function oursHeight(along: number, off: number, plan = true): number {
+  return motuHeight(plan ? OURS : { ...OURS, shore: OURS_SHORE, width: OURS_WIDTH }, along, off);
+}
 
 /** a far motu: a low, treed island on a white rim, its own sand flat round it */
 function farMotu(length: number, width: number, seed: number): MotuShape {
@@ -247,9 +317,11 @@ const FAR_MOTUS: Array<{ bearing: number; dist: number; turn: number; length: nu
 ];
 /** the high island: bearing, distance (m), the turn of its long axis (deg), its half-extents (m) and peak (m) */
 const HIGH = { bearing: -42, dist: 7400, turn: 25, rx: 3000, rz: 1700, peak: 430 };
-/** m: the high island's air, an exponential haze over distance (§12.5: islands 10+ km off go sky-blue; at 7 km the
- * high island across the lagoon is blue-grey, not gone — the ocean's own haze, which the near land shares, is done
- * by its 4.6 km rim). Its ground (forest.ts createForestGround) and the radio tower on its summit melt on it alike. */
+/** m: the high island's air, the marine air's extinction e-folding (in green) over distance (§12.5: islands 10+ km
+ * off go sky-blue; at 7 km the high island across the lagoon is blue-grey, not gone — the ocean's own haze, which the
+ * near land shares, is done by its 4.6 km rim). Its ground (forest.ts createForestGround) and its radio towers are
+ * seen through it alike (farAir.ts: the light this air scatters in front of them, in their own bearing — not the
+ * horizon's colour, which had made the island paler than its sky: the user, 2026-10-30). */
 export const HIGH_AIR = 8500;
 
 /**
@@ -429,9 +501,12 @@ export interface FilmCoast {
   /** the floor the ocean shades its depth against */
   readonly seabed: SeabedField;
   readonly materials: IslandMaterials;
-  /** resolves once the set's own models are in: the radio tower's (radioTower.ts) */
+  /** resolves once the set's own models are in: the radio towers' (radioTower.ts) */
   readonly ready: Promise<void>;
-  /** per frame: the terrain's light, haze, swash and the live sea level at our beach, and the tower's lamp */
+  /** the network's stations that stand on this coast: each one's id and its lamp (world) — the Rose's beams run to
+   * them in w6 (props.ts) */
+  readonly towers: ReadonlyArray<{ id: string; lamp: [number, number, number] }>;
+  /** per frame: the terrain's light, haze, swash and the live sea level at our beach, and the towers' lamps */
   update(frame: Omit<IslandFrame, 'waterLevel'>, waterLevelAt: WaterLevelFn): void;
   /** the far islands: each one's world centre, its height function and its rough reach (m) — forest.ts grows
    * their trees */
@@ -451,7 +526,7 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
   const terrainMat = materials.terrain.material;
 
   // OUR ISLAND, in beach coordinates (along toward −z, off toward −x)
-  const oursAt = (x: number, z: number): number => motuHeight(OURS, bz - z, bx - x);
+  const oursAt = (x: number, z: number): number => oursHeight(bz - z, bx - x);
   /** m inland of our nearer shore (forest.ts: where the trees may stand) */
   const oursInland = (x: number, z: number): number => {
     const along = bz - z;
@@ -542,7 +617,8 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
     const along = bz - z;
     const off = bx - x;
     const floor = floorAt(x, z);
-    let h = along > -1150 && along < 800 && off > -560 && off < 470 ? Math.max(floor, oursAt(x, z)) : floor;
+    // (wide enough for the plan's lobe, its ocean slope onto the reef, and the spit's sand flat out in the lagoon)
+    let h = along > -1150 && along < 800 && off > -800 && off < 800 ? Math.max(floor, oursAt(x, z)) : floor;
     for (const m of motus) {
       if (Math.abs(x - m.c[0]) < m.reach + 300 && Math.abs(z - m.c[1]) < m.reach + 300) h = Math.max(h, m.heightAt(x, z));
     }
@@ -562,7 +638,7 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
   // our island: half-metre cells where the eye walks and looks, coarser out to where the floor is deep
   {
     const us = graded(-1150, 800, -190, 170, 0.5, 6);
-    const vs = graded(-560, 470, -55, 32, 0.4, 5);
+    const vs = graded(-800, 800, -55, 32, 0.4, 5);
     add(
       gridMesh(us, vs, (along, off, out) => ((out[0] = bx - off), (out[1] = bz - along)), (x, z) => Math.max(LAGOON_FLOOR, oursAt(x, z))),
       'coast-ours',
@@ -582,11 +658,39 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
     const vs = graded(hc[1] - HALF, hc[1] + HALF, hc[1] - 3600, hc[1] + 3600, 14, 30);
     add(gridMesh(us, vs, (x, z, out) => ((out[0] = x), (out[1] = z)), (x, z) => Math.max(LAGOON_FLOOR - 16, highAt(x, z))), 'coast-high', false, o.high?.(materials.terrain.uniforms.aerial.color));
   }
-  // THE RADIO TOWER on the high island's summit, its first leg's guys toward our beach (radioTower.ts): the summit is
-  // the skyline from every eye of w1–w6 (radioTower.ts has the numbers), so the whole mast stands against the sky
+  // THE RADIO TOWERS (radioTower.ts: the network's stations that stand on this coast), each first leg's guys toward
+  // our beach: on the high island's summit (the skyline from every eye of w1–w6), on each named motu's spine (its
+  // most inland point), and inland on ours behind the forest — each melting on its own island's air
+  const aerial = materials.terrain.uniforms.aerial;
   const summit = summitOf(highAt, hc, 3600);
-  const tower = createRadioTower({ ground: highAt, at: [summit.x, summit.z], toward: [bx, bz], haze: materials.terrain.uniforms.aerial.color, air: HIGH_AIR });
-  group.add(tower.group);
+  const spine = (m: (typeof motus)[number]): [number, number] => {
+    let best: [number, number, number] = [m.c[0], m.c[1], -Infinity];
+    for (let x = m.box.x[0]; x <= m.box.x[1]; x += 5) {
+      for (let z = m.box.z[0]; z <= m.box.z[1]; z += 5) {
+        const v = m.inland(x, z);
+        if (v > best[2]) best = [x, z, v];
+      }
+    }
+    return [best[0], best[1]];
+  };
+  const on: Record<(typeof FILM_COAST)[string], { site: MastSite; air: MastAir; lod?: 0 | 1 }> = {
+    high: { site: { ground: highAt, at: [summit.x, summit.z], toward: [bx, bz] }, air: farAir.air },
+    motu1: { site: { ground: heightAt, at: spine(motus[0]), toward: [bx, bz] }, air: terrainAir(aerial) },
+    motu2: { site: { ground: heightAt, at: spine(motus[1]), toward: [bx, bz] }, air: terrainAir(aerial) },
+    // (seen from a few hundred metres: the kit's full detail)
+    ours: { site: { ground: heightAt, at: [bx - OURS_MAST.off, bz - OURS_MAST.along], toward: [bx, bz] }, air: terrainAir(aerial), lod: 0 },
+  };
+  const towers = Object.entries(FILM_COAST).map(([id, where]) => {
+    const t = createRadioTower(on[where].site, stationOf(id).mast, { air: on[where].air, haze: aerial.color, lod: on[where].lod });
+    group.add(t.group);
+    return { id, tower: t };
+  });
+  // (and the high island's second mast on its summit ridge, beside the first as the beach sees them: radioTower.ts)
+  if (HIGH_SECOND_MAST) {
+    const t = createRadioTower({ ground: highAt, at: ridgeSite(highAt, [summit.x, summit.z], [bx, bz]), toward: [bx, bz] }, HIGH_SECOND, { air: on.high.air, haze: aerial.color });
+    group.add(t.group);
+    towers.push({ id: 'treetops-second', tower: t });
+  }
 
   // THE SEABED the ocean reads: the same floor, baked over the lagoon round our island and the near motus (5.6 km
   // square, 2.7 m texels; the high island's own shallows are too far to read), half-float, mipped (seabed.ts says
@@ -626,16 +730,20 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
     heightAt,
     seabed,
     materials,
-    ready: tower.ready,
+    ready: Promise.all(towers.map((t) => t.tower.ready)).then(() => undefined),
+    towers: towers.map((t) => ({ id: t.id, lamp: t.tower.lamp })),
     islands: [
-      { name: 'ours', box: { x: [bx - 75, bx + 335], z: [bz - 445, bz + 1005] }, heightAt: oursAt, inland: oursInland },
+      // (the plan's: the spit reaching ~250 m out at +700, the lobe ~440 m in at −660)
+      { name: 'ours', box: { x: [bx - 270, bx + 460], z: [bz - 720, bz + 1005] }, heightAt: oursAt, inland: oursInland },
       ...motus.map((m, i) => ({ name: `motu${i + 1}`, box: m.box, heightAt: m.heightAt, inland: m.inland })),
     ],
     update(frame, waterLevelAt) {
       // the swash reads the live sea at our beach, where the eye is (the far islands' shores are too far to read)
       materials.update({ ...frame, waterLevel: waterLevelAt(bx - 10, bz) });
-      // (the tower's lamp blinks on the sea's clock)
-      tower.setTime(frame.time);
+      // (the towers' lamps blink on the sea's clock)
+      for (const t of towers) t.tower.setTime(frame.time);
+      // (the high island's air, from this eye under this Sun: farAir.ts)
+      farAir.update(frame.cameraPosition, frame.sunDirection);
     },
   };
 }

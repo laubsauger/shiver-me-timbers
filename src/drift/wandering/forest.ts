@@ -3,11 +3,12 @@
  * "island greens are dark and olive, and turn blue with distance"; from sea level an island is a wide, low band of
  * trees on a white rim). The game's islands had none — bare sand domes and tan blocks, the v11 review.
  *
- *   - THE CANOPY: every motu's interior is a shell over its trees' crowns. A crown is a dome on a jittered grid
- *     (a pure hash of its cell, so any point finds its neighbours without a table), and the shell is the highest
- *     crown over each point: the broccoli-head top of a broadleaf forest, gaps dark between the crowns. Its edge
- *     ramps down to scrub over the last metres before the sand, the forest's wall facing the beach. Each crown has
- *     its own green (broadleaf, dark, young yellow-green, grey ironwood) baked into the vertices with its shade.
+ *   - THE CANOPY: every motu's interior is a shell over its trees' crowns. A crown is a few lobes on a jittered
+ *     grid (a pure hash of its cell, so any point finds its neighbours without a table), and the shell is the highest
+ *     crown over each point, over a sub-canopy of smaller trees: a broadleaf forest's rough top, in groves and
+ *     clearings (THE CANOPY AS A MOTU'S, below). Its edge ramps down to grey-green scrub over the last metres before
+ *     the sand, the forest's wall facing the beach. Each crown has its own green (its species', turned in hue and
+ *     value) baked into the vertices with its shade.
  *   - THE LEAVES at the edge we walk along: alpha-cut cards of the anthurium scan's leaves (Poly Haven CC0, the
  *     plants already on the beach: plants.ts) laid over the shell's surface, so the wall the eye passes at 25 m is
  *     leaves with sky between them, not a smooth green hull. Lit by the shell's own normal, as a crown's leaves are.
@@ -15,13 +16,13 @@
  *     shaded as canopy (`createForestGround`), bare rock where too steep, a sand rim at the water.
  */
 import * as THREE from 'three/webgpu';
-import { attribute, cameraPosition, cameraViewMatrix, diffuseColor, exp, float, mix, modelWorldMatrix, normalView, normalWorld, normalWorldGeometry, output, positionViewDirection, positionWorld, select, smoothstep, texture, uniform, vec3, vec4, vertexColor } from 'three/tsl';
-import type { AerialUniforms } from '../../terrain/aerialPerspective';
+import { attribute, cameraPosition, cameraViewMatrix, diffuseColor, exp, float, mix, modelWorldMatrix, normalView, normalWorld, normalWorldGeometry, positionViewDirection, positionWorld, select, smoothstep, texture, uniform, vec3, vec4, vertexColor } from 'three/tsl';
 import { fbm2, cellular2 } from '../../terrain/noise';
 import { fbm2Cpu, hash2Cpu } from '../../terrain/noiseCpu';
 import { LITTER_RES } from './beachMaterial';
-// (HIGH_AIR is the high island's air, kept with the island in coast.ts: its radio tower melts on the same curve)
-import { graded, HIGH_AIR } from './coast';
+import { graded } from './coast';
+// (the high island's air: the light 7 km of marine air scatters in front of it, as its radio towers have it)
+import { farAir } from './farAir';
 import { rng } from '../undertime/web';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -38,7 +39,9 @@ export interface ForestIsland {
 }
 
 /** the trees of a forest: crown spacing (m), heights (m), radii (m), where they start inland (m), the shell's
- * cell (m) — fine near the walk, coarse elsewhere — and a seed */
+ * cell (m) — fine near the walk, coarse elsewhere — a seed, and its emergents: the share of crowns that stand out
+ * of the canopy, and whether they are PALM HEADS (narrow, tall: a far motu's, whose real palms are too far to draw)
+ * or broad spreading crowns (ours, among the real palms: palms.ts) */
 interface Stand {
   spacing: number;
   top: [number, number];
@@ -47,25 +50,82 @@ interface Stand {
   edge: [number, number];
   cell: [number, number];
   seed: number;
+  emergent: number;
+  heads: boolean;
 }
 
-/** linear albedos of the crowns (leaf greens are dark: 5–10% reflectance) and their shares */
-const SPECIES: Array<{ share: number; albedo: [number, number, number] }> = [
-  { share: 0.5, albedo: [0.048, 0.064, 0.03] },
-  { share: 0.2, albedo: [0.03, 0.041, 0.022] },
-  { share: 0.18, albedo: [0.072, 0.082, 0.036] },
-  { share: 0.12, albedo: [0.044, 0.053, 0.042] },
+/**
+ * THE CANOPY AS A MOTU'S (the 2026-10-30 QA sweep, item 4: "far canopy = rows of identical egg-shaped crowns … reads
+ * as CG at once"; and the user that night, on the landing approach: "these higher trees look a little bit silly … too
+ * much of a homogeneous canopy … too evenly distributed … these high trees look like something from Mario … all of
+ * these leaves are kind of exactly the same colour"). An A/B at 575 s pinned the eggs on this shell, not on the edge
+ * trees' far clumps: each crown was a paraboloid cap only 0.75 r deep on a jittered 6.2 m grid, and between the crowns
+ * the shell fell to the understorey 1.2 m over the ground — so every crown taller than its neighbours stood on a
+ * vertical wall of its own, a column with a round top, and the one-in-eleven emergents (narrower, 5–11 m taller) were
+ * the lollipops on the ridge. Four greens, each crown's only change its brightness.
+ *
+ * What an island's broadleaf forest is (Pisonia, Calophyllum, Barringtonia, breadfruit, Tournefortia; the palms above
+ * it are palms.ts): crowns wider than they are tall, irregular — a main dome and lesser lobes leaning off it, some
+ * round, some flat-topped and spreading — packed over a lower layer of smaller trees, so the canopy is a continuous
+ * rough surface, not crowns on stalks; taller in groves and lower and broken in clearings (GROVE); every crown its own
+ * hue and value; here and there a dead one. So:
+ *   - a crown is a main dome and up to three lesser lobes, each with a profile `top − depth·d^p`: p 1.6 rounded …
+ *     4.8 flat-topped, depth 0.3–0.6 of its radius (wider than tall), its height and radius tied (a big tree has a
+ *     big crown); an emergent broadleaf broad and spreading, its skirt down into the canopy;
+ *   - between crowns the shell falls to the SUB-CANOPY (SUB of the stand's mean height, less in clearings), not to
+ *     the ground, so no crown stands on a wall; at the forest's edge the scrub's 1.2 m as before;
+ *   - groves (GROVE m across) raise or lower whole stretches and thin them out: a crown in GAP is missing where the
+ *     grove is thinnest;
+ *   - every crown's leaves broken up in height by BUMP (a ragged top against the sky, not a smooth dome);
+ *   - its colour a species' (SPECIES) turned in hue and value per crown (HUE, VALUE: ±12%).
+ */
+/** m: the groves' and clearings' scale */
+const GROVE = 60;
+/** share of the stand's mean height the sub-canopy stands at, between the crowns (in a grove; less in a clearing) */
+const SUB = 0.5;
+/** the most crowns missing where the grove is thinnest */
+const GAP = 0.35;
+/** a crown's height broken up by its leaf masses: ± this share of its radius, at BUMP_SCALE m */
+const BUMP = 0.14;
+const BUMP_SCALE = 2.4;
+/** each crown's own hue (warmer ↔ cooler) and value, ± (shares) */
+const HUE = 0.12;
+const VALUE = 0.13;
+
+/** linear albedos of the crowns (leaf greens are dark: 5–10% reflectance) and their shares (§12.5: dark and olive) */
+const SPECIES: Array<{ share: number; albedo: [number, number, number]; name: string }> = [
+  { name: 'pisonia', share: 0.28, albedo: [0.066, 0.083, 0.03] },
+  { name: 'calophyllum', share: 0.22, albedo: [0.026, 0.038, 0.019] },
+  { name: 'barringtonia', share: 0.2, albedo: [0.045, 0.06, 0.028] },
+  { name: 'breadfruit', share: 0.1, albedo: [0.058, 0.082, 0.026] },
+  { name: 'tournefortia', share: 0.12, albedo: [0.058, 0.066, 0.05] },
+  // (a Terminalia's leaves turning red before they drop, a few in every crown)
+  { name: 'terminalia', share: 0.05, albedo: [0.066, 0.054, 0.028] },
+  // (dead or dying: bare grey-brown branches and a few leaves)
+  { name: 'dead', share: 0.03, albedo: [0.074, 0.065, 0.052] },
 ];
+const DEAD = SPECIES.length - 1;
+/** the understorey between crowns (dark: light that never gets in), and the grey-green scrub at the forest's edge
+ * (Scaevola, the strand's shrub) */
+const UNDER: [number, number, number] = [0.03, 0.041, 0.022];
+const SCRUB_TINT: [number, number, number] = [0.05, 0.06, 0.043];
 
 interface Crown {
   x: number;
   z: number;
-  r: number;
-  top: number;
+  /** m: its lobes, the main one first — x, z, radius, top */
+  lobes: Array<[number, number, number, number]>;
+  /** m from a lobe's top to its rim, and the profile's exponent */
   depth: number;
-  species: number;
-  tint: number;
+  p: number;
+  /** m: the main lobe's radius (the bump's scale) */
+  r: number;
+  /** linear albedo, this crown's own */
+  c: [number, number, number];
 }
+
+/** the groves: 0 a clearing … 1 the tallest, densest stand (a slow field over the island) */
+const groveAt = (s: Stand, x: number, z: number): number => Math.min(1, Math.max(0, (fbm2Cpu(x / GROVE + s.seed * 1.7, z / GROVE - s.seed * 0.9, 3) - 0.5) * 2.2 + 0.5));
 
 /** the crown of grid cell (i, j), or null where nothing grows (each worked out once a build: `memo`) */
 function crownAt(isl: ForestIsland, s: Stand, i: number, j: number, memo: Map<number, Crown | null>): Crown | null {
@@ -79,61 +139,112 @@ function crownAt(isl: ForestIsland, s: Stand, i: number, j: number, memo: Map<nu
 
 function crownOf(isl: ForestIsland, s: Stand, i: number, j: number): Crown | null {
   const h = (k: number): number => hash2Cpu(i * 1.31 + k * 17.17 + s.seed * 3.7, j * 0.97 - k * 5.3 + s.seed);
-  const x = (i + 0.15 + 0.7 * h(0)) * s.spacing;
-  const z = (j + 0.15 + 0.7 * h(1)) * s.spacing;
+  // (anywhere in its cell, not its middle 70%: the grid showed through as rows)
+  const x = (i + 0.05 + 0.9 * h(0)) * s.spacing;
+  const z = (j + 0.05 + 0.9 * h(1)) * s.spacing;
   const inland = isl.inland(x, z);
   if (inland < s.edge[0]) return null;
   // the forest's edge: scrub at the sand, the trees growing to full height over the next metres
   const e = Math.min(1, Math.max(0, (inland - s.edge[0]) / (s.edge[1] - s.edge[0])));
   const grow = 0.18 + 0.82 * e * e * (3 - 2 * e);
-  // (one crown in eleven an EMERGENT — a coconut palm's or a tall tree's, standing out of the canopy: from across
-  // the lagoon a motu's line is its ragged top, palm heads above the trees; without them a far motu read as a flat
-  // dark bar on the horizon, the 2026-10-29 review)
-  const emergent = h(6) < 0.09;
-  const r = (s.radius[0] + (s.radius[1] - s.radius[0]) * h(2)) * (0.55 + 0.45 * grow) * (emergent ? 0.65 : 1);
-  const top = isl.heightAt(x, z) + ((s.top[0] + (s.top[1] - s.top[0]) * h(3) ** 1.5) * grow + (emergent ? 5 + 6 * h(7) : 0) * grow * grow);
+  const grove = groveAt(s, x, z);
+  // a clearing: the thinner the grove, the more crowns missing (the sub-canopy, lower there, shows instead)
+  if (h(8) < GAP * (1 - grove) ** 1.5) return null;
+  // its size in the stand (height and radius tied: a tall tree spreads), and the grove's stature
+  const u = h(3);
+  const stature = 0.72 + 0.56 * grove;
+  let r = (s.radius[0] + (s.radius[1] - s.radius[0]) * (0.35 * h(2) + 0.65 * u)) * (0.55 + 0.45 * grow);
+  let top = isl.heightAt(x, z) + (s.top[0] + (s.top[1] - s.top[0]) * u ** 1.3) * grow * stature;
+  // its form: 1.6 rounded … 4.8 flat-topped and spreading; wider than tall
+  let p = 1.6 + 3.2 * h(9);
+  let depth = r * (0.3 + 0.3 * h(10));
   let pick = h(4);
   let species = 0;
   for (; species < SPECIES.length - 1 && pick > SPECIES[species].share; species++) pick -= SPECIES[species].share;
-  return { x, z, r, top, depth: r * 0.75, species, tint: 0.8 + 0.4 * h(5) };
+  if (species === DEAD) {
+    // a dead tree: lower, its crown thin and ragged
+    top -= 0.25 * (top - isl.heightAt(x, z));
+    p = 1.3;
+    depth = r * 0.7;
+  }
+  if (h(6) < s.emergent) {
+    if (s.heads) {
+      // (a FAR MOTU's palm heads: one crown in eleven standing 5–11 m out of the canopy, narrow — from across the
+      // lagoon a motu's line is its ragged top, palm heads above the trees; without them a far motu read as a flat
+      // dark bar on the horizon, the 2026-10-29 review. A few pixels at 1.5–3.5 km; ours has real palms instead)
+      r *= 0.65;
+      top += (5 + 6 * h(7)) * grow * grow;
+    } else {
+      // an emergent broadleaf: a broad, flat-topped crown over the canopy, its skirt reaching down into it (no wall)
+      r *= 1.3;
+      // (2–4 m: at 3–7 m one read from the water as a smooth dark dome over the edge trees, the first round)
+      const lift = (2 + 2 * h(7)) * grow;
+      top += lift;
+      p = 2.6 + 1.2 * h(9);
+      depth = r * 0.35 + lift;
+    }
+  }
+  // its lobes: up to three lesser domes leaning off the main one, a little lower (an irregular outline)
+  const lobes: Crown['lobes'] = [[x, z, r, top]];
+  const n = Math.floor(h(11) * 3.6);
+  for (let k = 0; k < n; k++) {
+    const a = Math.PI * 2 * h(12 + k);
+    const off = r * (0.35 + 0.25 * h(15 + k));
+    lobes.push([x + Math.cos(a) * off, z + Math.sin(a) * off, r * (0.4 + 0.2 * h(18 + k)), top - depth * (0.15 + 0.5 * h(21 + k))]);
+  }
+  // its own colour: the species', warmer or cooler and lighter or darker
+  const a = SPECIES[species].albedo;
+  const hue = HUE * (2 * h(5) - 1);
+  const value = 1 + VALUE * (2 * h(13) - 1);
+  const c: [number, number, number] = [a[0] * (1 + hue) * value, a[1] * value, a[2] * (1 - 1.4 * hue) * value];
+  return { x, z, lobes, depth, p, r, c };
 }
 
 /** the shell over a forest at (x, z): its height, the crown's shade there (1 at a crown's top, dark in a gap),
  * and its albedo; null outside the forest */
 function shellAt(isl: ForestIsland, s: Stand, x: number, z: number, out: { y: number; ao: number; c: [number, number, number] }, memo: Map<number, Crown | null>): boolean {
+  const inland = isl.inland(x, z);
+  if (inland < s.edge[0] - 3) return false;
   const ci = Math.floor(x / s.spacing);
   const cj = Math.floor(z / s.spacing);
   let best = -Infinity;
   let ao = 0.2;
   let crown: Crown | null = null;
-  for (let dj = -1; dj <= 1; dj++) {
-    for (let di = -1; di <= 1; di++) {
+  // (two cells round: a lobe of a broad crown reaches 1.6 of its radius from its centre, anywhere in its cell)
+  for (let dj = -2; dj <= 2; dj++) {
+    for (let di = -2; di <= 2; di++) {
       const c = crownAt(isl, s, ci + di, cj + dj, memo);
       if (!c) continue;
-      const d2 = ((x - c.x) ** 2 + (z - c.z) ** 2) / (c.r * c.r);
-      if (d2 >= 1) continue;
-      const y = c.top - c.depth * d2;
-      if (y > best) {
-        best = y;
-        ao = 1 - 0.6 * d2;
-        crown = c;
+      for (const [lx, lz, lr, lt] of c.lobes) {
+        const d2 = ((x - lx) ** 2 + (z - lz) ** 2) / (lr * lr);
+        if (d2 >= 1) continue;
+        const y = lt - c.depth * d2 ** (c.p / 2);
+        if (y > best) {
+          best = y;
+          ao = 1 - 0.6 * d2;
+          crown = c;
+        }
       }
     }
   }
-  const inland = isl.inland(x, z);
-  if (inland < s.edge[0] - 3) return false;
   const ground = isl.heightAt(x, z);
-  // between the crowns: the understorey, low and dark
-  const under = ground + 1.2 * Math.min(1, Math.max(0, (inland - s.edge[0] + 3) / 6));
+  // between the crowns: the sub-canopy (smaller trees, lower in a clearing) — over the scrub's 1.2 m at the edge
+  const e = Math.min(1, Math.max(0, (inland - s.edge[0]) / (s.edge[1] - s.edge[0])));
+  const grove = groveAt(s, x, z);
+  const sub = SUB * ((s.top[0] + s.top[1]) / 2) * e * e * (3 - 2 * e) * (0.45 + 0.75 * grove);
+  const under = ground + 1.2 * Math.min(1, Math.max(0, (inland - s.edge[0] + 3) / 6)) + sub;
+  // the leaf masses: a crown's top is ragged, not a smooth dome
+  if (crown) best += BUMP * crown.r * 2 * (fbm2Cpu(x / BUMP_SCALE + s.seed, z / BUMP_SCALE, 2) - 0.5);
   out.y = Math.max(best, under);
   if (!crown || best < under) {
-    out.ao = 0.18;
-    out.c = SPECIES[1].albedo;
+    out.ao = 0.18 + 0.2 * Math.min(1, sub / 4);
+    // (the grey-green scrub at the edge, the dark understorey deeper in)
+    const k = Math.min(1, Math.max(0, (inland - s.edge[0]) / 8));
+    out.c = [SCRUB_TINT[0] + (UNDER[0] - SCRUB_TINT[0]) * k, SCRUB_TINT[1] + (UNDER[1] - SCRUB_TINT[1]) * k, SCRUB_TINT[2] + (UNDER[2] - SCRUB_TINT[2]) * k];
     return true;
   }
   out.ao = ao;
-  const a = SPECIES[crown.species].albedo;
-  out.c = [a[0] * crown.tint, a[1] * crown.tint, a[2] * crown.tint];
+  out.c = crown.c;
   return true;
 }
 
@@ -219,10 +330,12 @@ function canopyMaterial(sun: THREE.Vector3): THREE.MeshStandardNodeMaterial {
 
 /**
  * The high island's ground, shaded as forest from 7 km: canopy greens in crown-sized cells with the gaps dark,
- * bare rock on the steepest slopes, sand at the water, melting into `haze` (the terrain's own haze colour) over
- * HIGH_AIR.
+ * bare rock on the steepest slopes, sand at the water, seen through the air in front of it (farAir.ts: the light
+ * those 7 km of marine air scatter toward the eye, in its bearing). It had melted into the terrain's haze colour —
+ * the horizon's, averaged over every bearing — over HIGH_AIR, and read paler and warmer than the sky over its summit
+ * (the user, 2026-10-30: "the white weird islands … probably an effect of haze … but it doesn't work").
  */
-export function createForestGround(haze: AerialUniforms['color']): THREE.MeshStandardNodeMaterial {
+export function createForestGround(): THREE.MeshStandardNodeMaterial {
   const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.85, metalness: 0 });
   const p = positionWorld.xz;
   const cell = cellular2(p.div(9)) as V3;
@@ -238,8 +351,7 @@ export function createForestGround(haze: AerialUniforms['color']): THREE.MeshSta
   m.colorNode = mix(mix(canopy, rock, steep), sand, shore);
   m.roughnessNode = mix(float(0.85), float(0.95), steep);
   m.fog = false;
-  const k = float(1).sub(exp(positionWorld.xz.sub(cameraPosition.xz).length().div(-HIGH_AIR))) as F;
-  m.outputNode = vec4(mix(output.rgb, vec3(haze as unknown as V3), k), output.a);
+  farAir.air.output(m);
   return m;
 }
 
@@ -393,6 +505,14 @@ const SCRUB = { inland: [17, 26] as [number, number], step: [1.6, 3.2] as [numbe
 
 /** m: within this of the eye an edge tree is drawn from its full scan */
 const NEAR = 55;
+/** TREES OF THEIR OWN: an edge tree's stretch across and up (× its kind's), its lean (rad, ±), and its leaves' hue
+ * and value (±, shares); the scrub's leaves toward Scaevola's grey-green (a multiplier on the scan's green) */
+const TREE_WIDE: [number, number] = [0.9, 1.5];
+const TREE_TALL: [number, number] = [0.8, 1.08];
+const LEAN = 0.1;
+const TREE_HUE = 0.12;
+const TREE_VALUE = 0.15;
+const SCAEVOLA: [number, number, number] = [1.12, 0.95, 1.18];
 
 /**
  * A CROWN IS LIT AS ONE VOLUME (the 2026-10-29 beach review at 600–610 s: "horrendous black flickering across all
@@ -474,7 +594,7 @@ class CrownMaterial extends THREE.MeshStandardNodeMaterial {
 
 /**
  * The crown a fragment is in: the instance's `leafCrown` (its centre in the mesh's space, its horizontal radius m)
- * and `ratio` (vertical : horizontal radius). Returns its outward normal there (world), turned by the crown's leaf
+ * and `leafCrownH` (its vertical radius m: each instance its own, as each is stretched its own way). Returns its outward normal there (world), turned by the crown's leaf
  * clusters (CLUSTER), its depth (0 at the centre, 1 on the ellipsoid), the sunlight left after its leaves on the way
  * in, and where to look its shadow up from.
  *
@@ -483,10 +603,10 @@ class CrownMaterial extends THREE.MeshStandardNodeMaterial {
  * smooth green balls, the 2026-10-29 "broccoli/lollipop" note. So were opaque cores inside the crowns, behind the
  * gaps: the flicker fell by a third, but the balls showed through.)
  */
-function crownLight(sun: THREE.UniformNode<'vec3', THREE.Vector3>, ratio: number): { normal: V3; depth: F; light: F; shadowAt: V3 } {
+function crownLight(sun: THREE.UniformNode<'vec3', THREE.Vector3>): { normal: V3; depth: F; light: F; shadowAt: V3 } {
   const crown = attribute('leafCrown', 'vec4');
   const centre = modelWorldMatrix.mul(vec4(crown.xyz, 1)).xyz;
-  const radii = vec3(crown.w, crown.w.mul(ratio), crown.w);
+  const radii = vec3(crown.w, attribute('leafCrownH', 'float'), crown.w);
   // in the crown's unit sphere: the point, and the ray toward the Sun (its parameter still in metres)
   const q = positionWorld.sub(centre).div(radii);
   const s = vec3(sun as unknown as V3).div(radii);
@@ -617,6 +737,72 @@ function clumpCards(leaves: THREE.BufferGeometry, crown: ReturnType<typeof crown
   return g;
 }
 
+/**
+ * DEAD TREES over the canopy (the user, 2026-10-30: "the occasional dead or broken tree"; the Tubuai motu reference —
+ * drift-narrative/references/tropical-coast-lagoon/motu-mitiha-tubuai-shallow-lagoon-sea-level.jpg — has bleached bare
+ * crowns standing out of the forest's line): DEAD_TREES of the island scans' far LODs, their trunks and branches only
+ * (~11k triangles each), bleached toward a pale grey (BLEACH), DEAD_H m tall so they stand out of the 7–13 m canopy,
+ * scattered DEAD_INLAND m in along the coast the walk sees (`walk`, widened by DEAD_REACH). No shadows (they fall
+ * inland at the film's low Suns, on the canopy).
+ */
+const DEAD_TREES = 9;
+const DEAD_H: [number, number] = [11, 16];
+const DEAD_INLAND: [number, number] = [45, 170];
+const DEAD_REACH = 160;
+const BLEACH = 0.65;
+function deadTrees(isl: ForestIsland, walk: { x: [number, number]; z: [number, number] }, base: string, loads: Promise<unknown>[], aerial: (m: THREE.Material) => void): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'forest-dead';
+  const r = rng(6607);
+  const spots: Array<{ x: number; z: number; h: number; turn: number; lean: number; kind: number }> = [];
+  for (let i = 0; spots.length < DEAD_TREES && i < 5000; i++) {
+    const x = isl.box.x[0] + (isl.box.x[1] - isl.box.x[0]) * r();
+    const z = walk.z[0] - DEAD_REACH + (walk.z[1] - walk.z[0] + 2 * DEAD_REACH) * r();
+    const inland = isl.inland(x, z);
+    if (inland < DEAD_INLAND[0] || inland > DEAD_INLAND[1] || isl.heightAt(x, z) < 1) continue;
+    if (spots.some((s) => Math.hypot(s.x - x, s.z - z) < 40)) continue;
+    spots.push({ x, z, h: DEAD_H[0] + (DEAD_H[1] - DEAD_H[0]) * r(), turn: r() * Math.PI * 2, lean: 0.12 * (2 * r() - 1), kind: r() < 0.5 ? 0 : 1 });
+  }
+  const loader = new GLTFLoader();
+  ['island_tree_01', 'island_tree_02'].forEach((id, k) => {
+    const mine = spots.filter((s) => s.kind === k);
+    if (!mine.length) return;
+    loads.push(
+      loader.loadAsync(`${base}${id}/${id}_lod.glb`).then((g) => {
+        g.scene.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(g.scene);
+        const tall = box.max.y - box.min.y;
+        g.scene.traverse((o) => {
+          const part = o as THREE.Mesh;
+          const src = part.material as THREE.MeshStandardMaterial;
+          if (!part.isMesh || /leaves/.test(src.name) || !src.map) return;
+          const m = new THREE.MeshStandardNodeMaterial({ map: src.map, normalMap: src.normalMap, roughness: 1, metalness: 0 });
+          // bleached: the bark's own pattern, its colour gone most of the way to a pale grey
+          const bark = texture(src.map).rgb;
+          m.colorNode = mix(bark, vec3(bark.dot(vec3(0.2126, 0.7152, 0.0722)).mul(1.7)), BLEACH);
+          aerial(m);
+          const geo = part.geometry.clone().applyMatrix4(part.matrixWorld);
+          geo.translate(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);
+          const inst = new THREE.InstancedMesh(geo, m, mine.length);
+          const q = new THREE.Quaternion();
+          mine.forEach((s, i) => {
+            const k = s.h / tall;
+            q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.turn).premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(Math.cos(s.turn), 0, Math.sin(s.turn)), s.lean));
+            inst.setMatrixAt(i, new THREE.Matrix4().compose(new THREE.Vector3(s.x, isl.heightAt(s.x, s.z) - 0.3, s.z), q, new THREE.Vector3(k, k, k)));
+          });
+          inst.instanceMatrix.needsUpdate = true;
+          inst.castShadow = false;
+          inst.receiveShadow = true;
+          inst.frustumCulled = false;
+          inst.name = `forest-dead-${id}`;
+          group.add(inst);
+        });
+      }),
+    );
+  });
+  return group;
+}
+
 function edgeTrees(
   isl: ForestIsland,
   walk: { x: [number, number]; z: [number, number] },
@@ -664,21 +850,25 @@ function edgeTrees(
    * resolution"): their modelled leaves, collapsed to ~90k triangles a tree, went to shards. Within NEAR m of the eye
    * a tree is drawn from its full scan (1–2M triangles); further off from the light one's trunk, its leaves as clumps
    * (FAR CROWNS AS CLUMPS). Which is which is set per frame from the eye (`setEye`): a pure function of where it is. */
-  const lods: Array<{ spots: Array<{ x: number; z: number }>; mats: THREE.Matrix4[]; near: THREE.InstancedMesh[]; far: THREE.InstancedMesh[] }> = [];
+  const lods: Array<{ spots: Array<{ x: number; z: number }>; mats: THREE.Matrix4[]; tints: THREE.Color[]; near: THREE.InstancedMesh[]; far: THREE.InstancedMesh[] }> = [];
   /** each mesh's crown (`userData.crown`, crownFit) per instance in the meshes' space — x, y, z, horizontal radius
-   * m — into its `leafCrown` at `slot`, with the instance's matrix */
+   * m — into its `leafCrown` at `slot`, its vertical radius into `leafCrownH`, with the instance's matrix (and its
+   * colour, `tint`: TREES OF THEIR OWN) */
   const cv = new THREE.Vector3();
-  const putCrown = (m: THREE.InstancedMesh, slot: number, mat: THREE.Matrix4): void => {
+  const bark = new THREE.Color();
+  const putCrown = (m: THREE.InstancedMesh, slot: number, mat: THREE.Matrix4, tint: THREE.Color): void => {
     const fit = m.userData.crown as ReturnType<typeof crownFit>;
     const e = mat.elements;
     cv.copy(fit.centre).applyMatrix4(mat);
     (m.geometry.getAttribute('leafCrown') as THREE.InstancedBufferAttribute).setXYZW(slot, cv.x, cv.y, cv.z, fit.rh * Math.hypot(e[0], e[1], e[2]));
+    (m.geometry.getAttribute('leafCrownH') as THREE.InstancedBufferAttribute).setX(slot, fit.rh * fit.ratio * Math.hypot(e[4], e[5], e[6]));
+    m.setColorAt(slot, m.userData.leaf ? tint : bark.setScalar((tint.r + tint.g + tint.b) / 3));
   };
   kinds.forEach((kind, k) => {
     const spots = (k < EDGE_TREES.length ? trees : shrubs).filter((t) => t.k === k);
     if (!spots.length) return;
     const tree = k < EDGE_TREES.length;
-    const entry = { spots, mats: [] as THREE.Matrix4[], near: [] as THREE.InstancedMesh[], far: [] as THREE.InstancedMesh[] };
+    const entry = { spots, mats: [] as THREE.Matrix4[], tints: [] as THREE.Color[], near: [] as THREE.InstancedMesh[], far: [] as THREE.InstancedMesh[] };
     lods.push(entry);
     const build = (g: { scene: THREE.Object3D }, which: 'near' | 'far'): void => {
       g.scene.updateMatrixWorld(true);
@@ -691,18 +881,34 @@ function edgeTrees(
       const q = new THREE.Quaternion();
       const tilt = new THREE.Quaternion();
       const ax = new THREE.Vector3();
+      // TREES OF THEIR OWN (the 2026-10-30 review: "too much of a homogeneous canopy … all of these leaves are kind
+      // of exactly the same colour"): four scans, each instance stretched its own way — WIDE (×) across and TALL (×)
+      // up, so a crown is as often wider than it is tall as not — leaning up to LEAN, and its leaves turned in hue
+      // and value (TREE_HUE, TREE_VALUE; the bark in value only), the scrub toward the strand's grey-green Scaevola
+      const v = (t: { u: number }, n: number): number => {
+        const x = Math.sin(t.u * n + n * 0.37) * 43758.5453;
+        return x - Math.floor(x);
+      };
       const mats = spots.map((t) => {
         const h = kind.height[0] + (kind.height[1] - kind.height[0]) * t.u;
         const sc = h / tall;
+        const sx = sc * (TREE_WIDE[0] + (TREE_WIDE[1] - TREE_WIDE[0]) * v(t, 17.3));
+        const sy = sc * (TREE_TALL[0] + (TREE_TALL[1] - TREE_TALL[0]) * v(t, 23.9));
         q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), t.u * 977 % (Math.PI * 2));
         ax.set(Math.cos(t.u * 311), 0, Math.sin(t.u * 311));
-        tilt.setFromAxisAngle(ax, 0.06 * Math.sin(t.u * 59));
+        tilt.setFromAxisAngle(ax, LEAN * (2 * v(t, 59.1) - 1));
         q.premultiply(tilt);
-        const foot = new THREE.Vector3(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2).multiplyScalar(sc).applyQuaternion(q);
+        const foot = new THREE.Vector3(-(box.min.x + box.max.x) / 2 * sx, -box.min.y * sy, -(box.min.z + box.max.z) / 2 * sx).applyQuaternion(q);
         const y = isl.heightAt(t.x, t.z) - 0.25;
-        return new THREE.Matrix4().compose(new THREE.Vector3(t.x, y, t.z).add(foot), q, new THREE.Vector3(sc, sc, sc));
+        return new THREE.Matrix4().compose(new THREE.Vector3(t.x, y, t.z).add(foot), q, new THREE.Vector3(sx, sy, sx));
       });
       entry.mats = mats;
+      entry.tints = spots.map((t) => {
+        const hue = TREE_HUE * (2 * v(t, 31.7) - 1);
+        const value = 1 + TREE_VALUE * (2 * v(t, 41.3) - 1);
+        const c = new THREE.Color(value * (1 + hue), value, value * (1 - 1.4 * hue));
+        return tree ? c : c.multiply(new THREE.Color(...SCAEVOLA));
+      });
       const isLeaf = (p: THREE.Mesh): boolean => /leaves/.test((p.material as THREE.Material).name);
       // (each leaf mesh its own crown — a tree's leaves are one, the Pachira file four plants side by side, one
       // crown round all four lit them as the far side of a ball — and the bark its nearest leaves')
@@ -723,7 +929,7 @@ function edgeTrees(
         // through the far crowns — the far bark's share of their flicker was a ninth, 8.4 → 7.4. The trunk stays.)
         if (which === 'far' && tree && /branches/.test(src.name)) continue;
         const crown = crownOf(part);
-        const lit = crownLight(sun, crown.ratio);
+        const lit = crownLight(sun);
         const leaf = isLeaf(part);
         const leaves = leaf && tree;
         const sprig = leaves && which === 'far' ? kind.sprig : null;
@@ -779,11 +985,13 @@ function edgeTrees(
         const scanned = part.geometry.clone().applyMatrix4(part.matrixWorld);
         const geo = sprig ? clumpCards(scanned, crown, (kind.height[0] + kind.height[1]) / 2 / tall, sprig, 7717 + k * 131) : scanned;
         geo.setAttribute('leafCrown', new THREE.InstancedBufferAttribute(new Float32Array(mats.length * 4), 4));
+        geo.setAttribute('leafCrownH', new THREE.InstancedBufferAttribute(new Float32Array(mats.length), 1));
         const inst = new THREE.InstancedMesh(geo, m, mats.length);
         inst.userData.crown = crown;
+        inst.userData.leaf = leaf;
         mats.forEach((x, i) => {
           inst.setMatrixAt(i, x);
-          putCrown(inst, i, x);
+          putCrown(inst, i, x, entry.tints[i]);
         });
         inst.count = which === 'far' ? mats.length : 0;
         inst.instanceMatrix.needsUpdate = true;
@@ -811,7 +1019,7 @@ function edgeTrees(
         const slot = near ? n : f;
         for (const m of near ? e.near : e.far) {
           m.setMatrixAt(slot, e.mats[i]);
-          putCrown(m, slot, e.mats[i]);
+          putCrown(m, slot, e.mats[i], e.tints[i]);
         }
         if (near) n++;
         else f++;
@@ -824,7 +1032,11 @@ function edgeTrees(
         m.count = f;
         m.instanceMatrix.needsUpdate = true;
       }
-      for (const m of [...e.near, ...e.far]) m.geometry.getAttribute('leafCrown').needsUpdate = true;
+      for (const m of [...e.near, ...e.far]) {
+        m.geometry.getAttribute('leafCrown').needsUpdate = true;
+        m.geometry.getAttribute('leafCrownH').needsUpdate = true;
+        if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      }
     }
   };
   return { group, feet, setEye };
@@ -898,11 +1110,13 @@ export function createForest(
   const eyeSetters: Array<(eye: THREE.Vector3) => void> = [];
   islands.forEach((isl, n) => {
     const ours = n === 0;
+    // (ours lower and broader than it was, 7–13 m, not 9–17: the palms stand out of it — palms.ts — as on a real
+    // motu; its far cells 2 m, not 3, so a crown's lobes and leaf masses show on the skyline: THE CANOPY AS A MOTU'S)
     const stand: Stand = ours
-      ? { spacing: 6.2, top: [9, 17], radius: [3.2, 6.4], edge: [27, 46], cell: [0.6, 3], seed: 11 }
+      ? { spacing: 6.2, top: [7, 13], radius: [3.4, 7], edge: [27, 46], cell: [0.6, 2], seed: 11, emergent: 0.015, heads: false }
       : // (the far motus' trees growing up over 70 m from their shores, so each island's ends taper down to its
         // rim and its line is a low mound of trees, not a slab with square ends)
-        { spacing: 6.8, top: [8, 16], radius: [3.4, 6.6], edge: [12, 80], cell: [2.5, 2.5], seed: 23 + n };
+        { spacing: 6.8, top: [8, 15], radius: [3.4, 6.6], edge: [12, 80], cell: [2.5, 2.5], seed: 23 + n, emergent: 0.09, heads: true };
     const geo = shellGeometry(isl, stand, ours ? walk : isl.box);
     const mesh = new THREE.Mesh(geo, shellMat);
     mesh.name = `forest-${isl.name}`;
@@ -911,6 +1125,7 @@ export function createForest(
     group.add(mesh);
     if (ours) {
       const edge = edgeTrees(isl, walk, base, loads, sunU);
+      group.add(deadTrees(isl, walk, base, loads, aerial));
       group.add(edge.group);
       feet.push(...edge.feet);
       eyeSetters.push(edge.setEye);

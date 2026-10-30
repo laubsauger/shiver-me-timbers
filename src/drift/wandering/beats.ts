@@ -390,13 +390,15 @@ export function landfall(t: number, c1End: number, from: { x: number; z: number 
 /** rad: how far the eye looks round toward the land (−: to the right) over the landfall, on top of COAST_YAW;
  * eased in as the raft turns in, held as we step off, eased back along the beach once ashore */
 const LOOK = -24 * D;
-/** rad: the turn left toward the flock wheeling over the sea in w4 */
-const BIRD_LOOK = 22 * D;
+/** rad: the turn left toward the flock wheeling over the sea in w4 — 10°, eased in and back over 10 s each, so it
+ * peaks at 1.5 × 10° / 10 s = 1.5°/s: the dome's comfort (docs/drift/WORKING-NOTES.md, camera turns "about 1° a
+ * second or less"; 22° over 8 s and 7 s peaked at 4.7°/s, and at that rate 22° needs longer than w4) */
+const BIRD_LOOK = 10 * D;
 export function coastLook(t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
   // and in w4 round to the left, out over the sea, as the sandpipers wheel there (flock.ts: the flock's own clock
   // is w4 + 2; it crosses the front at ~9 s and wheels over the sea from ~13 s), back before the vortex overhead
   // (the 2026-10-29 review: "we should tilt a little to the left to watch the sandpipers")
-  const birds = BIRD_LOOK * (smooth((t - starts.w4 - 11) / 8) - smooth((t - starts.w4 - 25) / 7));
+  const birds = BIRD_LOOK * (smooth((t - starts.w4 - 6) / 10) - smooth((t - starts.w4 - 26) / 10));
   return LOOK * (smooth((t - starts.w2 + 12) / 30) - smooth((t - starts.w2 - 34) / 30)) + birds;
 }

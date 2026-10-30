@@ -37,6 +37,11 @@
  *     branch, the compare sampler's derivative-taking reads may not (WGSL uniformity), which is why the contact grid
  *     runs everywhere and the wide one is loads.
  *
+ * Measured at 568 s (the sail's shadow on the sand 45 m from the eye, a runtime A/B in one boot): its edge 14 cm →
+ * 31 cm wide, the physical 28 cm; the deck's contact shadows (crates, rails, ropes) and the beach dressing's pebbles
+ * at 604 s unchanged, nowhere more than 4 levels in 8 bits. Ashore nothing within 12 m of its caster changes at all:
+ * its true penumbra is narrower than the contact filter's 2.5 texels (5.5 cm) already.
+ *
  * Cost per receiving fragment: 16 compare samples (as before) + 17 depth loads for the search, + 36 loads where a
  * caster farther up the light than the contact radius resolves (6 m at sea, 12 m ashore: 2.5 texels / tan 0.265°)
  * shades it. Every frame a pure function of the map: no noise, no history.
@@ -52,8 +57,9 @@ const TAPS = 4;
 /** the Sun's angular radius (rad: the disc the sky draws, atmosphere.ts) as the tangent a penumbra grows by */
 const SUN_TAN = Math.tan(SUN_ANG);
 /** m: the search's rings about the receiver, four taps each, every other one turned 45° (eight bearings between two
- * rings): a blocker's edge a distance x off is found by a ring of ≥ 1.41 x within CONE of its cone, so all of a
- * penumbra up to ~0.28 m half-width is found and the outer part of a wider one by chance */
+ * rings). A caster's edge x to the side is found by a ring between ~1.41 x and CONE × its cone: with the rings a
+ * factor 2 apart, always over the inner ~70% of a penumbra and mostly to its edge; where it is missed the filter falls
+ * back to the contact width, on light already ~90% lit */
 const RINGS = [0.05, 0.1, 0.2, 0.4];
 /** how many times its own cone's radius off to the side a blocker still counts (the rings are a factor 2 apart) */
 const CONE = 2;

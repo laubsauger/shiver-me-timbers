@@ -110,7 +110,11 @@ function starMap(g: ReturnType<typeof ourGalaxy>): THREE.DataTexture {
  * Render the galaxy's glow from the Sun into a cube (size² per face), and map its stars. `front` and `up` are
  * the sea world's dome front and up (unit): the frame the galactic centre is placed in.
  */
-export function bakeNightSky(renderer: THREE.WebGPURenderer, front: THREE.Vector3, up: THREE.Vector3, size = 1536): NightSky {
+// (size: 2048 a face, ~23 px a degree, a 4K dome master's pixel; it was 1536, ~17 px/°, enough for the 2K preview
+// it was set at but soft in the band's dust lanes at 4K and up — the user, 2026-10-30, asking after higher-resolution
+// Milky Way. The glow is computed, not a photograph, so it is baked finer rather than upscaled. Mipmapped, so the
+// grain of the march's jitter does not alias where a smaller master reads the cube minified)
+export function bakeNightSky(renderer: THREE.WebGPURenderer, front: THREE.Vector3, up: THREE.Vector3, size = 2048): NightSky {
   const p = getTheDriftParams;
   const g = ourGalaxy(p, [0, 0, 0], driftParams.domeTilt);
   const milky = createMilkyWay(g, p.marchSteps);
@@ -129,7 +133,7 @@ export function bakeNightSky(renderer: THREE.WebGPURenderer, front: THREE.Vector
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
   scene.add(milky.group);
-  const target = new THREE.CubeRenderTarget(size, { type: THREE.HalfFloatType });
+  const target = new THREE.CubeRenderTarget(size, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   const camera = new THREE.CubeCamera(1e-7, 1e4, target);
   camera.position.copy(sun);
   scene.add(camera);

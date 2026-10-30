@@ -24,11 +24,12 @@
  * Ambient occlusion, so the low Sun's direct light still reaches under them.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, Loop, abs, cameraPosition, cameraViewMatrix, dFdx, dFdy, exp, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, uniform, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, Loop, abs, cameraPosition, cameraViewMatrix, dFdx, dFdy, exp, float, mix, normalWorldGeometry, positionWorld, sin, smoothstep, texture, uniform, uniformArray, vec2, vec3, vec4, vertexStage } from 'three/tsl';
 import type { TerrainBlendHooks } from '../../terrain/sandMaterial';
-import { fbm2 } from '../../terrain/noise';
+import { fbm2, hash2 } from '../../terrain/noise';
 import { WRACK } from './beachDressing';
 import { swashAt, swashClock } from './shoreline';
+import { swashField, swashIn, swashUV } from './swashSim';
 import { coordFilter } from '../../ship/bandLimit';
 
 type F = THREE.Node<'float'>;
@@ -50,7 +51,7 @@ type Layer = keyof typeof LAYERS;
  * rides on it in luminance only */
 const SAND_DRY = vec3(0.6, 0.55, 0.45);
 /** wet sand's albedo, linear: a neutral grey-beige under half the dry's (wet sand drinks the light) */
-const SAND_WET = vec3(0.26, 0.25, 0.225);
+const SAND_WET = vec3(0.3, 0.285, 0.255);
 /** m of rise above the live sea the wet band reaches: its mean, and the full swing of its wander along the beach */
 const WET_RISE = [0.6, 0.3] as const;
 /** THE SWASH'S UPPER LIMIT, beachDressing.ts LIMIT and its placement (`zones`): m over the sea of the line's middle,
@@ -84,8 +85,21 @@ export const LITTER_RES = 1024;
 
 /** the most occluders the ground reads (each a few ALU per terrain fragment) */
 const MAX_OCCLUDERS = 112;
+/** m: where the fine patterns are measured from — the coast's anchor (sea.ts COAST_AT); any point within a few km of
+ * the beach would do. The coast lies 40 km out, where a 32-bit world position steps every 4 mm: a tile's uv there
+ * (~2·10⁴) steps every 1/256 of a tile, many texels of a 4k map, and a 4 cm speck's noise every 1/16 of a speck —
+ * blocks and rulings the pixels beat into moiré (the sim water's did, the 2026-10-30 note: "this weird moiré
+ * pattern"). Measured from here, at the vertex, and interpolated small, they are exact. Kept on the world position:
+ * everything that must agree with something placed on the CPU at the same world point (the swash-limit and wrack
+ * bands with beachDressing.ts, the swash's events and sim, the litter, the occluders) — all metres-scale, where the
+ * 4 mm steps do not show */
+const PATTERN_ORIGIN = new THREE.Vector3(-40000, 0, 0);
 
-export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/packed/`): BeachTerrain {
+export function createBeachTerrain(
+  base = `${import.meta.env.BASE_URL}drift/pbr/packed/`,
+  /** the Sun's transmittance through the clouds at a world point (seaSky.ts `cloudSun`): their shadows on the ground */
+  o: { cloudSun?: (p: V3) => F } = {},
+): BeachTerrain {
   const loader = new THREE.TextureLoader();
   const loads: Promise<unknown>[] = [];
   const tex = (name: string): THREE.Texture => {
@@ -105,6 +119,9 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
 
   /** sRGB → linear (the albedo's rgb) */
   const linear = (c: V3): V3 => c.pow(2.2) as V3;
+  /** m from PATTERN_ORIGIN, exact (see there) */
+  const pL = vertexStage(positionWorld.sub(vec3(PATTERN_ORIGIN.x, PATTERN_ORIGIN.y, PATTERN_ORIGIN.z))) as unknown as V3;
+  const pP = pL.xz as V2;
 
   // the index field the tile offsets follow: a slow gradient noise (no cells to show), m
   const index = fbm2(positionWorld.xz.div(13), 2).mul(8) as F;
@@ -118,7 +135,7 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
     const [tw0, th0] = LAYERS[layer];
     const tw = tw0 * k;
     const th = th0 * k;
-    const p = positionWorld.xz;
+    const p = pP;
     const uv = vec2(p.x.div(tw), p.y.negate().div(th)) as V2;
     // (explicit gradients: the offsets jump at an index step, and an implicit sample there takes the smallest mip)
     const gx = dFdx(uv);
@@ -137,7 +154,7 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   /** the dry sand's relief (sand_dry's second map, the 20 m scan): tangent normal (xy) and AO, without a repeat on
    * an index field of its own, slower than the tiles' (its features are metres apart, not centimetres) */
   const relief = () => {
-    const p = positionWorld.xz;
+    const p = pP;
     const uv = vec2(p.x.div(RELIEF_TILE), p.y.negate().div(RELIEF_TILE)) as V2;
     const ri = fbm2(p.div(61).add(vec2(17.3, 4.1)), 2).mul(6) as F;
     const rA = sin(vec2(3, 7).mul(ri.floor())) as V2;
@@ -186,13 +203,14 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
     return keep;
   })() as F;
 
-  /** value noise of positionWorld.xz / scale, 0..1 (anti-tiling and patchiness) */
+  /** value noise of the ground's position / scale, 0..1 (anti-tiling and patchiness) */
   const noise = (scale: number): F => {
-    const q = positionWorld.xz.div(scale);
+    const q = pP.div(scale);
     const i = q.floor();
     const f = q.fract();
     const u = f.mul(f).mul(f.mul(-2).add(3));
-    const hash = (o: V2): F => sin(i.add(o).dot(vec2(127.1, 311.7))).mul(43758.5453).fract() as F;
+    // (sin-free, the same on every GPU: tests/gpuSinHash.test.ts)
+    const hash = (o: V2): F => hash2(i.add(o)) as F;
     const a = hash(vec2(0, 0) as V2);
     const b = hash(vec2(1, 0) as V2);
     const c = hash(vec2(0, 1) as V2);
@@ -201,6 +219,11 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
   };
 
   const hooks: TerrainBlendHooks = {
+    // THE CLOUDS' SHADOWS on the sand and the seabed (the open notes' "cloud shadows on the sea": the lagoon's
+    // turquoise is the lit floor seen through the water, so a shadow shows there first) — the same transmittance the
+    // sea's sun terms and the swash take, read at the vertex: the cloud light volume is two filterable 3D textures,
+    // and the ground's fragment stage already binds a dozen maps; the shadow is ~100 m soft, the ground's cells ≤ 6 m
+    sunThrough: o.cloudSun ? vertexStage(o.cloudSun(positionWorld as unknown as V3)) : undefined,
     ground(ctx) {
       const N = normalWorldGeometry;
       // THE TERRAIN'S WEIGHTS AS SCALARS. ctx.shoreW (and so ctx.groundW, mixed by it) reaches this hook as a vec2:
@@ -241,22 +264,41 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       const rel = relief();
       const dryN = rel.n.mul(RELIEF_GAIN) as V2;
       // THE WET BAND (the user, 2026-10-29: "the wet sand should be a little longer and darker"): the sand the swash
-      // keeps wet, from the water up WET_RISE of rise (5–8 m of the 1:11 face), its top soft and wandering along the
-      // beach; a shade darker for half a metre above that. Wet sand drinks the light: a neutral grey-beige under half
-      // the dry sand's albedo (the wet scan's grain in its luminance only), glossy (its roughness, ~0.6, at 0.45:
-      // the wet face mirrors the sky), its shape the dry sand's smoothed by the swash: the wet scan's own ripples, a
-      // regular one every few cm everywhere, only a trace of it
+      // keeps wet, from the water up WET_RISE of rise (5–8 m of the 1:11 face), saturated at the water and drying
+      // toward its wandering top; a shade darker for half a metre above that. Wet sand drinks the light: a neutral
+      // grey-beige half the dry sand's albedo where saturated (the wet scan's grain in its luminance only), and
+      // mirror-ish there (roughness 0.14), matte again as it dries; its shape the dry sand's smoothed by the swash: the
+      // wet scan's own ripples, a regular one every few cm everywhere, only a trace of it
       const rise = float(ctx.sand.depthBelow).negate() as F;
       const wetTop = fbm2(positionWorld.xz.div(9).add(vec2(3.1, 8.7)), 2).sub(0.5).mul(WET_RISE[1]).add(WET_RISE[0]) as F;
       // (the swash's own events, shoreline.ts swashAt: the sand dark under each run-up's water and drying behind it)
       const swE = swashAt(rise, positionWorld.xz, swashClock as unknown as F);
-      const damp = float(1).sub(smoothstep(wetTop.sub(0.3), wetTop.add(0.08), rise)).max(swE.wet) as F;
+      // (over the swash sim's domain, its own fields: swashSim.ts — wet where its water has been, glazed after it)
+      const simIn = swashIn(positionWorld.xz) as F;
+      const simMarks = texture(swashField.marks, swashUV(positionWorld.xz)) as V4;
+      // (what the water left — its wetness and its glaze — read a little off where it lies, ±0.2 m over a metre and
+      // ±0.05 m over 30 cm: the line a run-up stopped at, crisp in the sim's 10 cm cells, meanders and frays as the
+      // sand drains. The water itself, `sheet` below, is read where it is)
+      const leftAt = positionWorld.xz.add(vec2(fbm2(pP.mul(0.9).add(vec2(2.4, 7.7)), 2), fbm2(pP.mul(0.9).add(vec2(9.1, 1.3)), 2)).sub(0.5).mul(0.4))
+        .add(vec2(fbm2(pP.mul(3.3).add(vec2(5.5, 0.6)), 2), fbm2(pP.mul(3.3).add(vec2(1.8, 4.4)), 2)).sub(0.5).mul(0.1)) as V2;
+      const leftMarks = texture(swashField.marks, swashUV(leftAt)) as V4;
+      // (graded, not a band: saturated at the still water, drying up the face to wetTop — one wide uniform dark band
+      // read heavy, the swash v2 clips — and the swash's own wetness over it, its darkness going as it dries)
+      // (the sim's wetness drying unevenly where it is going: ±0.4 of what is left of it, in patches of ~0.4 m — with the
+      // sim's own wicking (WICK) the line a run-up stopped at goes soft and ragged as it dries, not a crisp lobe, the
+      // 2026-10-30 note: "real drying is uneven")
+      const wetLeft = leftMarks.z as F;
+      const wetSim = wetLeft.sub(float(1).sub(wetLeft).mul((fbm2(pP.mul(2.5).add(vec2(6.6, 3.2)), 3) as F).sub(0.5).mul(0.8))).clamp(0, 1) as F;
+      const damp = float(1).sub(smoothstep(-0.02, wetTop, rise)).max(mix(swE.wet, wetSim, simIn)) as F;
       const wetA = SAND_WET.mul(mix(float(1), wet.albedo.dot(LUM).div(0.54), 0.5)) as V3;
       const margin = float(1).sub(smoothstep(wetTop, wetTop.add(0.5), rise)).mul(0.1) as F;
       // sand: dry above the wet band, wet in it, foam where the swash is. UNDER WATER it is the lagoon's white coral
       // sand, neutral grey-beige (§12.4: #9a9888 under 20–50 cm); the water's own absorption turns it turquoise
-      const submerged = smoothstep(0.05, 0.5, float(ctx.sand.depthBelow)) as F;
-      const sandA0 = mix(mix(dryA.mul(float(1).sub(margin)), wetA, damp), vec3(0.42, 0.41, 0.37), submerged) as V3;
+      // (only under a quarter metre of water and more, and darker than it was: a pale grey-beige from 5 cm down painted
+      // a dry-looking strip between the sea and the wet sand — "a band in between where there's no water … very ugly
+      // and unlikely", the 2026-10-29 review of the 568 s view. The sand nearest the sea is the wettest, never paler)
+      const submerged = smoothstep(0.25, 1.2, float(ctx.sand.depthBelow)) as F;
+      const sandA0 = mix(mix(dryA.mul(float(1).sub(margin)), wetA, damp), wetA.mul(1.3), submerged) as V3;
       // THE SWASH'S UPPER LIMIT (the dressing's recommendation, 2026-10-29): where the last waves dropped what they
       // carried, a faint band of shell grit and dried foam along the line beachDressing.ts lays its pebbles and
       // shells on — the same height, wander and clumps as its placement (SWASH_LIMIT), so the decal carries the line
@@ -266,29 +308,59 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       const limitOff = positionWorld.y.sub(limitMid).div(SWASH_LIMIT.half) as F;
       const limitClump = smoothstep(0.35, 0.7, fbm2(positionWorld.xz.div(5.3).add(vec2(11, 0)), 3)).mul(1.4).add(0.3) as F;
       const limitBand = exp(limitOff.mul(limitOff).negate()).mul(limitClump).clamp(0, 1).mul(float(1).sub(submerged)) as F;
-      const gritPx = (coordFilter(positionWorld.xz) as V2).x.max((coordFilter(positionWorld.xz) as V2).y) as F;
+      const gritPx = (coordFilter(pP) as V2).x.max((coordFilter(pP) as V2).y) as F;
       const speck = mix(noise(0.04), float(0.5), smoothstep(0.015, 0.04, gritPx)) as F;
       const grit = mix(vec3(0.66, 0.6, 0.55), vec3(0.36, 0.34, 0.32), speck).mul(mix(float(1), float(0.6), damp)) as V3;
       const sandA = mix(sandA0, grit, limitBand.mul(SWASH_LIMIT.strength)) as V3;
       // the swash's moving sheet of water: a film over the sand, darker, mirror-smooth (the game's sand did this in
       // its own albedo, which this hook replaces — the tongues had gone invisible)
-      const sheet = smoothstep(0.0003, 0.002, swE.depth) as F;
+      // (the sim's water present: its glaze is 1 only while the water stands on the sand)
+      const sheet = mix(smoothstep(0.0003, 0.002, swE.depth), smoothstep(0.97, 1, simMarks.w), simIn) as F;
       // (clear water over sand: the sand under the sheet a little darker still, no tint of its own — the sheet's
       // surface, its mirror and its foam, is shoreline.ts)
       // (and the sand the water has just left, for a few seconds: glazed, darker still — where the backwash strands
       // its foam, on sand it has just wet, not on dry-looking sand: the 2026-10-29 review of beach_600)
-      const glazed = swE.fresh.mul(sheet.oneMinus()) as F;
-      const filmed = mix(sandA.mul(float(1).sub(glazed.mul(0.18))), wetA.mul(0.85), sheet) as V3;
+      const glazed = mix(swE.fresh, leftMarks.w, simIn).mul(sheet.oneMinus()) as F;
+      const filmed = mix(sandA.mul(float(1).sub(glazed.mul(0.22))), wetA.mul(0.85), sheet) as V3;
       // (its foam is the shoreline layer's, on the water's own surface)
       const foamed = filmed;
       // (dry sand is matte: the scan's roughness, ~0.5, made it a satin sheen mirroring the blue sky)
-      const sandR0 = mix(dry.rough.max(0.88), wet.rough.mul(0.45), damp) as F;
+      // (and glossy only where it is saturated: mirror-ish at the line, matte again as it dries)
+      const sandR0 = mix(dry.rough.max(0.88), mix(float(0.55), float(0.4), damp.mul(damp)), damp) as F;
       // (the water's mirror is the shoreline layer's: the sand under it is wet sand, not a second mirror — at 0.04 it
       // took the low Sun as a key-light highlight of its own, one compact blob under the sheet)
-      // (glazed at 0.2: glossier than the wet sand's ~0.28, never the mirror the water itself is — at 0.04 the sand
-      // under the sheet took the low Sun as one compact highlight)
-      const sandR = mix(sandR0, float(0.2), glazed.mul(0.8)) as F;
-      const sandN = mix(dryN, dryN.mul(0.6).add(wet.n.mul(0.1)), damp).mul(sheet.oneMinus()) as V2;
+      // (glazed at 0.12: as glossy as the saturated sand at the line, for the seconds the film takes to sink in; never
+      // the mirror the water itself is — at 0.04 the sand under the sheet took the low Sun as one compact highlight)
+      // (and under the water no gloss of its own: the water fills the grains, sand to water is no mirror, and the
+      // Sun's highlight is the water's surface's — at 0.14 the sand under the swash's thin film took the low Sun as one
+      // white slab, the sim6 close clip at 649 s)
+      // THE GLAZE'S GLITTER (the 2026-10-30 note: "real wet sand under a low Sun gives a glitter of sparkling points
+      // and streaks, plus a broad, dimmer sheen, not a smooth slab"): the film draining off the grains leaves a
+      // broad sheen (0.55) with mirror facets in it (0.05), each tilted its own way (±0.2), so only those turned to the
+      // Sun light — a point here and there, the rest of the sheen dim (at 0.35 the sheen alone, this grazing, still
+      // blew out white: the sheet hidden, the smear stayed — the sand's). Cells ~2.5 px wide, octaves of the footprint as the
+      // water's glitter (shoreline.ts), a facet a third of a cell across; the microfacet lobes keep their energy, the
+      // facets only gather it. An even glaze (0.12) took the low Sun as one white smear along the line the backwash
+      // left (lowsun_649, 2026-10-30)
+      const cellSz = float(2).pow(gritPx.mul(2.5).max(0.002).log2().floor()) as F;
+      const cellQ = pP.div(cellSz) as V2;
+      const cellI = cellQ.floor() as V2;
+      const hash = (salt: number): F => {
+        const p3 = vec3(cellI.x, cellI.y, cellI.x).mul(vec3(0.1031, 0.103, 0.0973)).add(salt).fract() as V3;
+        const p4 = p3.add(p3.dot(vec3(p3.y, p3.z, p3.x).add(33.33))) as V3;
+        return p4.x.add(p4.y).mul(p4.z).fract() as F;
+      };
+      const facetAt = vec2(hash(0.21), hash(0.64)).mul(0.5).add(0.25) as V2;
+      // (each cell's film a drop or a thin pool left between the grains, there with the chance the glaze still gives:
+      // as the water drains the spots go out one by one — it dries back, not dims)
+      const filmLeft = smoothstep(hash(0.47).sub(0.04), hash(0.47).add(0.04), glazed) as F;
+      const facet = smoothstep(0.42, 0.18, cellQ.sub(cellI).sub(facetAt).length()).mul(filmLeft) as F;
+      const facetTilt = vec2(hash(0.37), hash(0.83)).sub(0.5).mul(0.3) as V2;
+      // (saturated sand 0.4 and the glaze between its drops 0.65, swept on the farm against 0.14/0.55: at 0.14 the
+      // drained strip took the low Sun as one smooth smear, the sim7 clip at 649 and 657 s; now a grainy glint)
+      const glazeR = mix(float(0.65), float(0.05), facet) as F;
+      const sandR = mix(mix(sandR0, glazeR, glazed.max(facet)), float(0.7), sheet) as F;
+      const sandN = mix(dryN, dryN.mul(0.6).add(wet.n.mul(0.1)), damp).mul(sheet.oneMinus()).add(facetTilt.mul(facet)) as V2;
       const sandAO = mix(mix(rel.ao, float(1), 0.5), wet.ao, damp) as F;
       // the cover: dry grass with patches of leaf-litter soil, the litter's autumn colours dulled toward the soil
       const patch = smoothstep(0.35, 0.7, noise(11)) as F;
@@ -330,7 +402,7 @@ export function createBeachTerrain(base = `${import.meta.env.BASE_URL}drift/pbr/
       // the rock, triplanar (steep ground): the planes' tangent normals onto the world, whiteout-blended about
       // the geometric normal
       const [tw] = LAYERS.rock;
-      const p = positionWorld.div(tw);
+      const p = pL.div(tw);
       const bw = abs(N).pow(4);
       const wsum = bw.x.add(bw.y).add(bw.z);
       const wx = bw.x.div(wsum);

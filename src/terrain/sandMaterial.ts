@@ -928,6 +928,12 @@ export interface TerrainBlendHooks {
    * `ao` (0..1) occludes the indirect light only (the material's aoNode): the sky a canopy hides.
    */
   ground(ctx: TerrainGroundContext): { albedo: any; roughness: any; emissiveGate?: any; normal?: any; ao?: any };
+  /**
+   * The Sun's transmittance through the clouds here (0..1, a float node): multiplied into the sunlight's received
+   * shadow, so the clouds' shadows fall on the ground (The Drift: `SeaSky.cloudSun`, the same the sea's sun terms
+   * take, so a shadow runs on across the waterline). Absent (the game) → no node.
+   */
+  sunThrough?: any;
 }
 
 /**
@@ -1062,6 +1068,11 @@ export function terrainBlendMaterial(
   // depend on itself).
   material.normalNode = hooked?.normal ?? sandNodes.reliefNormal;
   if (hooked?.ao) material.aoNode = hooked.ao;
+  // (the clouds' shadows, film only: on the sunlight alone, as the shadow map is)
+  if (hooks?.sunThrough) {
+    const through = hooks.sunThrough;
+    (material as unknown as { receivedShadowNode: unknown }).receivedShadowNode = (s: any) => s.mul(through);
+  }
   material.metalness = 0;
 
   // §V30/§V43 aerial perspective. The island melts into the atmosphere on the
