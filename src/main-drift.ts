@@ -23,13 +23,13 @@ import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
 import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
-import { beatStarts, eyePath, undertimeState, webFlight } from './drift/undertime/timeline';
-import { finalKnots } from './drift/undertime/grains';
+import { beatStarts, eyePath, undertimeState } from './drift/undertime/timeline';
 import { loadWebData } from './drift/undertime/webVolume';
 import { getTheDriftParams } from './params/getTheDrift';
 import { createArrival } from './drift/getTheDrift/act';
 import { loadGalaxyAtlas } from './drift/getTheDrift/galaxies';
-import type { ArrivalState } from './drift/getTheDrift/timeline';
+import { ourGalaxy, type ArrivalState } from './drift/getTheDrift/timeline';
+import { webFrame, webPlace } from './drift/getTheDrift/webDive';
 import { createUndertimeField } from './drift/undertime/field';
 import { CrawlOverlay, crawlBand, type CrawlLayout } from './drift/undertime/crawl';
 import type { TextPocket } from './drift/undertime/field';
@@ -43,6 +43,8 @@ import { C1_FOLLOW, beatStarts as seaBeats, type BeatName } from './drift/wander
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
 import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
+import { flatFramingTrack, type FlatView } from './drift/flatFraming';
+import { FlatTitles } from './drift/flatTitles';
 
 type View = 'flat' | 'dome';
 
@@ -135,11 +137,12 @@ async function boot(): Promise<void> {
   const { total: act1 } = beatStarts(p);
   const p2 = getTheDriftParams;
   const act2Start = act1 - p2.overlap;
-  // the galaxies open at the web's knots where the pull-back leaves them
-  const flightEnd = webFlight(act2Start, p);
-  const heroKnot = web.knots[0].pos;
-  const eyePatEnd: [number, number, number] = [0, 1, 2].map((i) => heroKnot[i] + flightEnd.offset[i]) as [number, number, number];
-  const arrival = createArrival(p2, eyePath(act2Start, p), finalKnots(web.knots, eyePatEnd, eyePath(act2Start, p), flightEnd.box), p.domeTilt, galaxyAtlas);
+  // THE DIVE INTO THE WEB (drift/getTheDrift/webDive.ts): the web's frame — its turn in the world, and its size in Get
+  // the Drift's world (~560 of our galaxy's radii a box) — set once; the field draws the web in it, and the galaxies
+  // open at its knots and along the dive's filament
+  const e0 = eyePath(act2Start, p);
+  const diveFrame = webFrame(p, p2, web.knots[0].pos, ourGalaxy(p2, e0, p.domeTilt).sun);
+  const arrival = createArrival(p2, e0, { frame: diveFrame, knots: web.knots, particles: web.particles.data }, p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
   // THE SEA (drift/wandering/sea.ts), in a scene of its own: the landing's last hundred-odd metres (C1), taken
   // over from Get the Drift as one descent, then the rest of Part C and Act 3 (wandering/beats.ts) — or, with
@@ -154,8 +157,12 @@ async function boot(): Promise<void> {
       });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
   const total = seaStart + sea.total;
+  /** s the dive's near detail (webVolume.ts createWebParticles `close`) comes up over, from where it starts */
+  const DIVE_CLOSE = 4;
   /** s the show fades to black over at its end (W5: "the title, or the game") */
   const END_FADE = 6;
+  /** deg the end title sinks to its place (endTitleEl) as it fades in */
+  const END_TITLE_SETTLE = 2;
   /** the end title: Act 1's signature again, over the outro's night (W6), in the crawl's overlay */
   const endTitle = [{ lines: ['the Drift'], at: seaTest ? Infinity : seaStart + seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts.w6 + 38, signature: true }];
   let titleOn = false;
@@ -193,9 +200,21 @@ async function boot(): Promise<void> {
     }
     return strength > 0 ? { lo, hi, az: p.crawlPocketAz, strength: strength * p.crawlPocket } : { lo: 0, hi: 0, az: p.crawlPocketAz, strength: 0 };
   };
-  // the crawl lives in master space, so it shows in the dome view only
+  // the crawl lives in master space, so it shows in the dome view only; the 16:9 cut (`dome.setFlat`) draws the same
+  // phrases composed for its own frame instead (drift/flatTitles.ts), swapped in by the capture while it is on
   // (the sea acts: SEA_GRADE — references/sea-golden-hour-sky)
-  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, grade: true });
+  const flatTitles = new FlatTitles();
+  const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, flatOverlay: flatTitles.texture, grade: true });
+  // THE 16:9 CUT'S FRAMING (drift/flatFraming.ts): with `__drift.setFlatTrack(true)` the flat view is aimed per frame
+  // as a function of show time, from the beats' start times (built when it is switched on); off, the view is where
+  // `setFlat` put it. Only the flat view: the dome master never reads it.
+  let flatTrack: ((at: number) => FlatView) | null = null;
+  const flatMarks = (): Record<string, number> => {
+    const marks: Record<string, number> = { ...beatStarts(p).starts, end: total };
+    for (const [b, s] of Object.entries(driftBeats(p2).starts)) marks[b] = act2Start + s;
+    for (const [b, s] of Object.entries(seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts)) marks[b] = seaStart + s;
+    return marks;
+  };
 
   const q = new URLSearchParams(location.search);
   let t = Number(q.get('t') ?? 0) || 0;
@@ -238,6 +257,7 @@ async function boot(): Promise<void> {
   let actNear = 0.05;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
+    if (flatTrack && dome.flat) dome.setFlat(flatTrack(at));
     const x = seaTest ? 1 : Math.min(1, Math.max(0, (at - seaStart) / XF));
     seaK = x * x * (3 - 2 * x);
     dome.setFaceSize(faceOverride ?? p.domeFace);
@@ -249,9 +269,15 @@ async function boot(): Promise<void> {
       dome.setGrade(...SEA_GRADE);
       titleOn = at >= endTitle[0].at;
       if (titleOn) {
-        Object.assign(crawl.layout, crawlLayout(), { end: total, fade: END_FADE - 1 });
+        // (low in front, under the Rose: at crawlHoldEl, 30°, its lowest beam — the coast towers' lamps' chord, 25–29°
+        // over the word — ran through the letters and the tower's red lamp stood on the end of "Drift", the 2026-10-30
+        // QA sweep. At endTitleEl the letters keep ~3° under that chord and ~10° off the lamp, still in the front safe
+        // zone, over the dark land; it settles END_TITLE_SETTLE as it fades in, not crawlElTop's 7°, which would draw it
+        // down through the beams)
+        Object.assign(crawl.layout, crawlLayout(), { end: total, fade: END_FADE - 1, holdEl: p.endTitleEl, elTop: p.endTitleEl + END_TITLE_SETTLE });
         crawl.phrases = endTitle;
         crawl.draw(at);
+        if (dome.flat) flatTitles.draw(at, crawl.phrases, crawl.layout);
       }
       return state;
     }
@@ -266,15 +292,21 @@ async function boot(): Promise<void> {
     // Undertime hands its world over to the galaxies, then leaves the scene
     const k = Math.min(1, Math.max(0, t2 / (p2.overlap + 2)));
     const fade = 1 - k * k * (3 - 2 * k);
-    // the web stays on as the structure the galaxies sit on, dimmer, until we are inside our own galaxy
-    const webKeep = act2 ? 0.45 * (1 - act2.local) + 0.55 * fade : 1;
+    // the web stays on as the structure the galaxies sit on: whole through the dive, dimmer once we are inside our
+    // galaxy's volume, gone among its near stars (it dimmed with the first stars' fade until the 2026-10-30 dive —
+    // from 81 s, just as the eye began to fly through it)
+    const webKeep = act2 ? (1 - 0.55 * act2.volume) * (1 - act2.local) : 1;
     field.group.visible = fade > 0 || webKeep > 0.002;
     arrival.group.visible = t2 >= 0;
     const moved = eye.position.clone().sub(eyeWas);
     camera.position.add(moved);
     controls.target.add(moved);
     eyeWas.copy(eye.position);
-    field.update(state, at, eye.position, fade, webKeep);
+    // where the eye is in the web: the pull-back, the dive, the approach — one curve (webDive.ts); the dive's near detail
+    // comes up over its first DIVE_CLOSE s
+    const place = webPlace(at, [eye.position.x, eye.position.y, eye.position.z], diveFrame, p);
+    const close = Math.min(1, Math.max(0, (at - diveFrame.diveStart) / DIVE_CLOSE));
+    field.update(state, at, eye.position, fade, webKeep, { ...place, R: diveFrame.R, close: close * close * (3 - 2 * close) });
     // Get the Drift arrives at the Sun from galaxy distances: the near clip must follow the scale
     // (and once the planet is there, the nearest thing is its atmosphere, a thousand km off: 1e-4 of a unit)
     // (and as the landing comes down to the water, a few hundredths of the height)
@@ -287,6 +319,7 @@ async function boot(): Promise<void> {
     Object.assign(crawl.layout, crawlLayout());
     crawl.phrases = undertimeCrawl(p);
     crawl.draw(at);
+    if (dome.flat) flatTitles.draw(at, crawl.phrases, crawl.layout);
     field.setPocket(pocketAt(at), p.domeTilt);
     return state;
   };
@@ -450,6 +483,14 @@ async function boot(): Promise<void> {
       paused = on;
     },
     state: () => undertimeState(t, p),
+    /** the 16:9 cut's framing (drift/flatFraming.ts) on or off: on, every frame drawn in the flat view (`dome.setFlat`)
+     * is aimed by it — scripts/drift-review-clip.mjs --flat-track */
+    setFlatTrack(on: boolean): void {
+      flatTrack = on ? flatFramingTrack(flatMarks()) : null;
+    },
+    /** the framing at show time `at` (deg), and the beats' start times it is timed from */
+    flatFraming: (at: number): FlatView => flatFramingTrack(flatMarks())(at),
+    flatMarks,
     /** offline dome-master render to the cine sink (npm run cine:sink): { size, fps, from, to, shot } */
     record,
   };

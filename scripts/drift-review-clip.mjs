@@ -7,11 +7,13 @@
  *
  *   node scripts/drift-review-clip.mjs --from <s> --to <s> [--width 1280] [--fps 30] [--out <file.mp4>]
  *        [--shot '<json>' | --shot-file <view.json>] [--dome] [--port 5362] [--channel chrome|chromium]
- *        [--query raftplain] [--ss <n>] [--setup '<js>'] [--crf 16] [--allow-long] [--allow-large]
+ *        [--query raftplain] [--ss <n>] [--setup '<js>'] [--crf 16] [--allow-long] [--allow-large] [--flat-track]
  *
  *   --from/--to   show time, s: frames t = from + n/fps for n < round((to − from)·fps)
  *   --shot        the view, the fields of a still's shot without name and t (scripts/drift-review-page.mjs), e.g.
  *                 '{"fov":55,"mode":"chase","back":9,"side":-3,"up":2.2}'. Default: the show's eye, 60°, straight ahead
+ *   --flat-track  THE 16:9 CUT: the view aimed frame by frame by the show's framing track (src/drift/flatFraming.ts:
+ *                 up for Acts 1–2, the horizon at sea, up into w6's night), over the --shot's view; not with --dome
  *   --out         default out/drift/review/clip_<from>-<to>s[_dome].mp4; written as <file>.part until it is complete
  *   --width       px (even); the 16:9 view is cut from a square frame of this size
  *   --ss          cube-face supersampling (default: 2 face texels a view pixel, under 4096 px faces: flatSupersample in
@@ -39,6 +41,7 @@ if (!Number.isFinite(FROM) || !Number.isFinite(TO) || !(TO > FROM)) throw new Er
 const FPS = num('fps', 30);
 const FRAMES = Math.max(0, Math.round((TO - FROM) * FPS)); // record.ts frameCount
 const DOME = has('dome');
+if (DOME && has('flat-track')) throw new Error('--flat-track aims the 16:9 view: not with --dome');
 const N = num('width', DOME ? 1024 : 1280);
 if (N % 2 !== 0) throw new Error(`--width ${N}: must be even`);
 const MAX = DOME ? 1024 : 1280;
@@ -95,6 +98,7 @@ try {
   ff.stdin.on('error', () => {}); // an ffmpeg that died is reported by its exit code below
   if (SETUP) console.log('[review] setup:', JSON.stringify(await run(SETUP)));
   await aim(page, shot, DOME);
+  if (has('flat-track')) await page.evaluate(() => window.__drift.setFlatTrack(true));
   console.log(`[review] ${FRAMES} frames [${FROM}, ${TO}) s at ${FPS} fps, ${N}×${h}${DOME ? ' dome' : ''}, ss ${ss.toFixed(2)}`);
   t0 = Date.now();
   await page.evaluate(

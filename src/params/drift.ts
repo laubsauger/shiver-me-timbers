@@ -56,6 +56,54 @@ export interface DriftParams {
   waveRadiance: number;
   /** linear radiance of the wave front's sparks (U3) */
   sparkRadiance: number;
+  /**
+   * THE LIGHT WAVE AS A COLLAPSE (the 2026-10-30 review: "a better ramp into intensity … a total collapse of space
+   * and time … too tame"). s of tension before the front rises, taken from the end of the cooling once its last
+   * phrase has gone (32.3 s with the default text): births gather low in front, quicken and brighten, and a glow
+   * comes up under the front horizon. The beat lengths are unchanged.
+   */
+  waveBuild: number;
+  /** deg, the most the front pulls the field toward itself as it passes (space folding onto the front line) */
+  waveLens: number;
+  /** deg, how far either side of the front its pull reaches (the e-fold of the pinch) */
+  waveLensWidth: number;
+  /** linear radiance of the front itself: its white core (the shoulder rolls it off; its fringes are fractions) */
+  frontRadiance: number;
+  /**
+   * 0..0.9, how hard the front STALLS over the audience (the held climax: the 2026-10-30 story note — the separate
+   * dome-wide "glowing network" flashed up while the front was still climbing and lit the spent region behind it
+   * again). The sweep's speed dips by this fraction as the front crosses the zenith, so it rushes up from the
+   * horizon, hangs over the audience in its brightest light, and rushes away.
+   */
+  waveStall: number;
+  /** linear radiance of the front's CREST: the broad band of light, textured as a caustic web, it carries while it
+   * stalls overhead (ahead of its line mostly; behind it the dome is spent) */
+  crestRadiance: number;
+  /** s, e-fold of the afterglow: what the front froze (the field's last instant) cooling white → amber → ember */
+  afterglow: number;
+  /** how many grains the front leaves behind besides the hero grain (survivors.ts): the one-in-a-billion, visibly
+   * few. Reload-scoped */
+  survivors: number;
+  /** "a few more shades" (the 2026-10-30 review): each family's range, either side of its base colour.
+   * Matter runs deep ember ← amber → pale gold; antimatter cyan ← azure → violet-magenta (direction.md's cooling
+   * already names cyan and magenta tracks). Products of annihilation take the families' rose and teal. */
+  matterDeep: number;
+  matterPale: number;
+  antiCyan: number;
+  antiMagenta: number;
+  productWarm: number;
+  productCool: number;
+  /**
+   * THE PARTICLES' GLOW PROFILE (the 2026-10-30 note: "the particles' bloom falloff … a little bit thick and doesn't
+   * have a smooth enough falloff … too thick in the inner and outer parts, just a smidge"). Each trail, bead and
+   * flash is a sharp core plus a halo, both Gaussians, the halo windowed to exactly zero (with zero slope) at its
+   * quad's edge. `glowCore` scales the core's width (1: ~10 % thinner than before, its energy kept, so it is
+   * brighter at the centre), `glowHalo` the halo's width (1: ~25 % wider than before, lower so its energy is ~0.9 of
+   * before), `glowHaloGain` the halo's energy.
+   */
+  glowCore: number;
+  glowHalo: number;
+  glowHaloGain: number;
   /** 1: the event grammar (photon collisions, looping pairs, plasma); 0: the spiral tracks (look-dev A/B) */
   grammar: number;
   /** concurrent pair slots; each draws two tracks and seven light sprites */
@@ -99,8 +147,10 @@ export interface DriftParams {
   pairLife: number;
   /** orders of magnitude the zoom beat pulls back through */
   zoomDecades: number;
-  /** the web (webVolume.ts): box units the eye ends from the hero knot; deg the flight line turns through;
-   * the gas's radiance */
+  /** the web (webVolume.ts): box units the eye ends from the hero knot; deg the flight line turns through (by
+   * the gather beat + 1 s, where the dive into the web begins: under 1°/s); the gas's radiance. The dive's target
+   * filament was picked for these two (getTheDrift/webDive.ts): change them and the web's frame follows, but the
+   * dive may miss its filament */
   webReach: number;
   webTurn: number;
   webRadiance: number;
@@ -120,6 +170,9 @@ export interface DriftParams {
   crawlSink: number;
   /** deg, where "the Drift" settles and holds */
   crawlHoldEl: number;
+  /** deg, where the END title ("the Drift" again, over W6's night) settles: under the Rose's beams and the coast
+   * towers' lamps (main-drift.ts endTitle), not at crawlHoldEl, where the beams crossed it */
+  endTitleEl: number;
   /** text height as a fraction of the master width (0.033 ≈ a 3° x-height) */
   crawlSize: number;
   /** rad, the widest a line may span in azimuth (±50° safe zone ≈ 1.75) */
@@ -165,6 +218,26 @@ export const driftParams: DriftParams = registerParams(
     starRadiance: 40,
     waveRadiance: 0.6,
     sparkRadiance: 8,
+    waveBuild: 5.5,
+    waveLens: 6,
+    waveLensWidth: 14,
+    frontRadiance: 7,
+    waveStall: 0.72,
+    crestRadiance: 1.1,
+    // (0.9 s in the first rounds: the frozen field burned on behind the front; the region it passes stays spent)
+    afterglow: 0.35,
+    survivors: 16,
+    matterDeep: 0xff6224,
+    matterPale: 0xffe2a0,
+    antiCyan: 0x52dcff,
+    antiMagenta: 0xc77bff,
+    productWarm: 0xff8f86,
+    productCool: 0x5fe8d2,
+    // (the 1:1 sweep of 2026-10-30, four profiles at 1920: the core a further 10 % thinner and the halo's light 0.8 —
+    // between the first default and the leanest — read "a smidge" thinner inside and out without going wiry)
+    glowCore: 0.9,
+    glowHalo: 1,
+    glowHaloGain: 0.8,
     grammar: 1,
     pairSlots: 2600,
     trackSegments: 40,
@@ -190,7 +263,7 @@ export const driftParams: DriftParams = registerParams(
     pairLife: 3.2,
     zoomDecades: 2,
     webReach: 0.3,
-    webTurn: 20,
+    webTurn: 14,
     webRadiance: 3,
     matterColor: 0xffb44c,
     antimatterColor: 0x6e9cff,
@@ -201,6 +274,7 @@ export const driftParams: DriftParams = registerParams(
     crawlElTop: 37,
     crawlSink: 5,
     crawlHoldEl: 30,
+    endTitleEl: 18,
     crawlSize: 0.033,
     crawlMaxArc: 1.6,
     crawlRadiance: 1.4,
@@ -236,6 +310,16 @@ export const driftParams: DriftParams = registerParams(
     starRadiance: { min: 0, max: 100, step: 0.5 },
     waveRadiance: { min: 0, max: 10, step: 0.05 },
     sparkRadiance: { min: 0, max: 60, step: 0.5 },
+    waveBuild: { min: 0, max: 15, step: 0.25 },
+    waveLens: { min: 0, max: 20, step: 0.25 },
+    waveLensWidth: { min: 2, max: 60, step: 0.5 },
+    frontRadiance: { min: 0, max: 40, step: 0.1 },
+    waveStall: { min: 0, max: 0.9, step: 0.01 },
+    crestRadiance: { min: 0, max: 6, step: 0.05 },
+    afterglow: { min: 0.05, max: 4, step: 0.05 },
+    glowCore: { min: 0.3, max: 3, step: 0.05 },
+    glowHalo: { min: 0.3, max: 3, step: 0.05 },
+    glowHaloGain: { min: 0, max: 3, step: 0.05 },
     fieldRadius: { min: 2, max: 200, step: 1 },
     particleSize: { min: 0.01, max: 1, step: 0.01 },
     pairLife: { min: 0.3, max: 10, step: 0.1 },
@@ -264,6 +348,7 @@ export const driftParams: DriftParams = registerParams(
     crawlElTop: { min: 10, max: 60, step: 1 },
     crawlSink: { min: 0, max: 20, step: 0.5 },
     crawlHoldEl: { min: 0, max: 60, step: 1 },
+    endTitleEl: { min: 0, max: 60, step: 0.5 },
     crawlSize: { min: 0.005, max: 0.1, step: 0.001 },
     crawlMaxArc: { min: 0.3, max: 3.1, step: 0.05 },
     crawlRadiance: { min: 0, max: 10, step: 0.05 },

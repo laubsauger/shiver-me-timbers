@@ -56,7 +56,7 @@
  * then shaded with that occlusion on its materials' indirect light (domeAo.ts says why there, and why seam-free).
  */
 import * as THREE from 'three/webgpu';
-import { cubeTexture, float, mix, texture, toneMapping, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { cubeTexture, float, mix, step, texture, toneMapping, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { domeBasis, domeMasterDirectionNode } from './domeMaster';
 import { DomeAo, type DomeAoLook } from './domeAo';
@@ -75,6 +75,10 @@ const EDGE_PAD = 16;
  * centres (level < 0) nothing changes.
  */
 const FACES = { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter } as const;
+
+/** the grade's knee (`grade`): the tone map's output (0..1, linear) above which its contrast power hands over to
+ * the shoulder — 0.6 is AgX's for a scene radiance of ~1 (a white surface in full sun): the grade is unchanged below */
+const GRADE_KNEE = 0.6;
 
 /** the faces' cube target; its texture named for three's MRT, which the AO's colour pass binds (domeAo.ts colourMrt) */
 function faceTarget(size: number): THREE.CubeRenderTarget {
@@ -175,14 +179,21 @@ export interface DomeCaptureOptions {
    * convention as the master (v = 0 at the bottom = front). Composited before the tone map.
    */
   overlay?: THREE.Texture;
+  /**
+   * Optional layer drawn instead of `overlay` while the review view is on (`setFlat`): the same titles composed for
+   * the flat frame (drift/flatTitles.ts), in the flat frame's own uv — the square view, v = 0 at its bottom. Only the
+   * texture `overlay`'s lookup reads is swapped (`setFlat`): the shader is the same, and the dome's frames are
+   * exactly what they were without it. Needs `overlay`.
+   */
+  flatOverlay?: THREE.Texture;
   /** baked into the shader; AgX keeps saturated emitters cleaner than ACES */
   toneMapping?: THREE.ToneMapping;
   /** MSAA samples of the faces' colour pass: 4 (the default) or 0 (`setSamples`) */
   samples?: number;
   /**
    * A grade after the tone map, set per frame (`setGrade`): saturation about the luminance, and contrast as a
-   * power about mid grey (a camera's curve; AgX alone is flat). Absent, the present pass is exactly the tone
-   * map and `setGrade` does nothing.
+   * power about mid grey (a camera's curve; AgX alone is flat) that rolls into a shoulder above GRADE_KNEE instead
+   * of clipping. Absent, the present pass is exactly the tone map and `setGrade` does nothing.
    */
   grade?: boolean;
 }
@@ -227,8 +238,12 @@ export class DomeCapture {
    * first use, at the faces' size) */
   private samples: number;
   private msaa: THREE.RenderTarget | null = null;
+  /** the overlay's lookup, and the two layers it reads (the master's, and the flat view's: `flatOverlay`) */
+  private overlayNode: ReturnType<typeof texture> | null = null;
+  private readonly overlays: { dome: THREE.Texture | null; flat: THREE.Texture | null };
 
   constructor(opts: DomeCaptureOptions) {
+    this.overlays = { dome: opts.overlay ?? null, flat: opts.flatOverlay ?? null };
     this.samples = (opts.samples ?? FACE_SAMPLES) > 1 ? FACE_SAMPLES : 0;
     this.target = faceTarget(opts.faceSize);
     this.cubeCamera = new THREE.CubeCamera(opts.near ?? 0.05, opts.far ?? 1e6, this.target);
@@ -271,6 +286,7 @@ export class DomeCapture {
     let lit = hdrTex.rgb.add(this.glow.rgb);
     if (opts.overlay) {
       const layer = texture(opts.overlay, masterUV);
+      this.overlayNode = layer;
       lit = mix(lit, layer.rgb.mul(this.uOverlayRadiance), layer.a);
     }
     const present = this.material('dome-present');
@@ -278,8 +294,20 @@ export class DomeCapture {
     let graded = mapped;
     if (opts.grade) {
       const luma = mapped.dot(vec3(0.2126, 0.7152, 0.0722));
-      const saturated = mix(vec3(luma), mapped, this.uSaturation).max(0);
-      graded = saturated.div(0.18).pow(vec3(this.uContrast)).mul(0.18).min(1);
+      const saturated = mix(vec3(luma), mapped, this.uSaturation).max(0).min(1);
+      // THE SHOULDER (the 2026-10-29 review: cloudlets near the Sun "flat 255 blobs", the sky round it a clipped
+      // dome with a hard ring at its edge). The power about mid grey, cut at 1, reached white at AgX's 0.83 — a
+      // scene radiance of ~3.2 — and threw away the 2.3 stops AgX keeps above it (to ~16): the sky within a few
+      // degrees of a low Sun (2–4) and every thin cloud lit through by it (3–14, measured at 604 and 665 s) went flat
+      // white, the red first, ending in an edge. Now the power holds up to GRADE_KNEE, as before, and above it a
+      // curve reaches 1 only at AgX's own 1, with the same value and slope at the knee: everything under a scene
+      // radiance of ~1 is unchanged, a white of 2 goes 241 → 238 in 8-bit sRGB, of 3 253 → 246, of 4 255 → 249, and
+      // nothing clips short of AgX's white
+      const toe = saturated.div(0.18).pow(vec3(this.uContrast)).mul(0.18);
+      const kneeY = float(GRADE_KNEE / 0.18).pow(this.uContrast).mul(0.18);
+      const bend = this.uContrast.mul(kneeY).div(GRADE_KNEE).mul(1 - GRADE_KNEE).div(kneeY.oneMinus());
+      const shoulder = vec3(1).sub(vec3(1).sub(saturated).div(1 - GRADE_KNEE).pow(vec3(bend)).mul(kneeY.oneMinus()));
+      graded = mix(toe, shoulder, step(vec3(GRADE_KNEE), saturated));
     }
     present.fragmentNode = vec4(graded, 1);
     this.presentQuad = new THREE.QuadMesh(present);
@@ -297,14 +325,23 @@ export class DomeCapture {
   /**
    * The REVIEW VIEW: render a rectilinear view instead of the dome master (null: back to the dome). `fov` is the
    * square frame's full angle (deg; its 16:9 crop keeps it across), `yaw` (deg, + left) and `pitch` (deg, + up)
-   * aim it from the eye's front. Not for the show: for detail stills and clips to review.
+   * aim it from the eye's front. For detail stills and clips to review, and the show's 16:9 cut (aimed per frame by
+   * drift/flatFraming.ts, its titles from `flatOverlay`).
    */
   setFlat(view: { fov: number; yaw?: number; pitch?: number } | null): void {
     this.uFlat.value = view ? 1 : 0;
+    // the titles: the flat frame's own layer while it is on (`flatOverlay`), the master's otherwise
+    const layer = view && this.overlays.flat ? this.overlays.flat : this.overlays.dome;
+    if (this.overlayNode && layer && this.overlayNode.value !== layer) this.overlayNode.value = layer;
     if (!view) return;
     this.uFlatTan.value = Math.tan((view.fov * Math.PI) / 360);
     const m = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(((view.pitch ?? 0) * Math.PI) / 180, ((view.yaw ?? 0) * Math.PI) / 180, 0, 'YXZ'));
     this.uFlatAim.value.setFromMatrix4(m);
+  }
+
+  /** whether the review view is on (`setFlat`) */
+  get flat(): boolean {
+    return this.uFlat.value > 0;
   }
 
   /**
