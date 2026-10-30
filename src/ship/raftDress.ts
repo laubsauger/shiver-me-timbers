@@ -25,11 +25,13 @@
  */
 import * as THREE from 'three/webgpu';
 import { float, mix, normalLocal, positionLocal, smoothstep, vec3 } from 'three/tsl';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { PieceDef } from './pieceTypes';
 import type { MaterialFactory } from './shipAssembly';
 import { ropeRailParts, softBox, wornPieceGeometry } from './pieceGeometryWear';
 import { raftLayout } from './raftPartsLayout';
 import { roofSlope } from './raftPartsCabin';
+import { raftSparDiameter } from './raftPartsRig';
 import { raftParams } from '../params/raft';
 import { vhash } from './variation';
 import { triplanarFbm } from '../terrain/noise';
@@ -383,6 +385,68 @@ export function dressRaft(ship: THREE.Object3D, blueprint: PieceDef[], materials
       }
     }
   }
+  // THE CROSSING'S LASHING (the 2026-10-30 triage, a view up at the masthead at 545 s: it still read as a "pedestal").
+  // The game's lashing there is fifteen round turns 0.45 m tall, each a ring of 1.5 leg radii about the raked
+  // vertical — a ribbed column standing on the crossing, the perch at its side, nothing of the legs showing through.
+  // The Kon-Tiki's legs were "lashed crosswise at top" (kon-tiki-reference.md §4): two poles meeting at a narrow angle
+  // near their tips are lashed as shear legs are, with racking turns round BOTH — each turn hugging the pair, a long
+  // oval round two poles side by side, not a ring standing off them — a handspan of them, laid by hand and not quite
+  // even, the rope then crossed over the turns front and back where it is carried from one end of the lashing to the
+  // other. The piece stays the game's (its def and bounds: the rigging's sockets are on it); its mesh is that.
+  const crossDef = byId.get('lashing-crossing');
+  const crossMesh = ship.getObjectByName('lashing-crossing-mesh') as THREE.Mesh | undefined;
+  if (crossDef && crossMesh) {
+    const C = new THREE.Vector3(...crossDef.transform.position);
+    const rake = Math.max(0, p.mastRakeAft);
+    // the raked up (U), athwartships (X) and the face of the bipod (N): the legs lie in the X–U plane
+    const U = new THREE.Vector3(0, Math.cos(rake), -Math.sin(rake));
+    const N = new THREE.Vector3(0, Math.sin(rake), Math.cos(rake));
+    const X = new THREE.Vector3(1, 0, 0);
+    const halfSpan = p.mastLegSpacing / 2;
+    const tanLean = halfSpan / p.mastHeight;
+    const legR = raftSparDiameter(p, Math.hypot(halfSpan, p.mastHeight) + p.mastCrossingOverlap) / 2;
+    const rope = p.lashingRopeDiameter;
+    const at = (x: number, u: number, n: number): THREE.Vector3 => C.clone().addScaledVector(X, x).addScaledVector(U, u).addScaledVector(N, n);
+    const tubes: THREE.BufferGeometry[] = [];
+    /** turns of the racking (8 × 30 mm hemp: 0.25 m of lashing, centred on the crossing) */
+    const TURNS = 8;
+    const R = legR * 1.04 + rope * 0.5;
+    for (let k = 0; k < TURNS; k++) {
+      const u = (k - (TURNS - 1) / 2) * rope * 1.05 + (vhash(251, k) - 0.5) * 0.006;
+      // each leg's centre this far either side of the middle at this height (they cross at u = 0)
+      const sep = Math.abs(u) * tanLean;
+      const tilt = Math.tan((vhash(252, k) - 0.5) * 0.12);
+      const pts: THREE.Vector3[] = [];
+      const SEG = 28;
+      for (let i = 0; i < SEG; i++) {
+        const a = (i / SEG) * Math.PI * 2;
+        // round each leg's outer side, straight across the pair's front and back
+        const x = (Math.cos(a) >= 0 ? sep : -sep) + R * Math.cos(a);
+        const n = R * Math.sin(a) * (1 + (vhash(253, k * 31 + i) - 0.5) * 0.05);
+        pts.push(at(x, u + x * tilt, n));
+      }
+      tubes.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true, 'centripetal'), 44, rope * 0.48, 6, true));
+    }
+    // the rope crossing the turns, front and back, from one end of the lashing to the other
+    const span = ((TURNS - 1) / 2) * rope * 1.05;
+    for (const side of [1, -1]) {
+      const lift = R + rope * 0.9;
+      const curve = new THREE.CatmullRomCurve3([
+        at(-side * R * 0.7, span, side * (R + rope * 0.4)),
+        at(-side * R * 0.25, span * 0.35, side * lift),
+        at(side * R * 0.25, -span * 0.35, side * lift),
+        at(side * R * 0.7, -span, side * (R + rope * 0.4)),
+      ]);
+      tubes.push(new THREE.TubeGeometry(curve, 12, rope * 0.46, 6, false));
+    }
+    const merged = mergeGeometries(tubes);
+    if (merged) {
+      ship.updateMatrixWorld(true);
+      merged.applyMatrix4(new THREE.Matrix4().copy(crossMesh.matrixWorld).invert().multiply(ship.matrixWorld));
+      crossMesh.geometry.dispose();
+      crossMesh.geometry = merged;
+    }
+  }
   const mastMain = ship.getObjectByName('mast-main');
   const yard = ship.getObjectByName('yard-main-lower');
   if (mastMain && yard) {
@@ -429,6 +493,123 @@ export function dressRaft(ship: THREE.Object3D, blueprint: PieceDef[], materials
     };
     mastMain.add(halyard);
   }
+  // THE SMALL SAILS' YARDS ON THEIR HALYARDS (the user, 2026-10-30, of the topsail and the mizzen against a sunset:
+  // "they both don't really have a connection to the top with any kind of ropes"). Each yard is seized to its pole
+  // (raftPartsRig's parrel seizing), but nothing held it UP: the rigging plan's halyards for them run from the pole's
+  // truck down to the deck (raftRigging RAFT_EXTRA_ROPES), and the leg from the truck to the yard was never drawn,
+  // here or by the game's ropes. So, as the main's above: slings round the yard either side of its middle, up to an
+  // apex, and the halyard from there to the truck, re-laid as it is drawn (the yards brace and come down to furl).
+  const hangFromTruck = (yardId: string, mastId: string, truckId: string, slingX: number, apexUp: number): void => {
+    const yardNode = ship.getObjectByName(yardId);
+    const mastNode = ship.getObjectByName(mastId);
+    const yardDef = byId.get(yardId);
+    const truck = byId.get(mastId)?.sockets.find((s) => s.id === truckId)?.position;
+    if (!yardNode || !mastNode || !yardDef || !truck) return;
+    const yr = (yardDef.aabb.max[1] - yardDef.aabb.min[1]) / 2;
+    const apex = new THREE.Vector3(0, apexUp, 0);
+    for (const sx of [-slingX, slingX]) {
+      const a = new THREE.Vector3(sx, yr * 0.5, 0);
+      const d = new THREE.Vector3().subVectors(apex, a);
+      const g = new THREE.CylinderGeometry(0.006, 0.006, d.length(), 5).translate(0, d.length() / 2, 0);
+      part(`${yardId}-sling-${sx > 0 ? 's' : 'p'}`, g, hemp, a, new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()), yardNode);
+      const ring = lashing(yr + 0.006, 0, 3, 0.007);
+      ring.rotateZ(Math.PI / 2);
+      part(`${yardId}-sling-lash-${sx > 0 ? 's' : 'p'}`, ring, hemp, new THREE.Vector3(sx, 0, 0), undefined, yardNode);
+    }
+    const line = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 1, 5).translate(0, 0.5, 0), hemp);
+    line.name = `${yardId}-halyard-mesh`;
+    line.frustumCulled = false;
+    const from = new THREE.Vector3(...truck);
+    const to = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    line.onBeforeRender = () => {
+      yardNode.updateWorldMatrix(true, false);
+      to.copy(apex).applyMatrix4(yardNode.matrixWorld);
+      mastNode.worldToLocal(to);
+      const d = to.sub(from);
+      line.position.copy(from);
+      line.scale.set(1, Math.max(1e-3, d.length()), 1);
+      line.quaternion.setFromUnitVectors(up, d.normalize());
+      line.updateMatrix();
+      line.updateMatrixWorld(true);
+    };
+    mastNode.add(line);
+  };
+  // (m: the slings either side of the yard's middle, and their apex over its axis — the main's are ±0.38 and 0.32
+  // on a 6 m yard; these on 3.4 m and the mizzen's sprit, in proportion)
+  hangFromTruck('yard-main-upper', 'mast-main', 'anchor-masthead-main', 0.3, 0.16);
+  hangFromTruck('yard-mizzen-lower', 'mast-mizzen', 'anchor-masthead-mizzen', 0.22, 0.1);
+
+  // THE PARRELS, made fast (the 2026-10-30 note on the mizzen: "a bunched cloth knot at its yard end; nothing tying
+  // it on"). The game's seizing of a yard to its pole (raftPartsRig.parrelSeizing) is a sleeve of turns round BOTH
+  // spars' axes at once — on the mizzen a 0.3 m ribbed coil standing in the air between the pole and the yard, which
+  // from the deck read as a bunched cloth. A parrel is a collar round the pole whose ends are lashed to the yard: two
+  // turns round the pole, two legs forward either side of it to the yard's back, and three turns round the yard
+  // there. Built in the ship's frame from the two spars as they are, and laid into the seizing piece's own frame (its
+  // def and sockets stay the game's).
+  const parrel = (pieceId: string, mastId: string, yardId: string): void => {
+    const mesh = ship.getObjectByName(`${pieceId}-mesh`) as THREE.Mesh | undefined;
+    const mastNode = ship.getObjectByName(mastId);
+    const yardNode = ship.getObjectByName(yardId);
+    const mastDef = byId.get(mastId);
+    const yardDef = byId.get(yardId);
+    if (!mesh || !mastNode || !yardNode || !mastDef || !yardDef) return;
+    ship.updateMatrixWorld(true);
+    const toShip = new THREE.Matrix4().copy(ship.matrixWorld).invert();
+    const mastM = new THREE.Matrix4().multiplyMatrices(toShip, mastNode.matrixWorld);
+    const yardM = new THREE.Matrix4().multiplyMatrices(toShip, yardNode.matrixWorld);
+    const rope = 0.012;
+    const poleR = mastDef.aabb.max[0];
+    const yr = yardDef.aabb.max[1];
+    const mastO = new THREE.Vector3().setFromMatrixPosition(mastM);
+    const U = new THREE.Vector3().setFromMatrixColumn(mastM, 1).normalize();
+    const Y0 = new THREE.Vector3().setFromMatrixPosition(yardM);
+    const X = new THREE.Vector3().setFromMatrixColumn(yardM, 0).normalize();
+    // the pole's axis at the yard's height, and forward from it to the yard; S across
+    const P0 = mastO.clone().addScaledVector(U, Y0.clone().sub(mastO).dot(U));
+    const F = Y0.clone().sub(P0);
+    F.addScaledVector(U, -F.dot(U)).normalize();
+    const S = new THREE.Vector3().crossVectors(U, F).normalize();
+    const tubes: THREE.BufferGeometry[] = [];
+    const tube = (pts: THREE.Vector3[], closed: boolean, seg: number): void => {
+      tubes.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, closed, 'centripetal'), seg, rope * 0.5, 5, closed));
+    };
+    const Rp = poleR + rope * 0.6;
+    const back = Y0.clone().addScaledVector(F, -(yr + rope * 0.6));
+    for (const k of [-0.6, 0.6]) {
+      const c = P0.clone().addScaledVector(U, k * rope);
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i < 18; i++) {
+        const a = (i / 18) * Math.PI * 2;
+        pts.push(c.clone().addScaledVector(S, Math.cos(a) * Rp).addScaledVector(F, Math.sin(a) * Rp));
+      }
+      tube(pts, true, 36);
+    }
+    for (const side of [-1, 1]) {
+      const from = P0.clone().addScaledVector(S, side * Rp).addScaledVector(F, rope);
+      const to = back.clone().addScaledVector(X, side * 0.05);
+      tube([from, from.clone().lerp(to, 0.5).addScaledVector(U, -rope * 0.5), to], false, 8);
+    }
+    const Ry = yr + rope * 0.6;
+    const Uy = new THREE.Vector3().setFromMatrixColumn(yardM, 1).normalize();
+    const Fy = new THREE.Vector3().crossVectors(X, Uy).normalize();
+    for (const k of [-1, 0, 1]) {
+      const c = Y0.clone().addScaledVector(X, k * rope * 1.1);
+      const pts: THREE.Vector3[] = [];
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2;
+        pts.push(c.clone().addScaledVector(Uy, Math.cos(a) * Ry).addScaledVector(Fy, Math.sin(a) * Ry));
+      }
+      tube(pts, true, 28);
+    }
+    const merged = mergeGeometries(tubes);
+    if (!merged) return;
+    merged.applyMatrix4(new THREE.Matrix4().copy(mesh.matrixWorld).invert().multiply(ship.matrixWorld));
+    mesh.geometry.dispose();
+    mesh.geometry = merged;
+  };
+  parrel('lashing-parrel-main-upper', 'mast-main', 'yard-main-upper');
+  parrel('lashing-parrel-mizzen-lower', 'mast-mizzen', 'yard-mizzen-lower');
 
   // THE LADDER'S ROPES MADE FAST (the user: rigging and ladder lines "end in random spots"): each side rope's head
   // is seized to the starboard leg with a cord and a lashing round the leg, its foot likewise near the leg's foot.

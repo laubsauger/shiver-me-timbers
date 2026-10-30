@@ -378,12 +378,19 @@ export function createSailClothNodes(
   /**
    * How far a point of canvas is hauled UP as the sail gathers (m).
    * Transliteration of sailShape.sailFurlLift — same params, same order.
+   *
+   * × `set`, as the CPU side has been since the swag was made a fraction of what still HANGS (sailShape.ts: "the
+   * gather at the stations exceeded the whole remaining drop and lifted the foot ABOVE its own head"). This side
+   * had kept the old `swag · drop`, so a sail struck right in (set 0 — the film strikes to 0; the game's trim never
+   * went below 0.23) drew three spikes of canvas standing 0.16 of the drop over the furled roll, one at each inner
+   * station: the user, 2026-10-30, of the mainsail struck on its yard at the beach, "three weird spikes on the main
+   * sail popping up".
    */
   const furlLift = typedFn(([uu, v]: [Node, Node]) => {
     const furl = set.oneMinus();
     // 0 at each station (a line made fast), 1 in the middle of a bay
     const station = sin(uu.mul(max(u.furlBays, float(1))).mul(Math.PI)).abs();
-    return furl.mul(u.furlSwag).mul(builtDrop).mul(v.oneMinus()).mul(station.oneMinus());
+    return furl.mul(u.furlSwag).mul(builtDrop).mul(set).mul(v.oneMinus()).mul(station.oneMinus());
   }, 'float');
 
   /**

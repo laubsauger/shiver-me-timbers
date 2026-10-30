@@ -43,6 +43,7 @@ import {
   positionWorld,
   select,
   smoothstep,
+  step,
   texture,
   transformNormalToView,
   uniform,
@@ -60,6 +61,8 @@ import { shipSunDirectionOverride } from './sailMaterial';
 import { raftParams } from '../params/raft';
 import { createWornSail } from './raftSailWear';
 import { createHighlightNodes } from './raftHighlight';
+import { coordFilter } from './bandLimit';
+import { DECK_SLAT_PITCH, PLANK_GAP, PLANK_PITCH, PLANK_SEAM_PHASE } from './pieceGeometryWear';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL nodes
 type N = any;
@@ -74,6 +77,12 @@ const SCANS = {
   mat: { file: 'raft_bamboo_wall', tile: 2.0, depth: 0.006, mean: [0.2423, 0.1529, 0.0906], rough: 0.707 },
 } as const;
 type ScanName = keyof typeof SCANS;
+/** m: the mat scan's cane pitch on the deck — 55 canes across its tile (the strongest line of its albedo's and its
+ * normal's spectra across the canes, measured off the packed maps; 2.9–4.1 cm cane to cane) */
+const MAT_CANE = SCANS.mat.tile / 55;
+// (the deck's slats are cut at the same pitch: pieceGeometryWear DECK_SLAT_PITCH, 2.0 m / 55)
+/** × the mat scan's normal slopes on the deck: split cane, flat-topped (createMatMaterial; whole cane was 1.3) */
+const MAT_RELIEF = 0.6;
 /** texels across a packed map (the pack's SIZE) */
 const TEXELS = 1024;
 /**
@@ -183,8 +192,9 @@ interface Marched {
   hit: N;
   /** the height where the fragment itself is (not where its ray lands): what a hole lets through is HERE */
   heightHere: N;
-  /** the shading normal (local) with the scan's normal laid on the face, `strength` × the scan's slopes */
-  normal: (strength: number) => N;
+  /** the shading normal (local) with the scan's normal laid on the face, `strength` × the scan's slopes (a number,
+   * or a node: the mats band-limit theirs by the pixel's footprint across the canes) */
+  normal: (strength: N, base?: N) => N;
 }
 
 /**
@@ -194,13 +204,16 @@ interface Marched {
  * grazing end clamped (a ray at 75° from the normal already shifts 3.7 depths). All of it fades out with the
  * texel footprint, so at range it is the flat scan and nothing swims.
  */
-function marchScan(name: ScanName, face: Face, offset: N, steps: number, tileScale = 1): Marched {
+function marchScan(name: ScanName, face: Face, offset: N, steps: number, tileScale = 1, uAt?: N, wScale?: N): Marched {
   const s = scan(name);
   const S = SCANS[name];
   const tile = float(S.tile * tileScale);
   const p = positionLocal;
   // (the offset may step — a wall's panels — so the footprint is taken before it: no seam of blurred mips)
-  const uvBase = vec2(p.dot(face.U), p.dot(face.W)).div(tile);
+  // (`uAt`: metres along U to read the scan at instead of the fragment's own — the deck's slats, each one cane)
+  // (`wScale`: × the coordinate along W — the slats stretch the scan's canes along their length)
+  const along: N = wScale === undefined ? p.dot(face.W) : p.dot(face.W).mul(wScale);
+  const uvBase = vec2(uAt ?? p.dot(face.U), along).div(tile);
   const uv0 = uvBase.add(offset.div(tile));
   const gx = dFdx(uvBase);
   const gy = dFdy(uvBase);
@@ -249,10 +262,10 @@ function marchScan(name: ScanName, face: Face, offset: N, steps: number, tileSca
     b,
     hit: r.z.mul(fade),
     heightHere: heightTex.sample(uv0).grad(gx, gy).a,
-    normal: (strength) => {
+    normal: (strength, base = normalLocal) => {
       const t = b.xy.mul(2).sub(1).mul(strength);
       const nz = float(1).sub(t.dot(t)).max(0).sqrt();
-      const n = face.U.mul(t.x).add(face.W.mul(t.y)).add(normalLocal.mul(nz)).normalize();
+      const n = face.U.mul(t.x).add(face.W.mul(t.y)).add(base.mul(nz)).normalize();
       // NO SUN ON A FACE TURNED FROM IT. A thin wall's shadowed face is barely behind its own lit one in the sun's
       // shadow map (the bias reaches through 5 cm), so a texel whose scanned normal tips sunward lit up: square
       // orange flecks all over a backlit wall. Where the surface itself faces away, the sunward part of the
@@ -415,7 +428,12 @@ function createPlankMaterial(steps: number): THREE.MeshStandardNodeMaterial {
       : k === 1 ? [select(e.x.greaterThan(e.z), Z, X), select(e.x.greaterThan(e.z), X, Z)]
         : [select(e.x.greaterThan(e.y), Y, X), select(e.x.greaterThan(e.y), X, Y)],
   );
-  const s = marchScan('planks', face, vec2(piece.seed.mul(5.3), piece.seed.mul(2.9)), steps);
+  // ONE SCANNED BOARD ON EACH PLANK (the boards are separate planks now, pieceGeometryWear.planked: the 2026-10-30
+  // note "made out of rectangular planks, not out of separate wooden planks"): across the boards the scan is laid so
+  // its own board seams (one PLANK_PITCH apart from PLANK_SEAM_PHASE of its tile) fall in the real gaps, shifted by a
+  // whole number of boards per piece so no two pieces show the same boards in the same order
+  const across = float(PLANK_SEAM_PHASE * SCANS.planks.tile + PLANK_GAP / 2).sub(piece.aabbMin.dot(face.U)).add(piece.seed.mul(9).floor().mul(PLANK_PITCH));
+  const s = marchScan('planks', face, vec2(across, piece.seed.mul(2.9)), steps);
   const p = positionLocal;
   const frame = shipLocalFrame();
   const water = shipWater(frame);
@@ -460,8 +478,44 @@ function createMatMaterial(game: THREE.Material, steps: number): THREE.MeshPhysi
   const Z = vec3(0, 0, 1);
   // canes fore-and-aft on top (v along z), up the edge faces
   const face = boxFace((k) => (k === 0 ? [Z, Y] : k === 1 ? [X, Z] : [X, Y]));
-  const s = marchScan('mat', face, vec2(piece.seed.mul(4.3), piece.seed.mul(9.1)), steps);
   const p = positionLocal;
+  // THE DECK'S SLATS ARE GEOMETRY (pieceGeometryWear.slatMat: the user, 2026-10-30, of the deck — "it looks like a
+  // useless plastic plane … real split-bamboo slats"): every deck mat, the pieces 3–6 cm thick, is a row of rounded
+  // split-cane strips DECK_SLAT_PITCH apart from its own edge. On their tops the scan is read at the slat's own centre
+  // across — one scanned cane a slat, its nodes and marks along it, nothing painted across it (no second set of cane
+  // edges beside the real ones) — and the slat's curvature comes from its own normal, band-limited below as the scan's
+  // relief was. The cabin floor and the loose mats indoors (not slatted) read the scan as before.
+  const thick = piece.aabbMax.y.sub(piece.aabbMin.y);
+  // @band-limited-elsewhere: a per-piece gate on the piece's own thickness (a uniform), no spatial coordinate
+  const slatted = step(0.03, thick).mul(step(thick, 0.06));
+  const nA = normalLocal.abs();
+  const onTop = nA.y.greaterThanEqual(nA.x).and(nA.y.greaterThanEqual(nA.z));
+  const across = p.dot(face.U);
+  const fromEdge = across.sub(piece.aabbMin.dot(face.U));
+  const slatCentre = piece.aabbMin.dot(face.U).add(fromEdge.div(DECK_SLAT_PITCH).floor().add(0.5).mul(DECK_SLAT_PITCH));
+  // (and along each slat the scan is stretched 1.7×: its nodes ~0.2 m apart drew a slat as a row of short tiles from
+  // a few metres, the joints staggered slat to slat like brickwork — a split culm's nodes are 0.3–0.5 m apart)
+  const slatTop = onTop.and(slatted.greaterThan(0.5));
+  const s = marchScan('mat', face, vec2(piece.seed.mul(4.3), piece.seed.mul(9.1)), steps, 1, select(slatTop, slatCentre, across), select(slatTop, float(1 / 1.7), float(1)));
+  // THE CANES' RELIEF, SOFTENED AND BAND-LIMITED (the 2026-10-29 AA review: "Raft deck slats moiré — shading
+  // aliasing, MSAA can't touch it; worse as faces sharpen"). The scan's canes are round in section, 3.6 cm across
+  // (MAT_CANE), and at the scan's own relief (× 1.3) a low Sun lit one flank of every cane and none of the other: at
+  // 545 s (Sun 10° up, 43° off the canes) a flank tilted more than ~15° from it gets nothing but the sky, the other
+  // three or four times a flat deck's light — the fore-deck a field of hard blue-black and straw stripes, one pair a
+  // cane, which at a master's pixel (a cane is 2–4 px of a 4K master from the show's eye) beat into moiré bands that
+  // swim as the eye moves. Measured by isolation (16:9 still, 545 s, fov 30): with the mats' normal off the stripes
+  // are gone entirely and the deck is a plain mat under the rigging's soft shadows; shadows, albedo and occlusion
+  // draw none of it. So, two things:
+  //   - FLATTER CANES: a deck mat is split bamboo, flat-topped and rounded only at its edges (the reference's
+  //     "golden-yellow mats", kon-tiki-reference.md §7), so the scan's slopes count at 0.6 (MAT_RELIEF), not 1.3 — the
+  //     grooves still dark against a low Sun, the crowns no longer half black;
+  //   - BAND-LIMITED: lighting is not linear in the normal, so the stripes reach the pixel grid at full contrast long
+  //     before the normal map's mips average a cane flat. The relief fades by the footprint ACROSS the canes (the
+  //     face's u, foreshortening and all), from a cane per 14 face pixels to flat at one per 4 — with a master's
+  //     1.25–1.5 face texels a pixel and the review's ~1.6, gone before a cane is three output pixels — and the
+  //     roughness takes up a little of the variance the flattened normal no longer carries.
+  // @band-limited-elsewhere: this smoothstep IS the band limit — on coordFilter (|dFdx| + |dFdy|) of the cane coordinate
+  const canes = float(1).sub(smoothstep(MAT_CANE * 0.07, MAT_CANE * 0.25, coordFilter(p.dot(face.U))));
   const noise = triplanarFbm(p.mul(1.9).add(piece.seed.mul(5)), normalLocal, float(6), 3);
   let c: N = onPalette(s.a.rgb, 'mat', [0.3, 0.24, 0.155], 1.15);
   const bleach = float(0.3).add(noise.mul(0.4)).clamp(0, 1);
@@ -472,9 +526,12 @@ function createMatMaterial(game: THREE.Material, steps: number): THREE.MeshPhysi
   const water = shipWater(shipLocalFrame());
   const mix3 = (a: N, b: N): N => mix(a, b, isMat);
   m.colorNode = mix3(g.colorNode, c.mul(water.tint));
-  m.roughnessNode = mix3(g.roughnessNode, s.a.a.mul(mix(float(0.8), float(1.0), bleach)).mul(water.roughnessScale).clamp(0.3, 1));
+  m.roughnessNode = mix3(g.roughnessNode, s.a.a.mul(mix(float(0.8), float(1.0), bleach)).add(canes.oneMinus().mul(0.08)).mul(water.roughnessScale).clamp(0.3, 1));
   m.aoNode = mix3(g.aoNode ?? float(1), mix(float(1), s.b.b, 0.7).mul(float(1).sub(s.hit.mul(0.4))));
-  m.normalNode = mix3(g.normalNode, transformNormalToView(s.normal(1.3))).normalize();
+  // (a slat's own curvature, the geometry's normal, faded to its face's flat normal by the same footprint as the
+  // relief: rounded strips at 10–20 face pixels a cane are exactly the stripes the moiré came from)
+  const slatNormal = mix(normalLocal, mix(face.N, normalLocal, canes), slatted).normalize();
+  m.normalNode = mix3(g.normalNode, transformNormalToView(s.normal(canes.mul(MAT_RELIEF), slatNormal))).normalize();
   m.emissiveNode = g.emissiveNode;
   m.metalness = 0;
   m.sheenNode = vec3(0.22, 0.2, 0.15);

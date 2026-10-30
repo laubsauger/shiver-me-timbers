@@ -115,7 +115,10 @@ function yardAndSail(
     // §B86-2: and this raft's own saturating wind, so one shared membrane
     // still answers two very different suits of canvas (sailDynamics.readSailWindRef)
     // §B86-3: the roll is gathered along THIS yard, at the raft's own packing
-    shape: { sheetLeadAft: -1, yardR: yr, windRef: p.sailWindRef, yardLength: len, furlPack: p.furlBundlePack },
+    // and the head is bent TO the yard across the `sailYardOffset` the cloth hangs forward of it — head row, bolt
+    // rope and robands round the spar (pieceGeometrySail.yardBend; the 2026-10-30 note: "the top is not aligned
+    // with the horizontal spar")
+    shape: { sheetLeadAft: -1, yardR: yr, windRef: p.sailWindRef, yardLength: len, furlPack: p.furlBundlePack, yardOffset: p.sailYardOffset },
   });
   return [yard, sail];
 }

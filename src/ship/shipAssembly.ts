@@ -349,7 +349,9 @@ export class ShipAssembly {
     }
     if (rt.sail === stateId) return; // rebuilds geometry: never do it twice
     rt.mesh.geometry.dispose();
-    rt.mesh.geometry = buildSailGeometry(stateId, rt.def.aabb);
+    // (with the piece's own shape: without it a rebuilt raft sail lost its yard-sized robands — the galleon's
+    // 0.36 m pegs — its bundle's packing and its head bent to the yard)
+    rt.mesh.geometry = buildSailGeometry(stateId, rt.def.aabb, rt.def.shape);
     rt.sail = stateId;
   }
 

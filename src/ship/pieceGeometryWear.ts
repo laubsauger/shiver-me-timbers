@@ -430,6 +430,186 @@ function logRings(def: PieceDef, cell: number): THREE.BufferGeometry {
 }
 
 /**
+ * THE PLANKS OF A PLANKED PIECE (the user, 2026-10-30, of the raft from the side at the landing: "everything looks
+ * obviously made out of rectangular planks, not out of separate wooden planks … all the angles are too sharp …
+ * nothing is rounded or bevelled … some variability in bending along the length, warp"). The bow boards, their side
+ * runs aft along the outer logs and the centreboards were each ONE slab with the scan's board lines painted on it.
+ * Here each is built of its planks: one PLANK_PITCH apart across the piece (the weathered-planks scan's own board
+ * width, 2.4 m / 9, so the material lays one scanned board on each — raftLook.ts `createPlankMaterial`), a gap
+ * between them, every plank its own: a little shorter or longer at each end and cut off square by eye, a little
+ * thicker or thinner and set a few millimetres in or out of its neighbours, bowed along its length and sprung along
+ * its edge, twisted end to end and cupped across, with its arrises rounded by a centimetre so a highlight runs along
+ * each edge. Each within the piece's own box ± its warp.
+ */
+/** m: slat to slat across a deck mat — the mat scan's cane (raft_bamboo_wall: 55 canes a 2.0 m tile; raftLook.ts
+ * reads one scanned cane on each slat) */
+export const DECK_SLAT_PITCH = 2.0 / 55;
+/** m: the gap between two slats, and how deep a slat is under its crown (its rounded edge's drop) */
+const SLAT_GAP = 0.0035;
+const SLAT_DEPTH = 0.012;
+/** a split cane's section, half of it: (across, as a fraction of the half-width; down from the crown, m) */
+const SLAT_PROFILE: Array<[number, number]> = [[0, 0], [0.4, 0.0002], [0.8, 0.0012], [0.96, 0.0045], [1, SLAT_DEPTH]];
+
+/**
+ * A DECK MAT AS ITS SLATS (the user, 2026-10-30: the bamboo deck "looks like a useless plastic plane … all the angles
+ * are too sharp"; the coordinator's brief: "real split-bamboo slats or culms, each a rounded strip with nodes, slight
+ * curvature and varied tone, lashed in rows … it must stay band-limited"). The mat was one 4 cm slab with the scan's
+ * canes on top. Here its top is DECK_SLAT_PITCH-wide split canes laid fore-and-aft from its port edge, a few mm
+ * apart: each flat on top and rounded down at its edges (SLAT_PROFILE), each its own length (its ends up to 2.5 cm
+ * short of the mat's, so the mat's ends are ragged as cut cane is), lifted a little on the crossbeams and bowed
+ * between them, its crown a hair higher or lower and tilted a little — on a backing a slat's depth under their
+ * crowns, which is what shows between them. Nodes and tone come from the scan (raftLook.ts reads one scanned cane
+ * along each slat), and the slats' rounding is band-limited there, as the scan's relief was (the moiré).
+ * Rings along each slat ~0.45 m apart (its bow's resolution): ~40k triangles across the deck.
+ */
+function slatMat(def: PieceDef, seed: number, k: number): THREE.BufferGeometry {
+  const { min, max } = def.aabb;
+  const top = max[1];
+  const parts: THREE.BufferGeometry[] = [];
+  // the backing under the slats, a slat's depth down (soft-edged, lying on the crowns as the mat did)
+  const backing = softBox(min[0], max[0], min[1], top - SLAT_DEPTH, min[2], max[2], 0.004, 0.6).toNonIndexed();
+  backing.deleteAttribute('normal');
+  // (lifted with the slats on it, so no daylight shows under them)
+  warp(backing, (x, y, z, out) => out.set(0, y > min[1] + 0.01 ? (0.004 + 0.004 * noise2(x * 0.9, z * 0.9, seed)) * k : 0, 0));
+  parts.push(backing);
+  const n = Math.max(1, Math.floor((max[0] - min[0]) / DECK_SLAT_PITCH));
+  const hw = (DECK_SLAT_PITCH - SLAT_GAP) / 2;
+  const prof: Array<[number, number]> = [
+    ...SLAT_PROFILE.slice().reverse().map(([a, d]): [number, number] => [-a, d]),
+    ...SLAT_PROFILE.slice(1).map(([a, d]): [number, number] => [a, d]),
+  ];
+  for (let i = 0; i < n; i++) {
+    const h = (j: number): number => vhash(seed, 80 + j, i);
+    const xc = min[0] + (i + 0.5) * DECK_SLAT_PITCH;
+    const z0 = min[2] + h(0) * 0.025;
+    const z1 = max[2] - h(1) * 0.025;
+    const rings = Math.max(2, Math.ceil((z1 - z0) / 0.45) + 1);
+    const crown = (h(2) - 0.5) * 0.002;
+    const tilt = (h(3) - 0.5) * 0.05;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    const ringPts = (z: number): void => {
+      const t = (z - z0) / Math.max(1e-3, z1 - z0);
+      // lifted on the crowns of what is under the mat, bowed a few mm between, each slat its own way
+      const lift = (0.004 + 0.004 * noise2(xc * 0.9, z * 0.9, seed) + 0.003 * Math.sin(Math.PI * t) * (h(4) * 2 - 1)) * k;
+      for (const [a, d] of prof) {
+        const x = a * hw;
+        pos.push(xc + x, top - d + crown + tilt * x + lift, z);
+      }
+    };
+    for (let r = 0; r < rings; r++) ringPts(z0 + ((z1 - z0) * r) / (rings - 1));
+    const w = prof.length;
+    for (let r = 0; r + 1 < rings; r++) {
+      for (let j = 0; j + 1 < w; j++) {
+        const a = r * w + j;
+        idx.push(a, a + w, a + 1, a + 1, a + w, a + w + 1);
+      }
+    }
+    // the cut ends: the section closed down to its foot
+    for (const [r, flip] of [[0, false], [rings - 1, true]] as const) {
+      const base = pos.length / 3;
+      const o = r * w;
+      const zEnd = pos[o * 3 + 2];
+      pos.push(xc, top - SLAT_DEPTH + crown + pos[(o + (w >> 1)) * 3 + 1] - (top + crown), zEnd);
+      for (let j = 0; j + 1 < w; j++) idx.push(...(flip ? [base, o + j + 1, o + j] : [base, o + j, o + j + 1]));
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    parts.push(g.toNonIndexed());
+  }
+  return smoothNormals(parts.reduce((a, g) => concat(a, g)));
+}
+
+/**
+ * A geometry built of boxes (the greybox builders' way: each box twelve triangles), every box rounded to radius `r`
+ * and warped a few millimetres by hand — the stern's steering block, the guaras' slotted collars, the cabin floor
+ * (the same note: "the interior still looks very boxy … all the angles are too sharp"). Null when the geometry is not
+ * all boxes (anything else is left as built).
+ */
+function softenBoxes(base: THREE.BufferGeometry, r: number, cell: number, seed: number, k: number, wobble = 0.004): THREE.BufferGeometry | null {
+  const src = base.index !== null ? base.toNonIndexed() : base;
+  const p = src.attributes.position;
+  if (p.count === 0 || p.count % 36 !== 0) return null;
+  const parts: THREE.BufferGeometry[] = [];
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (let b = 0; b < p.count / 36; b++) {
+    box.makeEmpty();
+    const corners = new Set<string>();
+    for (let i = b * 36; i < (b + 1) * 36; i++) {
+      v.fromBufferAttribute(p, i);
+      box.expandByPoint(v);
+      corners.add(`${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`);
+    }
+    if (corners.size !== 8) return null;
+    const g = softBox(box.min.x, box.max.x, box.min.y, box.max.y, box.min.z, box.max.z, r, cell).toNonIndexed();
+    g.deleteAttribute('normal');
+    warp(g, (x, y, z, out) => out.set(
+      noise2(y * 5 + b, z * 5, seed) * wobble * k,
+      noise2(x * 5, z * 5 + b, seed + 1) * wobble * 0.7 * k,
+      noise2(x * 5 + b, y * 5, seed + 2) * wobble * k,
+    ));
+    parts.push(g);
+  }
+  return smoothNormals(parts.reduce((a, g) => concat(a, g)));
+}
+
+/** m the worn crossbeam is shorter at each end than its blueprint (see the crossbeam case) */
+export const CROSSBEAM_TRIM = 0.12;
+/** m: plank to plank across a planked piece — the planks scan's board (raft_weathered_planks: 9 boards a 2.4 m tile) */
+export const PLANK_PITCH = 2.4 / 9;
+/** m: the gap between two planks */
+export const PLANK_GAP = 0.014;
+/** the scan's first board seam, as a fraction of its tile across the boards (measured off the packed albedo) */
+export const PLANK_SEAM_PHASE = 0.059;
+
+function planked(def: PieceDef, axes: number[], thin: number, long: number, cell: number, seed: number, k: number): THREE.BufferGeometry {
+  const { min, max } = def.aabb;
+  const other = 3 - thin - long;
+  const n = Math.max(1, Math.floor((axes[other] + PLANK_GAP) / PLANK_PITCH + 0.25));
+  const parts: THREE.BufferGeometry[] = [];
+  for (let b = 0; b < n; b++) {
+    const h = (i: number): number => vhash(seed, 40 + i, b);
+    const lo = [...min];
+    const hi = [...max];
+    lo[other] = min[other] + b * PLANK_PITCH;
+    hi[other] = Math.min(max[other], lo[other] + PLANK_PITCH - PLANK_GAP);
+    // its own length (up to 4 cm short at either end) and thickness (±10%), set in or out of its neighbours by 3 mm
+    lo[long] += h(0) * 0.04;
+    hi[long] -= h(1) * 0.04;
+    const t = axes[thin] * (0.9 + 0.2 * h(2));
+    const mid = (min[thin] + max[thin]) / 2 + (h(3) - 0.5) * 0.006;
+    lo[thin] = mid - t / 2;
+    hi[thin] = mid + t / 2;
+    const r = Math.min(0.012, t * 0.42);
+    const g = softBox(lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], r, cell).toNonIndexed();
+    g.deleteAttribute('normal');
+    const c = [0, 1, 2].map((a) => (lo[a] + hi[a]) / 2);
+    const half = [0, 1, 2].map((a) => Math.max(1e-3, (hi[a] - lo[a]) / 2));
+    const bow = (h(4) * 2 - 1) * 0.012;
+    const spring = (h(5) * 2 - 1) * 0.005;
+    const twist = (h(6) * 2 - 1) * 0.009;
+    const cup = (h(7) * 2 - 1) * 0.003;
+    const slantA = (h(8) - 0.5) * 0.03;
+    const slantB = (h(9) - 0.5) * 0.03;
+    warp(g, (x, y, z, out) => {
+      const v = [x, y, z];
+      const l = (v[long] - c[long]) / half[long];
+      const w = (v[other] - c[other]) / half[other];
+      const o = [0, 0, 0];
+      o[thin] = (bow * (1 - l * l) + twist * l * w + cup * w * w + noise2(l * 3, w, seed + b) * 0.002) * k;
+      o[other] = spring * (1 - l * l) * k;
+      // the ends sawn by eye: a little off square, each its own way
+      o[long] = (l > 0 ? slantA : slantB) * w * Math.max(0, Math.abs(l) * 8 - 7) * k;
+      out.set(o[0], o[1], o[2]);
+    });
+    parts.push(g);
+  }
+  return smoothNormals(parts.reduce((a, g) => concat(a, g)));
+}
+
+/**
  * The worn twin of a piece's greybox geometry (see the header), or null when the piece is left as built.
  * `base` is the greybox (pieceGeometry.ts's own); `roof` the thatch slab a roof lath rides, so the two sag as one.
  */
@@ -501,16 +681,21 @@ export function wornPieceGeometry(def: PieceDef, base: THREE.BufferGeometry, opt
       // INDOORS: the two straw mattresses, stuffed and slumped (rounded hard, the top domed and lumpy, the sides
       // bellied), and the loose reed mats on the floor, soft-edged and lying not quite flat
       if (def.id.startsWith('berth-')) {
-        const r = Math.min(0.05, sy * 0.4);
+        // (rounder than a box with its corners filed: the 2026-10-30 note, "mattresses with soft rounded forms" — the
+        // radius most of its depth, the top domed 3 cm, the sides bellied out where the stuffing presses them)
+        const r = Math.min(0.06, sy * 0.46);
         const g = softBox(min[0], max[0], min[1], max[1], min[2], max[2], r, 0.08).toNonIndexed();
         g.deleteAttribute('normal');
         const cy = (min[1] + max[1]) / 2;
+        const cx = (min[0] + max[0]) / 2;
+        const cz = (min[2] + max[2]) / 2;
         warp(g, (x, y, z, out) => {
-          const ex = Math.max(0, 1 - ((2 * (x - (min[0] + max[0]) / 2)) / sx) ** 2);
-          const ez = Math.max(0, 1 - ((2 * (z - (min[2] + max[2]) / 2)) / sz) ** 2);
+          const ex = Math.max(0, 1 - ((2 * (x - cx)) / sx) ** 2);
+          const ez = Math.max(0, 1 - ((2 * (z - cz)) / sz) ** 2);
           const up = y > cy ? 1 : 0;
           const lump = noise2(x * 5, z * 3, seed) * 0.012;
-          out.set(0, (up * (0.022 * ex * ez + lump * ex) - (1 - up) * 0.0) * k, 0);
+          const belly = Math.sin(Math.PI * Math.min(1, Math.max(0, (y - min[1]) / sy))) * 0.012;
+          out.set(Math.sign(x - cx) * belly * ez * k, (up * (0.03 * ex * ez + lump * ex)) * k, Math.sign(z - cz) * belly * ex * k);
         });
         return smoothNormals(g);
       }
@@ -520,26 +705,12 @@ export function wornPieceGeometry(def: PieceDef, base: THREE.BufferGeometry, opt
         warp(g, (x, _y, z, out) => out.set(0, (0.003 + 0.003 * noise2(x * 1.4, z * 1.4, seed)) * k, 0));
         return smoothNormals(g);
       }
+      // THE CABIN FLOOR: its boxes rounded, the floor's edge no longer a cut line (the 2026-10-30 note on the interior)
+      if (def.id === 'cabin-floor') return softenBoxes(base, 0.02, 0.2, seed, k, 0.003);
       // a mat on the deck (never the cabin floor or what lies on it: they are indoors), lying on the crossbeams'
-      // crowns — up, never down into them — and its edges soft and a little ragged
+      // crowns — up, never down into them — built of its slats (slatMat)
       if (def.parent !== undefined || (shape.mat ?? 0) === 0) return null;
-      const g = softBox(min[0], max[0], min[1], max[1], min[2], max[2], 0.006, cell).toNonIndexed();
-      g.deleteAttribute('normal');
-      // (and its edge is not a ruled line: the mat's cut ends and selvedges wander a couple of cm in and out)
-      const hx = (max[0] - min[0]) / 2;
-      const hz = (max[2] - min[2]) / 2;
-      const cx = (min[0] + max[0]) / 2;
-      const cz = (min[2] + max[2]) / 2;
-      warp(g, (x, _y, z, out) => {
-        const ex = Math.max(0, 1 - (hx - Math.abs(x - cx)) / 0.04);
-        const ez = Math.max(0, 1 - (hz - Math.abs(z - cz)) / 0.04);
-        out.set(
-          Math.sign(x - cx) * ex * noise2(z * 3.1, 0.5, seed + 3) * 0.025 * k,
-          (0.004 + 0.004 * noise2(x * 0.9, z * 0.9, seed)) * k,
-          Math.sign(z - cz) * ez * noise2(x * 3.1, 1.5, seed + 4) * 0.025 * k,
-        );
-      });
-      return smoothNormals(g);
+      return slatMat(def, seed, k);
     }
     // THE LOGS (the bow and sides of the museum raft, the user 2026-10-29: "the log ends, their irregular lengths
     // and cut faces … taper and irregular diameter … nothing straight or aligned"): each log's girth swells and
@@ -581,7 +752,15 @@ export function wornPieceGeometry(def: PieceDef, base: THREE.BufferGeometry, opt
       return toCreasedNormals(g, Math.PI / 4);
     }
     case 'crossbeam': {
-      const g = new THREE.CylinderGeometry(sy / 2, sy / 2, sx, Math.max(6, Math.round(shape.sides ?? 10)), Math.max(1, Math.ceil(sx / cell)))
+      // ITS ENDS STOP SHORT OF THE SIDE BOARDS (the user, 2026-10-30, a red circle on the raft's side at the landing:
+      // the cut end of a log "between this stump and the sideboard", flickering through it). The beams' 5.5 m left
+      // each end disc at ±2.750 m, inside the side runs' 6 cm (2.687–2.760 starboard, 2.712–2.784 port), and as a run
+      // bows and twists its outer face swept back and forth across the disc. Trimmed by CROSSBEAM_TRIM each end the
+      // disc stands 4–6 cm inside the board's inner face, on the outer log's shoulder; aft of the runs the beam ends
+      // sit on that log as before. (The blueprint's beam — its length is the hull's beam to the sea physics — is
+      // unchanged; tests/raftCoplanar.test.ts holds the clearance.)
+      const len = Math.max(0.5, sx - 2 * CROSSBEAM_TRIM);
+      const g = new THREE.CylinderGeometry(sy / 2, sy / 2, len, Math.max(6, Math.round(shape.sides ?? 10)), Math.max(1, Math.ceil(len / cell)))
         .rotateZ(Math.PI / 2)
         .translate((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2)
         .toNonIndexed();
@@ -650,10 +829,71 @@ export function wornPieceGeometry(def: PieceDef, base: THREE.BufferGeometry, opt
       out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
       return toCreasedNormals(out, Math.PI / 3);
     }
+    // THE STEERING BLOCK on the stern logs (the thole pins' balsa block, [§5 Steering] kon-tiki-reference.md): hewn,
+    // not sawn — its edges rounded off by 3 cm, its faces wandering a centimetre, as an adze leaves them
+    case 'stern-block': {
+      const block = softBox(min[0], max[0], min[1], max[1], min[2], max[2], 0.03, 0.12).toNonIndexed();
+      block.deleteAttribute('normal');
+      warp(block, (x, y, z, out) => out.set(
+        noise2(y * 4, z * 4, seed) * 0.008 * k,
+        (noise2(x * 3, z * 4, seed + 1) * 0.008 - 0.004 * Math.cos((x / Math.max(1e-3, sx)) * Math.PI)) * k,
+        noise2(x * 3, y * 4, seed + 2) * 0.008 * k,
+      ));
+      // the thole pins (the game's: shape.pinHeight/Radius/Spacing on the block's top), each a little crooked
+      const pinH = shape.pinHeight ?? 0.3;
+      const pinR = shape.pinRadius ?? 0.03;
+      const spacing = shape.pinSpacing ?? 0.4;
+      const cx = (min[0] + max[0]) / 2;
+      const cz = (min[2] + max[2]) / 2;
+      const parts = [block];
+      for (const sign of [-1, 1]) {
+        const pin = new THREE.CylinderGeometry(pinR * 0.85, pinR, pinH + 0.04, 8, 3).toNonIndexed();
+        pin.deleteAttribute('normal');
+        pin.deleteAttribute('uv');
+        pin.rotateZ((vhash(seed, 61, sign) - 0.5) * 0.12);
+        pin.rotateX((vhash(seed, 62, sign) - 0.5) * 0.1);
+        pin.translate(cx + (sign * spacing) / 2, max[1] + pinH / 2 - 0.02, cz);
+        parts.push(pin);
+      }
+      return smoothNormals(parts.reduce((a2, g2) => concat(a2, g2)));
+    }
+    // THE STEERING OAR (the same note — "the back portion with the tiller"): the game's is an eight-sided shaft, a
+    // box for the blade and a six-sided tiller. A mangrove pole, round and a little crooked, a fir blade with its
+    // edges rounded and its face not quite flat, a tiller pole — the game's own dimensions (buildSteeringOarGeometry)
+    case 'steering-oar': {
+      const inboard = shape.inboard ?? max[2];
+      const aft = -min[2];
+      const shaftR = shape.shaftRadius ?? 0.045;
+      const bladeLen = Math.min(aft, shape.bladeLength ?? 1.2);
+      const bladeW = shape.bladeWidth ?? 0.4;
+      const tiller = shape.tillerLength ?? 0.9;
+      const len = inboard + aft;
+      const shaft = new THREE.CylinderGeometry(shaftR * 0.8, shaftR, len, 12, Math.max(2, Math.ceil(len / 0.4))).toNonIndexed();
+      shaft.deleteAttribute('normal');
+      shaft.deleteAttribute('uv');
+      warp(shaft, (x, y, z, out) => {
+        const t = y / len + 0.5;
+        out.set(Math.sin(Math.PI * t) * 0.025 * (vhash(seed, 91) * 2 - 1) * k + noise2(t * 6, Math.atan2(z, x), seed) * 0.003 * k, 0, Math.sin(Math.PI * t) * 0.02 * (vhash(seed, 92) * 2 - 1) * k);
+      });
+      shaft.rotateX(Math.PI / 2);
+      shaft.translate(0, 0, inboard - len / 2);
+      const blade = softBox(-0.0175, 0.0175, -bladeW / 2, bladeW / 2, -aft, -aft + bladeLen, 0.012, 0.15).toNonIndexed();
+      blade.deleteAttribute('normal');
+      warp(blade, (_x, y, z, out) => out.set(noise2(y * 3, z * 2, seed + 3) * 0.004 * k + (y / bladeW) * ((z + aft) / bladeLen) * 0.015 * k, 0, 0));
+      const cross = new THREE.CylinderGeometry(0.028, 0.032, tiller, 10, 3).toNonIndexed();
+      cross.deleteAttribute('normal');
+      cross.deleteAttribute('uv');
+      cross.rotateZ(Math.PI / 2 + (vhash(seed, 93) - 0.5) * 0.08);
+      cross.translate(0, 0, inboard - 0.3);
+      return smoothNormals(concat(concat(shaft, blade), cross));
+    }
     case 'splashboard':
     case 'guara': {
       if ((shape.collar ?? 0) > 0) {
-        // the slotted collar: its own boxes, warped a little and edge-softened by a creased normal
+        // the slotted collar: its own boxes, each rounded by a centimetre and a little out of true (the 2026-10-30
+        // note: "nothing is rounded or bevelled"); as before if it is not all boxes
+        const soft = softenBoxes(base, 0.012, 0.2, seed, k);
+        if (soft !== null) return soft;
         const g = subdivideToEdge(base, 0.1);
         warp(g, (x, y, z, out) => out.set(noise2(y * 4, z * 4, seed) * 0.004 * k, noise2(x * 4, z * 4, seed + 1) * 0.003 * k, 0));
         return toCreasedNormals(g, Math.PI / 6);
@@ -662,6 +902,8 @@ export function wornPieceGeometry(def: PieceDef, base: THREE.BufferGeometry, opt
       const axes = [sx, sy, sz];
       const thin = axes.indexOf(Math.min(...axes));
       const long = axes.indexOf(Math.max(...axes));
+      // a board wider than a plank is PLANKS: the bow boards, their side runs and the centreboards (planked)
+      if (axes[3 - thin - long] >= PLANK_PITCH * 1.6 && axes[long] > 0.5) return planked(def, axes, thin, long, cell, seed, k);
       const r = Math.min(0.01, axes[thin] * 0.4);
       const g = softBox(min[0], max[0], min[1], max[1], min[2], max[2], r, cell).toNonIndexed();
       g.deleteAttribute('normal');

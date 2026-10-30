@@ -9,8 +9,10 @@
  * the game's own seams are turned off for this sail, `sailSeamDarken` 1 and `sailSeamRidge` 0, and drawn here):
  *
  *   CLOTHS: vertical bolts on the lacing grid (sailClothNodes' panelCoord: the cloth's folds stand on its seams),
- *     each bolt joined end to end at its own heights — so the sail is a brick-work of cloths, each its own tone and
- *     age, from a pale newer bolt to a dark ochre old one.
+ *     most of them one length head to foot and a few pieced once part way down — each its own tone and age, from a
+ *     pale newer bolt to a dark ochre old one.
+ *   THE SET: the head scalloped between the robands with a fan of creases off each, long creases up from the clews
+ *     along the sheets' strain, soft vertical folds where the cloth hangs undrawn.
  *   SEAMS: a flat-felled overlap ~3 cm wide, two rows of stitching, a dark line in the fold, and the cloth PUCKERED
  *     along it where the stitching drew it in; a double thickness, so it shows dark against a backlit sail.
  *   THE HEAD BAND: a doubled tabling under the yard with its roband eyes; the BOLT ROPE sewn all round the edge.
@@ -25,7 +27,7 @@
  * sailMaterial.shipSunDirectionOverride on it.
  */
 import * as THREE from 'three/webgpu';
-import { cross, dFdx, dFdy, float, mix, positionView, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
+import { cross, dFdx, dFdy, float, mix, positionView, select, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
 import { createSailClothMaterial, type SailDecal } from './sailMaterial';
 import type { ShipMaterialHandle } from './woodMaterial';
 import { konTikiFaceApplies, konTikiFaceNodes, konTikiFacePrimitives } from './raftSailFace';
@@ -94,21 +96,26 @@ export function createWornSail(): ShipMaterialHandle {
       const s = piece.seed.mul(17.3);
       const on = clothWeight;
 
-      // THE CLOTHS: vertical bolts on the lacing grid, each joined end to end at its own two heights
+      // THE CLOTHS: vertical bolts on the lacing grid, most of them one length from the head to the foot, a few
+      // pieced once part way down. (Each bolt was joined at two heights at first — 0.27–0.45 and 0.6–0.76 of the drop
+      // — and with the two reef bands and the head band that drew a sail-wide GRID of rectangles, which backlit at
+      // 370 s read as tiles, not cloth: the 2026-10-30 triage, against the museum's sail, whose cloths run the whole
+      // drop. A canvas bolt is tens of metres long; a sail this size is pieced only where a cloth was short.)
       const laces = uLaces.max(2);
       const pc = u.sub(SAIL_LACE_MARGIN).div(SAIL_LACE_SPAN).mul(laces.sub(1));
       const col = pc.floor();
       const boltW = uWidth.mul(SAIL_LACE_SPAN).div(laces.sub(1));
       const hcol = (n: number): N => hash2(vec2(col.add(piece.seed.mul(31)), n));
-      const join1 = hcol(1).mul(0.18).add(0.27);
-      const join2 = hcol(2).mul(0.16).add(0.6);
-      const row = smoothstep(join1.sub(0.0005), join1.add(0.0005), v).add(smoothstep(join2.sub(0.0005), join2.add(0.0005), v));
+      // (about two cloths in five, each at its own height between a fifth and three quarters of the drop)
+      const pieced = hcol(3).lessThan(0.4);
+      const join = hcol(1).mul(0.53).add(0.21);
+      const row = select(pieced, smoothstep(join.sub(0.0005), join.add(0.0005), v), float(0));
       const age = hash2(vec2(col.mul(7.1).add(row.mul(3.3)), piece.seed.mul(13)));
       // (a pale newer bolt … an old dark-ochre one; their weave a touch different)
       const boltTone = mix(vec3(1.06, 1.04, 1.0), vec3(0.78, 0.66, 0.46), age.pow(1.3));
-      // distances to the seams (m): the bolts' sides, and the joins in this bolt
+      // distances to the seams (m): the bolts' sides, and the join in this bolt if it has one
       const fx = pc.add(0.5).fract().sub(0.5).abs().mul(boltW);
-      const fy = v.sub(join1).abs().min(v.sub(join2).abs()).mul(uDrop);
+      const fy = select(pieced, v.sub(join).abs().mul(uDrop), float(1e3));
       const seamD = fx.min(fy);
       // along the seam (m), for its stitches and its puckers: along y on a vertical one, x on a horizontal
       const vertical = smoothstep(-0.002, 0.002, fy.sub(fx));
@@ -155,6 +162,46 @@ export function createWornSail(): ShipMaterialHandle {
         reefCord = reefCord.max(float(1).sub(smoothstep(0.005, 0.008, d1.min(d2))).mul(inLen));
       });
       const cords = reefCord.mul(resolvedAt(0.008, px));
+
+      // THE CLOTH'S SET (the 2026-10-30 triage: front-lit at 545 s and backlit at 370 s the course still read as one
+      // flat printed board — "fresh out of an IKEA bag"). A square sail laced to a bamboo yard and sheeted at its two
+      // clews never lies smooth: the head sags in a shallow scallop between each pair of robands, with a short fan of
+      // creases running down from every roband where the lacing pulls; the sheets pull long creases up from each clew
+      // along the line of the strain (toward the far end of the yard); and the cloth between hangs in a few soft
+      // vertical folds where it is not quite drawn. Heights in metres on the cloth's own normal (`bumped`), each faded
+      // as its own width goes sub-pixel: millimetres, which under a low Sun or against it are what tell canvas from card.
+      // @band-limited-elsewhere: the lacing's own phase (a 0.8 m period); every fold built on it is × resolvedAt(px)
+      const lace = pc.add(0.5).fract().sub(0.5); // (bolts from the nearest roband, −½…½)
+      const scallop = lace.mul(Math.PI * 2).cos().oneMinus().mul(fromHead.div(0.18).negate().exp()).mul(-0.003);
+      const fan = lace.mul(boltW).div(fromHead.mul(0.7).add(0.06)).mul(Math.PI * 2 * 1.3).cos()
+        // @band-limited-elsewhere: a window on the lacing phase; the fan is × resolvedAt(0.06, px) below
+        .mul(float(1).sub(smoothstep(0.25, 0.5, lace.abs())))
+        .mul(fromHead.div(0.45).negate().exp())
+        .mul(0.0035)
+        .mul(resolvedAt(0.06, px));
+      const clew = (cx: N, toward: N): N => {
+        const dir = vec2(toward, uDrop).normalize();
+        const d = q.sub(vec2(cx, 0));
+        const along = d.dot(dir);
+        const across = d.x.mul(dir.y).sub(d.y.mul(dir.x));
+        const wob = fbm2(vec2(along.mul(0.9), across.mul(0.5)).add(s), 2).sub(0.5).mul(0.07);
+        // (three or four creases ~0.22 m apart either side of the strain line, gone ~0.45 m off it and ~1.7 m up it;
+        // 6 mm deep)
+        return across.add(wob).mul(Math.PI * 2 / 0.22).sin()
+          .mul(across.mul(across).div(0.2).negate().exp())
+          .mul(along.max(0).div(1.7).negate().exp())
+          // @band-limited-elsewhere: a 0.3 m ramp up from the clew; the creases are × resolvedAt(0.11, px)
+          .mul(smoothstep(0.0, 0.3, along))
+          .mul(0.006);
+      };
+      const clews = clew(float(0), uWidth.mul(0.7)).add(clew(uWidth, uWidth.mul(-0.7))).mul(resolvedAt(0.11, px));
+      const hang = q.x.mul(Math.PI * 2 / 0.62).add(fbm2(vec2(q.x.mul(0.7), q.y.mul(0.35)).add(s.mul(0.3)), 3).mul(5)).sin()
+        // @band-limited-elsewhere: metre-scale ramps over the drop; the folds are × resolvedAt(0.3, px)
+        .mul(smoothstep(0.1, 0.4, v).mul(float(1).sub(smoothstep(0.75, 0.95, v))))
+        // (1 cm over a 0.62 m fold, a slope of 0.1: at the first try's 3.5 mm the folds did not show at 545 s)
+        .mul(0.01)
+        .mul(resolvedAt(0.3, px));
+      const folds = scallop.add(fan).add(clews).add(hang);
 
       // PATINA: the cloth on its bolt's tone, then a strong irregular yellow-brown mottle, darker stains with tide
       // lines, streaks from the yard, mildew along the foot
@@ -231,7 +278,11 @@ export function createWornSail(): ShipMaterialHandle {
         .mul(float(1).sub(patch.mul(0.35)))
         .mul(float(1).sub(rope.mul(0.6)))
         .mul(float(1).sub(cords.mul(0.6)))
-        .mul(float(1).sub(paint.max(ink).mul(0.45)));
+        .mul(float(1).sub(paint.max(ink).mul(0.45)))
+        // (and the dirt in it: a stained or mildewed cloth passes less — against the Sun its stains show as shadows)
+        // (lightly: at 0.3 the mizzen's stains went near-black against the 370 s sunset)
+        .mul(float(1).sub(stain.mul(0.15)))
+        .mul(float(1).sub(mild.mul(0.12)));
       // and what stands proud of it (m): the overlaps and bands, the puckers along the seams, the fold, the
       // stitches, the bolt rope and the reef points, the canvas's slub
       const slub = fbm2(vec2(q.x.mul(40), q.y.mul(6)), 2).mul(0.0006).mul(resolvedAt(0.02, px));
@@ -244,6 +295,7 @@ export function createWornSail(): ShipMaterialHandle {
         .add(rope.mul(0.004).mul(lay.mul(0.3).add(0.7)))
         .add(cords.mul(0.003))
         .add(slub)
+        .add(folds)
         .mul(on);
       // (the robands and the furled bundle: the game's cloth, on the old canvas's tone rather than its new white)
       return mix(color.mul(vec3(0.86, 0.8, 0.68)), c, on);

@@ -433,11 +433,114 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB, shape?: Record
   // the bundle is authored at the size it reaches when she is fully in; the
   // shader scales its section down from there, about the head line
   const baseRadius = furlBundleRadius(width, drop, shape?.yardLength, shape?.furlPack);
+  const bend = yardBend(shape);
+  if (bend === null) {
+    return mergeNonIndexed([
+      withSailShape(geo, 1, width, drop),
+      ...reefPoints(width, drop),
+      ...sailTies(width, drop, shape?.yardR),
+      gatheredBunt(width, drop, baseRadius, seed),
+      ...gaskets(width, drop, baseRadius, seed),
+    ]);
+  }
+  const panel = withSailShape(geo, 1, width, drop);
+  bendHeadToYard(panel, bend);
   return mergeNonIndexed([
-    withSailShape(geo, 1, width, drop),
+    panel,
     ...reefPoints(width, drop),
-    ...sailTies(width, drop, shape?.yardR),
+    ...yardRobands(width, drop, bend),
     gatheredBunt(width, drop, baseRadius, seed),
     ...gaskets(width, drop, baseRadius, seed),
   ]);
+}
+
+/**
+ * THE HEAD BENT TO ITS YARD — a sail whose piece hangs off its yard's axis (the raft's: `shape.yardOffset`, m of
+ * cloth forward of the axis, with `shape.yardR`). The user, 2026-10-30, of the topsail and the mizzen against a
+ * sunset: "they both don't really have a connection to the top with any kind of ropes, or the top is not aligned
+ * with the horizontal spar". The raft's cloth hangs `sailYardOffset` (0.18 m) forward of its yard's axis and a yard
+ * radius under it — the room the topsail needed to clear its own pole (raft params, §T.159) — and its robands were
+ * pegs standing on the cloth's own head: from below, a row of pegs on an edge floating a hand's breadth in front
+ * of the spar. A square sail is BENT to its yard: its head rope laid along the spar's top-front and lashed to it
+ * with a roband at every seam, the cloth falling from there.
+ *
+ * So the body of the cloth stays where it was (the clearance it was moved out for stays honoured) and only its
+ * HEAD ROW is laid on the yard: those vertices become hardware (cloth weight 0 — the shader leaves them exactly
+ * where they are authored, and the head is the one row of a laced sail that never moves: every term of the cloth's
+ * shape is zero at v = 1), so the first course of cloth drapes from the spar's top-front down to where the canvas
+ * hangs. Along it, a bolt rope; round it and the yard, at every lacing station, a roband of two turns. Furled, the
+ * cloth gathers where the shader takes it (under the old head line, the roll's place), so the first course then
+ * runs from the spar down into the roll: canvas gathered in front of its yard, hanging from it, not a roll beside
+ * it in the air. (On the main the roll's back meets the yard; on the small sails it hangs a hand in front.)
+ *
+ * In the sail piece's own frame: the yard's axis is at (y = yardR, z = −yardOffset).
+ */
+interface YardBend {
+  /** the head row's place (m): on the yard's top-front, the bolt rope's centre */
+  headY: number;
+  headZ: number;
+  /** the yard's axis, its radius, and the bolt rope's */
+  axisY: number;
+  axisZ: number;
+  yardR: number;
+  boltR: number;
+}
+
+/** m: the head's bolt rope (radius), and a roband's cord (radius) — a 16 mm and a 9 mm hemp line */
+const BOLT_R = 0.008;
+const ROBAND_R = 0.0045;
+/** rad above the yard's forward horizontal where the head rope lies on it */
+const HEAD_ON_YARD = (50 * Math.PI) / 180;
+
+function yardBend(shape: Record<string, number> | undefined): YardBend | null {
+  const off = shape?.yardOffset;
+  const yr = shape?.yardR;
+  if (!(off !== undefined && off > 0 && yr !== undefined && yr > 0)) return null;
+  const r = yr + BOLT_R;
+  return {
+    headY: yr + r * Math.sin(HEAD_ON_YARD),
+    headZ: -off + r * Math.cos(HEAD_ON_YARD),
+    axisY: yr,
+    axisZ: -off,
+    yardR: yr,
+    boltR: BOLT_R,
+  };
+}
+
+/** the panel's head row (v = 1: authored at y = 0) laid on the yard as hardware */
+function bendHeadToYard(panel: THREE.BufferGeometry, b: YardBend): void {
+  const p = panel.attributes.position;
+  const s = panel.attributes.sailShape;
+  for (let i = 0; i < p.count; i++) {
+    if (Math.abs(p.getY(i)) > 1e-6) continue;
+    p.setXYZ(i, p.getX(i), b.headY, b.headZ);
+    s.setX(i, 0);
+  }
+  p.needsUpdate = true;
+  s.needsUpdate = true;
+}
+
+/** the head's bolt rope along the yard, and at every lacing station a roband: two turns round the yard and the
+ * head, a little apart and a little skewed, as a hand passes them */
+function yardRobands(width: number, drop: number, b: YardBend): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = [];
+  const bolt = new THREE.CylinderGeometry(b.boltR, b.boltR, width, 6, 1).rotateZ(Math.PI / 2);
+  bolt.translate(0, b.headY, b.headZ);
+  out.push(withSailShape(bolt, 0, width, drop));
+  const count = Math.max(2, Math.round(shipMaterialParams.sailLacingPoints));
+  // round the yard AND the head rope on its top-front: centred a little toward the head, wide enough for both
+  const cy = b.axisY + (b.headY - b.axisY) * 0.22;
+  const cz = b.axisZ + (b.headZ - b.axisZ) * 0.22;
+  const R = b.yardR + b.boltR * 1.4 + ROBAND_R;
+  for (let i = 0; i < count; i++) {
+    const x = (sailLaceStation(i, count) - 0.5) * width;
+    for (const turn of [-1, 1]) {
+      const ring = new THREE.TorusGeometry(R, ROBAND_R, 5, 16);
+      ring.rotateY(Math.PI / 2); // round the yard: its axis along x
+      ring.rotateZ(vjitter(0.18, i, turn, 31)); // passed by hand, never square to the spar
+      ring.translate(x + turn * ROBAND_R * 2.2, cy, cz);
+      out.push(withSailShape(ring, 0, width, drop));
+    }
+  }
+  return out;
 }
