@@ -315,7 +315,9 @@ async function frames(adapter) {
     const tBoot = Date.now();
     await page.goto(`${base}/drift.html?paused`);
     for (const until = Date.now() + 240_000; ; ) {
-      if (errors.length > 0) throw new Error(`drift.html failed to boot: ${errors.join('\n')}`);
+      // (with the files that came back missing or as Vite's HTML fallback: a boot that dies parsing one — "Unexpected
+      // token '<'" from GLTFLoader on a .glb the bundle lacks, 2026-10-30 — names it)
+      if (errors.length > 0) throw new Error(`drift.html failed to boot: ${errors.join('\n')}${misses.size ? ` — missing on this machine: ${[...misses].slice(0, 8).join(', ')} (sync the newest asset bundle)` : ''}`);
       const s = await page.evaluate(() => ({ ok: '__drift' in window, gate: document.body.innerText.includes('requires WebGPU') }));
       if (s.gate) throw new Error('drift.html shows its "requires WebGPU" gate: the page got no adapter');
       if (s.ok) break;
