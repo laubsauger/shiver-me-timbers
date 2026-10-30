@@ -55,7 +55,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer as createVite } from 'vite';
-import { chromeLaunchOptions, gpuArgs } from './drift-chrome.mjs';
+import { gpuArgs, launchChrome } from './drift-chrome.mjs';
 import { LANE_CODECS, hasEncoder, laneEncoder, laneNote } from './cine-codecs.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -228,8 +228,13 @@ async function main() {
   // ------------------------------------------------- probe: boots the page once (warms Vite) and asks for the act end
   // --expose-gc: the page collects garbage every few frames, or each frame's POST body stays in its memory
   // until a GC nothing triggers (src/drift/record.ts GC_EVERY)
-  // (scripts/drift-chrome.mjs: on macOS exactly { channel, headless: true, args: ['--js-flags=--expose-gc'] })
-  const launch = () => chromium.launch(chromeLaunchOptions(CHANNEL));
+  // (scripts/drift-chrome.mjs: on macOS exactly { channel, headless: true, args: ['--js-flags=--expose-gc'] }), each
+  // Chrome in a persistent profile of its own, so the shaders compiled by the last render are not compiled again
+  const launch = async () => {
+    const b = await launchChrome(chromium, { channel: CHANNEL, kind: 'render', say: log });
+    if (b.profile) log(`shader cache: ${b.profile.cache} (${b.profile.dir}${b.profile.why ? `; ${b.profile.why}` : ''})`);
+    return b;
+  };
   // OFF MACOS, the encoder must exist before anything renders (a node's ffmpeg may lack hevc_nvenc, and macOS's
   // VideoToolbox ProRes does not exist there at all): one listing, a loud failure with the fix
   if (process.platform !== 'darwin' || CODEC === 'ffv1' || CODEC === 'hevc10') {
@@ -243,6 +248,7 @@ async function main() {
   const probe = await probeBrowser.newPage({ viewport: { width: 256, height: 256 } });
   const probeErrors = [];
   probe.on('pageerror', (e) => probeErrors.push(String(e)));
+  const tProbe = Date.now();
   await probe.goto(`${base}/drift.html?paused${QUERY}`);
   for (const until = Date.now() + 120_000; ; ) {
     if (probeErrors.length > 0) throw new Error(`drift.html failed to boot: ${probeErrors.join('\n')}`);
@@ -250,6 +256,8 @@ async function main() {
     if (Date.now() > until) throw new Error('drift.html did not boot in 120 s');
     await new Promise((r) => setTimeout(r, 100));
   }
+  // (the boot alone, for the shader cache's measurements: a cold profile compiles here, the lanes after it are warm)
+  log(`probe: drift.html booted in ${secs(tProbe).toFixed(1)} s`);
   const probed = await probe.evaluate(async () => {
     const adapter = await navigator.gpu?.requestAdapter();
     const info = adapter?.info;

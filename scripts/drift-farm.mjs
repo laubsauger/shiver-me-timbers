@@ -475,6 +475,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         results: (j.results ?? []).map((r) => ({ path: landingPath(j.outs[r.out], r.path), bytes: r.bytes })), error: j.error ?? null,
         why: j.state === 'queued' ? holdReason(j, workerView, t) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
         cancelRequested: j.cancelRequested === true && !FINAL.has(j.state),
+        timing: j.timing ?? null,
         // (the console's queue manager: who sent it, its command for the settings, its times, its fps over time while
         // it runs — a finished job's samples stay in its job.json, not in every 3 s answer)
         submitter: j.submitter ?? null, argv: j.argv ?? [], cls: j.cls ?? null, queuedAt: j.queuedAt ?? null, claimedAt: j.claimedAt ?? null,
@@ -727,6 +728,9 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
           if (lines.length) j.last = String(lines.at(-1)).slice(0, 300);
         }
         if (b.progress && typeof b.progress === 'object') j.progress = b.progress;
+        // THE ROUND TRIP, measured on the box (durations, not its clock: the boxes' clocks are not this Mac's):
+        // payloadMs, bundleMs, treeMs, bootMs (start to first frame), renderMs, uploadMs, cache (warm | cold)
+        if (b.timing && typeof b.timing === 'object') j.timing = { ...(j.timing ?? {}), ...b.timing };
         if (Number.isFinite(b.progress?.fps)) j.samples = fpsSamples(j.samples, now(), b.progress.fps, b.progress.done);
         if (b.state && b.state !== j.state && !FINAL.has(j.state)) {
           const patch = b.state === 'running' ? { startedAt: now() } : FINAL.has(b.state) ? { endedAt: now(), exitCode: b.exitCode ?? null, error: b.error ?? null } : {};

@@ -29,7 +29,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
-import { chromeLaunchOptions, gpuArgs } from './drift-chrome.mjs';
+import { gpuArgs, launchChrome } from './drift-chrome.mjs';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -115,8 +115,10 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     // --expose-gc: the page collects every few frames, or each POST body stays in its memory (record.ts GC_EVERY);
     // and the machine's GPU flags (drift-chrome.mjs: Linux needs --enable-unsafe-webgpu and Vulkan, or headless Chrome
     // has no WebGPU adapter — linux-monster's first farm clip, 2026-10-30, waited 240 s on the page's WebGPU gate)
+    // A persistent profile (drift-chrome.mjs launchChrome): the shaders the last take compiled are not compiled again
     const gpu = gpuArgs();
-    browser = await chromium.launch({ ...chromeLaunchOptions(channel, gpu.args), headless: true });
+    browser = await launchChrome(chromium, { channel, gpu: gpu.args, kind: 'review', say: (m) => console.log(`[review] ${m}`) });
+    if (browser.profile) console.log(`[review] shader cache: ${browser.profile.cache} (${browser.profile.dir}${browser.profile.why ? `; ${browser.profile.why}` : ''})`);
     const page = await browser.newPage({ viewport: { width: 256, height: 256 } });
     const seen = new Set();
     // a module the server could not build (a syntax error mid-edit, a missing import) answers 500 and the page never

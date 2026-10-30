@@ -535,12 +535,12 @@ async function showLength() {
 async function probeLengthNow() {
   const { chromium } = await import('playwright');
   const { createServer } = await import('vite');
-  const { chromeLaunchOptions } = await import('./drift-chrome.mjs');
+  const { launchChrome } = await import('./drift-chrome.mjs');
   // its own port and dep cache: a render's Vite (5288/5290) may be running, and must never see its cache rewritten
   const vite = await createServer({ root: ROOT, clearScreen: false, logLevel: 'warn', cacheDir: join(ROOT, 'node_modules/.vite-drift-node'), server: { port: Number(arg('port', '5293')), strictPort: true, hmr: false, watch: null } });
   await vite.listen();
   const base = (vite.resolvedUrls?.local?.[0] ?? 'http://localhost:5293/').replace(/\/$/, '');
-  const browser = await chromium.launch(chromeLaunchOptions('chrome'));
+  const browser = await launchChrome(chromium, { channel: 'chrome', kind: 'render' });
   try {
     const page = await browser.newPage({ viewport: { width: 256, height: 256 } });
     const errors = [];

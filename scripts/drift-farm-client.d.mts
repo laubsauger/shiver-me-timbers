@@ -17,3 +17,5 @@ export const HOLD_ON_MS: number;
 export function holdOn<T>(what: string, fn: () => Promise<T>, o?: { untilMs?: number; say?: (m: string) => void; steps?: number[] }): Promise<T>;
 export function submitterOf(env?: Record<string, string | undefined>, pid?: number, host?: string): { pid: number; host: string; agent: string };
 export function labelOf(argv: string[], max?: number): string;
+export const VITE_CACHES: string[];
+export function roundTrip(job: Record<string, any>, at: { submitAt: number; followAt: number; landedAt: number }): string;

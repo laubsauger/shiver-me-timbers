@@ -26,7 +26,7 @@ import { cpus, freemem, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { GPU_ARG_VARIANTS, NODE_CHROME_FILE, chromeLaunchOptions, gpuArgs } from './drift-chrome.mjs';
+import { GPU_ARG_VARIANTS, NODE_CHROME_FILE, chromeLaunchOptions, gpuArgs, launchChrome } from './drift-chrome.mjs';
 import { hasEncoder, laneEncoder } from './cine-codecs.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -288,7 +288,8 @@ async function frames(adapter) {
     const s16 = want16 ? await startSink(join(OUT, 'ffv1'), 'ffv1') : null;
     if (s16) sinks.push(s16);
 
-    browser = await chromium.launch(chromeLaunchOptions(CHANNEL));
+    // (the renders' own profile family: this boot of drift.html leaves its shaders compiled for the first render)
+    browser = await launchChrome(chromium, { channel: CHANNEL, kind: 'render' });
     const page = await browser.newPage({ viewport: { width: 256, height: 256 } });
     const errors = [];
     const gpuErrors = [];

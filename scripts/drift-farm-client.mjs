@@ -24,8 +24,9 @@
  *       rule is that nothing runs a discarding git command. A finished tree is deleted as a folder of our own;
  *     - the asset bundle: hard links to the checkout's synced files (no copy, no change to them: nothing writes
  *       into a linked file, the job's own asset files are copied in first), node_modules: a folder of links to the
- *       checkout's packages (npm ci into a cache only when the job's lockfile differs), so each job's Vite cache is
- *       its own;
+ *       checkout's packages (npm ci into a cache only when the job's lockfile differs), and to the box's warm Vite
+ *       dependency caches (VITE_CACHES); Chrome's profiles, with their compiled shaders, are the box's too
+ *       (~/.cache/drift-chrome-profiles, drift-chrome.mjs);
  *     - the command inside the box's render slots (drift-slot.mjs, the checkout's slot folder), its output lines and
  *       progress sent to the hub every 2 s, every file it wrote under its out folders uploaded, the exit code reported.
  *
@@ -48,6 +49,12 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { contentId, installedManifest, run } from './drift-node-lib.mjs';
 import { landingPath } from './drift-farm.mjs';
+
+/** result files sent back while the job still runs (header of runJob's RESULTS AS THEY COME): whole-file kinds */
+const STREAMED = /\.(png|jpe?g|webp|exr|json|txt|csv)$/i;
+
+/** the scripts' Vite dependency caches (their cacheDir, under node_modules): linked from the box's into each job */
+export const VITE_CACHES = ['.vite-drift-render', '.vite-drift-review-stills', '.vite-drift-review-clip', '.vite-drift-check', '.vite-drift-node', '.vite-drift-stills'];
 
 /** MB of asset and untracked files a job may carry; more is a bundle's job */
 export const MAX_EXTRA_MB = 200;
@@ -311,6 +318,14 @@ export async function applyState({ main, jobDir, tar = 'tar', say = () => {} }) 
   }
   mkdirSync(join(tree, 'node_modules'), { recursive: true });
   for (const e of readdirSync(modules)) if (!e.startsWith('.vite')) linkDir(join(modules, e), join(tree, 'node_modules', e));
+  // Vite's dependency caches, the box's warm ones (the coordinator, 2026-10-30: "in farm job trees, link it to the box's
+  // warm one so each job doesn't re-optimize deps"): one per script, as each script names its own cacheDir. Vite
+  // keys a cache by the lockfile and its config and re-optimizes only when they differ; a job with another lockfile
+  // has its own node_modules (the cache folder above), and so its own Vite caches too
+  for (const name of VITE_CACHES) {
+    mkdirSync(join(modules, name), { recursive: true });
+    linkDir(join(modules, name), join(tree, 'node_modules', name));
+  }
   say(`farm: tree at ${meta.base.slice(0, 7)} + ${meta.files.length} file(s), ${linked} bundle file(s) linked`);
   return { tree, meta };
 }
@@ -367,6 +382,32 @@ export function labelOf(argv, max = 160) {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }
 
+const FINAL_STATES = ['done', 'failed', 'cancelled'];
+
+/**
+ * THE ROUND TRIP in one line, for the submitter's console (the user, 2026-10-30: "the idea was to accelerate our
+ * workflow … whenever we need the results this also needs to be quick"): packing and upload here, the wait for a
+ * box, the box's payload, bundle and tree, the boot (to the first frame; the shader cache warm or cold), the render,
+ * the upload back, the download here, and the whole. `at`: this Mac's clock (submitAt, followAt: the payload is up,
+ * landedAt); the hub's times are this Mac's clock too, the box's are durations.
+ */
+export function roundTrip(job, at) {
+  const s = (ms) => (Number.isFinite(ms) ? `${(Math.max(0, ms) / 1000).toFixed(1)} s` : '?');
+  const t = job.timing ?? {};
+  const parts = [
+    `send ${s(at.followAt - at.submitAt)}`,
+    `wait for a box ${s((job.claimedAt ?? NaN) - (job.queuedAt ?? NaN))}`,
+    `payload ${s(t.payloadMs)}`,
+    ...(t.bundleMs > 500 ? [`bundle ${s(t.bundleMs)}`] : []),
+    `tree ${s(t.treeMs)}`,
+    `boot ${s(t.bootMs)}${t.cache ? ` (shader cache ${t.cache})` : ''}`,
+    `render ${s(t.renderMs)}`,
+    `upload ${s(t.uploadMs)}`,
+    `back here ${s(at.landedAt - (job.endedAt ?? NaN))}`,
+  ];
+  return `farm: round trip ${s(at.landedAt - at.submitAt)}: ${parts.join(' · ')}`;
+}
+
 /** who sent a job, for the console's queue (From): DRIFT_AGENT, else the Claude Code session, else the pid */
 export function submitterOf(env = process.env, pid = process.pid, host = hostname()) {
   const agent = env.DRIFT_AGENT?.trim() || (env.CLAUDE_CODE_SESSION_ID ? `claude ${env.CLAUDE_CODE_SESSION_ID.slice(0, 8)}` : null);
@@ -380,6 +421,7 @@ export function submitterOf(env = process.env, pid = process.pid, host = hostnam
  */
 export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, say = console.error, out = (s) => process.stdout.write(s), stage }) {
   const call = api(hub, token);
+  const t0Submit = Date.now();
   if (prefer === 'auto') {
     const workers = await call('/farm/workers', { timeoutMs: 3000 }).catch((e) => ({ error: e.message }));
     if (!Array.isArray(workers)) return { fallback: `the farm hub does not answer (${workers.error})` };
@@ -404,6 +446,23 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   const t0 = Date.now();
   let job;
   let away = 0;
+  // the results, at the local paths the command named, as they come (each download holds on through a restart)
+  const landed = new Map(); // `${out}/${path}` → bytes landed
+  const land = async (r) => {
+    const dst = landingPath(job.outs[r.out], r.path);
+    mkdirSync(dirname(dst), { recursive: true });
+    await holdOn(`result ${r.path}`, async () => {
+      const res = await call(`/farm/jobs/${id}/files/${r.out}/${r.path.split('/').map(encodeURIComponent).join('/')}`, { raw: true, timeoutMs: 3_600_000 });
+      if (!res.ok) throw httpError(`result ${r.path}`, res);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(`${dst}.part`));
+      renameSync(`${dst}.part`, dst);
+    }, { say });
+    landed.set(`${r.out}/${r.path}`, r.bytes);
+    const of = job.progress?.unit === 'stills' && job.progress.total ? job.progress.total : FINAL_STATES.includes(job.state) ? job.results.length : '?';
+    const rel = relative(process.cwd(), dst);
+    say(`farm: got ${rel && !rel.startsWith('..') ? rel : dst} (${landed.size}/${of})`);
+  };
+  const fresh = () => (job?.results ?? []).filter((r) => landed.get(`${r.out}/${r.path}`) !== r.bytes);
   for (;;) {
     // (a dashboard restart: the last answer stands and the loop goes on; said once it has lasted 10 s)
     const next = await call(`/farm/jobs/${id}?from=${from}`).catch(() => null);
@@ -426,24 +485,17 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
       job = null;
       continue;
     }
-    if (job && ['done', 'failed', 'cancelled'].includes(job.state)) break;
+    if (job && FINAL_STATES.includes(job.state)) break;
+    for (const r of fresh()) await land(r);
     if (prefer === 'auto' && job?.state === 'queued' && Date.now() - t0 > 60_000 && !cancelled) {
       await call(`/farm/jobs/${id}/cancel`, { method: 'POST', body: {} }).catch(() => {});
       return { fallback: 'no box took it in 60 s' };
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  // the results, at the local paths the command named (each download holds on through a dashboard restart)
-  for (const r of job.results ?? []) {
-    const dst = landingPath(job.outs[r.out], r.path);
-    mkdirSync(dirname(dst), { recursive: true });
-    await holdOn(`result ${r.path}`, async () => {
-      const res = await call(`/farm/jobs/${id}/files/${r.out}/${r.path.split('/').map(encodeURIComponent).join('/')}`, { raw: true, timeoutMs: 3_600_000 });
-      if (!res.ok) throw httpError(`result ${r.path}`, res);
-      await pipeline(Readable.fromWeb(res.body), createWriteStream(`${dst}.part`));
-      renameSync(`${dst}.part`, dst);
-    }, { say });
-  }
+  // what is not here yet (the last files, a video)
+  for (const r of fresh()) await land(r);
+  say(roundTrip(job, { submitAt: t0Submit, followAt: t0, landedAt: Date.now() }));
   say(`farm: job ${id} ${job.state} on ${job.node} (exit ${job.exitCode ?? '—'})${job.results?.length ? `, ${job.results.length} file(s) back` : ''}${job.error ? `: ${job.error}` : ''}`);
   return { code: job.state === 'done' ? job.exitCode ?? 0 : job.exitCode || 1, job };
 }
@@ -465,12 +517,15 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
   let chain = Promise.resolve({ ok: true });
   let progress = { done: null, total: null, unit: null, fps: null, etaS: null };
   let cancel = false;
+  // THE ROUND TRIP (header), measured here as durations (this box's clock is not the Mac's)
+  const t0 = Date.now();
+  const timing = { payloadMs: null, bundleMs: null, treeMs: null, bootMs: null, renderMs: null, uploadMs: null, cache: null };
   /** one status post (lines from `acked`, progress, `patch`), never throwing: → { ok } or { ok: false, e } */
   const flush = (patch = {}) =>
     (chain = chain.then(async () => {
       const send = lines.slice(0, 2000);
       try {
-        const x = await call(`/farm/jobs/${job.id}/status`, { method: 'POST', body: { lines: send, from: acked, progress, ...patch } });
+        const x = await call(`/farm/jobs/${job.id}/status`, { method: 'POST', body: { lines: send, from: acked, progress, timing, ...patch } });
         acked += send.length;
         lines = lines.slice(send.length);
         if (x?.cancel) cancel = true;
@@ -502,18 +557,69 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
       if (!res.ok) throw httpError('payload', res);
       await pipeline(Readable.fromWeb(res.body), createWriteStream(join(jobDir, 'payload.tgz')));
     }, { say, untilMs: 5 * 60_000 });
+    let tMark = Date.now();
+    const lap = () => {
+      const t = Date.now();
+      const ms = t - tMark;
+      tMark = t;
+      return ms;
+    };
     const x = spawnSync(tar, ['-xzf', 'payload.tgz'], { cwd: jobDir, encoding: 'utf8', windowsHide: true });
     if (x.status !== 0) throw new Error(`payload unpack: ${x.stderr}`);
     const meta = JSON.parse(readFileSync(join(jobDir, 'job', 'meta.json'), 'utf8'));
+    timing.payloadMs = Date.now() - t0;
+    lap();
     await ensureBundle(meta.bundle);
+    timing.bundleMs = lap();
     const { tree } = await applyState({ main, jobDir, tar, say: note });
+    timing.treeMs = lap();
     for (const o of job.outs) mkdirSync(join(jobDir, 'out', String(o.i)), { recursive: true });
     const argv = resolveArgv(job.argv, { jobDir, outs: job.outs, inputs: job.inputs });
     // inside the box's render slots: the checkout's slot folder, whoever else renders there (DRIFT_FARM off: no loop)
     const cmd = [join(tree, 'scripts', 'drift-slot.mjs'), '--weight', String(job.weight ?? 1), '--', ...argv];
     note(`farm: running ${job.label} on ${tree}`);
     await tell({ state: 'running' });
+    const tRun = Date.now();
     const tick = setInterval(() => flush(), 2000);
+    // RESULTS AS THEY COME (the user, 2026-10-30: "the way back obviously has to be fast too … bam bam bam"): a still
+    // goes back as soon as it is written, not when the batch ends. Only whole-file kinds stream (an image, a JSON):
+    // a video grows until its encoder ends, so it goes at the end. A file counts as written once its size held for
+    // a second; at the end every file goes again if it changed since.
+    const sentAs = new Map(); // `${out}/${rel}` → "size:mtime" as uploaded
+    const seenAs = new Map(); // `${out}/${rel}` → "size:mtime" at the last look
+    let streaming = Promise.resolve();
+    const sendFile = async (o, rel) => {
+      const abs = join(jobDir, 'out', String(o.i), ...rel.split('/'));
+      const st = statSync(abs);
+      const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
+      if (sentAs.get(`${o.i}/${rel}`) === sig) return false;
+      await holdOn(`result ${rel}`, () => upload(call, `/farm/jobs/${job.id}/files?out=${o.i}&path=${encodeURIComponent(rel)}`, abs), { say });
+      sentAs.set(`${o.i}/${rel}`, sig);
+      return true;
+    };
+    const look = () => {
+      streaming = streaming.then(async () => {
+        for (const o of job.outs) {
+          const dir = join(jobDir, 'out', String(o.i));
+          for (const rel of filesUnder(dir)) {
+            if (rel.endsWith('.part') || !STREAMED.test(rel)) continue;
+            let st;
+            try {
+              st = statSync(join(dir, ...rel.split('/')));
+            } catch {
+              continue;
+            }
+            const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
+            const k = `${o.i}/${rel}`;
+            const steady = seenAs.get(k) === sig && Date.now() - st.mtimeMs > 1000;
+            seenAs.set(k, sig);
+            if (steady && sentAs.get(k) !== sig) await sendFile(o, rel).catch((e) => say(`farm: ${rel} not sent yet (${e.message}): at the end`));
+          }
+        }
+      });
+      return streaming;
+    };
+    const watcher = setInterval(look, 1000);
     let child = null;
     const watch = setInterval(() => {
       if (cancel && child?.exitCode === null) {
@@ -523,27 +629,40 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     }, 1000);
     const r = await run(process.execPath, cmd, {
       cwd: tree,
-      // (the box's own Chrome flags, drift-gpu-check.mjs --save, live in the checkout, not in the job's tree)
+      // (the box's own Chrome flags, drift-gpu-check.mjs --save, live in the checkout, not in the job's tree; its
+      // Chrome profiles, with their compiled shaders, are in the user's home: every job shares them)
       env: { ...process.env, DRIFT_FARM: '', DRIFT_SLOTS_DIR: process.env.DRIFT_SLOTS_DIR ?? join(main, 'out', 'drift', '.slots'), DRIFT_NODE_CHROME: process.env.DRIFT_NODE_CHROME || join(main, 'out', 'drift', 'node-chrome.json') },
       onSpawn: (p) => (child = p),
       onLine: (l) => {
         progress = progressOf(l, progress);
+        // the first frame or still: the page booted (its shaders compiled, its assets loaded); the shader cache as the
+        // script says it (drift-chrome.mjs launchChrome: any cold Chrome makes the job's cache cold)
+        if (timing.bootMs === null && (progress.done ?? 0) >= 1) timing.bootMs = Date.now() - tRun;
+        const fb = /first frame ([\d.]+) s after launch/.exec(l);
+        if (fb && timing.bootMs === null) timing.bootMs = Math.round(Number(fb[1]) * 1000);
+        const sc = /shader cache: (warm|cold)/.exec(l);
+        if (sc) timing.cache = timing.cache === 'cold' ? 'cold' : sc[1];
         onProgress(progress, l);
         lines.push(l);
       },
     });
     clearInterval(tick);
     clearInterval(watch);
+    clearInterval(watcher);
+    await streaming;
+    timing.renderMs = Date.now() - tRun - (timing.bootMs ?? 0);
+    lap();
     // every file it wrote under its out folders, back to the hub
     let sent = 0;
     for (const o of job.outs) {
       const dir = join(jobDir, 'out', String(o.i));
       for (const rel of filesUnder(dir)) {
         if (rel.endsWith('.part')) continue;
-        await holdOn(`result ${rel}`, () => upload(call, `/farm/jobs/${job.id}/files?out=${o.i}&path=${encodeURIComponent(rel)}`, join(dir, ...rel.split('/'))), { say });
+        await sendFile(o, rel);
         sent++;
       }
     }
+    timing.uploadMs = lap();
     const state = cancel ? 'cancelled' : r.code === 0 ? 'done' : 'failed';
     note(`farm: exit ${r.code}, ${sent} file(s) sent back`);
     await tell({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error: `exit ${r.code}` } : {}) });

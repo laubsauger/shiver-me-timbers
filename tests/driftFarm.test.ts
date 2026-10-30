@@ -21,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition,
 } from '../scripts/drift-farm.mjs';
-import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, submitterOf } from '../scripts/drift-farm-client.mjs';
+import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, roundTrip, submitterOf } from '../scripts/drift-farm-client.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'drift-farm-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -214,6 +214,9 @@ describe('the code state, packed on one machine and applied on another', () => {
     expect(readFileSync(join(tree, 'src', 'new.ts'), 'utf8')).toContain('fresh');
     expect(readFileSync(join(tree, 'public', 'drift', 'sand.png'), 'utf8')).toBe('SAND');
     expect(readFileSync(join(tree, 'node_modules', 'three', 'index.js'), 'utf8')).toBe('module.exports = 3');
+    // the job's Vite writes its dependency cache into the box's warm one (the next job does not re-optimize)
+    writeFileSync(join(tree, 'node_modules', '.vite-drift-render', 'warm.txt'), 'deps');
+    expect(readFileSync(join(box, 'node_modules', '.vite-drift-render', 'warm.txt'), 'utf8')).toBe('deps');
     // the box's own checkout did not change
     expect(sh(box, 'status', '--porcelain', '--untracked-files=no')).toBe('');
     // and deleting the job's folder leaves the checkout's packages and bundle file alone
@@ -221,6 +224,7 @@ describe('the code state, packed on one machine and applied on another', () => {
     expect(existsSync(jobDir)).toBe(false);
     expect(readFileSync(join(box, 'node_modules', 'three', 'index.js'), 'utf8')).toBe('module.exports = 3');
     expect(readFileSync(join(box, 'public', 'drift', 'sand.png'), 'utf8')).toBe('SAND');
+    expect(readFileSync(join(box, 'node_modules', '.vite-drift-render', 'warm.txt'), 'utf8')).toBe('deps'); // (kept warm)
   });
 
   it('a payload over the cap fails loud and names the biggest files', async () => {
@@ -504,5 +508,19 @@ describe('holding on through a dashboard restart (drift-farm-client.mjs holdOn)'
     expect(submitterOf({ DRIFT_AGENT: 'beach-agent', CLAUDE_CODE_SESSION_ID: '0797e262-d034' }, 7, 'laubs-mbp.local')).toEqual({ pid: 7, host: 'laubs-mbp', agent: 'beach-agent' });
     expect(submitterOf({ CLAUDE_CODE_SESSION_ID: '0797e262-d034' }, 7, 'h').agent).toBe('claude 0797e262');
     expect(submitterOf({}, 7, 'h').agent).toBe('pid 7');
+  });
+});
+
+describe('the round trip, in the submitter\'s console (drift-farm-client.mjs roundTrip)', () => {
+  // the user, 2026-10-30: "the way back obviously has to be fast too … so we don't just replace waiting on one thing
+  // with waiting on all the plumbing in between": every leg named, so the slow one shows
+  it('names every leg from this Mac\'s clock and the box\'s durations, and the shader cache', () => {
+    const job = { queuedAt: 1000, claimedAt: 1500, endedAt: 90_000, timing: { payloadMs: 300, bundleMs: 0, treeMs: 1800, bootMs: 67_200, renderMs: 400, uploadMs: 900, cache: 'warm' } };
+    expect(roundTrip(job, { submitAt: 0, followAt: 1000, landedAt: 90_600 })).toBe(
+      'farm: round trip 90.6 s: send 1.0 s · wait for a box 0.5 s · payload 0.3 s · tree 1.8 s · boot 67.2 s (shader cache warm) · render 0.4 s · upload 0.9 s · back here 0.6 s',
+    );
+  });
+  it('a box on old code (no timing): the hub\'s legs still show, the box\'s say "?"', () => {
+    expect(roundTrip({ queuedAt: 0, claimedAt: 0, endedAt: 5000 }, { submitAt: 0, followAt: 0, landedAt: 6000 })).toMatch(/round trip 6\.0 s: .* boot \? · render \? .* back here 1\.0 s$/);
   });
 });
