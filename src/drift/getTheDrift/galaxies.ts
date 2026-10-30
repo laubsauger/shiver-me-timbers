@@ -6,9 +6,10 @@
  * their own angle) face the eye with a roll of their own. Instance 0 is OUR galaxy, shaded with the
  * analytic model (galaxyModel.ts galaxyFace) its volume shares.
  *
- * They open at the knots where Undertime's first stars ignited (grains.ts finalKnots): each grows from a
- * point of light into its disc as `open` rises. Instance 0 is OUR galaxy, whose impostor hands over to the
- * ray-marched volume (milkyWay.ts) as we approach; its parameters are fixed so the two agree.
+ * They open at the knots where Undertime's first stars ignited, laid in the web where the dive into it passes
+ * (webGalaxies.ts; the 2026-10-30 dive, webDive.ts): each grows from a point of light into its disc. Instance 0
+ * is OUR galaxy, whose impostor hands over to the ray-marched volume (milkyWay.ts) as we approach; its parameters
+ * are fixed so the two agree.
  *
  * Brightness per unit projected area rises as a disc tilts away (a longer path through a thin glowing
  * sheet), capped so an edge-on galaxy is a bright needle rather than a blown-out line.
@@ -16,7 +17,6 @@
 import * as THREE from 'three/webgpu';
 import { Fn, abs, attribute, cameraPosition, clamp, cos, exp, float, max, min, mix, normalize, sin, smoothstep, step, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { galaxyFace } from './galaxyModel';
-import { rng } from '../undertime/web';
 import type { Vec3 } from '../../cine/domeMaster';
 
 type F = THREE.Node<'float'>;
@@ -36,6 +36,9 @@ export interface GalaxySpec {
   /** 0..1 order of appearance */
   appear: number;
   brightness: number;
+  /** 0..1 how bright its birth flare is (default 1): the knots' first galaxies flare, the hundreds strung along the
+   * dive's filament open without one (webGalaxies.ts). Ours always flares */
+  flare?: number;
   /** the atlas tile (−1: the analytic model), whether it lies in its plane, its roll (rad) as a billboard */
   tile: number;
   planar: boolean;
@@ -93,86 +96,6 @@ const TILT_MAX = (55 * Math.PI) / 180;
 /** OUR galaxy's model parameters (the volume reads the same ones) */
 export const OUR_LOOK = { arms: 2, wind: 1 / Math.tan((13 * Math.PI) / 180), phase: 0.6, seed: 3.7, elliptical: 0 };
 
-const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const len = (a: Vec3): number => Math.hypot(a[0], a[1], a[2]);
-
-function randomUnit(r: () => number): Vec3 {
-  const z = r() * 2 - 1;
-  const a = r() * Math.PI * 2;
-  const s = Math.sqrt(1 - z * z);
-  return [s * Math.cos(a), z, s * Math.sin(a)];
-}
-
-function inPlane(n: Vec3, r: () => number): Vec3 {
-  const t = randomUnit(r);
-  const d = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
-  const x: Vec3 = [t[0] - n[0] * d, t[1] - n[1] * d, t[2] - n[2] * d];
-  const l = len(x) || 1;
-  return [x[0] / l, x[1] / l, x[2] / l];
-}
-
-/**
- * The field: a galaxy at every knot, except where it would sit on our galaxy or across our flight line,
- * and round the knots their members — after the deep fields (references: galaxy-fields-clusters): the
- * sizes are extremely skewed (a handful large, most small smudges), clusters are concentrated (smooth warm
- * ellipticals packed toward the centre), there are galaxies everywhere between. Seeded, so every lane
- * renders the same sky.
- */
-export function galaxyField(knots: Array<{ pos: Vec3; level: number }>, ours: GalaxySpec, flight: [Vec3, Vec3], size: number, atlas: GalaxyAtlas['galaxies']): GalaxySpec[] {
-  const r = rng(4242);
-  const [a, b] = flight;
-  const ab = sub(b, a);
-  const abl = len(ab);
-  const clearOfFlight = (p: Vec3): number => {
-    const t = Math.min(1, Math.max(0, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / (abl * abl)));
-    return len(sub(p, [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t]));
-  };
-  const gauss = (): number => Math.sqrt(-2 * Math.log(Math.max(1e-9, r()))) * Math.cos(2 * Math.PI * r());
-  const byKind = (kinds: string[]): number[] => atlas.filter((g) => kinds.includes(g.kind)).map((g) => g.tile);
-  const discs = byKind(['spiral', 'barred']);
-  const others = byKind(['edge', 'inclined', 'irregular', 'interacting']);
-  const ellipticals = byKind(['elliptical']);
-  // each tile used in turn from a shuffled deck, so no two neighbours are the same galaxy
-  const decks = new Map<number[], number[]>();
-  const draw = (pool: number[]): number => {
-    if (pool.length === 0) return 0;
-    let d = decks.get(pool);
-    if (!d || d.length === 0) {
-      d = [...pool].sort(() => r() - 0.5);
-      decks.set(pool, d);
-    }
-    return d.pop() as number;
-  };
-  const out: GalaxySpec[] = [ours];
-  const add = (centre: Vec3, radius: number, pool: number[], brightness: number): void => {
-    // clear of our galaxy, and of the flight line by a margin (a galaxy passing close is a blur sweeping by)
-    if (len(sub(centre, ours.centre)) < ours.radius * 2.2 + radius || clearOfFlight(centre) < radius * 4 + size * 2) return;
-    const tile = draw(pool);
-    const normal = randomUnit(r);
-    out.push({
-      centre, normal, xAxis: inPlane(normal, r), radius,
-      arms: 2, wind: 1, phase: 0, seed: 0, elliptical: 0,
-      appear: r(), brightness,
-      tile, planar: atlas.find((g) => g.tile === tile)?.planar ?? false, roll: r() * Math.PI * 2,
-    });
-  };
-  for (const k of knots) {
-    // the knot's own galaxy: most modest, a few large (the size distribution of the deep fields)
-    const radius = size * (0.35 + 1.3 * Math.pow(r(), 3)) * (k.level > 0 ? 1.5 : 1);
-    const roll = r();
-    add(k.pos, radius, roll < 0.55 ? discs : roll < 0.8 ? others : ellipticals, 0.7 + r() * 0.5);
-    // a few of the knots are clusters (ellipticals packed toward the centre), the rest have a companion or two
-    const cluster = r() < 0.15;
-    const members = cluster ? 3 + Math.floor(r() * 5) : Math.floor(r() * 1.6);
-    for (let m = 0; m < members; m++) {
-      const spread = radius * (cluster ? 2.5 : 5);
-      const p: Vec3 = [k.pos[0] + gauss() * spread, k.pos[1] + gauss() * spread, k.pos[2] + gauss() * spread];
-      add(p, size * (0.08 + 0.3 * Math.pow(r(), 2.5)), cluster && r() < 0.7 ? ellipticals : r() < 0.6 ? discs : others, 0.45 + r() * 0.45);
-    }
-  }
-  return out;
-}
-
 export interface GalaxyUniforms {
   /** s, the act's own time */
   time: F;
@@ -197,7 +120,8 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
     centre.set([...s.centre, s.radius], i * 4);
     normal.set([...s.normal, s.appear], i * 4);
     xAxis.set([...s.xAxis, s.brightness], i * 4);
-    look.set([s.arms, s.wind, s.phase, s.seed + s.elliptical * 1000], i * 4);
+    // (an atlas galaxy has no use for the model's arm phase: its slot carries the birth flare's strength)
+    look.set([s.arms, s.wind, s.tile < 0 ? s.phase : (s.flare ?? 1), s.seed + s.elliptical * 1000], i * 4);
     tiles.set([i, s.tile, s.planar ? 1 : 0, s.roll], i * 4);
   });
   const C4 = attribute<'vec4'>('galaxyCentre', 'vec4');
@@ -221,7 +145,15 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
   const X0 = normalize(U.skyTurn.mul(X4.xyz));
   const X = normalize(X0.sub(N.mul(X0.dot(N))));
   const Y = N.cross(X);
-  const atlasTile = T4.y;
+  // ROUNDED: the instance's tile reaches the fragment stage as an interpolated varying, and three equal corner
+  // values come out a few ulp either side of themselves (8 as 7.9999995 in about half the pixels), so the
+  // floor(tile / cols) below flipped from pixel to pixel on the tiles that are multiples of the atlas's 8 columns
+  // (8, 16, 24): neighbours looked a whole row apart, the sampler's derivatives took the atlas's last mip, and those
+  // galaxies drew as grey cards full of black specks — grey where a 2×2 pixel quad straddled the flip, the tile's
+  // black sky where all four agreed (the 2026-10-30 QA sweep, item 3b: "big grey speckled rectangles" in the dome at
+  // 85–97 s, the same on all three farm boxes). Pinned at run time: every tile moved a quarter off the integer took
+  // every card out; every tile set to 8 made every galaxy one. (The flare's tint, `tileC` below, reads it too.)
+  const atlasTile = T4.y.round();
   const planar = max(T4.z, isOurs);
   // a billboard's basis: facing the eye, turned by the galaxy's own roll
   const side0 = normalize(toEye.cross(abs(toEye.y).lessThan(0.95).select(vec3(0, 1, 0), vec3(1, 0, 0))));
@@ -278,7 +210,7 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
   // as it falls; empty when not flaring
   const flareR = C4.w.div(dist).mul(1.3).clamp(0.012, 0.09);
   const swell = mix(0.5, 1, smoothstep(-FLARE_RISE, 0, since)).mul(mix(1, 0.65, smoothstep(0, FLARE_FALL * 3, since)));
-  const flashHalf = dist.mul(flareR).mul(swell).mul(2).mul(step(0.002, flare));
+  const flashHalf = dist.mul(flareR).mul(swell).mul(2).mul(step(0.002, flare.mul(mix(L4.z, 1, isOurs))));
   // its colour: the galaxy's own (the tile's mean, from the atlas's last mips), hot white at the core
   const tileC = vec2(atlasTile.sub(atlasTile.div(atlas.cols).floor().mul(atlas.cols)).add(0.5).div(atlas.cols), atlasTile.div(atlas.cols).floor().add(0.5).div(atlas.rows));
   const mean = mix(texture(atlas.texture, tileC).level(float(9)).rgb, vec3(0.9, 0.85, 0.75), isOurs);
@@ -295,7 +227,7 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
     const core = exp(rho.div(0.1).pow(2).negate()).mul(5);
     const halo = exp(rho.div(0.45).pow(2).negate()).mul(0.9).add(exp(rho.div(1.1).pow(2).negate()).mul(0.12));
     const c = vec3(0.85, 0.9, 1).mul(core).add(mix(vec3(0.85, 0.9, 1), tint, 0.6).mul(halo));
-    return vec4(c.mul(flare).mul(X4.w).mul(mix(U.field, U.ours, isOurs)).mul(U.radiance), 1);
+    return vec4(c.mul(flare).mul(mix(L4.z, 1, isOurs)).mul(X4.w).mul(mix(U.field, U.ours, isOurs)).mul(U.radiance), 1);
   })();
   flashMaterial.name = 'drift-galaxy-flashes';
 

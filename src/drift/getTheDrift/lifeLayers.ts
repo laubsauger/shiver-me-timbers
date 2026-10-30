@@ -76,7 +76,15 @@ export function nightLights(n: V3, v: F, land: F, L: LifeUniforms, fp: F): V3 {
   const hc = hash(cell.x.add(cell.y.mul(157)).add(cell.z.mul(113)));
   const inhabited = smoothstep(0.02, 0.12, v);
   const fineEnough = smoothstep(2 / 2000, 0.7 / 2000, fp);
-  const camp = mix(inhabited.mul(0.04), step(hc, inhabited.mul(0.25)), fineEnough).mul(smoothstep(0, 1, stage)).mul(float(1).sub(smoothstep(1.5, 2.5, stage)));
+  // (they belong to the night the lights first come up only: once past the balance they never return. The flood
+  // halves the stage again (life.ts: the lights falter) to ~1.7, back inside the camps' window, and at Drift-2's
+  // height a footprint is well under a cell, so every inhabited cell came back as a hard-edged 3 km square of rust
+  // round the drowning cities — the 2026-10-30 QA sweep, item 9: "flat brown hard-edged rectangles" at 265–278 s.
+  // The overshoot is 0 until the lights beat ends, by when the stage has passed 2.5 and the camps are out anyway)
+  const camp = mix(inhabited.mul(0.04), step(hc, inhabited.mul(0.25)), fineEnough)
+    .mul(smoothstep(0, 1, stage))
+    .mul(float(1).sub(smoothstep(1.5, 2.5, stage)))
+    .mul(float(1).sub(L.overshoot));
   // settlements grow from the core out: a pixel lights when the stage passes its level (bright = early);
   // the regions wake at different times
   const wake = mx_noise_float(n.mul(22).add(3.1)).mul(0.1);

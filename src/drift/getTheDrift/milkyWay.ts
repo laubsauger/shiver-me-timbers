@@ -69,9 +69,22 @@ export interface MilkyWay {
 
 /** dust extinction per channel relative to green (interstellar reddening: ~1/λ) */
 const REDDEN = vec3(0.72, 1, 1.38);
-/** how far the volume reaches above and below the plane, in radii (the bulge's height) */
-const SLAB = 0.2;
+/**
+ * How far the march reaches above and below the plane, and from the centre (radii) — where the samples go — and the
+ * share of each, from its edge inward, over which the light is TAPERED to nothing before the march stops.
+ * THE HARD EDGE (the user, 2026-10-30, ~105–112 s: "a very sharp edge, like a cutoff edge that is definitely not like a
+ * smooth round bulge … really doing a hard cut there"): the slab was 0.2 radii and cut the light off there, but the
+ * bulge still shone at a quarter of a unit per radius at that height (exp(−1.6·0.2/0.055)·3.5·25). While the eye sinks
+ * through 0.42 → 0.13 radii above the plane on its way in, the slab's surface is seen nearly edge-on, and it cut the
+ * bulge's upper halo along a straight line beside the core, parallel to the disk: in every view, the dome master's as
+ * the 16:9's (A/B on the farm, out/drift/review/webfly/edge_{A,B,C,E}: the edge went with the volume, not with the
+ * impostors or the dust; a CPU march of the model put it on the slab). Now the slab is 0.3 (the bulge 50× fainter at its
+ * surface) and the light fades out over its outer TAPER share, and the ball's, so no surface of the march has light
+ * left to cut — a taller slab alone would have moved the line, not removed it.
+ */
+const SLAB = 0.3;
 const BALL = 1.3;
+const TAPER = 0.4;
 
 // ------------------------------------------------------------------ the stars near the Sun point
 // two populations: the neighbourhood (the bright naked-eye stars, nearly all round the sky) and, fainter
@@ -196,10 +209,12 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
           const tt = t0.add(float(i).add(j).mul(ds));
           const x = o.add(dl.mul(tt));
           const s = galaxyVolume(x, look);
+          // (nothing left at the march's own bounds to cut: TAPER above)
+          const keep = float(1).sub(smoothstep(SLAB * (1 - TAPER), SLAB, abs(x.z))).mul(float(1).sub(smoothstep(BALL * (1 - TAPER * 0.4), BALL, length(x))));
           // the diffuse light is the DISTANT stars: the near ones are drawn as points (below), so the glow of
           // the first ~0.05 radii around the eye is left out — or the whole sky would be a milky wash
           const near = smoothstep(0.03, 0.1, tt);
-          light.addAssign(s.emit.mul(T).mul(ds).mul(near));
+          light.addAssign(s.emit.mul(T).mul(ds).mul(near).mul(keep));
           // dust dims blue more than red: the rift's edges brown, the band behind it warm (references:
           // milky-way — never a blue-purple band)
           T.mulAssign(exp(REDDEN.mul(s.kappa.mul(ds)).negate()));

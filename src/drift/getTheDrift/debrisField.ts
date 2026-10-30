@@ -16,7 +16,7 @@
  * field turns slowly as one (`spin` rad/s), a pure function of time.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, abs, atan, attribute, cameraPosition, cameraProjectionMatrix, cos, float, instanceIndex, max, mix, modelWorldMatrix, modelWorldMatrixInverse, normalGeometry, normalWorld, positionGeometry, positionWorld, reflect, screenSize, select, sin, smoothstep, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, abs, atan, attribute, cameraPosition, cameraProjectionMatrix, cos, float, max, mix, modelWorldMatrix, modelWorldMatrixInverse, normalGeometry, normalWorld, positionGeometry, positionWorld, reflect, screenSize, select, sin, smoothstep, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { rng } from '../undertime/web';
@@ -108,7 +108,9 @@ export interface DebrisData {
 /**
  * WHAT A PIECE IS. Most of the field is the waterlogged wood of a drowned world — planks and boards, square beams,
  * round logs, panels of roof and wall — and among it the things people owned (the user's story note, 2026-10-29:
- * "without someone telling me the story it doesn't become apparent"): crates, a plastic barrel, a lifebuoy, a jerrycan.
+ * "without someone telling me the story it doesn't become apparent"; sunken-world-cues.md cue 2, "human things, not
+ * boxes"): crates, a plastic drum, a lifebuoy, jerrycans, a plastic chair, a tyre, a navigation buoy, a bread crate, a
+ * plastic tank, a roller-shutter door, an upturned picnic table, a cardboard box, a suitcase.
  * Near the raft the logs and the things are scanned (CC0, Poly Haven: SCANS); everywhere else every kind is drawn as
  * the warped, broken-ended board (`createDebrisField`).
  */
@@ -122,18 +124,51 @@ export const enum DebrisKind {
   Lifebuoy = 6,
   Jerrycan = 7,
   Crate = 8,
+  Chair = 9,
+  Tyre = 10,
+  Buoy = 11,
+  PlasticCrate = 12,
+  PlasticCan = 13,
+  Tank = 14,
+  Door = 15,
+  Table = 16,
+  Box = 17,
+  Suitcase = 18,
 }
 /** the things people owned, by share of the relics (the rest of a relic draw), their real size (m: length along the
  * piece, width, height as it floats) and freeboard range (share of the height above the water) */
 const THINGS: Array<{ kind: DebrisKind; share: number; size: [number, number, number]; freeboard: [number, number] }> = [
-  { kind: DebrisKind.CrateLong, share: 0.25, size: [1.17, 0.53, 0.47], freeboard: [0.3, 0.45] },
-  { kind: DebrisKind.Crate, share: 0.2, size: [0.83, 0.41, 0.35], freeboard: [0.3, 0.45] },
+  { kind: DebrisKind.CrateLong, share: 0.1, size: [1.17, 0.53, 0.47], freeboard: [0.3, 0.45] },
+  { kind: DebrisKind.Crate, share: 0.08, size: [0.83, 0.41, 0.35], freeboard: [0.3, 0.45] },
   // (a plastic drum lying on its side, its bung up: it floats high)
-  { kind: DebrisKind.Barrel, share: 0.25, size: [0.88, 0.49, 0.49], freeboard: [0.4, 0.55] },
+  { kind: DebrisKind.Barrel, share: 0.1, size: [0.88, 0.49, 0.49], freeboard: [0.4, 0.55] },
   // (closed-cell foam: a ring lying flat rides most of its thickness out of the water)
-  { kind: DebrisKind.Lifebuoy, share: 0.12, size: [0.84, 0.84, 0.16], freeboard: [0.55, 0.7] },
+  { kind: DebrisKind.Lifebuoy, share: 0.05, size: [0.84, 0.84, 0.16], freeboard: [0.55, 0.7] },
   // (a sealed can on its side)
-  { kind: DebrisKind.Jerrycan, share: 0.18, size: [0.52, 0.35, 0.17], freeboard: [0.45, 0.6] },
+  { kind: DebrisKind.Jerrycan, share: 0.06, size: [0.52, 0.35, 0.17], freeboard: [0.45, 0.6] },
+  // (a monobloc chair on its back, legs up: hollow plastic, it floats high and reads at once)
+  { kind: DebrisKind.Chair, share: 0.12, size: [0.89, 0.66, 0.63], freeboard: [0.45, 0.6] },
+  // (a tyre lying flat, half awash)
+  { kind: DebrisKind.Tyre, share: 0.1, size: [0.61, 0.6, 0.17], freeboard: [0.4, 0.6] },
+  // (a navigation buoy, upright as it is moored to float: most of it out of the water)
+  { kind: DebrisKind.Buoy, share: 0.03, size: [1.08, 0.99, 2.65], freeboard: [0.55, 0.65] },
+  { kind: DebrisKind.PlasticCrate, share: 0.07, size: [0.41, 0.3, 0.26], freeboard: [0.4, 0.55] },
+  { kind: DebrisKind.PlasticCan, share: 0.06, size: [0.34, 0.32, 0.27], freeboard: [0.45, 0.6] },
+  { kind: DebrisKind.Tank, share: 0.05, size: [0.64, 0.44, 0.43], freeboard: [0.4, 0.55] },
+  // (a door lying flat, awash)
+  { kind: DebrisKind.Door, share: 0.04, size: [2.4, 1.08, 0.3], freeboard: [0.2, 0.35] },
+  // (a picnic table upside down, its top awash and its legs in the air: the flood's own picture)
+  { kind: DebrisKind.Table, share: 0.04, size: [3.02, 2.24, 0.74], freeboard: [0.8, 0.88] },
+  { kind: DebrisKind.Box, share: 0.05, size: [0.52, 0.39, 0.34], freeboard: [0.3, 0.45] },
+  // (a suitcase lying flat)
+  { kind: DebrisKind.Suitcase, share: 0.05, size: [0.44, 0.35, 0.15], freeboard: [0.4, 0.6] },
+];
+/** the things set where the eye will be (`thingsAt`), in this order: the most legible first — a table upside down, a
+ * chair, a tyre, a drum, a door — then round the rest */
+const PLACED: DebrisKind[] = [
+  DebrisKind.Table, DebrisKind.Chair, DebrisKind.Tyre, DebrisKind.Barrel, DebrisKind.Door, DebrisKind.Lifebuoy,
+  DebrisKind.Buoy, DebrisKind.Suitcase, DebrisKind.CrateLong, DebrisKind.Tank, DebrisKind.PlasticCrate, DebrisKind.Box,
+  DebrisKind.Jerrycan, DebrisKind.PlasticCan, DebrisKind.Crate,
 ];
 
 // weathered wood (grey, brown, sun-bleached), the odd painted plank or barrel
@@ -201,9 +236,11 @@ function makePiece(d: DebrisData, n: number, x: number, z: number, r: () => numb
   } else {
     // wreckage: panels of roof and wall, nailed boards, barely awash
     kind = DebrisKind.Panel;
-    w = Math.min(3, len * (0.4 + 0.5 * a));
-    h = 0.08 + 0.12 * b;
-    fb = 0.15 + 0.15 * h2;
+    // (at most a few boards wide: a 3 m sheet floating flat read as plywood pasted on the water, the 2026-10-29
+    // review of the landing still; and barely awash — its top a centimetre or two out, its low corners under)
+    w = Math.min(1.4, len * (0.3 + 0.4 * a));
+    h = 0.06 + 0.08 * b;
+    fb = 0.1 + 0.12 * h2;
   }
   d.place.set([x, z, yaw, len], n * 4);
   d.shape.set([w, h], n * 2);
@@ -257,13 +294,13 @@ export function matPieces(cx: number, cz: number, sigma: number, count: number, 
 /**
  * THINGS SET WHERE THE EYE WILL BE (the user's story note, 2026-10-29: "one recognisable object near the eye … is
  * worth a thousand planks"): one of the people's things at each of `at` (field frame, m), turned and chosen by the
- * seed, in the order of THINGS round and round.
+ * seed, in the order of PLACED round and round.
  */
 export function thingsAt(at: ReadonlyArray<readonly [number, number]>, seed = 2102): DebrisData {
   const r = rng(seed);
   const d = emptyData(at.length);
   at.forEach(([x, z], n) => {
-    const t = THINGS[n % THINGS.length];
+    const t = THINGS.find((q) => q.kind === PLACED[n % PLACED.length])!;
     const s = 0.95 + 0.15 * r();
     d.place.set([x, z, r() * Math.PI, t.size[0] * s], n * 4);
     d.shape.set([t.size[1] * s, t.size[2] * s], n * 2);
@@ -340,6 +377,9 @@ const PLANKS: Array<[number, number, number, number]> = [
   [0.27, 0.07, 0.205, 0.86],
 ];
 const PLANK_LUM = 0.229;
+/** m: a board's width and the length one atlas board covers (its rect is 4.2× as long as wide in the square image) */
+const BOARD_W = 0.24;
+const BOARD_L = 1.0;
 function plank(): THREE.Texture {
   if (!plankTexture) {
     plankTexture = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}drift/pbr/planks/diffuse.jpg`);
@@ -364,13 +404,24 @@ const SCANS: Array<{ kinds: DebrisKind[]; file: string; lum: number; turn?: (g: 
   { kinds: [DebrisKind.Barrel], file: 'Barrel_02', lum: 0, turn: (g) => g.rotateZ(Math.PI / 2) },
   { kinds: [DebrisKind.Lifebuoy], file: 'lifebuoy', lum: 0, turn: (g) => g.rotateX(Math.PI / 2) },
   { kinds: [DebrisKind.Jerrycan], file: 'metal_jerrycan_green', lum: 0, turn: (g) => g.rotateX(Math.PI / 2).rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Chair], file: 'plastic_monobloc_chair_01', lum: 0, turn: (g) => g.rotateX(Math.PI / 2).rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Tyre], file: 'old_tyre', lum: 0, turn: (g) => g.rotateX(Math.PI / 2) },
+  { kinds: [DebrisKind.Buoy], file: 'ocean_buoy', lum: 0 },
+  { kinds: [DebrisKind.PlasticCrate], file: 'plastic_crate_01', lum: 0, turn: (g) => g.rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.PlasticCan], file: 'plastic_jerrycan', lum: 0, turn: (g) => g.rotateZ(Math.PI / 2).rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Tank], file: 'industrial_pastic_container', lum: 0, turn: (g) => g.rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Door], file: 'rollershutter_door', lum: 0, turn: (g) => g.rotateX(Math.PI / 2).rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Table], file: 'wooden_picnic_table', lum: 0, turn: (g) => g.rotateZ(Math.PI).rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Box], file: 'cardboard_box_01', lum: 0, turn: (g) => g.rotateY(Math.PI / 2) },
+  { kinds: [DebrisKind.Suitcase], file: 'vintage_suitcase', lum: 0, turn: (g) => g.rotateX(Math.PI / 2) },
 ];
 
-/** a scan's meshes merged (their transforms applied), turned and scaled to the unit box; and its colour map */
-async function loadScan(file: string, turn?: (g: THREE.BufferGeometry) => void): Promise<{ geometry: THREE.BufferGeometry; map: THREE.Texture | null }> {
+/** a scan's meshes merged (their transforms applied), turned and scaled to the unit box, one geometry group per part;
+ * and each part's colour map (the door, the table and the suitcase are two materials) */
+async function loadScan(file: string, turn?: (g: THREE.BufferGeometry) => void): Promise<{ geometry: THREE.BufferGeometry; maps: Array<THREE.Texture | null> }> {
   const gltf = await new GLTFLoader().loadAsync(`${import.meta.env.BASE_URL}drift/pbr/${file}/${file}_float.glb`);
   const parts: THREE.BufferGeometry[] = [];
-  let map: THREE.Texture | null = null;
+  const maps: Array<THREE.Texture | null> = [];
   gltf.scene.updateMatrixWorld(true);
   gltf.scene.traverse((o) => {
     const m = o as THREE.Mesh;
@@ -382,10 +433,11 @@ async function loadScan(file: string, turn?: (g: THREE.BufferGeometry) => void):
     }
     if (m.geometry.index) g.setIndex(m.geometry.index.clone());
     g.applyMatrix4(m.matrixWorld);
-    parts.push(g);
-    map ??= (m.material as THREE.MeshStandardMaterial).map ?? null;
+    // (every part indexed, or none: mergeGeometries takes one or the other)
+    parts.push(g.index ? g : g.setIndex([...Array(g.getAttribute('position').count).keys()]));
+    maps.push(((Array.isArray(m.material) ? m.material[0] : m.material) as THREE.MeshStandardMaterial).map ?? null);
   });
-  const geometry = mergeGeometries(parts, false);
+  const geometry = mergeGeometries(parts, true);
   if (!geometry) throw new Error(`debris: ${file} has no mesh`);
   turn?.(geometry);
   geometry.computeBoundingBox();
@@ -395,8 +447,14 @@ async function loadScan(file: string, turn?: (g: THREE.BufferGeometry) => void):
   geometry.translate(-centre.x, -centre.y, -centre.z);
   // (applyMatrix4 carries the scan's own normals through the scale by its normal matrix: smooth, as scanned)
   geometry.scale(1 / Math.max(size.x, 1e-3), 1 / Math.max(size.y, 1e-3), 1 / Math.max(size.z, 1e-3));
-  return { geometry, map };
+  return { geometry, maps };
 }
+
+/** the kinds a board can stand for (createDebrisField without scans): the wood, and the things shaped like boxes */
+const BOARDABLE = new Set<DebrisKind>([
+  DebrisKind.Plank, DebrisKind.Beam, DebrisKind.Log, DebrisKind.Panel, DebrisKind.CrateLong, DebrisKind.Crate,
+  DebrisKind.Box, DebrisKind.PlasticCrate, DebrisKind.Tank, DebrisKind.Suitcase,
+]);
 
 /** px: the least each of a piece's three sizes is drawn across (createDebrisField: PIXEL-FLOORED) */
 const FLOOR_PX = 1.5;
@@ -439,8 +497,20 @@ export function createDebrisField(data: DebrisData, U: DebrisUniforms, look: Deb
   const group = new THREE.Group() as THREE.Group & { ready: Promise<void> };
   group.name = 'drift-debris-field';
   // which pieces each shape draws: the boards take every kind the scans do not (all of them without `scans`)
+  // (−1: drawn as a board; −2: not drawn. Without the scans only the wood and the box-shaped things are boards — a
+  // picnic table or a door drawn as a box was a 3 m slab with a door-sized slab on it mirroring the sky white, the
+  // 2026-10-29 review of the landing still; a chair, a tyre or a buoy as a box is no better. Those are left to the
+  // near mat's scans, a few percent of the far field's pieces gone)
+  // NO BROAD PANELS NEAR THE EYE (the near mat, `scans`): a metre-and-more of flat boards floating on a glassy sea read
+  // as a sheet laid on the water however it was textured, lain and awash — the 2026-10-29 review of the landing still.
+  // The scanned door and the upturned table carry the broad wreckage there; the far field keeps its panels, a few
+  // pixels each
   const scanOf = (i: number): number =>
-    look.scans ? SCANS.findIndex((s) => s.kinds.includes(data.kind[i]) && (!s.split || s.split(data.extra[i * 4 + 1]))) : -1;
+    look.scans
+      ? data.kind[i] === DebrisKind.Panel
+        ? -2
+        : SCANS.findIndex((s) => s.kinds.includes(data.kind[i]) && (!s.split || s.split(data.extra[i * 4 + 1])))
+      : BOARDABLE.has(data.kind[i]) ? -1 : -2;
   const groups = new Map<number, number[]>();
   for (let i = 0; i < data.count; i++) {
     const k = scanOf(i);
@@ -450,16 +520,17 @@ export function createDebrisField(data: DebrisData, U: DebrisUniforms, look: Deb
   const boards = groups.get(-1);
   if (boards?.length) {
     // (segments: 3 along a far board, 8 near — the bend and the broken ends need them; 2 across, for the bite)
-    const g = new THREE.BoxGeometry(1, 1, 1, look.tilt ? 8 : 3, 1, 2);
-    group.add(debrisMesh(subset(data, boards), U, look, g, { board: true, map: plank(), lum: PLANK_LUM }));
+    const segs = look.tilt ? 8 : 3;
+    const g = new THREE.BoxGeometry(1, 1, 1, segs, 1, 2);
+    group.add(debrisMesh(subset(data, boards), U, look, g, { board: true, maps: [plank()], lum: PLANK_LUM, segs }));
   }
   const loads: Array<Promise<void>> = [];
   for (const [k, idx] of groups) {
     if (k < 0) continue;
     const spec = SCANS[k];
     loads.push(
-      loadScan(spec.file, spec.turn).then(({ geometry, map }) => {
-        group.add(debrisMesh(subset(data, idx), U, look, geometry, { board: false, map, lum: spec.lum }));
+      loadScan(spec.file, spec.turn).then(({ geometry, maps }) => {
+        group.add(debrisMesh(subset(data, idx), U, look, geometry, { board: false, maps, lum: spec.lum, segs: 1 }));
       }),
     );
   }
@@ -473,12 +544,11 @@ function debrisMesh(
   U: DebrisUniforms,
   look: DebrisLook,
   geometry: THREE.BufferGeometry,
-  o: { board: boolean; map: THREE.Texture | null; lum: number },
+  o: { board: boolean; maps: Array<THREE.Texture | null>; lum: number; segs?: number },
 ): THREE.InstancedMesh {
   // (albedo and size in ONE instanced buffer: position, normal, uv, the instance matrix and five of ours were nine
   // vertex buffers, over WebGPU's eight — the pipeline failed to build, 2026-10-29)
   const albedoSize = new Float32Array(data.count * 4);
-  const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false });
   const AS = attribute<'vec4'>('debrisAlbedo', 'vec4');
   const A = AS.xyz;
   const S = AS.w;
@@ -506,14 +576,21 @@ function debrisMesh(
   const dims = vec3(P.w, D.y, D.x);
   const drawn = max(dims, vec3(least));
   const g = positionGeometry;
+  /** rad: the piece's own lie on the water, along and across it — a waterlogged board never floats level: one end or
+   * edge lower, under (for a 1.4 m panel, ±2° is ±2.5 cm at its edges, against a top 1–2 cm out) */
+  const lieA = nhash(vec2(E.y.mul(71), 5.3)).sub(0.5).mul(0.07);
+  const lieC = nhash(vec2(E.y.mul(83), 9.1)).sub(0.5).mul(0.07);
   // THE BOARD'S BREAKS, BEND AND TWIST (see createDebrisField), in the unit box then in metres
   let gx: THREE.Node<'float'> = g.x;
   if (o.board) {
     const side = select(g.x.greaterThan(0), float(1), float(-1));
     const atEnd = smoothstep(0.42, 0.5, g.x.abs());
     const cut = nhash(vec2(E.y.mul(131).add(side.mul(7)), g.z.mul(2).add(0.5).floor().add(g.y.mul(0.01))));
-    // a bite back from the end of up to ~1.3 board-widths, never more than a third of its length
-    const bite = cut.mul(1.1).add(0.15).mul(D.x).div(P.w.max(1e-3)).min(0.3).mul(atEnd);
+    // a bite back from the end of up to ~1.3 board-widths — and never past the end's own segment of the box. Bitten
+    // further, an end vertex crossed the next one in: the quad between them turned over, the top's was culled and the
+    // BOTTOM's showed through, its −y normal mirroring the sky at full Fresnel — the white rectangle on the broad
+    // panel by the landing (2026-10-29, isolated to the near mat's boards in one boot)
+    const bite = cut.mul(1.1).add(0.15).mul(D.x).div(P.w.max(1e-3)).min(0.9 / (o.segs ?? 1)).mul(atEnd);
     gx = g.x.sub(side.mul(bite));
   }
   const unit = vec3(gx, g.y, g.z);
@@ -528,8 +605,10 @@ function debrisMesh(
   // the freeboard: the unit box's top at E.x of its height above the water
   const afloat = m.add(vec3(0, D.y.mul(E.x.sub(0.5)), 0));
   // m above (−: below) the water at this point of the piece, for the wet band and the absorption
-  const aboveWater = afloat.y.toVarying('vDebrisAbove');
-  const fieldPos = vec3(afloat.x.mul(c).add(afloat.z.mul(s)), afloat.y, afloat.z.mul(c).sub(afloat.x.mul(s))).add(centre);
+  const aboveWater = afloat.y.add(afloat.x.mul(lieA)).add(afloat.z.mul(lieC)).toVarying('vDebrisAbove');
+  // (its lie: a shear, the angles a degree or two)
+  const lying = afloat.add(vec3(0, afloat.x.mul(lieA).add(afloat.z.mul(lieC)), 0));
+  const fieldPos = vec3(lying.x.mul(c).add(lying.z.mul(s)), lying.y, lying.z.mul(c).sub(lying.x.mul(s))).add(centre);
   let positionNode: THREE.Node<'vec3'> = fieldPos;
   if (look.swell) {
     // ON THE SEA'S LONG WAVES: the piece's centre at the sea's height there, and (`tilt`) its ends and sides at
@@ -550,32 +629,44 @@ function debrisMesh(
     // (the sea's scene is in metres and its group unscaled and level: the field's y is the world's)
     positionNode = fieldPos.add(vec3(0, lift, 0));
   }
-  material.positionNode = positionNode;
+
   // the eye's direction in the piece's frame, and the area a box shows along it: each face's area × |its cosine|
   const v = modelWorldMatrixInverse.mul(vec4(toPiece, 0)).xyz;
   const bv = vec3(v.x.mul(c).sub(v.z.mul(s)), v.y, v.x.mul(s).add(v.z.mul(c))).abs();
   const shown = (d: V3): F => bv.x.mul(d.y).mul(d.z).add(bv.y.mul(d.x).mul(d.z)).add(bv.z.mul(d.x).mul(d.y)) as F;
   const cover = shown(dims).div(shown(drawn).max(1e-12)).toVarying('vDebrisCover');
   const unitV = positionGeometry.toVarying('vDebrisUnit');
-  material.colorNode = Fn(() => {
+  // one material per colour map (a scan's parts), sharing every other node
+  const colourOf = (map: THREE.Texture | null): THREE.Node<'vec4'> => Fn(() => {
     // ── THE SURFACE: its colour where it is dry ────────────────────────────────────────────────────────────────
     let albedo: V3;
     if (o.board) {
-      // the board's grain runs along the piece (unit x); across it, z on the top and the bottom, y on the sides
-      const across = select(abs(normalGeometry.y).greaterThan(0.5), unitV.z, unitV.y);
-      const pick = float(instanceIndex).mul(0.618).fract().greaterThan(0.5);
+      // AT ITS REAL SIZE (the 2026-10-29 review: a broad panel took one scanned board stretched across all of it — a
+      // clean plywood sheet): the grain runs along the piece; across it the piece is BOARD_W-wide boards side by side
+      // (its top and bottom across its width, its sides across its height), each its own board of the atlas at its
+      // own offset along it, a dark seam between them
+      const top = abs(normalGeometry.y).greaterThan(0.5);
+      const acrossM = select(top, unitV.z.add(0.5).mul(D.x), unitV.y.add(0.5).mul(D.y));
+      const alongM = unitV.x.add(0.5).mul(P.w);
+      const board = acrossM.div(BOARD_W).floor();
+      const inBoard = acrossM.div(BOARD_W).fract();
+      const hb = nhash(vec2(board.add(E.y.mul(37)), 2.7));
       const r0 = vec4(...PLANKS[0]);
       const r1 = vec4(...PLANKS[1]);
-      const rect = select(pick, r1, r0);
+      const rect = select(hb.greaterThan(0.5), r1, r0);
+      const alongT = alongM.div(BOARD_L).add(hb.mul(7.3)).fract();
       // (inset a little from the board's own edge in the atlas: the background is black right to it)
-      const at = vec2(rect.x.add(rect.z.mul(across.add(0.5).clamp(0.04, 0.96))), rect.y.add(rect.w.mul(unitV.x.add(0.5).clamp(0.02, 0.98))));
-      albedo = texture(o.map!, at).rgb.mul(A.div(o.lum)) as V3;
-    } else if (o.map && o.lum > 0) {
+      const at = vec2(rect.x.add(rect.z.mul(inBoard.clamp(0.04, 0.96))), rect.y.add(rect.w.mul(alongT.clamp(0.02, 0.98))));
+      // the seams, only where a face is more than one board across
+      const many = select(top, D.x, D.y).greaterThan(BOARD_W * 1.3);
+      const seam = select(many, smoothstep(0, 0.07, inBoard).mul(smoothstep(1, 0.93, inBoard)).mul(0.6).add(0.4), float(1));
+      albedo = texture(map!, at).rgb.mul(A.div(o.lum)).mul(hb.mul(0.3).add(0.85)).mul(seam) as V3;
+    } else if (map && o.lum > 0) {
       // scanned wood: its own grain and bark, at the piece's tone
-      albedo = texture(o.map, uv()).rgb.mul(A.div(o.lum)) as V3;
+      albedo = texture(map, uv()).rgb.mul(A.div(o.lum)) as V3;
     } else {
       // the things people made, in their own colours
-      albedo = (o.map ? texture(o.map, uv()).rgb : A) as V3;
+      albedo = (map ? texture(map, uv()).rgb : A) as V3;
     }
     const lum = albedo.dot(vec3(0.2126, 0.7152, 0.0722));
     const wood = o.board || o.lum > 0;
@@ -608,8 +699,14 @@ function debrisMesh(
     const spec = (skyR as V3).add(glint).mul(fresnel).mul(film).mul(under);
     return vec4(diffuse.add(spec), seen.mul(cover));
   })();
-  material.name = 'drift-debris';
-  const mesh = new THREE.InstancedMesh(geometry, material, data.count);
+  const materials = o.maps.map((map) => {
+    const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false });
+    material.positionNode = positionNode;
+    material.colorNode = colourOf(map);
+    material.name = 'drift-debris';
+    return material;
+  });
+  const mesh = new THREE.InstancedMesh(geometry, materials.length === 1 ? materials[0] : materials, data.count);
   const mat = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const up = new THREE.Vector3(0, 1, 0);

@@ -4,8 +4,9 @@
  * in the dome (where the Milky Way arrival left it), so the scene never needs a camera turn: we come over
  * the planet by translation, and the dawn is the limb lifting toward a Sun that stays put.
  *
- *   SURFACE     the satellites' Earth (earthMaps.ts): Blue Marble colour, the measured elevation for the
- *               relief shading (exaggerated) and for the flood, open water deep navy with teal shelves and a
+ *   SURFACE     the satellites' Earth (earthMaps.ts): Blue Marble colour (Sentinel-2's under the closest views),
+ *               the measured elevation for the relief shading (exaggerated from orbit) and for the flood, open
+ *               water deep navy with teal shelves and a
  *               rough-water sun glint; Part B's life layers over it (lifeLayers.ts). The clouds' shadows
  *               fall on it. Night is black but for the Black Marble's lights.
  *   CLOUDS      a shell a few km up: a real day's cloud field over Europe (VIIRS), NASA's composite
@@ -69,7 +70,7 @@ import {
 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
-import { GLOBAL_ELEV_TEXEL, latLon, loadEarthMaps, mapCoords, sampleBoth, type GeoFrame } from './earthMaps';
+import { ELEV_TEXEL_KM, GLOBAL_ELEV_TEXEL, insetWater, latLon, loadEarthMaps, mapCoords, sampleBoth, sampleLevels, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
 import { STAR_SIGMA } from './milkyWay';
 import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, starburst, sunBloom, sunDisc, sunlight, towardEye } from './atmosphere';
@@ -127,9 +128,9 @@ const LACUNARITY = 2.03;
 const lod = (f: F, fp: F): F => float(1).sub(smoothstep(0.25, 0.5, f.mul(fp)));
 
 /** fbm of gradient noise, its octaves finer than the footprint faded out (and not evaluated) */
-function fbm(p: V3, f0: number, octaves: number, gain: number, fp: F): F {
+function fbm(p: V3, f0: number | F, octaves: number, gain: number, fp: F): F {
   const sum = float(0).toVar();
-  const f = float(f0).toVar();
+  const f = (typeof f0 === 'number' ? float(f0) : float(f0)).toVar();
   const a = float(1).toVar();
   Loop(octaves, ({ i }) => {
     const w = lod(f, fp).toVar();
@@ -144,10 +145,22 @@ function fbm(p: V3, f0: number, octaves: number, gain: number, fp: F): F {
 }
 
 // ------------------------------------------------------------------ the measured surface
-/** relief exaggeration for the shading (the real relief is too low to read from orbit) */
+/** relief exaggeration for the shading (the real relief is too low to read from orbit) — over a baseline of RELIEF_KM[1]
+ * and more; the real relief (1) from RELIEF_KM[0] down, where the near level's and the inset's finer elevation make
+ * the slopes steep enough to read as they are (2.5x the inset's 60 m slopes in the Alps tipped the normals past
+ * 70°: the ground shaded black and white) */
 const RELIEF = 2.5;
+const RELIEF_KM: [number, number] = [0.1, 0.8];
+/** the relief's baseline is never under this share of the finest elevation texel there: a bilinear lookup's slope is
+ * constant across a texel, so a shorter baseline draws the texel grid (the region's 1.1 km texels had a 0.8 km floor) */
+const RELIEF_TEXELS = 0.72;
 /** m: below this height the coasts get sub-pixel elevation detail once the sea starts rising */
 const LOWLAND_M = 150;
+/** the sub-pixel detail's first octave (unit-sphere frequency: 3000 is ~2.1 km) and height (m): over the region's
+ * and the near level's elevation, and over the inset's (~160 m, two of its texels: its own EU-DEM lowlands are
+ * measured to a metre or two, and 7 m of noise in a plain that falls 1 m a km moved its flood line by kilometres) */
+const LOWLAND_DETAIL: [number, number] = [3000, 7];
+const LOWLAND_DETAIL_INSET: [number, number] = [40000, 1];
 /** deg/s the cloud field drifts east (a time-lapse wind) */
 const CLOUD_DRIFT = 0.012;
 
@@ -199,8 +212,15 @@ export function createEarth(): Earth {
     const { lat, lon } = latLon(n, G);
     return { lat, ...mapCoords(lat, lon.sub(shift)) };
   };
-  const elevation = (c: ReturnType<typeof coords>, fp: F): F => sampleBoth(maps.regionElevation, maps.globalElevation, c, fp, GLOBAL_ELEV_TEXEL).x as F;
+  const elevation = (c: ReturnType<typeof coords>, fp: F): F =>
+    sampleLevels({ global: maps.globalElevation, region: maps.regionElevation, near: maps.nearElevation, inset: maps.insetElevation, globalTexel: GLOBAL_ELEV_TEXEL }, c, fp).x as F;
+  /** the clouds' map (G), and the lights (R) under them: the region over the global maps */
   const lcwAt = (c: ReturnType<typeof coords>, fp: F): V4 => sampleBoth(maps.regionLcw, maps.globalLcw, c, fp);
+  /** the surface's lights (R) and water (B), down to the near level's 15″ and the inset's own water line */
+  const lcwSurface = (c: ReturnType<typeof coords>, fp: F): V4 => {
+    const v = sampleLevels({ global: maps.globalLcw, region: maps.regionLcw, near: maps.nearLcw }, c, fp);
+    return vec4(v.x, v.y, insetWater(maps, c, fp, v.z as F), v.w);
+  };
   /** cloud cover 0..1 at unit normal n (on the cloud shell), the data's own plus sub-km texture at its edges */
   const cloudAt = (n: V3, fp: F): F => {
     const c = coords(n, u.cloudShift);
@@ -226,18 +246,26 @@ export function createEarth(): Earth {
     const t1 = sunward(n, muS).toVar();
     const t2 = cross(n, t1);
     const c = coords(n);
-    const real = sampleBoth(maps.regionAlbedo, maps.globalAlbedo, c, fp).rgb.toVar();
-    const lcw = lcwAt(c, fp).toVar();
+    const real = sampleLevels({ global: maps.globalAlbedo, region: maps.regionAlbedo, near: maps.nearAlbedo, inset: maps.insetAlbedo }, c, fp).rgb.toVar();
+    const lcw = lcwSurface(c, fp).toVar();
     const sea = seaLevel(L);
     // the measured elevation, with sub-pixel detail in the lowlands once the sea moves (a fractal flood line)
     const e0 = elevation(c, fp).toVar();
-    const lowDetail = fbm(n.add(vec3(-4, 9, 2)), 3000, 6, 0.5, fp).mul(7).mul(smoothstep(LOWLAND_M, 20, e0)).mul(smoothstep(0, 0.03, L.sea));
+    const lowDetail = fbm(n.add(vec3(-4, 9, 2)), mix(float(LOWLAND_DETAIL[0]), float(LOWLAND_DETAIL_INSET[0]), c.wi), 6, 0.5, fp)
+      .mul(mix(float(LOWLAND_DETAIL[1]), float(LOWLAND_DETAIL_INSET[1]), c.wi))
+      .mul(smoothstep(LOWLAND_M, 20, e0))
+      .mul(smoothstep(0, 0.03, L.sea));
     const e = e0.add(lowDetail).toVar();
-    // relief: the elevation one footprint (at least ~1 km) along the Sun's azimuth and across it
-    const eps = max(fp, 0.8 * KM).toVar();
+    // relief: the elevation one footprint along the Sun's azimuth and across it, at least RELIEF_TEXELS of the finest
+    // elevation texel there (0.8 km over the region, as before the near level and the inset came)
+    const finest = mix(mix(float(0.8), float(RELIEF_TEXELS * ELEV_TEXEL_KM.near), c.wn), float(RELIEF_TEXELS * ELEV_TEXEL_KM.inset), c.wi);
+    const eps = max(fp, finest.mul(KM)).toVar();
+    const relief = mix(float(1), float(RELIEF), smoothstep(RELIEF_KM[0] * KM, RELIEF_KM[1] * KM, eps));
     const metres = eps.mul(6371000);
-    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), fp).sub(e0).div(metres).toVar();
-    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), fp).sub(e0).div(metres).toVar();
+    // (the land's slopes only: the sea floor is held at the sea's surface. Over the inset's ~57 m baseline the step
+    // from a coastal field down to the shelf's −25 m read as a 25° slope — a lit or shaded rim along every coast)
+    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), fp).max(0).sub(e0.max(0)).div(metres).toVar();
+    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), fp).max(0).sub(e0.max(0)).div(metres).toVar();
     const slope = sqrt(g1.mul(g1).add(g2.mul(g2)));
     // land above the sea now: the colour's own coast, and the risen sea over the measured elevation
     const above = e.sub(sea);
@@ -247,7 +275,7 @@ export function createEarth(): Earth {
     // the new sea over what was land: by the measured elevation (continuous across the old coast — the
     // satellite water mask is binary and would draw the old coastline across the sea as a hard edge)
     const flooded = smoothstep(-30, 4, e).mul(float(1).sub(dry));
-    const N = normalize(n.sub(t1.mul(g1).add(t2.mul(g2)).mul(RELIEF).mul(land)));
+    const N = normalize(n.sub(t1.mul(g1).add(t2.mul(g2)).mul(relief).mul(land)));
 
     // land: the young world bare, life rolling over it in waves, the ice (lifeLayers.ts). Its bare rock is
     // the Sahara's (lat 18–30°, lon −12–29°: no Nile, no sea), mirrored over the planet so it has no seams

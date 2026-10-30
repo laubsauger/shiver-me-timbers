@@ -13,7 +13,10 @@ import type { SeaDrive } from '../wandering/sea';
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
-import { OUR_LOOK, createGalaxies, galaxyField, type GalaxyAtlas, type GalaxySpec } from './galaxies';
+import { OUR_LOOK, createGalaxies, type GalaxyAtlas, type GalaxySpec } from './galaxies';
+import { diveGalaxies } from './webGalaxies';
+import type { WebFrame } from './webDive';
+import type { WebKnot } from '../undertime/webVolume';
 import { createMilkyWay } from './milkyWay';
 import { DEBRIS_SPIN, createDebrisField, debrisPieces } from './debrisField';
 import { EARTH_R, SUN_E } from './atmosphere';
@@ -52,11 +55,18 @@ export interface ArrivalAct {
   dispose(): void;
 }
 
-/** `atlas` must be loaded (its tiles' kinds pick the field's galaxies) */
-export function createArrival(p: GetTheDriftParams, e0: Vec3, knots: Array<{ pos: Vec3; level: number }>, tiltDeg: number, atlas: GalaxyAtlas): ArrivalAct {
+/**
+ * `atlas` must be loaded (its tiles' kinds pick the field's galaxies); `web`, the cosmic web the dive flies through
+ * (webDive.ts frame, the web's knots and particles: where the field's galaxies sit)
+ */
+export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebFrame; knots: WebKnot[]; particles: Uint16Array }, tiltDeg: number, atlas: GalaxyAtlas): ArrivalAct {
   const g = ourGalaxy(p, e0, tiltDeg);
-  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0.12, brightness: 1, tile: -1, planar: true, roll: 0 };
-  const specs = galaxyField(knots, ours, [e0, g.sun], p.galaxySize, atlas.galaxies);
+  // ours is born a moment after the first of the field, as the dive gathers speed (~85.5 s: "then OUR galaxy")
+  const ours: GalaxySpec = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, ...OUR_LOOK, appear: 0.62, brightness: 1, tile: -1, planar: true, roll: 0 };
+  const specs = diveGalaxies(
+    { ...web, ours, size: p.galaxySize, zenith: domeDir(90, 0, tiltDeg), start: arrivalEye(-p.diveLead, p, g) },
+    atlas.galaxies,
+  );
   const skyTurn = new THREE.Matrix3();
   const u = { time: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
   const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> }, atlas);

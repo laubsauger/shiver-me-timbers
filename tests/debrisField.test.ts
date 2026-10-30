@@ -50,7 +50,9 @@ describe('debrisField', () => {
     for (let i = 0; i < d.count; i++) {
       const fb = d.extra[i * 4];
       expect(fb).toBeGreaterThan(0.1);
-      expect(fb).toBeLessThan(0.75);
+      // the wood waterlogged, under 40% of its height out; the things ride as they float (an upturned table's legs
+      // stand up out of the water)
+      expect(fb).toBeLessThan(d.kind[i] <= 3 ? 0.4 : 0.9);
       kinds.set(d.kind[i], (kinds.get(d.kind[i]) ?? 0) + 1);
     }
     // the mass is waterlogged wood (planks, beams, logs, panels: kinds 0–3); the things are a few percent of it
@@ -70,8 +72,8 @@ describe('debrisField', () => {
     for (let i = 0; i < d.count; i++) {
       expect(d.kind[i]).toBeGreaterThanOrEqual(4);
       expect(d.place[i * 4]).toBe(at[i][0]);
-      // a crate, drum, lifebuoy or can: under 1.4 m long
-      expect(d.place[i * 4 + 3]).toBeLessThan(1.4);
+      // a thing at its real size: the longest, the upturned picnic table, is 3 m
+      expect(d.place[i * 4 + 3]).toBeLessThan(3.5);
     }
   });
 });

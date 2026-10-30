@@ -11,8 +11,11 @@
  * CAMERA. ONE JOURNEY, never at rest from the galaxy cluster down to the water (user, 2026-10-26: the moves
  * that each eased to rest and then started again read as clips stitched together). Two zooms, each a smooth
  * monotone curve of log distance through a few anchors, overlapping where one hands over to the other:
- *   - into the galaxy: f = |E − T| / |E0 − T| along the straight approach E0 → T (exponential in distance:
- *     constant optic flow), at rest only at the very start; it slows to a drift as the Earth comes in;
+ *   - into the galaxy: f = |E − T| / |E0 − T| along the straight approach line through E0 and T (exponential in
+ *     distance: constant optic flow). It begins as THE DIVE INTO THE WEB (webDive.ts), `diveLead` s before the
+ *     act, at rest and e^diveEfolds times further out than E0 — among the filaments, which Undertime draws in the
+ *     same frame — and is the approach it always was from the `ours` beat on; it slows to a drift as the Earth
+ *     comes in;
  *   - toward the Earth and down to it: the altitude, from the planet as a point beside the Sun to orbit, a
  *     slow descent through the time waves and the night, faster through the flood and over the spiral.
  * The planet's place in the view follows from the altitude and where its limb sits on the dome, so it turns
@@ -113,7 +116,8 @@ export interface ArrivalState {
   volume: number;
   /** 0..1 the stars near the Sun point (parallax field inside the disk) */
   local: number;
-  /** distance to the Sun point as a fraction of the start: 1 → insideKeep → less in the sun beat */
+  /** distance to the Sun point as a fraction of |E0 − T| (ourDistance): e^diveEfolds where the dive into the web
+   * starts (diveLead s before the act) → insideKeep → less in the sun beat */
   f: number;
   /** 0..1 the Sun standing out as one star */
   sunStar: number;
@@ -145,8 +149,31 @@ function journey(ts: number[], speeds: number[], weight: (t: number) => number =
   };
 }
 
-const journeys = new Map<string, { galaxy: (t: number) => number; earth: (t: number) => number }>();
-function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; earth: (t: number) => number } {
+/**
+ * THE DIVE'S PACE (webDive.ts), as (fraction of its span, e-folds per second) keys: the speed it ADDS to the approach
+ * over its span, from `diveLead` s before the act to the galaxies beat's end, scaled to add `diveEfolds` in all (at
+ * 3 e-folds the keys are near their own scale: a peak of ~0.27). Slow under Undertime's first stars and its
+ * signature, so the hero grain still lights above the text (~82.5 s); fastest a little past halfway (~88 s), where
+ * the approach's own pace is still ~0.04 — together ~0.31 e-folds/s, under the 0.35 cap; and back to nothing at
+ * `ours`, where the approach's own 0.12 carries on: from there the journey is the very curve it was without the dive
+ * (the 2026-10-30 review: "a better sense of speed when zooming in … more dynamic"). Accelerate, then decelerate as
+ * our galaxy is recognised — the breath before "this whole zoom in".
+ */
+const DIVE_KEYS: ReadonlyArray<readonly [number, number]> = [
+  [0, 0],
+  [0.12, 0.012],
+  [0.24, 0.04],
+  [0.36, 0.12],
+  [0.48, 0.24],
+  [0.58, 0.27],
+  [0.68, 0.24],
+  [0.8, 0.14],
+  [0.92, 0.04],
+  [1, 0],
+];
+
+const journeys = new Map<string, { galaxy: (t: number) => number; earth: (t: number) => number; dive: (t: number) => number }>();
+function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; earth: (t: number) => number; dive: (t: number) => number } {
   const key = JSON.stringify(p);
   const hit = journeys.get(key);
   if (hit) return hit;
@@ -183,18 +210,31 @@ function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; ear
   const det = b1 * a2 - a1 * b2;
   const s1 = (A1 * a2 - a1 * A2) / det;
   const s2 = (b1 * A2 - A1 * b2) / det;
+  // THE DIVE (DIVE_KEYS): the e-folds of distance it has still to add at time t — diveEfolds before it starts, 0
+  // from `ours` on
+  const dSpan = p.diveLead + p.galaxies;
+  let dive = (_t: number): number => 0;
+  if (dSpan > 1e-6 && p.diveEfolds > 0) {
+    const dts = DIVE_KEYS.map(([x]) => -p.diveLead + x * dSpan);
+    const d0 = journey(dts, DIVE_KEYS.map(([, v]) => v));
+    const dScale = p.diveEfolds / d0(p.galaxies);
+    dive = (t: number): number => p.diveEfolds - d0(t) * dScale;
+  }
   const made = {
     galaxy: (t: number): number => -g0(t) * gScale,
     earth: (t: number): number => far * Math.exp(-(before(t) * s1 + after(t) * s2)),
+    dive,
   };
   journeys.clear();
   journeys.set(key, made);
   return made;
 }
 
-/** ln f, the approach into our galaxy (journeysFor) */
+/** ln f, the approach into our galaxy with the dive into the web ahead of it (journeysFor); defined from the dive's
+ * start, `diveLead` s before the act (t < 0), where Undertime's frame still draws the web (webDive.ts) */
 function galaxyZoom(t: number, p: GetTheDriftParams): number {
-  return journeysFor(p).galaxy(t);
+  const j = journeysFor(p);
+  return j.galaxy(t) + j.dive(t);
 }
 
 export function arrivalState(t: number, p: GetTheDriftParams): ArrivalState {

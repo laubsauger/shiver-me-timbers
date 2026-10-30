@@ -1,6 +1,7 @@
 /**
  * Get the Drift's arrival is one long approach from where Undertime leaves the eye to the Sun point inside
- * our galaxy. On a dome it must start exactly where Act 1 stopped and at rest (no lurch at the hand-over),
+ * our galaxy, beginning as the dive into the web (webDive.ts). On a dome it must start at rest where the pull-back
+ * comes to rest, and carry on without a lurch where the acts hand over (tests/webDive.test.ts),
  * stay under the comfort cap for exponential flight (0.35 e-folds of distance per second), and actually end
  * up inside the disk for the band — and our galaxy must be laid so its band arcs over the audience with the
  * bright centre low in front.
@@ -28,15 +29,29 @@ describe('Get the Drift arrival', () => {
     expect((1 - ramped(1 - h, 0.3, 0.2)) / h).toBeLessThan(1e-3);
   });
 
-  it('starts exactly where Undertime left the eye, at rest', () => {
-    expect(dist(arrivalEye(0, p, g), e0)).toBeLessThan(1e-9);
-    expect(dist(arrivalEye(0.1, p, g), e0) / 0.1).toBeLessThan(1e-3);
+  // THE DIVE INTO THE WEB (webDive.ts, the 2026-10-30 review): the approach now begins diveLead s before the act, at
+  // rest, e^diveEfolds times further out on the same line through E0 — Undertime draws the web in the same frame until
+  // the act, so the eye's place in the web is one continuous curve (tests/webDive.test.ts); the world eye itself
+  // changes worlds at the act, invisibly
+  it('starts at rest on the approach line, e^diveEfolds further out, and flies the line through E0', () => {
+    const t0 = -p.diveLead;
+    const start = arrivalEye(t0, p, g);
+    expect(dist(start, g.sun)).toBeCloseTo(p.ourDistance * Math.exp(p.diveEfolds), 6);
+    expect(dist(arrivalEye(t0 + 0.1, p, g), start) / 0.1).toBeLessThan(1e-3 * dist(start, g.sun));
+    // on the line E0 → Sun point the whole way (translation only, toward one fixed point)
+    const line = [e0[0] - g.sun[0], e0[1] - g.sun[1], e0[2] - g.sun[2]];
+    const ll = Math.hypot(line[0], line[1], line[2]);
+    for (const t of [t0, 0, 5, p.galaxies]) {
+      const e = arrivalEye(t, p, g);
+      const d = [e[0] - g.sun[0], e[1] - g.sun[1], e[2] - g.sun[2]];
+      expect(dot(d, line) / (ll * Math.hypot(d[0], d[1], d[2]))).toBeCloseTo(1, 9);
+    }
   });
 
   it('never flies faster than 0.35 e-folds of distance per second', () => {
     const h = 1 / 30;
     let peak = 0;
-    for (let t = 0; t < total; t += h) {
+    for (let t = -p.diveLead; t < total; t += h) {
       const a = arrivalState(t, p).f;
       const b = arrivalState(t + h, p).f;
       peak = Math.max(peak, Math.abs(Math.log(b) - Math.log(a)) / h);

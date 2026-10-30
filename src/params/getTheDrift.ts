@@ -2,7 +2,8 @@
  * The Drift, Act 2 "Get the Drift", part A: from the first stars to Earth (drift.html, after Undertime).
  * Direction: /Users/flo/work/code/drift-narrative/get-the-drift/direction.md. Beat lengths in seconds:
  *
- *   galaxies  the web's knots open into galaxies; we drift among them toward one
+ *   galaxies  the dive through the web (from diveLead s before the act): its knots open into galaxies in the
+ *             distance, the groups along the way resolve into clusters, ours comes up ahead
  *   ours      that one is ours: we glide down onto its disk
  *   band      inside: the Milky Way arcs over the dome
  *   sun       one star ahead brightens into the Sun
@@ -55,6 +56,15 @@ export interface GetTheDriftParams {
   centreEl: number;
   /** fraction of the radius the Sun sits from the centre */
   sunRadius: number;
+  /**
+   * THE DIVE INTO THE WEB (webDive.ts; the 2026-10-30 review: "fly into it … realise the vastness of this filament
+   * network, then have the galaxies pop in in the distance, then OUR galaxy, and then start this whole zoom in"):
+   * s before the act's start the dive begins (where Undertime's pull-back and its turn come to rest: its gather
+   * beat + 1 s), and the e-folds of distance it adds to the approach before the galaxies beat ends — the approach
+   * then starts e^diveEfolds times further out, among the filaments, and is the same curve as before from `ours` on
+   */
+  diveLead: number;
+  diveEfolds: number;
   /** fraction of the starting distance left at the end of the galaxies beat / of ours (inside the disk) */
   driftKeep: number;
   insideKeep: number;
@@ -107,6 +117,8 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     bandLean: 20,
     centreEl: 14,
     sunRadius: 0.55,
+    diveLead: 7,
+    diveEfolds: 3,
     driftKeep: 0.72,
     insideKeep: 6e-3,
     earthApproach: 25,
@@ -148,6 +160,8 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     bandLean: { min: -60, max: 60, step: 1 },
     centreEl: { min: 0, max: 60, step: 1 },
     sunRadius: { min: 0.1, max: 0.9, step: 0.01 },
+    diveLead: { min: 0, max: 20, step: 0.5 },
+    diveEfolds: { min: 0, max: 4, step: 0.05 },
     driftKeep: { min: 0.1, max: 1, step: 0.01 },
     insideKeep: { min: 1e-5, max: 0.01, step: 1e-5 },
     earthApproach: { min: 4, max: 60, step: 0.5 },

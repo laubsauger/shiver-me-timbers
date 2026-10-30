@@ -44,6 +44,32 @@ describe("Get the Drift, the planet's life", () => {
     }
   });
 
+  // The camp fires (lifeLayers.ts nightLights) light while the stage is in 0–2.5 and are held out by
+  // (1 − overshoot) once past the balance: the flood's faltering lights fall back into that window, and from Drift-2's
+  // height the camps came back as hard-edged rust squares round the drowning cities (the 2026-10-30 QA sweep, item 9).
+  // What the gate rests on: whenever the stage is back in the camps' window after the cities lit, the overshoot is
+  // fully on — and it is still 0 while the camps belong (the lights beat), so the first night keeps them.
+  it('keeps the camp fires to the first night: they never return as the flood dims the cities', () => {
+    const h = 1 / 30;
+    const smooth = (a: number, b: number, x: number): number => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+    const camps = (t: number): number => {
+      const s = lifeState(t, p);
+      return smooth(0, 1, s.lights) * (1 - smooth(1.5, 2.5, s.lights)) * (1 - s.overshoot);
+    };
+    let back = false;
+    for (let t = starts.overshoot; t < starts.drift2 + p.drift2; t += h) {
+      if (lifeState(t, p).lights < 2.5) back = true;
+      expect(camps(t), `camps at ${t.toFixed(2)}`).toBe(0);
+    }
+    // (the premise: the flood does take the stage back into their window)
+    expect(back).toBe(true);
+    // and the first night still has them
+    expect(camps(starts.lights + p.lights * 0.4)).toBeGreaterThan(0.3);
+  });
+
   it('comes down for the flood under the comfort cap, the planet never jumping', () => {
     const h = 1 / 30;
     let peak = 0;
