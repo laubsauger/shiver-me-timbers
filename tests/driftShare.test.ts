@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
-  agentOf, classify, needVramGB, parseNvidiaSmiXml, parsePsTable, parseWinPs, policyOf, readYieldPolicy, shareDecision, shareOf, waitForGpu, WIN_GPU_MARK,
+  agentOf, classify, needVramGB, nvidiaGpuMem, parseNvidiaSmiXml, parsePsTable, parseWinPs, policyOf, readYieldPolicy, shareDecision, shareOf, waitForGpu, WIN_GPU_MARK,
   YIELD_DEFAULTS, type GpuShare,
 } from '../scripts/drift-share.mjs';
 
@@ -173,19 +173,21 @@ describe('Windows: WDDM, and the GPU counters', () => {
     ['812', '700', '90000000', 'dwm.exe', '"dwm.exe"'],
     ['6400', '6300', '900000000', 'python.exe', 'C:\\AI\\ComfyUI_windows_portable\\python_embeded\\python.exe -s ComfyUI\\main.py --windows-standalone-build'],
     ['7000', '6900', '400000000', 'chrome.exe', '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --type=gpu-process --field-trial-handle=1'],
-  ].map((f) => f.join('\t')).join('\r\n') + `\r\n${WIN_GPU_MARK}\r\npid_812_luid_0x00000000_0x0000F00D_phys_0 335544320\r\npid_6400_luid_0x00000000_0x0000F00D_phys_0 18253611008\r\npid_7000_luid_0x00000000_0x0000F00D_phys_0 268435456\r\n`;
+  ].map((f) => f.join('\t')).join('\r\n') + `\r\n${WIN_GPU_MARK}\r\npid_812_luid_0x00000000_0x0000F00D_phys_0 335544320\r\npid_6400_luid_0x00000000_0x0000F00D_phys_0 18253611008\r\npid_7000_luid_0x00000000_0x0000F00D_phys_0 268435456\r\n#adapters\r\nluid_0x00000000_0x0000F00D_phys_0 19818086400\r\n`;
   const smi = parseNvidiaSmiXml(smiXml({ used: 18900, util: 2, procs: [[812, 'C+G', 'C:\\Windows\\System32\\dwm.exe', 'N/A'], [6400, 'C', 'C:\\AI\\ComfyUI_windows_portable\\python_embeded\\python.exe', 'N/A'], [7000, 'C+G', 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'N/A']] }));
 
   it('reads the CIM process table (tab-separated, CRLF) and the dedicated memory per process', () => {
-    const { table: t, gpuMem } = parseWinPs(WIN_PS_OUT);
-    expect(t.get(6400)).toMatchObject({ ppid: 6300 });
+    const w = parseWinPs(WIN_PS_OUT);
+    expect(w.table.get(6400)).toMatchObject({ ppid: 6300 });
+    const gpuMem = nvidiaGpuMem(w, 18900);
     expect(Math.round(gpuMem.get(6400)!)).toBe(17408);
     expect(Math.round(gpuMem.get(812)!)).toBe(320);
   });
 
   it('with the counters: ComfyUI\'s 17 GB counts, dwm (the desktop) does not → wait', () => {
-    const { table: t, gpuMem } = parseWinPs(WIN_PS_OUT);
-    const s = shareOf(smi, t, gpuMem)!;
+    const w = parseWinPs(WIN_PS_OUT);
+    const t = w.table;
+    const s = shareOf(smi, t, nvidiaGpuMem(w, 18900))!;
     expect(s.memKnown).toBe(true);
     const d = shareDecision(s, YIELD_DEFAULTS, 10);
     expect(d.canStart).toBe(false);
@@ -208,6 +210,48 @@ describe('Windows: WDDM, and the GPU counters', () => {
     expect(shareDecision(shareOf(withComfy, tbl), YIELD_DEFAULTS, 10).state).toBe('rendering+shared');
     const withBrowser = parseNvidiaSmiXml(smiXml({ used: 9000, util: 99, procs: [ours, [7000, 'C+G', 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'N/A']] }));
     expect(shareDecision(shareOf(withBrowser, tbl), YIELD_DEFAULTS, 10).state).toBe('rendering');
+  });
+});
+
+describe('windows-monster, 2026-10-30: the per-process counters lie', () => {
+  // its real numbers: nvidia-smi 5,772 MiB used, the adapter counter 5,780 MB; per process a Chrome "29 GB", the
+  // NVIDIA Overlay "2.9 TB", python 4.5 GB, dwm 2.2 GB — and an idle AMD-less virtual adapter beside it
+  const MB = 2 ** 20;
+  const out = [
+    ['2332', '700', '1', 'dwm.exe', '"dwm.exe"'],
+    ['15004', '1', '1', 'NVIDIA Overlay.exe', '"C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\CEF\\NVIDIA Overlay.exe"'],
+    ['120280', '1', '1', 'python.exe', 'C:\\Users\\User\\venv\\Scripts\\python.exe server.py'],
+    ['120520', '1', '1', 'chrome.exe', '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --type=gpu-process'],
+  ].map((f) => f.join('\t')).join('\r\n') + `\r\n${WIN_GPU_MARK}\r\n` + [
+    ['15004', 'B8F3', 2961492], ['120520', 'B8F3', 29046], ['120280', 'B8F3', 4574], ['2332', 'B8F3', 2209],
+    ['120520', 'DE3C', 900], // the same Chrome on another adapter: not the 4090's
+  ].map(([pid, l, mb]) => `pid_${pid}_luid_0x00000000_0x0000${l}_phys_0 ${Number(mb) * MB}`).join('\r\n') + '\r\n#adapters\r\n' + [
+    ['DE3C', 0], ['DE11', 0], ['B8F3', 5780],
+  ].map(([l, mb]) => `luid_0x00000000_0x0000${l}_phys_0 ${Number(mb) * MB}`).join('\r\n');
+  const smi = parseNvidiaSmiXml(smiXml({ used: 5772, util: 5, procs: [[2332, 'C+G', 'C:\\Windows\\System32\\dwm.exe', 'N/A'], [15004, 'C+G', 'C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\CEF\\NVIDIA Overlay.exe', 'N/A'], [120280, 'C', 'C:\\Users\\User\\venv\\Scripts\\python.exe', 'N/A'], [120520, 'C+G', 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'N/A']] }));
+
+  it('takes the 4090\'s adapter (the one whose total is nvidia-smi\'s), and the largest figure per process', () => {
+    const g = nvidiaGpuMem(parseWinPs(out), 5772);
+    expect(Math.round(g.get(120520)!)).toBe(29046);
+    expect(g.has(999)).toBe(false);
+  });
+
+  it('a Chrome "holding 29 GB" of a card that uses 5.8 GB is not believed, and the box is free to render', () => {
+    const w = parseWinPs(out);
+    const s = shareOf(smi, w.table, nvidiaGpuMem(w, 5772))!;
+    expect(s.procs.find((p) => p.pid === 120520)?.memMB).toBeNull();
+    const d = shareDecision(s, YIELD_DEFAULTS, 10);
+    // what others can hold at most: 5,772 used less the desktop's 2,209 (dwm) → 3.5 GB, under the 4 GB policy
+    expect(d.foreignGB).toBeLessThanOrEqual(3.6);
+    expect(d.canStart).toBe(true);
+  });
+
+  it('others never come out at more than the card uses, less ours and the desktop', () => {
+    const w = parseWinPs(out);
+    const s = shareOf(smi, w.table, new Map([[120280, 4574], [120520, 5000], [2332, 2209]]))!;
+    expect(s.memKnown).toBe(false); // (the overlay has no figure here)
+    const known = { ...s, memKnown: true, foreignMB: 9574 };
+    expect(shareDecision(known, YIELD_DEFAULTS, 10).foreignGB).toBe(3.5);
   });
 });
 

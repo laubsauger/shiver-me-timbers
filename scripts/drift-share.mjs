@@ -34,7 +34,13 @@
  * per process (N/A); there it is the GPU performance counters' WMI class
  * (Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory, whose name is never translated), read in the same
  * PowerShell call as the process table — the way studio-manager's agent reads its services' VRAM (its
- * src/session/svcstats.ts). Without either, "foreign" is what is used while nothing of ours runs. Process command lines
+ * src/session/svcstats.ts). Without either, "foreign" is what is used while nothing of ours runs.
+ *   THOSE COUNTERS LIE PER PROCESS (windows-monster, 2026-10-30: the adapter's own counter said 5,780 MB in use and
+ *   nvidia-smi 5,772 MiB, while one Chrome "held" 29 GB and the NVIDIA Overlay 2.9 TB, and the processes together far
+ *   more than the card: they overlap, and some report reserved space): so only the instances of the NVIDIA adapter
+ *   count (its LUID: the adapter whose dedicated total is nvidia-smi's used memory; a laptop's integrated GPU has its
+ *   own), the largest per process, not a sum; a process's figure above what the whole card uses is unknown, not
+ *   believed; and "others" are never more than what nvidia-smi says is used, less ours and the desktop's. Process command lines
  * are read to tell ours from theirs and to name an app; only names and memory ever leave this machine.
  *
  * STUDIO-MANAGER: where the box runs studio-manager's agent (127.0.0.1:4310, `yarn session serve`; the studio's
@@ -131,8 +137,9 @@ export function parsePsTable(text) {
   return out;
 }
 
-/** Windows' marker between the process table and the GPU memory counters in WIN_PS's output */
+/** Windows' markers between the process table, the per-process GPU memory and the per-adapter GPU memory in WIN_PS's output */
 export const WIN_GPU_MARK = '#gpu';
+export const WIN_ADAPTER_MARK = '#adapters';
 /**
  * one PowerShell call: the CIM process table (pid, ppid, working set, name, command line — tab-separated, [char]9, so
  * no escapes cross the command line), then after `#gpu` each process's dedicated GPU memory per adapter
@@ -142,21 +149,37 @@ export const WIN_PS = [
   "Get-CimInstance Win32_Process | ForEach-Object { '{0}{5}{1}{5}{2}{5}{3}{5}{4}' -f $_.ProcessId, $_.ParentProcessId, $_.WorkingSetSize, $_.Name, $_.CommandLine, [char]9 }",
   `'${WIN_GPU_MARK}'`,
   "Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction SilentlyContinue | ForEach-Object { '{0} {1}' -f $_.Name, $_.DedicatedUsage }",
+  `'${WIN_ADAPTER_MARK}'`,
+  "Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction SilentlyContinue | ForEach-Object { '{0} {1}' -f $_.Name, $_.DedicatedUsage }",
 ].join('; ');
 
-/** WIN_PS's output → { table: pid → { pid, ppid, cpuPct: null, rssMB, cmd }, gpuMem: pid → MB (summed over adapters) } */
+/**
+ * WIN_PS's output → { table: pid → { pid, ppid, cpuPct: null, rssMB, cmd }, gpuMemByLuid: luid → (pid → MB, the
+ * largest instance), adapters: luid → MB in use } (header: THOSE COUNTERS LIE PER PROCESS)
+ */
 export function parseWinPs(text) {
   const table = new Map();
-  const gpuMem = new Map();
-  let gpu = false;
+  const gpuMemByLuid = new Map();
+  const adapters = new Map();
+  let section = 'procs';
   for (const raw of String(text).split(/\r?\n/)) {
-    if (raw.trim() === WIN_GPU_MARK) {
-      gpu = true;
+    const line = raw.trim();
+    if (line === WIN_GPU_MARK || line === WIN_ADAPTER_MARK) {
+      section = line;
       continue;
     }
-    if (gpu) {
-      const m = /^pid_(\d+)_\S*\s+(\d+)\s*$/.exec(raw.trim());
-      if (m && Number(m[2]) > 0) gpuMem.set(Number(m[1]), (gpuMem.get(Number(m[1])) ?? 0) + Number(m[2]) / 2 ** 20);
+    if (section === WIN_GPU_MARK) {
+      const m = /^pid_(\d+)_luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\s+(\d+)\s*$/i.exec(line);
+      if (!m || Number(m[3]) <= 0) continue;
+      const luid = m[2].toLowerCase();
+      const per = gpuMemByLuid.get(luid) ?? new Map();
+      per.set(Number(m[1]), Math.max(per.get(Number(m[1])) ?? 0, Number(m[3]) / 2 ** 20));
+      gpuMemByLuid.set(luid, per);
+      continue;
+    }
+    if (section === WIN_ADAPTER_MARK) {
+      const m = /^luid_(0x[0-9a-f]+_0x[0-9a-f]+)_phys_\d+\s+(\d+)\s*$/i.exec(line);
+      if (m) adapters.set(m[1].toLowerCase(), (adapters.get(m[1].toLowerCase()) ?? 0) + Number(m[2]) / 2 ** 20);
       continue;
     }
     const f = raw.split('\t');
@@ -164,7 +187,20 @@ export function parseWinPs(text) {
     const pid = Number(f[0]);
     table.set(pid, { pid, ppid: Number(f[1]), cpuPct: null, rssMB: Number(f[2]) / 2 ** 20, cmd: f.slice(4).join('\t').trim() || f[3] });
   }
-  return { table, gpuMem };
+  return { table, gpuMemByLuid, adapters };
+}
+
+/**
+ * the NVIDIA card's per-process memory (pid → MB) out of parseWinPs's: the adapter whose memory in use is nearest
+ * nvidia-smi's used figure (`usedMB`) — not the integrated GPU's, not a virtual display's
+ */
+export function nvidiaGpuMem({ gpuMemByLuid, adapters }, usedMB) {
+  if (!gpuMemByLuid?.size) return new Map();
+  let best = null;
+  for (const [luid, mb] of adapters ?? []) if (gpuMemByLuid.has(luid) && (best === null || Math.abs(mb - usedMB) < Math.abs(adapters.get(best) - usedMB))) best = luid;
+  // no adapter counter: the LUID with the most memory under it
+  if (best === null) best = [...gpuMemByLuid].sort((a, b) => [...b[1].values()].reduce((x, y) => x + y, 0) - [...a[1].values()].reduce((x, y) => x + y, 0))[0][0];
+  return gpuMemByLuid.get(best) ?? new Map();
 }
 
 // -------------------------------------------------------------------------------------------- ours, theirs
@@ -243,7 +279,9 @@ export function shareOf(parsed, table, gpuMem = new Map(), services = []) {
   if (!gpu) return null;
   const procs = gpu.procs.map((p) => {
     const c = classify(p.pid, p.path, table, services);
-    const memMB = p.memMB ?? (gpuMem.has(p.pid) ? Math.round(gpuMem.get(p.pid)) : null);
+    let memMB = p.memMB ?? (gpuMem.has(p.pid) ? Math.round(gpuMem.get(p.pid)) : null);
+    // a process cannot hold more than the whole card has in use: such a figure is a counter's lie, so unknown
+    if (memMB !== null && gpu.usedMB !== null && memMB > gpu.usedMB) memMB = null;
     return { pid: p.pid, label: c.label, kind: c.kind, heavy: c.heavy, memMB };
   });
   const sum = (kind) => procs.filter((p) => p.kind === kind).reduce((a, p) => a + (p.memMB ?? 0), 0);
@@ -261,8 +299,10 @@ export function shareDecision(share, policy = YIELD_DEFAULTS, needGB = null) {
   if (!share) return { state: 'idle', canStart: true, why: 'no NVIDIA card here: nothing to yield to', foreign: [], foreignGB: null, freeGB: null };
   const ours = share.procs.some((p) => p.kind === 'ours');
   const foreign = share.procs.filter((p) => p.kind === 'foreign').sort((a, b) => (b.memMB ?? -1) - (a.memMB ?? -1));
-  // others' VRAM: their own figures; where the driver gives none, what is used while nothing of ours is on the card
-  const foreignMB = share.memKnown ? share.foreignMB : ours ? null : Math.max(0, (share.usedMB ?? 0) - share.systemMB);
+  // others' VRAM: their own figures — but never more than the card has in use, less ours and the desktop's (the
+  // figures overlap on Windows); where the driver gives none, what is used while nothing of ours is on the card
+  const room = Math.max(0, (share.usedMB ?? 0) - share.oursMB - share.systemMB);
+  const foreignMB = share.memKnown ? Math.min(share.foreignMB, share.usedMB === null ? Infinity : room) : ours ? null : room;
   const names = (list) => list.slice(0, 4).map((p) => `${p.label}${p.memMB != null ? ` ${gbs(p.memMB)}` : ''}`).join(', ');
   const why = [];
   if (foreignMB !== null && foreignMB / 1024 > policy.foreignVramGB) why.push(`${gbs(foreignMB)} of VRAM held by others (${names(foreign) || 'unnamed'}; the policy allows ${policy.foreignVramGB} GB)`);
@@ -286,7 +326,7 @@ export function shareDecision(share, policy = YIELD_DEFAULTS, needGB = null) {
 const sh = (cmd, args, timeout = 8000) =>
   new Promise((res) => execFile(cmd, args, { timeout, maxBuffer: 32 << 20, windowsHide: true }, (e, out) => res({ ok: !e, out: String(out ?? ''), missing: e?.code === 'ENOENT' })));
 
-let winCache = { at: 0, table: new Map(), gpuMem: new Map() };
+let winCache = { at: 0, table: new Map(), gpuMemByLuid: new Map(), adapters: new Map() };
 let smiMissing = false;
 
 /** the process table (and on Windows the counters' GPU memory); `pids`: GPU processes it must hold (Windows reads again early) */
@@ -300,7 +340,7 @@ async function processTable(pids) {
     return winCache;
   }
   const r = await sh('ps', ['-Ao', 'pid=,ppid=,pcpu=,rss=,command=']);
-  return { table: r.ok ? parsePsTable(r.out) : new Map(), gpuMem: new Map() };
+  return { table: r.ok ? parsePsTable(r.out) : new Map(), gpuMemByLuid: null };
 }
 
 let agentCache = { at: 0, value: null };
@@ -336,8 +376,9 @@ export async function gpuSnapshot({ agent = null } = {}) {
   if (!r.ok) return null;
   const parsed = parseNvidiaSmiXml(r.out);
   const pids = parsed.gpus.flatMap((g) => g.procs.map((p) => p.pid));
-  const { table, gpuMem } = await processTable(pids);
-  const share = shareOf(parsed, table, gpuMem, agent?.services ?? []);
+  const t = await processTable(pids);
+  const used = [...parsed.gpus].sort((a, b) => (b.totalMB ?? 0) - (a.totalMB ?? 0))[0]?.usedMB ?? 0;
+  const share = shareOf(parsed, t.table, t.gpuMemByLuid ? nvidiaGpuMem(t, used) : new Map(), agent?.services ?? []);
   return share && agent?.gpuName ? { ...share, name: agent.gpuName } : share;
 }
 

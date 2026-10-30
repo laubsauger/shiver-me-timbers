@@ -50,7 +50,9 @@ export function parseNvidiaSmiXml(xml: string): { driver: string | null; gpus: S
 export function parsePsTable(text: string): Map<number, ProcEntry>;
 export const WIN_GPU_MARK: string;
 export const WIN_PS: string;
-export function parseWinPs(text: string): { table: Map<number, ProcEntry>; gpuMem: Map<number, number> };
+export const WIN_ADAPTER_MARK: string;
+export function parseWinPs(text: string): { table: Map<number, ProcEntry>; gpuMemByLuid: Map<string, Map<number, number>>; adapters: Map<string, number> };
+export function nvidiaGpuMem(w: { gpuMemByLuid: Map<string, Map<number, number>>; adapters: Map<string, number> }, usedMB: number): Map<number, number>;
 export function isOurs(pid: number, table: Map<number, ProcEntry>, path?: string): boolean;
 export interface AgentService { name: string; pid: number; alive?: boolean; vramMb?: number | null }
 export function classify(pid: number, path: string, table: Map<number, ProcEntry>, services?: AgentService[]): { kind: 'ours' | 'system' | 'foreign'; label: string; heavy: boolean };
