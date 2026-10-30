@@ -2,5 +2,7 @@
  { "name": "beach_604", "t": 604, "fov": 55, "pitch": -10 },
  { "name": "sea_400", "t": 400, "fov": 55, "pitch": -6 },
  { "name": "night_744", "t": 744, "fov": 60, "pitch": 15 },
- { "name": "space_150", "t": 150, "fov": 60 }
+ { "name": "space_150", "t": 150, "fov": 60 },
+ { "name": "earth_180", "t": 180, "fov": 60 },
+ { "name": "flood_272", "t": 272.5, "fov": 60 }
 ]

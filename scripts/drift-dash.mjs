@@ -233,7 +233,7 @@
  */
 import { createServer } from 'node:http';
 import { execFile, spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writeFileSync, mkdirSync, appendFileSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writeFileSync, mkdirSync, appendFileSync, openSync, readSync, fstatSync, closeSync, renameSync } from 'node:fs';
 import { join, dirname, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
@@ -673,6 +673,39 @@ const UTIL_LONG_KEEP = 180;
 const utilLong = new Map();
 const fleetLong = [];
 let utilTick = 0;
+/**
+ * THE RINGS ACROSS A RESTART (the coordinator, 2026-10-30: a dashboard restart emptied the 3 h charts): all four
+ * written to out/drift/dashboard/rings.json every RINGS_EVERY_S (a .part, then a rename) and read back at start, the
+ * samples older than each ring's span dropped
+ */
+const RINGS_FILE = process.env.DRIFT_DASH_RINGS ?? join(ROOT, 'out/drift/dashboard/rings.json');
+const RINGS_EVERY_S = 60;
+(() => {
+  try {
+    const r = JSON.parse(readFileSync(RINGS_FILE, 'utf8'));
+    const now = Date.now();
+    const fresh = (rows, spanS) => (Array.isArray(rows) ? rows.filter((x) => Array.isArray(x) && now - x[0] < spanS * 1000) : []);
+    const short = UTIL_KEEP * UTIL_STEP_S;
+    const long = UTIL_LONG_KEEP * UTIL_STEP_S * UTIL_LONG_EVERY;
+    for (const [k, rows] of Object.entries(r.util ?? {})) util.set(k, fresh(rows, short).slice(-UTIL_KEEP));
+    for (const [k, rows] of Object.entries(r.utilLong ?? {})) utilLong.set(k, fresh(rows, long).slice(-UTIL_LONG_KEEP));
+    fleetSeries.push(...fresh(r.fleet, short).slice(-UTIL_KEEP));
+    fleetLong.push(...fresh(r.fleetLong, long).slice(-UTIL_LONG_KEEP));
+  } catch {
+    // (none yet, or unreadable: the charts start empty, as before)
+  }
+})();
+function saveRings() {
+  try {
+    mkdirSync(dirname(RINGS_FILE), { recursive: true });
+    writeFileSync(`${RINGS_FILE}.part`, JSON.stringify({ at: Date.now(), util: Object.fromEntries(util), utilLong: Object.fromEntries(utilLong), fleet: fleetSeries, fleetLong }));
+    renameSync(`${RINGS_FILE}.part`, RINGS_FILE);
+  } catch {
+    // (a read-only checkout: kept in memory only)
+  }
+}
+setInterval(saveRings, RINGS_EVERY_S * 1000).unref();
+for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => (saveRings(), process.exit(0)));
 async function sampleUtil() {
   try {
     const sl = slots();

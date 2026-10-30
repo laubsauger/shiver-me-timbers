@@ -312,11 +312,16 @@ export class Capture {
     if (t === null) throw new Error('cine: grab() without bind()');
     const w = this.width;
     const h = this.height;
-    const read = (await stage(
-      this.renderer.readRenderTargetPixelsAsync(t, 0, 0, w, h) as Promise<unknown>,
-      30000,
-      'readRenderTargetPixelsAsync',
-    )) as Uint8Array | Uint16Array;
+    // the copy is encoded now, as it always was (the loop draws on into the other slots meanwhile)
+    const reading = this.renderer.readRenderTargetPixelsAsync(t, 0, 0, w, h) as Promise<unknown>;
+    reading.catch(() => {}); // (its failure is read below; not an unhandled rejection meanwhile)
+    // THE GPU'S QUEUE FIRST, on a long guard: a jump in show time queues the sea's whole wake replay ahead of the frame
+    // (src/drift/wandering/sea.ts wakeTo, (t − world start) × 30 steps), which a slower GPU takes longer than the 30 s
+    // the readback is held to — the Mac, 2026-10-30: "readRenderTargetPixelsAsync did not finish in 30000ms" at the
+    // first still past 400 s. The 30 s guard against a hung read then starts once that work is done.
+    const device = (this.renderer.backend as { device?: GPUDevice }).device;
+    if (device) await stage(device.queue.onSubmittedWorkDone(), 600000, 'the GPU work before the readback');
+    const read = (await stage(reading, 30000, 'readRenderTargetPixelsAsync')) as Uint8Array | Uint16Array;
     // (a 16-bit readback is a Uint16Array of the same padded rows: unpadded here as bytes)
     const raw = read instanceof Uint8Array ? read : new Uint8Array(read.buffer, read.byteOffset, read.byteLength);
 

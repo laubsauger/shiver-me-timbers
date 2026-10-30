@@ -764,6 +764,8 @@ export async function workLoop({ hub, token, node, main, work, tar, say, gpuFree
   mkdirSync(work, { recursive: true });
   let farmState = 'accepting';
   let away = 0;
+  /** the pulse that came with a job, acted on when that job is done */
+  let afterJob = null;
   const pulseOf = (r) => ({
     state: r.headers.get('x-drift-farm-state') ?? 'accepting',
     command: r.headers.get('x-drift-farm-command'),
@@ -797,6 +799,9 @@ export async function workLoop({ hub, token, node, main, work, tar, say, gpuFree
       if (p.state !== farmState) say(`farm: this box is ${p.state} (set from the dashboard)`);
       farmState = p.state;
       job = r.status === 200 ? await r.json() : null;
+      // (a job came with it: the pulse is acted on once the job is done — a box kept busy by a full queue never had
+      // an empty answer, so it never restarted onto a new head: all three stayed on de97f3f under load, 2026-10-30)
+      if (job) afterJob = p;
       // (between jobs only: a command, a newer head or bundle; a job handed over in this answer runs first)
       if (!job) {
         const out = await onPulse(p);
@@ -819,5 +824,10 @@ export async function workLoop({ hub, token, node, main, work, tar, say, gpuFree
     onState('rendering', job);
     const r = await runJob({ job, call, main, work, tar, say, ensureBundle, onProgress: (p, line) => onState('rendering', { ...job, progress: p, last: line }) });
     say(`farm: ${job.id} ${r.state}`);
+    if (afterJob) {
+      const out = await onPulse(afterJob);
+      afterJob = null;
+      if (out?.exit !== undefined) return out;
+    }
   }
 }

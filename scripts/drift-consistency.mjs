@@ -10,6 +10,10 @@
  *   --save-ref   the Mac's clean tree also refreshes the GPU check's reference (drift-gpu-check.mjs --save-ref →
  *                scripts/drift-gpu-check.ref.json, at this commit): the frames every box's GPU check is held to
  *   --boxes ''   this Mac only
+ *   --priority   high by default: the check gates a night's render, and waits behind no agent's review jobs
+ *
+ * Box against box too: the RMS between each pair of boxes per shot (two NVIDIA boxes on Vulkan and D3D12 — the Act 2
+ * agent, 2026-10-30: "the same tree draws slightly differently on linux-monster and windows-monster")
  *
  * One fixed shot list (scripts/drift-consistency-shots.json: the beach at 604, the sea at 400, night at 744, space at
  * 150), drawn by the review pipeline (drift-review-stills.mjs, 16:9) at ONE code state on every machine at once:
@@ -179,7 +183,7 @@ async function main() {
   for (const [k, box] of boxes.entries()) {
     runs.push((async () => {
       const r = await submit({
-        root: ROOT, hub, token, prefer: box, stage: join(dir, `stage-${box}`), clean: true, base: head,
+        root: ROOT, hub, token, prefer: box, stage: join(dir, `stage-${box}`), clean: true, base: head, priority: arg('priority', 'high'),
         argv: ['node', ...stillsArgs(join(dir, box), 5382 + k)],
         say: (m) => console.log(`[${box}] ${m}`), out: (s) => process.stdout.write(s.split('\n').filter(Boolean).map((l) => `[${box}] ${l}\n`).join('')),
       });
@@ -213,15 +217,40 @@ async function main() {
       }
       report.shots[name][m] = entry;
       const f1 = (x) => x.toFixed(1);
-      rows.push([name, m, `Y ${f1(mm.y)}  RGB ${f1(mm.r)} ${f1(mm.g)} ${f1(mm.b)}${entry.rms !== undefined ? `  ΔY ${entry.dY >= 0 ? '+' : ''}${f1(entry.dY)} (${f1((100 * entry.dY) / Math.max(1, refM.y))}%)  RMS ${f1(entry.rms)}  p99 ${entry.p99}  ${entry.same ? 'same' : 'DIFFERS'}` : '  (reference)'}`]);
+      rows.push([name, m, `Y ${f1(mm.y)}  RGB ${f1(mm.r)} ${f1(mm.g)} ${f1(mm.b)}${entry.rms !== undefined ? `  ΔY ${entry.dY >= 0 ? '+' : ''}${f1(entry.dY)} (${f1((100 * entry.dY) / Math.max(1, refM.y))}%)  RMS ${f1(entry.rms)}  p99 ${entry.p99}  ${entry.same ? 'same' : 'DIFFERS'}` : m === 'laubs-mbp' ? '  (reference)' : '  (no reference from this Mac)'}`]);
     }
   }
+  // box against box (header)
+  const boxesHere = boxes.filter((b) => existsSync(join(dir, b)));
+  const pairs = [];
+  for (const name of names) {
+    for (let i = 0; i < boxesHere.length; i++) {
+      for (let k = i + 1; k < boxesHere.length; k++) {
+        const fa = join(dir, boxesHere[i], `${name}.png`);
+        const fb = join(dir, boxesHere[k], `${name}.png`);
+        if (!existsSync(fa) || !existsSync(fb)) continue;
+        const a = readRgb(fa);
+        const b = readRgb(fb);
+        const c = compare(a, b);
+        const dY = means(a).y - means(b).y;
+        pairs.push({ shot: name, a: boxesHere[i], b: boxesHere[k], rms: c.rms, p99: c.p99, dY });
+        writeGrey(join(dir, 'diff', `${boxesHere[i]}_vs_${boxesHere[k]}_${name}.png`), a.w, a.h, c.heat);
+      }
+    }
+  }
+  report.pairs = pairs;
   writeFileSync(join(dir, 'report.json'), `${JSON.stringify(report, null, 1)}\n`);
   console.log('');
   for (const [s, m, t] of rows) console.log(`${s.padEnd(12)} ${m.padEnd(16)} ${t}`);
+  if (pairs.length) {
+    console.log('\nbox against box:');
+    for (const p of pairs) console.log(`${p.shot.padEnd(12)} ${`${p.a} / ${p.b}`.padEnd(34)} RMS ${p.rms.toFixed(1)}  p99 ${p.p99}  ΔY ${p.dY >= 0 ? '+' : ''}${p.dY.toFixed(1)}${p.rms > NOISE_RMS || Math.abs(p.dY) > NOISE_MEAN ? '  DIFFERS' : ''}`);
+  }
+  const compared = Object.values(report.shots).flatMap((x) => Object.values(x)).filter((e) => e.same !== undefined).length;
   const differs = Object.values(report.shots).flatMap((x) => Object.entries(x).filter(([, e]) => e.same === false).map(([m]) => m));
-  console.log(`\n${differs.length === 0 ? 'every machine within noise of this Mac' : `differs beyond noise: ${[...new Set(differs)].join(', ')}`} — ${dir}`);
-  process.exit(differs.length === 0 ? 0 : 1);
+  const verdict = compared === 0 ? 'NOTHING COMPARED (no box stills, or no reference from this Mac)' : differs.length === 0 ? 'every machine within noise of this Mac' : `differs beyond noise: ${[...new Set(differs)].join(', ')}`;
+  console.log(`\n${verdict} — ${dir}`);
+  process.exit(compared > 0 && differs.length === 0 ? 0 : 1);
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url) || basename(process.argv[1] ?? '') === 'drift-farm.mjs') {
