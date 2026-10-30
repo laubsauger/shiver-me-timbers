@@ -409,7 +409,7 @@ async function stepNpm() {
 }
 
 async function stepBundle(source) {
-  say(`bundle: ${source.kind === 'ssh' ? `the Mac over SSH, ${source.label}` : `the folder ${source.label}`}`);
+  say(`bundle: ${source.kind === 'ssh' ? `the Mac over SSH, ${source.label}` : source.kind === 'farm' ? source.label : `the folder ${source.label}`}`);
   const { changed, record } = await syncBundle({ root: ROOT, source, prev: state.bundle ?? null, dryRun: DRY, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR });
   if (!DRY && record) saveState({ bundle: record });
   if (!DRY) say(changed ? `bundle: ${record.file} unpacked and verified` : 'bundle: current, verified');
@@ -781,9 +781,11 @@ async function worker() {
       if (record) saveState({ bundle: record });
       if (have() !== want) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) is not the hub's newest (now ${have()?.slice(0, 6) ?? 'none'} here): rebuild the bundle on the Mac (node scripts/drift-bundle.mjs)`);
     },
-    onState: (st, job) =>
+    onState: (st, job, why) =>
       beat({
-        state: st === 'rendering' ? 'rendering' : st === 'busy-foreign' ? 'busy-foreign' : 'idle',
+        // (standby: the hub keeps this box out of the farm, drift-farm-nodes.json "exclude"; the reason as `why`)
+        state: st === 'rendering' ? 'rendering' : st === 'busy-foreign' ? 'busy-foreign' : st === 'standby' ? 'standby' : 'idle',
+        why: st === 'standby' ? why : undefined,
         job: job ? { name: job.label, chunk: null, chunks: null, frames: job.progress?.done ?? null, framesTotal: job.progress?.total ?? null, fps: job.progress?.fps ?? null, etaS: job.progress?.etaS ?? null, out: job.id } : undefined,
         error: undefined,
       }),
