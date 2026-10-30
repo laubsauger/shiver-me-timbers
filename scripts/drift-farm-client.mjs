@@ -166,19 +166,21 @@ const copyInto = (src, dst) => {
  * the job's payload: stage/job/{meta.json, code.patch, files/<rel>, inputs/<i>/<name>} → stage/payload.tgz.
  * Throws when the extra files are over MAX_EXTRA_MB, or the base is not a commit here.
  */
-export async function packState({ root, stage, inputs = [], base = 'origin/main', say = () => {}, assetsNow = null }) {
+export async function packState({ root, stage, inputs = [], base = 'origin/main', say = () => {}, assetsNow = null, clean = false }) {
   const baseSha = git(root, ['rev-parse', '--verify', `${base}^{commit}`]).stdout.trim();
   if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error(`${base} is not a commit here (git fetch first)`);
   const job = join(stage, 'job');
   mkdirSync(join(job, 'files'), { recursive: true });
-  // the tracked changes against the base: committed but not pushed, staged, and not staged, binary files whole
-  const d = git(root, ['diff', '--binary', baseSha], { encoding: 'buffer' });
+  // the tracked changes against the base: committed but not pushed, staged, and not staged, binary files whole.
+  // `clean`: none of them — the base exactly, and the bundle's assets (drift-consistency.mjs: every machine draws the
+  // same commit, whatever this checkout has in progress)
+  const d = clean ? { status: 0, stdout: Buffer.alloc(0) } : git(root, ['diff', '--binary', baseSha], { encoding: 'buffer' });
   if (d.status !== 0) throw new Error(`git diff failed: ${String(d.stderr)}`);
   writeFileSync(join(job, 'code.patch'), d.stdout);
-  const untracked = git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'src', 'scripts', 'tests', 'public']).stdout.split('\0').filter((f) => f && !f.startsWith('public/drift/'));
+  const untracked = clean ? [] : git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'src', 'scripts', 'tests', 'public']).stdout.split('\0').filter((f) => f && !f.startsWith('public/drift/'));
   // the assets the boxes' bundle lacks (drift-bundle.mjs decides what a bundle holds; `assetsNow`: that list given)
   let now = assetsNow;
-  if (now === null) {
+  if (now === null && !clean) {
     const listFile = join(stage, 'assets-now.json');
     const r = spawnSync(process.execPath, [join(root, 'scripts/drift-bundle.mjs'), '--list-json', listFile], { cwd: root, encoding: 'utf8', windowsHide: true });
     if (r.status !== 0) throw new Error(`drift-bundle --list-json failed: ${r.stderr}`);
@@ -186,7 +188,7 @@ export async function packState({ root, stage, inputs = [], base = 'origin/main'
   }
   const manifest = installedManifest(root);
   const overlay = [];
-  for (const f of assetOverlay(now, manifest)) {
+  for (const f of clean ? [] : assetOverlay(now, manifest)) {
     if (f.why === 'touched' && (await sha256(join(root, f.path))) === f.sha256) continue; // only its time changed
     overlay.push(f);
   }
@@ -419,7 +421,7 @@ export function submitterOf(env = process.env, pid = process.pid, host = hostnam
  * run `argv` on the farm as if here (header: SUBMIT). `prefer`: a box's name, or 'auto' (the best free box; none
  * free, or none takes it in 60 s: { fallback } and the caller runs it locally). → { code } or { fallback: why }
  */
-export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, say = console.error, out = (s) => process.stdout.write(s), stage }) {
+export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main' }) {
   const call = api(hub, token);
   const t0Submit = Date.now();
   if (prefer === 'auto') {
@@ -431,7 +433,7 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   const untracked = new Set(git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'src', 'scripts', 'tests', 'public']).stdout.split('\0').filter(Boolean));
   const bundled = new Set((installedManifest(root)?.files ?? []).map((f) => f.path));
   const remap = remapArgv(argv, { root, cwd: process.cwd(), shipped: (rel) => tracked.has(rel) || untracked.has(rel) || bundled.has(rel) });
-  const { payload, meta } = await packState({ root, stage, inputs: remap.inputs, say });
+  const { payload, meta } = await packState({ root, stage, inputs: remap.inputs, say, clean, base });
   let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' ? null : prefer, weight, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
   await upload(call, `/farm/jobs/${id}/payload`, payload);
   say(`farm: job ${id} queued${prefer === 'auto' ? '' : ` for ${prefer}`}; following it here (Ctrl-C cancels it)`);

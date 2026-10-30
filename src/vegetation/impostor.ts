@@ -62,6 +62,7 @@ import {
   vec4,
 } from 'three/tsl';
 import { sierraParams, type SierraParams } from '../params/sierra';
+import { hash2 } from '../terrain/noise';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyNode = any;
@@ -598,11 +599,13 @@ export function createImpostorMaterial(
   // distance — it cannot minify, there is no footprint to widen, and filtering
   // it would turn a stochastic coverage of exactly `uFade` into a uniform
   // half-transparent ghost, which is the artifact the dither exists to avoid.
-  const hash = screenCoordinate.xy
-    .dot(vec2(12.9898, 78.233))
-    .sin()
-    .mul(43758.5453)
-    .fract(); // @band-limited-elsewhere: screen-space dither, period = 1 px
+  //
+  // The sin-free hash2 (terrain/noise.ts, §V16) of the pixel's integer cell, not fract(sin(·)·43758): Apple's GPUs
+  // and NVIDIA's disagree on that sin in its last bits, which the ×43758 makes the whole value — the same commit's
+  // foliage edges came out speckled differently on the Mac than on the render farm's boxes (the farm consistency
+  // check, 2026-10-30, tests/gpuSinHash.test.ts). The dither PATTERN changed with it, not its look: still one uniform
+  // threshold per pixel.
+  const hash = hash2(screenCoordinate.xy.floor()); // @band-limited-elsewhere: screen-space dither, period = 1 px
   // @band-limited-elsewhere: threshold against that dither, not a spatial edge
   material.opacityNode = albedo.w.mul(float(1).sub(hash.step(uFade.oneMinus())));
   material.alphaTest = p.impostorAlphaTest;

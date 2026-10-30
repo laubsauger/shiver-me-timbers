@@ -74,6 +74,8 @@
  * a worker whose code or bundle is behind syncs while it is idle (drift-node.mjs worker).
  *   node scripts/drift-farm.mjs kick <box> sync-now|gpu-check-now|restart|pause|resume|drain     (this Mac, loopback)
  *   node scripts/drift-farm.mjs state <box> accepting|draining|paused|removed
+ *   node scripts/drift-farm.mjs consistency    every machine draws the same shots at HEAD, compared with this Mac's
+ *                                              (scripts/drift-consistency.mjs)
  */
 import { execFile, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -805,8 +807,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   };
   if (what === 'kick' && box && arg) await send(`/farm/nodes/${encodeURIComponent(box)}/command`, { cmd: arg });
   else if (what === 'state' && box && arg) await send(`/farm/nodes/${encodeURIComponent(box)}/state`, { state: arg });
+  // do the machines draw the same film? (scripts/drift-consistency.mjs; it reads its own flags)
+  else if (what === 'consistency') await import('./drift-consistency.mjs');
   else {
-    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}`);
+    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}\n       node scripts/drift-farm.mjs consistency [--boxes a,b] [--width 960] [--shots file] [--no-mac]`);
     process.exit(2);
   }
 }
