@@ -92,9 +92,11 @@ const SOURCE_ONLY = [
   /^(bamboo_wall|bamboo_wall_03|thatch_roof_angled|weathered_planks|rough_wood|reed_roof_04)\//,
   // props → <id>_prop.glb (drift-prop-export.py)
   // (and the floating debris' own cut, <id>_float.glb: getTheDrift/debrisField.ts)
-  /^(Barrel_02|lifebuoy|metal_jerrycan_green|metal_jug|pot_enamel_01|wicker_basket_02|wooden_bowl_02|wooden_crate_01|wooden_crate_02|wooden_spoon)\/(?!.*_(prop|float)\.glb$)/,
-  // ground debris and rocks → <id>_lod.glb (drift-tree-export.py, drift-rock-lod.py)
-  /^(bark_debris_01|dead_tree_trunk|dead_tree_trunk_02|dry_branches_medium_01|root_cluster_01|single_root|shrub_02|shrub_03|coast_rocks_05|namaqualand_boulder_05)\/(?!.*_(lod|float)\.glb$)/,
+  /^(Barrel_02|lifebuoy|metal_jerrycan_green|metal_jug|pot_enamel_01|wicker_basket_02|wooden_bowl_02|wooden_crate_01|wooden_crate_02|wooden_spoon|plastic_monobloc_chair_01|old_tyre|ocean_buoy|plastic_crate_01|plastic_jerrycan|industrial_pastic_container|rollershutter_door|wooden_picnic_table|cardboard_box_01|vintage_suitcase)\/(?!.*\.glb$)/,
+  // ground debris and rocks → <id>_lod.glb (drift-tree-export.py, drift-rock-lod.py), and the beach dressing's own
+  // cuts, <id>_beach.glb / <id>_pebble.glb (beachDressing.ts). Every .glb in these folders is an export of ours and
+  // loads; only the scans' .gltf/.bin/textures are sources (2026-10-30: dropping _pebble.glb broke the boxes' boot)
+  /^(bark_debris_01|dead_tree_trunk|dead_tree_trunk_02|dry_branches_medium_01|root_cluster_01|single_root|shrub_02|shrub_03|coast_rocks_05|namaqualand_boulder_05)\/(?!.*\.glb$)/,
 ];
 
 function walk(dir, base) {
