@@ -17,6 +17,10 @@
  *                   <width>×<width>·9/16, its own default supersampling. Its frames are the dome master's, t = from +
  *                   n/fps (both draw through __drift.record), so the two versions line up frame for frame
  *   --box <name>    every chunk on that box (a measurement); by default whichever box is free
+ *   --clean         the COMMITTED state, HEAD exactly (it must be on origin), not this checkout's work in progress —
+ *                   for a render that is kept (the coordinator, 2026-10-30: a tree packed while another session was
+ *                   mid-edit hung every job of its window); without it the live tree, checked to build first
+ *                   (drift-precheck.mjs)
  *
  * THE CODE STATE is this checkout's, as for any farm job (HEAD's base on origin + the diff + untracked files), packed
  * ONCE for every chunk; the assets are the bundle the boxes sync. THE CHUNKS are cut on whole frames (every frame is a
@@ -72,10 +76,15 @@ async function main() {
   const flat = arg('flat', null) === null ? null : Number(arg('flat'));
   if (flat !== null && !(flat > 0 && flat % 2 === 0)) throw new Error(`--flat ${arg('flat')}: an even width in px`);
   const box = arg('box', null);
+  const clean = argv.includes('--clean');
   const priority = arg('priority', 'low');
   if (!['low', 'normal', 'high'].includes(priority)) throw new Error(`--priority ${priority}: low | normal | high`);
   const head = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
-  const dirty = spawnSync('git', ['-C', ROOT, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).stdout.trim() !== '';
+  const dirty = !clean && spawnSync('git', ['-C', ROOT, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).stdout.trim() !== '';
+  if (clean) {
+    spawnSync('git', ['-C', ROOT, 'fetch', '--quiet', 'origin']);
+    if (spawnSync('git', ['-C', ROOT, 'merge-base', '--is-ancestor', 'HEAD', 'origin/main']).status !== 0) throw new Error(`--clean: HEAD ${head} is not on origin/main — push it first (the boxes fetch the commit)`);
+  }
   const out = resolve(ROOT, arg('out', `out/drift/preview/${head}${dirty ? '+dirty' : ''}`));
   const chunksDir = join(out, 'chunks');
   mkdirSync(chunksDir, { recursive: true });
@@ -83,6 +92,7 @@ async function main() {
   const chunks = chunksOf(from, to, chunk, fps).map((c) => ({ ...c, file: join(chunksDir, `chunk_${stamp(c.from)}-${stamp(c.to)}${kind}.mp4`) }));
   const have = chunks.filter((c) => existsSync(c.file) && frameCountOf(c.file) === c.frames);
   const todo = chunks.filter((c) => !have.includes(c));
+  if (clean) say(`code: the commit ${head} exactly (--clean), nothing of this checkout's work in progress`);
   say(`[${from}, ${to}) s, ${flat ? `16:9 ${flat}×${Math.round((flat * 9) / 16 / 2) * 2}` : `dome ${size}²`}, ${fps} fps: ${chunks.length} chunks of ${chunk} s (${have.length} here already), ${priority} priority${box ? `, on ${box}` : ''} → ${out}`);
 
   const { packState, submit } = await import('./drift-farm-client.mjs');
@@ -90,7 +100,14 @@ async function main() {
   const hub = process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190';
   // ONE code state for every chunk (header)
   const stage = join(ROOT, 'out/drift/farm/stage', `render-${process.pid}`);
-  const packed = todo.length > 0 ? await packState({ root: ROOT, stage, say }) : null;
+  const packed = todo.length > 0 ? await packState({ root: ROOT, stage, say, ...(clean ? { clean: true, base: 'HEAD' } : {}) }) : null;
+  // THE RUN, for the console's full-show tracker (drift-farm.mjs POST /farm/runs): its chunks, those here already marked
+  const { submitterOf } = await import('./drift-farm-client.mjs');
+  const runId = `${new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${flat ? 'flat' : 'dome'}-${process.pid}`;
+  await fetch(`${hub}/farm/runs`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${JSON.parse(token).token}` }, signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify({ id: runId, kind: flat ? 'flat' : 'dome', label: `${flat ? `16:9 ${flat}` : `dome ${size}²`} [${from}, ${to}) s`, from, to, size: flat ?? size, priority, submitter: submitterOf(), chunks: chunks.map((c) => ({ from: c.from, to: c.to, here: have.includes(c) })) }),
+  }).catch((e) => say(`(the console's tracker will not show this run: ${e.message})`));
   let done = have.length;
   const t0 = Date.now();
   // CTRL-C / SIGTERM CANCELS EVERY CHUNK it sent, and ends (the coordinator, 2026-10-30: a SIGINT to the full-show
@@ -113,7 +130,7 @@ async function main() {
     todo.map(async (c) => {
       const tag = `${c.from}–${c.to} s`;
       const r = await submit({
-        root: ROOT, hub, token: JSON.parse(token).token, prefer: box ?? 'any', weight: flat ? 1 : lanes, priority, stage, packed, signals: false, onQueued: (id) => sent.add(id),
+        root: ROOT, hub, token: JSON.parse(token).token, prefer: box ?? 'any', weight: flat ? 1 : lanes, priority, stage, packed, signals: false, onQueued: (id) => sent.add(id), run: { id: runId, i: chunks.indexOf(c) },
         argv: flat
           ? ['node', 'scripts/drift-review-clip.mjs', '--from', String(c.from), '--to', String(c.to), '--fps', String(fps), '--width', String(flat), '--channel', 'chrome', '--allow-long', '--allow-large', '--out', c.file, ...extra]
           : ['node', 'scripts/drift-render.mjs', '--size', String(size), '--fps', String(fps), '--from', String(c.from), '--to', String(c.to), '--channel', 'chrome', '--lanes', String(lanes), '--out', c.file, ...extra],

@@ -53,6 +53,9 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { HEVC_MAX_LUMA_PS, LANE_CODECS, laneEncoderArgs, laneNote } from './cine-codecs.mjs';
+import { previewTee } from './drift-preview.mjs';
+// (a farm job's live preview, drift-preview.mjs: one frame every 10 s handed on, never waited for)
+const preview = previewTee();
 
 const argv = process.argv.slice(2);
 const arg = (name, fallback) => {
@@ -438,6 +441,7 @@ const server = createServer(async (req, res) => {
       if (rec.depth !== depth) throw new Error(`${shot}: a ${depth}-bit frame in a ${rec.depth}-bit take`);
       await enqueueFrame(rec, body);
       rec.frames++;
+      preview.offer(body, w, h, { depth });
       if (rec.frames % 24 === 0) process.stdout.write('.');
       res.writeHead(204).end();
       return;

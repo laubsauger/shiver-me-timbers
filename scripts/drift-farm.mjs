@@ -19,6 +19,12 @@
  *   GET  /farm/jobs/:id/files/:out/<path>  a result file
  *   POST /farm/jobs/:id/cancel, /requeue, POST /farm/nodes/:name/state   the dashboard's CONTROLS (below: loopback only)
  *   GET  /farm/workers                 who is free, busy or busy with someone else's work, and their speed
+ *   PUT  /farm/jobs/:id/preview        the job's newest frame, a small JPEG (drift-preview.mjs; the worker sends it)
+ *   GET  /farm/jobs/:id/preview.jpg    … for the console's "now rendering" mosaic: from loopback and the tailnet, NO
+ *                                      token (the dashboard page has none; a 640 px frame, nothing else)
+ *   POST /farm/runs                    a chunked render (drift-farm-render.mjs) says what it is: { id, kind, from, to,
+ *                                      chunks: [{ from, to, here }] }; its chunks' jobs carry `run`, and /api's Farm
+ *                                      shows each run with its chunks' states (the console's full-show tracker)
  *   GET  /farm/bundle/latest-assets.json, /farm/bundle/drift-assets-<date>.tar.gz
  *                                      THE ASSET BUNDLE over the same door (out/drift-bundle): the Windows boxes have no
  *                                      SSH, so a worker syncs its bundle from here (drift-node-lib.mjs, a "farm" source)
@@ -154,10 +160,14 @@ export const queueOrder = (queued) => [...queued].sort((a, b) => rankOf(b) - ran
 /** may `job` take `node` while `queued` (the others) wait? Not while a higher job that could use that box is queued */
 export const yieldsTo = (job, node, queued) => queued.some((h) => h !== job && rankOf(h) > rankOf(job) && (!h.prefer || h.prefer === node));
 
+/** ms a job sent back for results that were not pictures stays off the box that made them (drift-sanity.mjs) */
+export const AVOID_MS = 10 * 60_000;
+
 /** the worker that takes `job` now, or null (hold it): of the workers in a claim right now [{ node, speed }], the
- * fastest (only the pinned one, when `prefer`) — header: WHO GETS WHAT */
-export function pickWorker(job, waiting) {
-  const cands = (job.prefer ? waiting.filter((w) => w.node === job.prefer) : [...waiting]).sort((a, b) => b.speed - a.speed);
+ * fastest (only the pinned one, when `prefer`; not one the job is avoiding, until `avoidUntil`) — header: WHO GETS WHAT */
+export function pickWorker(job, waiting, now = Date.now()) {
+  const avoid = job.avoid && now < (job.avoidUntil ?? 0) ? new Set(job.avoid) : null;
+  const cands = (job.prefer ? waiting.filter((w) => w.node === job.prefer) : waiting.filter((w) => !avoid?.has(w.node))).sort((a, b) => b.speed - a.speed);
   return cands[0]?.node ?? null;
 }
 
@@ -296,6 +306,18 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       // a job folder without its job.json: half-made, ignored
     }
   }
+  // THE CHUNKED RENDERS (header: POST /farm/runs), across restarts
+  const runsDir = join(dir, 'runs');
+  mkdirSync(runsDir, { recursive: true });
+  const runs = new Map();
+  for (const f of readdirSync(runsDir).filter((x) => x.endsWith('.json'))) {
+    try {
+      const r = JSON.parse(readFileSync(join(runsDir, f), 'utf8'));
+      runs.set(r.id, r);
+    } catch {
+      // (half-written: ignored)
+    }
+  }
   const speedsFile = join(dir, 'speeds.json');
   let speeds = (() => {
     try {
@@ -416,7 +438,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       const still = queued.filter((q) => jobs.get(q.id)?.state === 'queued');
       const waiting = [...claims.keys()].filter((node) => !yieldsTo(job, node, still)).map((node) => ({ node, speed: speedNow(node) }));
       if (waiting.length === 0) continue;
-      const node = pickWorker(job, waiting);
+      const node = pickWorker(job, waiting, now());
       if (!node) continue;
       const c = claims.get(node);
       claims.delete(node);
@@ -474,6 +496,36 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       req.on('error', bad);
     });
 
+  /**
+   * the chunked renders of the last 24 h, newest first (header: POST /farm/runs): each chunk with the state of its
+   * newest job — 'here' (it was on this Mac already), queued, preparing, running (with progress), done, failed,
+   * cancelled — or 'waiting' (no job yet); and the counts
+   */
+  const runsView = (t) => {
+    const byRun = new Map();
+    for (const j of jobs.values()) {
+      if (!j.run || !runs.has(j.run.id)) continue;
+      const k = `${j.run.id}:${j.run.i}`;
+      const prev = byRun.get(k);
+      if (!prev || j.createdAt > prev.createdAt) byRun.set(k, j);
+    }
+    return [...runs.values()]
+      .filter((r) => t - r.createdAt < 86_400_000)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((r) => {
+        const chunks = r.chunks.map((c, i) => {
+          const j = byRun.get(`${r.id}:${i}`);
+          return { from: c.from, to: c.to, state: c.here ? 'here' : j?.state ?? 'waiting', job: j?.id ?? null, node: j?.node ?? null, progress: j && !FINAL.has(j.state) ? j.progress ?? null : null, previewAt: j?.previewAt ?? null };
+        });
+        const count = (st) => chunks.filter((c) => st.includes(c.state)).length;
+        return {
+          id: r.id, kind: r.kind, label: r.label, from: r.from, to: r.to, size: r.size, priority: r.priority, submitter: r.submitter, createdAt: r.createdAt, chunks,
+          done: count(['here', 'done']), running: count(['preparing', 'running']), failed: count(['failed', 'cancelled']), total: chunks.length,
+          active: chunks.some((c) => !['here', 'done', 'failed', 'cancelled'].includes(c.state)),
+        };
+      });
+  };
+
   /** the dashboard's Farm (drift-dash.mjs's typedef) */
   const view = () => {
     const t = now();
@@ -496,12 +548,16 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         priority: j.priority ?? 'normal',
         cancelRequested: j.cancelRequested === true && !FINAL.has(j.state),
         timing: j.timing ?? null,
+        previewAt: j.previewAt ?? null, run: j.run ?? null,
         // (the console's queue manager: who sent it, its command for the settings, its times, its fps over time while
         // it runs — a finished job's samples stay in its job.json, not in every 3 s answer)
         submitter: j.submitter ?? null, argv: j.argv ?? [], cls: j.cls ?? null, queuedAt: j.queuedAt ?? null, claimedAt: j.claimedAt ?? null,
         attempts: j.attempts ?? 0, samples: FINAL.has(j.state) ? [] : j.samples ?? [],
+        // (where its files land on the submitting machine: the console groups a whole render's chunks by them)
+        outs: (j.outs ?? []).map((o) => o.local),
       })),
       workers: workerView,
+      runs: runsView(t),
       nodes: Object.fromEntries(hints().map((n) => [n.name, { state: farmStateOf(n.name), at: nodeStates[n.name]?.at ?? null, by: nodeStates[n.name]?.by ?? null, actions: NODE_ACTIONS[farmStateOf(n.name)] }])),
     };
   };
@@ -510,10 +566,10 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
    * run `job` again as a new job (the same code state, inputs and outs, its payload linked): a finished one on the
    * user's word, a running one taken off its box (which is told to stop: cancel on its next status). → the new job
    */
-  const requeue = (job, why) => {
+  const requeue = (job, why, extra = {}) => {
     const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
-    const keep = ['label', 'argv', 'kind', 'cls', 'prefer', 'weight', 'priority', 'base', 'bundle', 'outs', 'inputs', 'submitter', 'payloadBytes'];
-    const fresh = { id, state: 'queued', ...Object.fromEntries(keep.map((k) => [k, job[k]])), createdAt: now(), queuedAt: now(), attempts: 0, results: [], requeuedFrom: job.id };
+    const keep = ['label', 'argv', 'kind', 'cls', 'prefer', 'weight', 'priority', 'base', 'bundle', 'outs', 'inputs', 'submitter', 'payloadBytes', 'run', 'retries'];
+    const fresh = { id, state: 'queued', ...Object.fromEntries(keep.map((k) => [k, job[k]])), createdAt: now(), queuedAt: now(), attempts: 0, results: [], requeuedFrom: job.id, ...extra };
     mkdirSync(join(jobsDir, id), { recursive: true });
     try {
       linkSync(join(jobsDir, job.id, 'payload.tgz'), join(jobsDir, id, 'payload.tgz'));
@@ -547,7 +603,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
   /** a worker's own routes: what a box needs to take, run and return a job, and to sync its bundle */
   const workerRoute = (p, method) =>
     (p[1] === 'claim' && method === 'GET') || (p[1] === 'bundle' && method === 'GET') ||
-    (p[1] === 'jobs' && p[2] && ((p[3] === 'payload' && method === 'GET') || (p[3] === 'status' && method === 'POST') || (p[3] === 'files' && method === 'PUT')));
+    (p[1] === 'jobs' && p[2] && ((p[3] === 'payload' && method === 'GET') || (p[3] === 'status' && method === 'POST') || (p[3] === 'files' && method === 'PUT') || (p[3] === 'preview' && method === 'PUT')));
 
   async function handle(req, res, url) {
     if (!url.pathname.startsWith('/farm/')) return false;
@@ -591,6 +647,15 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       } catch (e) {
         return deny(res, 400, String(e.message)), true;
       }
+    }
+    // THE LIVE PREVIEW (header): no token — the dashboard page has none; `allow` (loopback, the tailnet) stands
+    if (req.method === 'GET' && p[1] === 'jobs' && p[3] === 'preview.jpg' && p.length === 4) {
+      const job = jobs.get(p[2]);
+      const f = job ? join(jobsDir, job.id, 'preview.jpg') : null;
+      if (!f || !existsSync(f)) return deny(res, 404, 'no preview (yet)'), true;
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': statSync(f).size, 'cache-control': 'no-cache' });
+      await pipeline(createReadStream(f), res);
+      return true;
     }
     const byToken = tokenOk(req.headers.authorization, token);
     const byAddress = !byToken && workerRoute(p, req.method) ? nodeAt(req.socket.remoteAddress) : null;
@@ -711,6 +776,14 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         dispatch();
         return true;
       }
+      if (p[1] === 'runs' && req.method === 'POST' && byToken) {
+        const b = await readJson(req);
+        if (!/^[\w.-]{4,80}$/.test(String(b.id ?? '')) || !Array.isArray(b.chunks)) return deny(res, 400, 'a run: { id, kind, from, to, chunks: [{ from, to, here }] }'), true;
+        const run = { id: b.id, kind: b.kind === 'flat' ? 'flat' : 'dome', label: String(b.label ?? '').slice(0, 160), from: Number(b.from), to: Number(b.to), size: b.size ?? null, priority: b.priority ?? 'normal', submitter: b.submitter ?? null, createdAt: now(), chunks: b.chunks.slice(0, 2000).map((c) => ({ from: Number(c.from), to: Number(c.to), here: c.here === true })) };
+        runs.set(run.id, run);
+        writeFileSync(join(runsDir, `${run.id}.json`), JSON.stringify(run));
+        return json(res, 201, { id: run.id }), true;
+      }
       if (p[1] !== 'jobs') return deny(res, 404, 'no such farm route'), true;
       if (p.length === 2 && req.method === 'POST') {
         const b = await readJson(req);
@@ -721,7 +794,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
         const job = {
           id, state: 'uploading', label: String(b.label ?? b.argv.join(' ')).slice(0, 160), argv: b.argv, kind: ['still', 'clip', 'long'].includes(b.kind) ? b.kind : jobKind(b.argv),
-          cls: jobClass(b.argv), prefer: b.prefer ?? null, weight: Math.max(1, Number(b.weight) || 1), priority: PRIORITIES.includes(b.priority) ? b.priority : 'normal', base: b.base, bundle: b.bundle ?? null,
+          cls: jobClass(b.argv), prefer: b.prefer ?? null, weight: Math.max(1, Number(b.weight) || 1), priority: PRIORITIES.includes(b.priority) ? b.priority : 'normal', base: b.base, bundle: b.bundle ?? null, run: b.run && typeof b.run === 'object' ? { id: String(b.run.id), i: Number(b.run.i) } : null,
           outs: Array.isArray(b.outs) ? b.outs : [], inputs: Array.isArray(b.inputs) ? b.inputs : [], submitter: b.submitter ?? null, createdAt: now(), attempts: 0, results: [],
         };
         save(job);
@@ -730,6 +803,15 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       const job = jobs.get(p[2]);
       if (!job) return deny(res, 404, `no farm job ${p[2]}`), true;
       const d = join(jobsDir, job.id);
+      if (p[3] === 'preview' && req.method === 'PUT') {
+        // (a 640 px JPEG; more is not a preview)
+        const n = Number(req.headers['content-length'] ?? 0);
+        if (n > 2 * 2 ** 20) return deny(res, 413, 'a preview is a small JPEG (2 MB at most)'), true;
+        await pipeline(req, createWriteStream(join(d, 'preview.jpg.part')));
+        renameSync(join(d, 'preview.jpg.part'), join(d, 'preview.jpg'));
+        save({ ...jobs.get(job.id), previewAt: now() });
+        return json(res, 204), true;
+      }
       if (p[3] === 'payload' && req.method === 'PUT') {
         if (job.state !== 'uploading') return deny(res, 409, `job ${job.id} is ${job.state}`), true;
         await pipeline(req, createWriteStream(join(d, 'payload.tgz.part')));
@@ -770,6 +852,14 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
           j = transition(j, b.state, patch);
           if (b.state === 'done' || b.state === 'failed') {
             workers.set(j.node, { node: j.node, at: now(), state: 'waiting', job: null });
+            // RESULTS THAT ARE NOT PICTURES (drift-sanity.mjs, `retry`): the job again, on another box when one takes
+            // work in the next AVOID_MS — twice at most
+            if (b.state === 'failed' && b.retry === true && (j.retries ?? 0) < 2 && !j.prefer) {
+              save(j);
+              requeue(j, `${j.error} (on ${j.node})`, { retries: (j.retries ?? 0) + 1, avoid: [...(j.avoid ?? []), j.node], avoidUntil: now() + AVOID_MS });
+              j = jobs.get(j.id); // (with its requeuedAs: saved again below)
+              dispatch();
+            }
             const durS = (j.endedAt - (j.startedAt ?? j.endedAt)) / 1000;
             if (b.state === 'done') {
               speeds = learn(speeds, { node: j.node, cls: j.cls, fps: Number(b.fps), durS, speed: speedNow(j.node) });

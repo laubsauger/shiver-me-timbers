@@ -357,6 +357,9 @@ async function main() {
         if (m.type() !== 'error' && m.type() !== 'warning') return;
         if (m.type() === 'error') l.consoleErrors++;
         const text = m.text();
+        // A LOST DEVICE OR A GPU ERROR fails the lane (src/core/app.ts logs them): out of memory, a device draws black
+        // and the render used to end with exit 0 (linux-monster beside sd-webrtc, 2026-10-30: 16 black stills)
+        if (m.type() === 'error' && /\[gpu\] (uncaptured error|DEVICE LOST)/.test(text)) l.errors.push(`the GPU failed: ${text.slice(0, 300)}`);
         if (seen.has(text) || seen.size > 20) return;
         seen.add(text);
         console.log(`[lane ${l.k} ${m.type()}] ${text}`);

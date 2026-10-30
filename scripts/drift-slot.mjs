@@ -25,8 +25,10 @@
  * so we have to wait less"): `--farm [auto|<box>]` (or DRIFT_FARM=auto in the environment: every agent's job, with
  * one variable) sends the command to a studio render machine instead of a slot here, through this Mac's farm hub
  * (drift-dash.mjs, :5190; token from farm.json). Its output shows here as it runs, and its files land at the --out
- * paths it named, as if it had run here; files it reads outside the code are sent along. `auto`: the best free box,
- * and with none free (or none taking it in 60 s), a slot here as before. `--local` overrides DRIFT_FARM.
+ * paths it named, as if it had run here; files it reads outside the code are sent along. `auto`: whichever box takes
+ * it first; a slot here only when the farm cannot take it at all — the hub does not answer, or no box that takes work
+ * is online (busy boxes are a queue, not a reason to come back here). `--local` overrides DRIFT_FARM. A tree that does
+ * not build (drift-precheck.mjs: a session mid-edit) is refused, here as on the farm.
  * `--priority low|normal|high` (or DRIFT_FARM_PRIORITY; normal by default): the farm hands out the highest first, and a
  * low job only to a box no queued higher job could use (drift-farm.mjs PRIORITIES); a low job never falls back here.
  *
@@ -92,11 +94,6 @@ if (!cmd.length) {
   console.error('usage: node scripts/drift-slot.mjs [--slots N] [--weight N] -- <command…>   |   --status');
   process.exit(2);
 }
-if (WEIGHT > SLOTS) {
-  console.error(`drift-slot: a job of weight ${WEIGHT} can never run in ${SLOTS} slots`);
-  process.exit(2);
-}
-
 // ON THE FARM (header): submit instead of running here; `auto` falls back to a slot here
 const farmAt = opts.indexOf('--farm');
 const FARM = opts.includes('--local') ? null : farmAt >= 0 ? (opts[farmAt + 1] && !opts[farmAt + 1].startsWith('--') ? opts[farmAt + 1] : 'auto') : process.env.DRIFT_FARM || null;
@@ -114,6 +111,11 @@ if (FARM) {
     const token = JSON.parse(readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8')).token;
     r = await submit({ root: ROOT, hub: process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190', token, argv: cmd, prefer: FARM, weight: WEIGHT, priority, stage, say: (m) => console.error(`drift-slot: ${m}`) });
   } catch (e) {
+    // (a tree that does not build, drift-precheck.mjs, is refused here too: it would hang a slot here as on a box)
+    if (e.precheck) {
+      console.error(`drift-slot: farm: ${e.message}`);
+      process.exit(1);
+    }
     r = { fallback: e.message };
   } finally {
     rmSync(stage, { recursive: true, force: true });
@@ -125,6 +127,12 @@ if (FARM) {
     process.exit(1);
   }
   console.error(`drift-slot: farm: ${r.fallback} — running it here`);
+}
+// (this Mac's slots only: a farm job's weight is the box's business — a 2-lane chunk was refused here, 2026-10-30,
+// because this Mac's limit was 1 while the user worked)
+if (WEIGHT > SLOTS) {
+  console.error(`drift-slot: a job of weight ${WEIGHT} can never run in ${SLOTS} slots`);
+  process.exit(2);
 }
 
 /** take `WEIGHT` free slots at once (all or none), or null */

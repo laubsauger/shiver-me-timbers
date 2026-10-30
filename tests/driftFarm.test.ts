@@ -23,6 +23,7 @@ import {
 } from '../scripts/drift-farm.mjs';
 import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, roundTrip, submitterOf } from '../scripts/drift-farm-client.mjs';
 import { chunksOf } from '../scripts/drift-farm-render.mjs';
+import { previewTee } from '../scripts/drift-preview.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'drift-farm-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -502,6 +503,55 @@ describe('the door', () => {
     expect(hub.jobs().find((j) => j.id === id)?.state).toBe('cancelled');
   });
 
+  // the console's "now rendering" mosaic (2026-10-30): a running job's newest frame, from the dashboard page (which
+  // has no token), and the full-show tracker's runs
+  it('a job\'s live preview: the box sends it, the page reads it without a token, its time is on the job', async () => {
+    await newJob(['node', 'scripts/drift-render.mjs']);
+    // (the job this box is handed: whichever is oldest in the queue, maybe one an earlier test left)
+    const { id } = await claimAs('eeg-msi', '100.126.127.68');
+    expect((await call(`/farm/jobs/${id}/preview`, { method: 'PUT', token: null, raw: 'JPEGBYTES' })).status).toBe(204);
+    from = '127.0.0.1';
+    const r = await fetch(`${base}/farm/jobs/${id}/preview.jpg`); // (no token)
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('image/jpeg');
+    expect(r.headers.get('cache-control')).toBe('no-cache');
+    expect(await r.text()).toBe('JPEGBYTES');
+    expect(hub.view().jobs.find((j: { id: string }) => j.id === id)?.previewAt).toBe(now);
+    // another box cannot send one for a job it does not hold
+    from = '100.77.131.101';
+    expect((await call(`/farm/jobs/${id}/preview`, { method: 'PUT', token: null, raw: 'X' })).status).toBe(403);
+  });
+
+  it('a chunked render\'s run: its chunks\' states from their jobs, those here already counted done', async () => {
+    from = '127.0.0.1';
+    const chunks = [{ from: 0, to: 20, here: true }, { from: 20, to: 40 }, { from: 40, to: 50 }];
+    expect((await call('/farm/runs', { method: 'POST', body: { id: 'run-test-1', kind: 'flat', label: '16:9 2048 [0, 50) s', from: 0, to: 50, chunks } })).status).toBe(201);
+    const { id } = await (await call('/farm/jobs', { method: 'POST', body: { argv: ['node', 'scripts/drift-review-clip.mjs'], base: 'abcdef1', run: { id: 'run-test-1', i: 1 } } })).json();
+    await call(`/farm/jobs/${id}/payload`, { method: 'PUT', raw: 'P' });
+    const run = hub.view().runs.find((r: { id: string }) => r.id === 'run-test-1');
+    expect(run).toMatchObject({ kind: 'flat', total: 3, done: 1, active: true });
+    expect(run.chunks.map((c: { state: string }) => c.state)).toEqual(['here', 'queued', 'waiting']);
+    expect(run.chunks[1].job).toBe(id);
+    expect((await call('/farm/runs', { method: 'POST', token: null, body: { id: 'run-x', chunks: [] } })).status).toBe(401); // (the token: a submitter's route)
+  });
+
+  it('results that were not pictures: the job fails, goes back to the queue as a new job that avoids that box', async () => {
+    for (const j of hub.jobs().filter((x) => x.state === 'queued')) await control(`/farm/jobs/${j.id}/cancel`, {});
+    await newJob(['node', 'scripts/drift-review-stills.mjs']);
+    const { id } = await claimAs('eeg-msi', '100.126.127.68');
+    const post = (body: unknown) => call(`/farm/jobs/${id}/status`, { method: 'POST', token: null, body });
+    await post({ state: 'running', from: 0, lines: [] });
+    await post({ state: 'failed', error: '16 result(s) are not pictures — s1.png: the still is pure black', retry: true, from: 0, lines: [] });
+    const old = hub.jobs().find((j) => j.id === id)!;
+    expect(old).toMatchObject({ state: 'failed' });
+    const fresh = hub.jobs().find((j) => j.id === old.requeuedAs)!;
+    expect(fresh).toMatchObject({ state: 'queued', retries: 1, avoid: ['eeg-msi'] });
+    // eeg-msi asks first: its claim is held, not given it; windows-monster is given it
+    from = '100.126.127.68';
+    expect(await fetch(`${base}/farm/claim?node=eeg-msi`, { signal: AbortSignal.timeout(300) }).then((x) => x.status, () => 'held')).toBe('held');
+    expect((await claimAs('windows-monster', '100.77.131.101'))?.id).toBe(fresh.id);
+  });
+
   it('removed: its claim is answered at once with its state (the worker asks again in minutes)', async () => {
     from = '127.0.0.1';
     expect((await control('/farm/nodes/windows-monster/state', { state: 'removed' })).status).toBe(200);
@@ -608,5 +658,20 @@ describe('a whole render in chunks over the farm (drift-farm-render.mjs chunksOf
     const c = chunksOf(745.8, 760, 4.01, 30);
     expect(c.reduce((a, x) => a + x.frames, 0)).toBe(Math.round((760 - 745.8) * 30));
     for (const x of c) expect(Math.round((x.to - x.from) * 30)).toBe(x.frames);
+  });
+});
+
+describe('the live preview tee (drift-preview.mjs)', () => {
+  // the coordinator, 2026-10-30: "negligible; it must never slow the render" — one frame every 10 s, never awaited,
+  // and nothing at all without DRIFT_PREVIEW_FILE (a render on this Mac, outside the farm)
+  it('takes one frame per interval and drops the rest; without a file it takes none', () => {
+    let t = 0;
+    const tee = previewTee({ file: join(scratch, 'preview.jpg'), everyMs: 10_000, now: () => t, ffmpeg: 'false' });
+    const px = Buffer.alloc(4 * 4 * 4);
+    expect(tee.offer(px, 4, 4)).toBe(true);
+    t = 5000;
+    expect(tee.offer(px, 4, 4)).toBe(false); // (too soon, and the first may still be writing)
+    const none = previewTee({ file: undefined });
+    expect(none.offer(px, 4, 4)).toBe(false);
   });
 });

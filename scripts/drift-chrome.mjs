@@ -32,7 +32,7 @@
  *   DRIFT_CHROME_PERSIST=0        a throwaway profile, as before
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,6 +118,32 @@ const alive = (pid) => {
   }
 };
 
+/** the profiles this process holds now (header of takeProfile) */
+const takenHere = new Set();
+
+/**
+ * does a running Chrome hold this profile? Chrome's own lock: on Windows `lockfile`, open without sharing while Chrome
+ * runs (an open for writing fails); elsewhere the `SingletonLock` link, "<host>-<pid>", whose pid is alive
+ */
+export function chromeHolds(dir) {
+  if (process.platform === 'win32') {
+    const f = join(dir, 'lockfile');
+    if (!existsSync(f)) return false;
+    try {
+      closeSync(openSync(f, 'r+'));
+      return false;
+    } catch (e) {
+      return e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES';
+    }
+  }
+  try {
+    const pid = Number(/-(\d+)$/.exec(readlinkSync(join(dir, 'SingletonLock')))?.[1]);
+    return Number.isInteger(pid) && pid > 0 && alive(pid);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * a profile of `kind` that no live Chrome holds: the first of <kind>-0, <kind>-1, … whose lock is free or whose holder
  * is gone. → { dir, release }
@@ -125,7 +151,12 @@ const alive = (pid) => {
 export function takeProfile(kind, root = PROFILES_DIR, pid = process.pid) {
   for (let i = 0; i < 32; i++) {
     const dir = join(root, `${kind}-${i}`);
+    // (this process's own: two lanes of one render share a pid, so the lock file alone let the second take the
+    // first's profile — Chrome then handed the page to the running one and exited 21, windows-monster 2026-10-30)
+    if (takenHere.has(dir)) continue;
     mkdirSync(dir, { recursive: true });
+    // (a Chrome still closing — the probe's, a moment before a lane — holds it by Chrome's own lock)
+    if (chromeHolds(dir)) continue;
     const lock = join(dir, LOCK);
     try {
       writeFileSync(lock, String(pid), { flag: 'wx' });
@@ -135,9 +166,11 @@ export function takeProfile(kind, root = PROFILES_DIR, pid = process.pid) {
       if (Number.isInteger(holder) && holder > 0 && holder !== pid && alive(holder)) continue;
       writeFileSync(lock, String(pid)); // (its holder died without letting go)
     }
+    takenHere.add(dir);
     return {
       dir,
       release: () => {
+        takenHere.delete(dir);
         try {
           if (Number(readFileSync(lock, 'utf8')) === pid) rmSync(lock, { force: true });
         } catch {

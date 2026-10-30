@@ -48,6 +48,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { contentId, installedManifest, run } from './drift-node-lib.mjs';
+import { checkOutput, LOOKED_AT } from './drift-sanity.mjs';
 import { landingPath } from './drift-farm.mjs';
 
 /** result files sent back while the job still runs (header of runJob's RESULTS AS THEY COME): whole-file kinds */
@@ -169,6 +170,13 @@ const copyInto = (src, dst) => {
 export async function packState({ root, stage, inputs = [], base = 'origin/main', say = () => {}, assetsNow = null, clean = false }) {
   const baseSha = git(root, ['rev-parse', '--verify', `${base}^{commit}`]).stdout.trim();
   if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error(`${base} is not a commit here (git fetch first)`);
+  // A TREE THAT DOES NOT BUILD never goes out (drift-precheck.mjs: a session mid-edit, 2026-10-30, hung every job packed
+  // in its window at boot); a clean state is the commit, which is what it is
+  if (!clean) {
+    const { precheck, precheckMessage } = await import('./drift-precheck.mjs');
+    const pc = await precheck(root);
+    if (!pc.ok) throw Object.assign(new Error(precheckMessage(pc)), { precheck: true });
+  }
   const job = join(stage, 'job');
   mkdirSync(join(job, 'files'), { recursive: true });
   // the tracked changes against the base: committed but not pushed, staged, and not staged, binary files whole.
@@ -419,19 +427,22 @@ export function submitterOf(env = process.env, pid = process.pid, host = hostnam
 // ------------------------------------------------------------------------------------------------------- submit
 /**
  * run `argv` on the farm as if here (header: SUBMIT). `prefer`: a box's name, 'any' (whichever box, however long it
- * waits), or 'auto' (the best free box; none free, or none takes it in 60 s: { fallback } and the caller runs it
- * locally — never for a `low` job, which waits for the farm). `priority`: low | normal | high (drift-farm.mjs
+ * waits), or 'auto' (whichever box; { fallback } and the caller runs it locally only when the hub does not answer or
+ * no box that takes work is online — never for a `low` job, which waits for the farm). `priority`: low | normal | high (drift-farm.mjs
  * PRIORITIES). `packed`: a { payload, meta } already made by packState (drift-farm.mjs render: one code state for
  * every chunk). → { code } or { fallback: why }
  */
-export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, priority = 'normal', say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main', packed = null, signals = true, onQueued = () => {} }) {
+export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, priority = 'normal', say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main', packed = null, signals = true, onQueued = () => {}, run = null }) {
   const call = api(hub, token);
   const t0Submit = Date.now();
   if (prefer === 'auto' && priority === 'low') prefer = 'any';
+  // `auto` FALLS BACK only when the farm cannot take the job at all: the hub does not answer, or no box that takes
+  // work is online. Boxes that are busy mean a queue, not a fallback (2026-10-30, 01:49: two boxes whose claims had
+  // gone silent — the hub was handing jobs to busy claims — sent a job back to this Mac after 60 s, where it failed)
   if (prefer === 'auto') {
     const workers = await call('/farm/workers', { timeoutMs: 3000 }).catch((e) => ({ error: e.message }));
     if (!Array.isArray(workers)) return { fallback: `the farm hub does not answer (${workers.error})` };
-    if (!workers.some((w) => w.state === 'waiting')) return { fallback: `no box is free (${workers.map((w) => `${w.node} ${w.state}`).join(', ')})` };
+    if (!workers.some((w) => w.state !== 'offline' && (w.farmState ?? 'accepting') === 'accepting')) return { fallback: `no farm box is online and taking work (${workers.map((w) => `${w.node} ${w.state}${w.farmState && w.farmState !== 'accepting' ? `/${w.farmState}` : ''}`).join(', ')})` };
   }
   const tracked = new Set(git(root, ['ls-files', '-z']).stdout.split('\0').filter(Boolean));
   const untracked = new Set(git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'src', 'scripts', 'tests', 'public']).stdout.split('\0').filter(Boolean));
@@ -439,7 +450,7 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   const remap = remapArgv(argv, { root, cwd: process.cwd(), shipped: (rel) => tracked.has(rel) || untracked.has(rel) || bundled.has(rel) });
   if (packed && remap.inputs.length > 0) throw new Error('a packed code state carries no inputs: pass the job\'s files as repo paths');
   const { payload, meta } = packed ?? (await packState({ root, stage, inputs: remap.inputs, say, clean, base }));
-  let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' || prefer === 'any' ? null : prefer, weight, priority, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
+  let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' || prefer === 'any' ? null : prefer, weight, priority, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf(), ...(run ? { run } : {}) } });
   await upload(call, `/farm/jobs/${id}/payload`, payload);
   say(`farm: job ${id} queued${prefer === 'auto' || prefer === 'any' ? '' : ` for ${prefer}`}${priority !== 'normal' ? ` at ${priority} priority` : ''}; following it here (Ctrl-C cancels it)`);
   onQueued(id);
@@ -498,10 +509,6 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
     }
     if (job && FINAL_STATES.includes(job.state)) break;
     for (const r of fresh()) await land(r);
-    if (prefer === 'auto' && job?.state === 'queued' && Date.now() - t0 > 60_000 && !cancelled) {
-      await call(`/farm/jobs/${id}/cancel`, { method: 'POST', body: {} }).catch(() => {});
-      return { fallback: 'no box took it in 60 s' };
-    }
     await new Promise((r) => setTimeout(r, 2000));
   }
   // what is not here yet (the last files, a video)
@@ -610,11 +617,23 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     const sentAs = new Map(); // `${out}/${rel}` → "size:mtime" as uploaded
     const seenAs = new Map(); // `${out}/${rel}` → "size:mtime" at the last look
     let streaming = Promise.resolve();
+    // IS IT A PICTURE? (drift-sanity.mjs): a pure-black still, or a clip that drops to black (a lost device), is never
+    // sent back as a result; the job fails and goes back to the queue, to another box when there is one
+    const bad = [];
     const sendFile = async (o, rel) => {
       const abs = join(jobDir, 'out', String(o.i), ...rel.split('/'));
       const st = statSync(abs);
       const sig = `${st.size}:${Math.round(st.mtimeMs)}`;
       if (sentAs.get(`${o.i}/${rel}`) === sig) return false;
+      if (LOOKED_AT.test(rel)) {
+        const why = checkOutput(abs);
+        if (why) {
+          if (!bad.some((b) => b.rel === rel)) bad.push({ rel, why });
+          sentAs.set(`${o.i}/${rel}`, sig);
+          note(`farm: ${rel} NOT SENT: ${why}`);
+          return false;
+        }
+      }
       await holdOn(`result ${rel}`, () => upload(call, `/farm/jobs/${job.id}/files?out=${o.i}&path=${encodeURIComponent(rel)}`, abs), { say });
       sentAs.set(`${o.i}/${rel}`, sig);
       return true;
@@ -642,6 +661,25 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
       return streaming;
     };
     const watcher = setInterval(look, 1000);
+    // THE LIVE PREVIEW (drift-preview.mjs): the script writes its newest frame there every ~10 s; sent when it changed
+    const previewFile = join(jobDir, 'preview.jpg');
+    let previewSent = 0;
+    let previewBusy = false;
+    const sendPreview = async () => {
+      if (previewBusy) return;
+      let st;
+      try {
+        st = statSync(previewFile);
+      } catch {
+        return;
+      }
+      if (st.mtimeMs <= previewSent) return;
+      previewBusy = true;
+      previewSent = st.mtimeMs;
+      await call(`/farm/jobs/${job.id}/preview`, { method: 'PUT', body: Readable.from(createReadStream(previewFile)), json: false, timeoutMs: 20_000 }).catch(() => {});
+      previewBusy = false;
+    };
+    const previewWatch = setInterval(() => void sendPreview(), 3000);
     let child = null;
     const watch = setInterval(() => {
       if (cancel && child?.exitCode === null) {
@@ -653,7 +691,7 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
       cwd: tree,
       // (the box's own Chrome flags, drift-gpu-check.mjs --save, live in the checkout, not in the job's tree; its
       // Chrome profiles, with their compiled shaders, are in the user's home: every job shares them)
-      env: { ...process.env, DRIFT_FARM: '', DRIFT_SLOTS_DIR: process.env.DRIFT_SLOTS_DIR ?? join(main, 'out', 'drift', '.slots'), DRIFT_NODE_CHROME: process.env.DRIFT_NODE_CHROME || join(main, 'out', 'drift', 'node-chrome.json') },
+      env: { ...process.env, DRIFT_FARM: '', DRIFT_SLOTS_DIR: process.env.DRIFT_SLOTS_DIR ?? join(main, 'out', 'drift', '.slots'), DRIFT_NODE_CHROME: process.env.DRIFT_NODE_CHROME || join(main, 'out', 'drift', 'node-chrome.json'), DRIFT_PREVIEW_FILE: previewFile },
       onSpawn: (p) => (child = p),
       onLine: (l) => {
         progress = progressOf(l, progress);
@@ -671,6 +709,8 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     clearInterval(tick);
     clearInterval(watch);
     clearInterval(watcher);
+    clearInterval(previewWatch);
+    await sendPreview();
     await streaming;
     timing.renderMs = Date.now() - tRun - (timing.bootMs ?? 0);
     lap();
@@ -685,9 +725,11 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
       }
     }
     timing.uploadMs = lap();
-    const state = cancel ? 'cancelled' : r.code === 0 ? 'done' : 'failed';
-    note(`farm: exit ${r.code}, ${sent} file(s) sent back`);
-    await tell({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error: `exit ${r.code}` } : {}) });
+    const blackOut = bad.length > 0 && !cancel;
+    const state = cancel ? 'cancelled' : r.code === 0 && !blackOut ? 'done' : 'failed';
+    note(`farm: exit ${r.code}, ${sent} file(s) sent back${blackOut ? `; ${bad.length} not (${bad[0].rel}: ${bad[0].why})` : ''}`);
+    const error = blackOut ? `${bad.length} result(s) are not pictures — ${bad[0].rel}: ${bad[0].why}` : `exit ${r.code}`;
+    await tell({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error, ...(blackOut ? { retry: true } : {}) } : {}) });
     return { state, exitCode: r.code, fps: progress.fps };
   } catch (e) {
     clearInterval(prep);

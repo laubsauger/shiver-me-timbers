@@ -81,6 +81,8 @@ export const flatSupersample = (fov, width) => Math.max(1, Math.min((REVIEW_TEXE
  */
 export async function openDriftPage({ port, channel, query, cacheDir, onFrame }) {
   let sink = null;
+  /** the first GPU error the page logged (header of the console handler below): every later frame is refused */
+  let gpuFatal = null;
   let vite = null;
   let browser = null;
   const close = async () => {
@@ -97,7 +99,10 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
         res.setHeader('access-control-allow-origin', '*');
         try {
           const url = new URL(req.url, 'http://sink');
-          if (url.pathname === '/frame') await onFrame(Buffer.concat(parts), url.searchParams);
+          if (url.pathname === '/frame') {
+            if (gpuFatal) throw new Error(`the GPU failed: ${gpuFatal}`);
+            await onFrame(Buffer.concat(parts), url.searchParams);
+          }
           else if (url.pathname === '/endshot' && url.searchParams.has('failed')) console.error('[review] take failed in the page:', url.searchParams.get('failed'));
           res.end('ok');
         } catch (e) {
@@ -126,9 +131,21 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     let bootFailed = () => {};
     const bootFailure = new Promise((_, reject) => (bootFailed = reject));
     bootFailure.catch(() => {});
-    page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 300)));
+    // (an error thrown while the page boots — a SyntaxError from a module caught mid-edit, a missing export — ends the
+    // take at once: 2026-10-30, such jobs waited out the 240 s boot timeout and held their box)
+    let isUp = false;
+    page.on('pageerror', (e) => {
+      console.log('[pageerror]', String(e).slice(0, 300));
+      if (!isUp) bootFailed(new Error(`drift.html did not boot: ${String(e).slice(0, 300)}`));
+    });
     page.on('console', (m) => {
       if (m.type() !== 'error') return;
+      // A LOST DEVICE OR A GPU ERROR fails the take (src/core/app.ts logs them): an out-of-memory device draws black
+      // frames and the job used to end with exit 0 — linux-monster, 2026-10-30, 16 black stills beside sd-webrtc
+      if (/\[gpu\] (uncaptured error|DEVICE LOST)/.test(m.text())) {
+        gpuFatal ??= m.text().slice(0, 300);
+        bootFailed(new Error(`the GPU failed: ${gpuFatal}`));
+      }
       if (m.text().includes('status of 500')) bootFailed(new Error('drift.html did not boot: a module failed to build on the server (its error is printed above)'));
       if (seen.has(m.text()) || seen.size > 20) return;
       seen.add(m.text());
@@ -144,6 +161,7 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     } catch (e) {
       throw new Error(`${e.message}${seen.size ? `\n  the page's errors: ${[...seen].map((t) => t.slice(0, 200)).join(' | ')}` : '\n  (no error in the page: still building shaders or loading assets?)'}`);
     }
+    isUp = true;
     if (!(await page.evaluate(() => '__drift' in window))) {
       throw new Error(`drift.html shows its "requires WebGPU" gate: this Chrome (${channel}) found no WebGPU adapter. GPU flags from ${gpu.from}: ${gpu.args.join(' ') || '(none)'} — node scripts/drift-gpu-check.mjs says which flags work here`);
     }

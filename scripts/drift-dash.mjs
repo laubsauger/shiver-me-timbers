@@ -167,6 +167,26 @@
  * @property {boolean} enabled
  * @property {FarmJob[]} jobs            newest first: queued, running, then the finished of the last 24 h
  * @property {{ node: string, state: 'waiting'|'busy'|'busy-foreign'|'offline', seen: number, speed: number, job: string|null }[]} workers
+ * @property {FarmRun[]} runs            the chunked renders of the last 24 h (drift-farm.mjs render), newest first: the
+ *                                       console's full-show tracker
+ *
+ * @typedef {object} FarmRun
+ * @property {string} id
+ * @property {'dome'|'flat'} kind
+ * @property {string} label              "dome 2048² [0, 770) s", "16:9 2048 [0, 770) s"
+ * @property {number} from               s
+ * @property {number} to                 s
+ * @property {number|null} size          px: the dome master's side, or the 16:9 width
+ * @property {'low'|'normal'|'high'} priority
+ * @property {object|null} submitter     { pid, host, agent }
+ * @property {number} createdAt          ms epoch
+ * @property {{ from: number, to: number, state: 'here'|'waiting'|'uploading'|'queued'|'preparing'|'running'|'done'|'failed'|'cancelled', job: string|null, node: string|null, progress: object|null, previewAt: number|null }[]} chunks
+ *           here: on this Mac before the run began; waiting: no job yet (the helper is still sending them)
+ * @property {number} done               chunks here or done
+ * @property {number} running            chunks preparing or running
+ * @property {number} failed             chunks failed or cancelled (the same command renders them again)
+ * @property {number} total
+ * @property {boolean} active            a chunk is still to come
  *
  * @typedef {object} FarmJob
  * @property {string} id
@@ -193,12 +213,20 @@
  * @property {number|null} claimedAt     ms epoch: a box took it (preparing until startedAt)
  * @property {number} attempts           times it went back to the queue (a box stopped answering)
  * @property {[number, number, number|null][]} samples   while it runs: [ms epoch, fps, frames done], one per 10 s, the last 20 min (drift-farm.mjs fpsSamples)
+ * @property {string[]} outs            where its out folders and files land on the submitting machine (a whole render's chunks: <out>/chunks/chunk_<from>-<to>.mp4)
+ * @property {'low'|'normal'|'high'} priority
+ * @property {object|null} timing        the round trip, measured on the box: { payloadMs, bundleMs, treeMs, bootMs, renderMs, uploadMs, cache: 'warm'|'cold' }
+ * @property {number|null} previewAt     ms epoch of its newest live frame: GET /farm/jobs/:id/preview.jpg (≤640 px JPEG,
+ *                                       every ~10 s while it runs; no token, loopback and tailnet; cache-control no-cache)
+ * @property {{ id: string, i: number }|null} run   the chunked render it is chunk i of (Farm.runs)
  *
  * GET /api/history, read by the page every 15 s (kept out of the 3 s answer):
  * @typedef {object} History
  * @property {number} now
  * @property {number} stepS              s between utilisation samples
- * @property {Record<string, [number, number|null, number|null, number|null, string][]>} util   by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge], the last 30 min
+ * @property {Record<string, [number, number|null, number|null, number|null, string, number, number|null][]>} util   by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge, our fps there, GPU W], the last 30 min
+ * @property {[number, number, number, number, number][]} fleet   the fleet every stepS, the last 30 min: [ms epoch, jobs queued, jobs running, frames/min, GPU W summed]
+ * @property {{ stepS: number, util: History['util'], fleet: History['fleet'] }} long   the same every 60 s, the last 3 h (the console's timeline)
  * @property {(Slots['recent'][number] & { key: string })[]} jobs   this Mac's finished slot jobs, newest first, the last 7 days (history.jsonl)
  *
  * GET /api/log?farm=<job id>|slot=<n>[&lines=200]: { lines: string[] }, the newest lines of a farm job's log or a slot's
@@ -441,14 +469,15 @@ function outputs(work) {
   };
   for (const r of outputRoots(work)) walk(r, 0);
   found.sort((a, b) => b.mtime - a.mtime);
-  // at most three from one folder, so one busy round does not hide every other stream's newest
+  // at most eight from one folder, so one busy round does not hide every other stream's newest; 80 in all (the user,
+  // 2026-10-30: "latest outputs can contain a few more … an endless grid down to the bottom")
   const perDir = new Map();
   const pick = found.filter((f) => {
     const n = (perDir.get(dirname(f.path)) ?? 0) + 1;
     perDir.set(dirname(f.path), n);
-    return n <= 3;
+    return n <= 8;
   });
-  outCache = { at: Date.now(), value: pick.slice(0, 12).map((f) => ({ ...f, name: basename(f.path), dir: basename(dirname(f.path)), video: f.path.endsWith('.mp4') })) };
+  outCache = { at: Date.now(), value: pick.slice(0, 80).map((f) => ({ ...f, name: basename(f.path), dir: basename(dirname(f.path)), video: f.path.endsWith('.mp4') })) };
   return outCache.value;
 }
 
@@ -631,15 +660,45 @@ function remember(sl) {
 /** s between utilisation samples, and how many are kept (120 × 15 s: the last 30 min) */
 const UTIL_STEP_S = 15;
 const UTIL_KEEP = 120;
-/** by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge][] */
+/** by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge, our fps there, GPU W][] */
 const util = new Map();
+/**
+ * THE NIGHT IN THE CONSOLE'S TIMELINE (the user, 2026-10-30: "more graphs, more overviews at a glance"): the fleet as
+ * a whole every UTIL_STEP_S, the last 30 min — [ms epoch, jobs queued, jobs running, frames/min, GPU W summed] — and
+ * every UTIL_LONG_EVERY-th sample of both kept longer (UTIL_LONG_KEEP: 180 × 60 s, 3 h) for the timeline's lanes
+ */
+const fleetSeries = [];
+const UTIL_LONG_EVERY = 4;
+const UTIL_LONG_KEEP = 180;
+const utilLong = new Map();
+const fleetLong = [];
+let utilTick = 0;
 async function sampleUtil() {
   try {
     const sl = slots();
     remember(sl);
-    const { machines } = machinesNow(await machine(), sl, farmView());
+    const farm = farmView();
+    const { machines } = machinesNow(await machine(), sl, farm);
     const t = Date.now();
-    for (const c of machines) util.set(c.key, [...(util.get(c.key) ?? []), [t, c.gpu?.utilPct ?? null, c.gpu?.oursGB ?? null, c.gpu?.othersGB ?? null, c.badge]].slice(-UTIL_KEEP));
+    // our frame rate on each machine: its farm job's or drift-node job's, this Mac's slots' newest (frames/s)
+    const fpsOf = (c) => (c.self ? sl.held.reduce((a, h) => a + (h.unit === 'frames' ? h.fpsHistory?.at(-1) ?? 0 : 0), 0) : c.farm?.progress?.fps ?? c.job?.fps ?? 0) || 0;
+    const long = utilTick++ % UTIL_LONG_EVERY === 0;
+    for (const c of machines) {
+      const row = [t, c.gpu?.utilPct ?? null, c.gpu?.oursGB ?? null, c.gpu?.othersGB ?? null, c.badge, Math.round(fpsOf(c) * 100) / 100, c.gpu?.powerW != null ? Math.round(c.gpu.powerW) : null];
+      util.set(c.key, [...(util.get(c.key) ?? []), row].slice(-UTIL_KEEP));
+      if (long) utilLong.set(c.key, [...(utilLong.get(c.key) ?? []), row].slice(-UTIL_LONG_KEEP));
+    }
+    const jobs = farm.jobs ?? [];
+    const queued = jobs.filter((j) => j.state === 'queued' || j.state === 'uploading').length + sl.waiting.length;
+    const running = jobs.filter((j) => j.state === 'running' || j.state === 'preparing').length + sl.held.length;
+    const fpm = Math.round(machines.reduce((a, c) => a + fpsOf(c), 0) * 60);
+    const watts = Math.round(machines.reduce((a, c) => a + (c.online && c.gpu?.powerW != null ? c.gpu.powerW : 0), 0));
+    fleetSeries.push([t, queued, running, fpm, watts]);
+    if (fleetSeries.length > UTIL_KEEP) fleetSeries.shift();
+    if (long) {
+      fleetLong.push([t, queued, running, fpm, watts]);
+      if (fleetLong.length > UTIL_LONG_KEEP) fleetLong.shift();
+    }
   } catch {
     // (the next one)
   }
@@ -699,7 +758,7 @@ const server = createServer(async (req, res) => {
     const keep = Date.now() - HISTORY_DAYS * 86400e3;
     const jobs = [...history.values()].filter((e) => e.ended > keep).sort((a, b) => b.ended - a.ended).slice(0, 300);
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-    res.end(JSON.stringify({ now: Date.now(), stepS: UTIL_STEP_S, util: Object.fromEntries(util), jobs }));
+    res.end(JSON.stringify({ now: Date.now(), stepS: UTIL_STEP_S, util: Object.fromEntries(util), fleet: fleetSeries, long: { stepS: UTIL_STEP_S * UTIL_LONG_EVERY, util: Object.fromEntries(utilLong), fleet: fleetLong }, jobs }));
     return;
   }
   if (url.pathname === '/api/log') {

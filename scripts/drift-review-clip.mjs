@@ -30,6 +30,7 @@ import { once } from 'node:events';
 import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { ROOT, aim, cli, eyeReport, flatSupersample, openDriftPage, refuseDuringRender } from './drift-review-page.mjs';
+import { previewTee } from './drift-preview.mjs';
 
 const { arg, num, has } = cli(process.argv.slice(2));
 const FROM = Number(arg('from', NaN));
@@ -59,6 +60,7 @@ let got = 0;
 let t0 = 0;
 let ff = null;
 let ffExit = null;
+const preview = previewTee();
 const { page, sinkUrl, run, close } = await openDriftPage({
   port: num('port', 5362),
   channel: arg('channel', 'chrome'),
@@ -69,6 +71,8 @@ const { page, sinkUrl, run, close } = await openDriftPage({
     if (Number(q.get('n')) !== got) throw new Error(`frame ${q.get('n')} arrived, ${got} expected`);
     if (bytes.length !== N * N * 4) throw new Error(`a frame of ${bytes.length} bytes, not ${N}² RGBA`);
     got++;
+    // (a farm job's live preview, drift-preview.mjs: one frame every 10 s handed on, never waited for)
+    preview.offer(bytes, N, N, { crop: DOME ? null : h });
     if (!ff.stdin.write(bytes)) await once(ff.stdin, 'drain');
     if (got % 30 === 0 || got === FRAMES) console.log(`[review] ${got}/${FRAMES}  ${(got / ((Date.now() - t0) / 1000)).toFixed(1)} fps`);
   },

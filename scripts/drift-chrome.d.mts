@@ -7,6 +7,7 @@ export function chromeLaunchOptions(channel: string | undefined, gpu?: string[])
 export const PROFILES_DIR: string;
 export const PROFILE_GPU_CACHE_MAX: number;
 export const GPU_CACHE_DIRS: string[];
+export function chromeHolds(dir: string): boolean;
 export function takeProfile(kind: string, root?: string, pid?: number): { dir: string; release: () => void };
 export function gpuDriver(): string | null;
 export function staleWhy(meta: { driver?: string | null; chrome?: string } | null, o: { driver: string | null; chrome?: string | null; bytes: number; max?: number }): string | null;

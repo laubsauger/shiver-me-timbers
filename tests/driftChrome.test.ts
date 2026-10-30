@@ -10,11 +10,11 @@
  *     caches are keyed by the shader — so an unchanged stack keeps every compiled pipeline.
  *   - EMPTYING A PROFILE'S CACHES KEEPS THE PROFILE (its lock, its record), and nothing outside it.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { clearGpuCaches, GPU_CACHE_DIRS, PROFILE_GPU_CACHE_MAX, staleWhy, takeProfile } from '../scripts/drift-chrome.mjs';
+import { chromeHolds, clearGpuCaches, GPU_CACHE_DIRS, PROFILE_GPU_CACHE_MAX, staleWhy, takeProfile } from '../scripts/drift-chrome.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'drift-chrome-test-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -28,6 +28,27 @@ describe('two live Chromes never share a profile', () => {
     a.release();
     expect(takeProfile('render-chrome', root, process.ppid).dir).toBe(join(root, 'render-chrome-0'));
     b.release();
+  });
+
+  // windows-monster, 2026-10-30: a 2-lane render's two Chromes share one pid, and the lock file alone handed the second
+  // the first's profile — Chrome passed the page to the running one and exited 21, the render failed
+  it('two lanes of one process never get the same profile', () => {
+    const a = takeProfile('lanes-chrome', root, process.pid);
+    const b = takeProfile('lanes-chrome', root, process.pid);
+    expect(a.dir).not.toBe(b.dir);
+    a.release();
+    b.release();
+  });
+
+  it.skipIf(process.platform === 'win32')('a profile a running Chrome still holds (SingletonLock to a live pid) is skipped', () => {
+    const dir = join(root, 'held-chrome-0');
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(`somehost-${process.pid}`, join(dir, 'SingletonLock'));
+    expect(chromeHolds(dir)).toBe(true);
+    expect(takeProfile('held-chrome', root, process.ppid).dir).toBe(join(root, 'held-chrome-1'));
+    rmSync(join(dir, 'SingletonLock'));
+    symlinkSync('somehost-999999', join(dir, 'SingletonLock'));
+    expect(chromeHolds(dir)).toBe(false);
   });
 
   it('a profile whose holder died is taken over', () => {
