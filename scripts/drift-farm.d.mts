@@ -12,7 +12,12 @@ export function transition(job: FarmJobRecord, to: string, patch?: Record<string
 export function jobKind(argv: string[]): 'still' | 'clip' | 'long';
 export function jobClass(argv: string[]): string;
 export function pickWorker(job: { kind: string; prefer?: string | null; queuedAt?: number; createdAt?: number }, waiting: { node: string; speed: number }[], free: { node: string; speed: number }[], now: number, patienceMs?: number): string | null;
-export function holdReason(job: { kind: string; prefer?: string | null; queuedAt?: number; createdAt?: number }, workers: { node: string; state: string; why?: string | null; speed: number }[], now: number, patienceMs?: number): string;
+type Queued = { id?: string; kind?: string; priority?: string; prefer?: string | null; queuedAt?: number; createdAt?: number };
+export function holdReason(job: { kind: string; prefer?: string | null; priority?: string; queuedAt?: number; createdAt?: number }, workers: { node: string; state: string; why?: string | null; speed: number; farmState?: string }[], now: number, patienceMs?: number, queued?: Queued[]): string;
+export const PRIORITIES: string[];
+export function rankOf(job: { priority?: string }): number;
+export function queueOrder<T extends Queued>(queued: T[]): T[];
+export function yieldsTo(job: Queued, node: string, queued: Queued[]): boolean;
 export function learn(speeds: unknown, s: { node: string; cls: string; fps?: number; durS?: number; speed?: number }): { nodes: Record<string, Record<string, number>>; dur1: Record<string, number> };
 export function speedOf(node: string, speeds: unknown, hint?: number): number;
 export const SAMPLE_MS: number;

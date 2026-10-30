@@ -221,9 +221,12 @@ export async function launchChrome(chromium, { channel, gpu = gpuArgs().args, ki
       say(`chrome profile ${prof.dir}: GPU caches emptied: ${why}`);
       clearGpuCaches(prof.dir);
     }
+    // (the HTTP cache is no use here — Vite serves the assets from this disk — and it grew to ~0.8 GB a profile on
+    // the first runs, 2026-10-30, on a Mac with 23 GB free: held to 32 MB by the flag below, an old one removed)
+    if (sizeOf(join(prof.dir, 'Default', 'Cache')) > 64 * 2 ** 20) rmSync(join(prof.dir, 'Default', 'Cache'), { recursive: true, force: true });
     // (warm: Dawn's cache holds pipelines from an earlier run — read before Chrome starts and makes the folder)
     let warm = !why && sizeOf(join(prof.dir, 'Default', 'DawnWebGPUCache')) > WARM_BYTES;
-    const open = () => chromium.launchPersistentContext(prof.dir, { ...options, viewport: null });
+    const open = () => chromium.launchPersistentContext(prof.dir, { ...options, args: [...options.args, '--disk-cache-size=33554432'], viewport: null });
     let ctx = await open();
     const versionOf = async () => {
       const page = ctx.pages()[0] ?? (await ctx.newPage());

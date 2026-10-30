@@ -27,6 +27,8 @@
  * (drift-dash.mjs, :5190; token from farm.json). Its output shows here as it runs, and its files land at the --out
  * paths it named, as if it had run here; files it reads outside the code are sent along. `auto`: the best free box,
  * and with none free (or none taking it in 60 s), a slot here as before. `--local` overrides DRIFT_FARM.
+ * `--priority low|normal|high` (or DRIFT_FARM_PRIORITY; normal by default): the farm hands out the highest first, and a
+ * low job only to a box no queued higher job could use (drift-farm.mjs PRIORITIES); a low job never falls back here.
  *
  *   node scripts/drift-slot.mjs --farm auto -- node scripts/drift-review-stills.mjs shots.json --out out/drift/x
  */
@@ -99,20 +101,26 @@ if (WEIGHT > SLOTS) {
 const farmAt = opts.indexOf('--farm');
 const FARM = opts.includes('--local') ? null : farmAt >= 0 ? (opts[farmAt + 1] && !opts[farmAt + 1].startsWith('--') ? opts[farmAt + 1] : 'auto') : process.env.DRIFT_FARM || null;
 if (FARM) {
+  const priority = opt('--priority', process.env.DRIFT_FARM_PRIORITY || 'normal');
+  if (!['low', 'normal', 'high'].includes(priority)) {
+    console.error(`drift-slot: --priority ${priority}: low | normal | high`);
+    process.exit(2);
+  }
   const { submit } = await import('./drift-farm-client.mjs');
   const { rmSync } = await import('node:fs');
   const stage = join(ROOT, 'out/drift/farm/stage', `${process.pid}-${Date.now()}`);
   let r;
   try {
     const token = JSON.parse(readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8')).token;
-    r = await submit({ root: ROOT, hub: process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190', token, argv: cmd, prefer: FARM, weight: WEIGHT, stage, say: (m) => console.error(`drift-slot: ${m}`) });
+    r = await submit({ root: ROOT, hub: process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190', token, argv: cmd, prefer: FARM, weight: WEIGHT, priority, stage, say: (m) => console.error(`drift-slot: ${m}`) });
   } catch (e) {
     r = { fallback: e.message };
   } finally {
     rmSync(stage, { recursive: true, force: true });
   }
   if (!r.fallback) process.exit(r.code);
-  if (FARM !== 'auto') {
+  // (a low job is background work for the farm: it never takes a slot of this Mac's instead)
+  if (FARM !== 'auto' || priority === 'low') {
     console.error(`drift-slot: farm (${FARM}): ${r.fallback}`);
     process.exit(1);
   }

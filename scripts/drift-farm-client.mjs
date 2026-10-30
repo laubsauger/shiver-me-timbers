@@ -418,12 +418,16 @@ export function submitterOf(env = process.env, pid = process.pid, host = hostnam
 
 // ------------------------------------------------------------------------------------------------------- submit
 /**
- * run `argv` on the farm as if here (header: SUBMIT). `prefer`: a box's name, or 'auto' (the best free box; none
- * free, or none takes it in 60 s: { fallback } and the caller runs it locally). → { code } or { fallback: why }
+ * run `argv` on the farm as if here (header: SUBMIT). `prefer`: a box's name, 'any' (whichever box, however long it
+ * waits), or 'auto' (the best free box; none free, or none takes it in 60 s: { fallback } and the caller runs it
+ * locally — never for a `low` job, which waits for the farm). `priority`: low | normal | high (drift-farm.mjs
+ * PRIORITIES). `packed`: a { payload, meta } already made by packState (drift-farm.mjs render: one code state for
+ * every chunk). → { code } or { fallback: why }
  */
-export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main' }) {
+export async function submit({ root, hub, token, argv, prefer = 'auto', weight = 1, priority = 'normal', say = console.error, out = (s) => process.stdout.write(s), stage, clean = false, base = 'origin/main', packed = null }) {
   const call = api(hub, token);
   const t0Submit = Date.now();
+  if (prefer === 'auto' && priority === 'low') prefer = 'any';
   if (prefer === 'auto') {
     const workers = await call('/farm/workers', { timeoutMs: 3000 }).catch((e) => ({ error: e.message }));
     if (!Array.isArray(workers)) return { fallback: `the farm hub does not answer (${workers.error})` };
@@ -433,10 +437,11 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   const untracked = new Set(git(root, ['ls-files', '--others', '--exclude-standard', '-z', '--', 'src', 'scripts', 'tests', 'public']).stdout.split('\0').filter(Boolean));
   const bundled = new Set((installedManifest(root)?.files ?? []).map((f) => f.path));
   const remap = remapArgv(argv, { root, cwd: process.cwd(), shipped: (rel) => tracked.has(rel) || untracked.has(rel) || bundled.has(rel) });
-  const { payload, meta } = await packState({ root, stage, inputs: remap.inputs, say, clean, base });
-  let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' ? null : prefer, weight, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
+  if (packed && remap.inputs.length > 0) throw new Error('a packed code state carries no inputs: pass the job\'s files as repo paths');
+  const { payload, meta } = packed ?? (await packState({ root, stage, inputs: remap.inputs, say, clean, base }));
+  let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' || prefer === 'any' ? null : prefer, weight, priority, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
   await upload(call, `/farm/jobs/${id}/payload`, payload);
-  say(`farm: job ${id} queued${prefer === 'auto' ? '' : ` for ${prefer}`}; following it here (Ctrl-C cancels it)`);
+  say(`farm: job ${id} queued${prefer === 'auto' || prefer === 'any' ? '' : ` for ${prefer}`}${priority !== 'normal' ? ` at ${priority} priority` : ''}; following it here (Ctrl-C cancels it)`);
   let cancelled = false;
   const onSig = () => {
     cancelled = true;

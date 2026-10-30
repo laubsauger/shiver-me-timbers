@@ -19,9 +19,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition,
+  createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, queueOrder, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition, yieldsTo,
 } from '../scripts/drift-farm.mjs';
 import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, roundTrip, submitterOf } from '../scripts/drift-farm-client.mjs';
+import { chunksOf } from '../scripts/drift-farm-render.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'drift-farm-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -85,6 +86,35 @@ describe('who gets what', () => {
   it('a job pinned to a box goes only there', () => {
     expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast], [fast], 1000)).toBeNull();
     expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast, slow], [fast, slow], 1000)).toBe('eeg-msi');
+  });
+
+  // PRIORITIES (drift-farm.mjs; the user, 2026-10-30: "I gave you all the computer in the world and everything is
+  // idle"): a background full-show preview fills the gaps between the agents' short review jobs at `low`, and must
+  // never slow them: a box a normal job could use is never handed to a low one
+  it('hands out the highest priority first, the oldest first within it', () => {
+    const q = [
+      { id: 'a', priority: 'low', queuedAt: 1 },
+      { id: 'b', queuedAt: 5 },
+      { id: 'c', priority: 'high', queuedAt: 9 },
+      { id: 'd', priority: 'normal', queuedAt: 2 },
+    ];
+    expect(queueOrder(q).map((j) => j.id)).toEqual(['c', 'd', 'b', 'a']);
+  });
+
+  it('a low job never takes a box a queued normal job could use — but a normal job pinned elsewhere holds nothing back', () => {
+    const low = { id: 'chunk', priority: 'low', queuedAt: 1 };
+    const review = { id: 'stills', queuedAt: 2 };
+    expect(yieldsTo(low, 'eeg-msi', [low, review])).toBe(true);
+    const pinned = { id: 'pinned', queuedAt: 2, prefer: 'linux-monster' };
+    expect(yieldsTo(low, 'eeg-msi', [low, pinned])).toBe(false);
+    expect(yieldsTo(low, 'linux-monster', [low, pinned])).toBe(true);
+    expect(yieldsTo(review, 'eeg-msi', [low, review])).toBe(false); // (a normal job never yields to a low one)
+  });
+
+  it('a held low job says it waits for the jobs above it', () => {
+    const workers = [{ node: 'eeg-msi', state: 'waiting', speed: 0.5, farmState: 'accepting' }];
+    const low = { kind: 'long', priority: 'low', queuedAt: 0 };
+    expect(holdReason(low, workers, 1000, PATIENCE_MS, [low, { kind: 'still', queuedAt: 5 }])).toBe('low priority: after 1 queued job(s) above it');
   });
 
   it('a held job says why, in words the dashboard shows', () => {
@@ -436,6 +466,22 @@ describe('the door', () => {
     expect((await claimAs('eeg-msi', '100.126.127.68'))?.requeuedFrom).toBeTruthy();
   });
 
+  it('over HTTP: a box asking gets the normal job before the low one queued earlier, and the low one after', async () => {
+    from = '127.0.0.1';
+    const mk = async (priority?: string) => {
+      const { id } = await (await call('/farm/jobs', { method: 'POST', body: { argv: ['node', 'scripts/drift-render.mjs'], base: 'abcdef1', ...(priority ? { priority } : {}) } })).json();
+      await call(`/farm/jobs/${id}/payload`, { method: 'PUT', raw: 'P' });
+      return id as string;
+    };
+    // (whatever earlier tests left queued goes first: cleared so this test sees only its own two)
+    for (const j of hub.jobs().filter((x) => x.state === 'queued')) await control(`/farm/jobs/${j.id}/cancel`, {});
+    const low = await mk('low');
+    const normal = await mk();
+    expect(hub.view().jobs.find((j: { id: string }) => j.id === low)).toMatchObject({ priority: 'low', why: 'low priority: after 1 queued job(s) above it' });
+    expect((await claimAs('eeg-msi', '100.126.127.68'))?.id).toBe(normal);
+    expect((await claimAs('windows-monster', '100.77.131.101'))?.id).toBe(low);
+  });
+
   it('removed: its claim is answered at once with its state (the worker asks again in minutes)', async () => {
     from = '127.0.0.1';
     expect((await control('/farm/nodes/windows-monster/state', { state: 'removed' })).status).toBe(200);
@@ -522,5 +568,25 @@ describe('the round trip, in the submitter\'s console (drift-farm-client.mjs rou
   });
   it('a box on old code (no timing): the hub\'s legs still show, the box\'s say "?"', () => {
     expect(roundTrip({ queuedAt: 0, claimedAt: 0, endedAt: 5000 }, { submitAt: 0, followAt: 0, landedAt: 6000 })).toMatch(/round trip 6\.0 s: .* boot \? · render \? .* back here 1\.0 s$/);
+  });
+});
+
+describe('a whole render in chunks over the farm (drift-farm-render.mjs chunksOf)', () => {
+  // every chunk is cut on whole frames: drift-render.mjs counts round((to − from)·fps) frames, so a chunk boundary off
+  // a frame would drop or double one at a seam — the joined show would be a frame short and everything after it late
+  it('cuts [0, 770) at 30 fps into 20 s chunks of whole frames, the last one shorter, nothing lost or doubled', () => {
+    const c = chunksOf(0, 770, 20, 30);
+    expect(c).toHaveLength(39);
+    expect(c[0]).toEqual({ from: 0, to: 20, frames: 600 });
+    expect(c.at(-1)).toEqual({ from: 760, to: 770, frames: 300 });
+    expect(c.reduce((a, x) => a + x.frames, 0)).toBe(770 * 30);
+    for (let i = 1; i < c.length; i++) expect(c[i].from).toBe(c[i - 1].to);
+    for (const x of c) expect(Math.round((x.to - x.from) * 30)).toBe(x.frames);
+  });
+
+  it('a range that starts mid-show and a chunk that is not a whole number of frames still meet exactly', () => {
+    const c = chunksOf(745.8, 760, 4.01, 30);
+    expect(c.reduce((a, x) => a + x.frames, 0)).toBe(Math.round((760 - 745.8) * 30));
+    for (const x of c) expect(Math.round((x.to - x.from) * 30)).toBe(x.frames);
   });
 });

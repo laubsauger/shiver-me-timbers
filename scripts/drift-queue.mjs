@@ -48,6 +48,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LANE_CODECS } from './cine-codecs.mjs';
 import { needVramGB, readYieldPolicy, waitForGpu } from './drift-share.mjs';
+import { frameCountOf, joinClips } from './drift-join.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -70,10 +71,6 @@ const say = (...a) => console.log(`[queue ${new Date().toISOString().slice(11, 1
 const sh = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 26 });
   return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? String(r.error ?? '') };
-};
-const frameCountOf = (file) => {
-  const r = sh('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=nb_frames', '-of', 'csv=p=0', file]);
-  return r.ok ? Number(r.out.trim()) : NaN;
 };
 const pad = (n) => String(n).padStart(6, '0');
 const gb = (b) => `${(b / 2 ** 30).toFixed(1)} GB`;
@@ -409,21 +406,8 @@ async function runJob(j, jobIndex = 0, jobCount = 1) {
   return { job: j.name, done: chunks.length, of: chunks.length, joined };
 }
 
-/** `ffmpeg -f concat -c copy` of whole clips into `out` (.part until its frame count is F); out or null */
-function joinFiles(files, out, F, list) {
-  const quoted = (f) => `file '${(process.platform === 'win32' ? f.replace(/\\/g, '/') : f).replace(/'/g, "'\\''")}'\n`;
-  writeFileSync(list, files.map(quoted).join(''));
-  const ext = out.endsWith('.mp4') ? 'mp4' : 'mov';
-  const r = sh('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', ...(ext === 'mp4' ? ['-movflags', '+faststart'] : []), '-f', ext, `${out}.part`]);
-  const n = r.ok ? frameCountOf(`${out}.part`) : NaN;
-  if (n !== F) {
-    say(`  JOIN FAILED: ${r.ok ? `${n} frames, ${F} expected` : r.err.trim()} — left ${out}.part`);
-    return null;
-  }
-  renameSync(`${out}.part`, out);
-  say(`  joined: ${out} (${F} frames)`);
-  return out;
-}
+/** `ffmpeg -f concat -c copy` of whole clips into `out` (drift-join.mjs, shared with the farm's chunked render) */
+const joinFiles = (files, out, F, list) => joinClips(files, out, F, list, say);
 
 /**
  * THE 12-BIT PRORES 4444 MASTER, ON THE MAC (--prores4444): every FFV1 chunk of a job becomes ProRes 4444 on

@@ -76,6 +76,9 @@
  *   node scripts/drift-farm.mjs state <box> accepting|draining|paused|removed
  *   node scripts/drift-farm.mjs consistency    every machine draws the same shots at HEAD, compared with this Mac's
  *                                              (scripts/drift-consistency.mjs)
+ *   node scripts/drift-farm.mjs render --from 0 --to 770 --chunk 20 --size 2048 --priority low
+ *                                              a whole render in chunks over every free box, joined on this Mac
+ *                                              (scripts/drift-farm-render.mjs)
  */
 import { execFile, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -138,6 +141,21 @@ export function jobClass(argv) {
  * the worker that takes `job` now, or null (hold it). `waiting`: workers in a claim right now [{ node, speed }];
  * `free`: every worker free in the last FREE_MS (the waiting ones too).
  */
+/**
+ * A JOB'S PRIORITY (the user, 2026-10-30: "I gave you all the computer in the world and everything is idle"): the
+ * agents' review jobs are short and come in bursts while they code, so the boxes idle between them; a background
+ * render (the whole show as a preview, drift-farm.mjs render) fills the gaps at `low` without slowing the agents'
+ * loop. The queue hands out the highest priority first, the oldest first within it; a `low` job takes a box only when
+ * no higher job that could use that box is queued (one pinned to another box does not hold it back). A running low job
+ * is never stopped: its chunks are kept short instead (20 s of show), so a normal job waits at most one chunk.
+ */
+export const PRIORITIES = ['low', 'normal', 'high'];
+export const rankOf = (job) => Math.max(0, PRIORITIES.indexOf(job.priority ?? 'normal'));
+/** the queued jobs in the order they are handed out: priority, then age */
+export const queueOrder = (queued) => [...queued].sort((a, b) => rankOf(b) - rankOf(a) || (a.queuedAt ?? a.createdAt) - (b.queuedAt ?? b.createdAt));
+/** may `job` take `node` while `queued` (the others) wait? Not while a higher job that could use that box is queued */
+export const yieldsTo = (job, node, queued) => queued.some((h) => h !== job && rankOf(h) > rankOf(job) && (!h.prefer || h.prefer === node));
+
 export function pickWorker(job, waiting, free, now, patienceMs = PATIENCE_MS) {
   let cands = job.prefer ? waiting.filter((w) => w.node === job.prefer) : [...waiting];
   if (cands.length === 0) return null;
@@ -152,12 +170,15 @@ export function pickWorker(job, waiting, free, now, patienceMs = PATIENCE_MS) {
  * why a queued job has no box yet, in words for the dashboard (FarmJob.why). `workers`: view()'s, each { node, state:
  * waiting | busy | busy-foreign | offline, why (busy-foreign: who, "ComfyUI 18 GB"), speed }
  */
-export function holdReason(job, workers, now, patienceMs = PATIENCE_MS) {
+export function holdReason(job, workers, now, patienceMs = PATIENCE_MS, queued = []) {
   const word = (w) => (w.state === 'busy-foreign' ? `${w.node} busy (${w.why ?? 'someone else on the GPU'})` : w.state === 'busy' ? `${w.node} busy with another job` : w.state === 'offline' ? `${w.node} offline` : `${w.node} free`);
   // only boxes that take work (farmState accepting) are candidates; the others say so
   const takes = (w) => (w.farmState ?? 'accepting') === 'accepting';
   const asked = job.prefer ? workers.filter((w) => w.node === job.prefer) : workers;
   if (asked.length === 0) return `${job.prefer} is not a farm box`;
+  // (low priority, header of PRIORITIES: behind the queued jobs above it that could use the same boxes)
+  const above = (queued ?? []).filter((h) => rankOf(h) > rankOf(job) && (!h.prefer || !job.prefer || h.prefer === job.prefer));
+  if (above.length > 0) return `${job.priority ?? 'normal'} priority: after ${above.length} queued job(s) above it`;
   const pool = asked.filter(takes);
   if (pool.length === 0) return job.prefer ? `${job.prefer} is ${asked[0].farmState} in the farm (the dashboard)` : `no box takes jobs (${asked.map((w) => `${w.node} ${w.farmState}`).join(', ')})`;
   const up = pool.filter((w) => w.state !== 'offline');
@@ -400,10 +421,13 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
 
   /** hand queued jobs to the workers in a claim right now (FIFO, by pickWorker) */
   const dispatch = () => {
-    const queued = [...jobs.values()].filter((j) => j.state === 'queued').sort((a, b) => a.queuedAt - b.queuedAt);
+    // (header of PRIORITIES: the highest first, the oldest first within it)
+    const queued = queueOrder([...jobs.values()].filter((j) => j.state === 'queued'));
     for (const job of queued) {
-      const waiting = [...claims.keys()].map((node) => ({ node, speed: speedNow(node) }));
-      if (waiting.length === 0) return;
+      // (a box a higher queued job could use is not offered to this one: that job waits for it, not behind a chunk)
+      const still = queued.filter((q) => jobs.get(q.id)?.state === 'queued');
+      const waiting = [...claims.keys()].filter((node) => !yieldsTo(job, node, still)).map((node) => ({ node, speed: speedNow(node) }));
+      if (waiting.length === 0) continue;
       const free = [...workers.values()].filter((w) => w.state === 'waiting' && now() - w.at < FREE_MS).map((w) => ({ node: w.node, speed: speedNow(w.node) }));
       const node = pickWorker(job, waiting, free, now());
       if (!node) continue;
@@ -462,6 +486,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
   const view = () => {
     const t = now();
     const list = [...jobs.values()].filter((j) => !FINAL.has(j.state) || t - (j.endedAt ?? j.createdAt) < 86_400_000).sort((a, b) => b.createdAt - a.createdAt);
+    const queuedNow = [...jobs.values()].filter((j) => j.state === 'queued');
     const best = Math.max(1, ...[...workers.values()].filter((w) => t - w.at < FREE_MS).map((w) => speedNow(w.node)));
     const workerView = hints().map((n) => {
       const w = workers.get(n.name);
@@ -475,7 +500,8 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         exitCode: j.exitCode ?? null, base: j.base, progress: j.progress ?? { done: null, total: null, unit: null, fps: null, etaS: null },
         estS: j.state === 'queued' && speeds.dur1?.[j.cls] ? Math.round(speeds.dur1[j.cls] / best) : null, last: j.last ?? null,
         results: (j.results ?? []).map((r) => ({ path: landingPath(j.outs[r.out], r.path), bytes: r.bytes })), error: j.error ?? null,
-        why: j.state === 'queued' ? holdReason(j, workerView, t) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
+        why: j.state === 'queued' ? holdReason(j, workerView, t, PATIENCE_MS, queuedNow) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
+        priority: j.priority ?? 'normal',
         cancelRequested: j.cancelRequested === true && !FINAL.has(j.state),
         timing: j.timing ?? null,
         // (the console's queue manager: who sent it, its command for the settings, its times, its fps over time while
@@ -494,7 +520,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
    */
   const requeue = (job, why) => {
     const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
-    const keep = ['label', 'argv', 'kind', 'cls', 'prefer', 'weight', 'base', 'bundle', 'outs', 'inputs', 'submitter', 'payloadBytes'];
+    const keep = ['label', 'argv', 'kind', 'cls', 'prefer', 'weight', 'priority', 'base', 'bundle', 'outs', 'inputs', 'submitter', 'payloadBytes'];
     const fresh = { id, state: 'queued', ...Object.fromEntries(keep.map((k) => [k, job[k]])), createdAt: now(), queuedAt: now(), attempts: 0, results: [], requeuedFrom: job.id };
     mkdirSync(join(jobsDir, id), { recursive: true });
     try {
@@ -690,7 +716,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
         const job = {
           id, state: 'uploading', label: String(b.label ?? b.argv.join(' ')).slice(0, 160), argv: b.argv, kind: ['still', 'clip', 'long'].includes(b.kind) ? b.kind : jobKind(b.argv),
-          cls: jobClass(b.argv), prefer: b.prefer ?? null, weight: Math.max(1, Number(b.weight) || 1), base: b.base, bundle: b.bundle ?? null,
+          cls: jobClass(b.argv), prefer: b.prefer ?? null, weight: Math.max(1, Number(b.weight) || 1), priority: PRIORITIES.includes(b.priority) ? b.priority : 'normal', base: b.base, bundle: b.bundle ?? null,
           outs: Array.isArray(b.outs) ? b.outs : [], inputs: Array.isArray(b.inputs) ? b.inputs : [], submitter: b.submitter ?? null, createdAt: now(), attempts: 0, results: [],
         };
         save(job);
@@ -809,8 +835,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   else if (what === 'state' && box && arg) await send(`/farm/nodes/${encodeURIComponent(box)}/state`, { state: arg });
   // do the machines draw the same film? (scripts/drift-consistency.mjs; it reads its own flags)
   else if (what === 'consistency') await import('./drift-consistency.mjs');
+  // a whole render in chunks over the farm's free boxes, joined here (scripts/drift-farm-render.mjs)
+  else if (what === 'render') await import('./drift-farm-render.mjs');
   else {
-    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}\n       node scripts/drift-farm.mjs consistency [--boxes a,b] [--width 960] [--shots file] [--no-mac]`);
+    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}\n       node scripts/drift-farm.mjs consistency [--boxes a,b] [--width 960] [--shots file] [--no-mac]\n       node scripts/drift-farm.mjs render --from 0 --to 770 [--chunk 20] [--size 2048] [--priority low] [--out dir] [-- drift-render flags]`);
     process.exit(2);
   }
 }
