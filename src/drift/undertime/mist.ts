@@ -38,10 +38,12 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import type { PairEvent } from './events';
+import { packedSpiral, type PairEvent } from './events';
 import { rng } from './web';
 import { billboardMesh, eyeFacing } from './billboard';
-import { arcPoint } from './loops';
+import { arcPoint, pairTint, type Shades } from './loops';
+import { frontTime, waveWarp, type WaveFxUniforms } from './waveFx';
+import { glowWindow } from './glow';
 import { pocketMask, type PocketUniforms } from './pairModel';
 
 type F = THREE.Node<'float'>;
@@ -66,6 +68,11 @@ export interface MistUniforms {
   life: F;
   pocket: PocketUniforms;
   eye: V3;
+  /** the families' shades (loops.ts pairTint) */
+  shades?: Shades;
+  /** the light wave (waveFx.ts): puffs drawn where its pull puts them, and burnt out as it passes (a spark is
+   * too small to freeze into the afterglow the trails keep; it flashes and is gone) */
+  fx?: WaveFxUniforms;
 }
 
 /** tileable value-noise fbm, 128², generated once (wispy alpha for the puffs) */
@@ -137,7 +144,7 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
         V.set([...e.vertex, e.energy], k * 4);
         X.set([...e.axis, (j + r()) / PUFFS], k * 4);
         Y.set([...e.across, q === 0 ? 1 : -1], k * 4);
-        Z.set([e.spiral, e.drift, e.arc, e.end], k * 4);
+        Z.set([packedSpiral(e), e.drift, e.arc, e.end], k * 4);
       }
   const a = attribute<'vec4'>('mistA', 'vec4');
   const v = attribute<'vec4'>('mistV', 'vec4');
@@ -177,7 +184,8 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
   const billow = vec3(hash(i.mul(1.3)), hash(i.mul(2.1)), hash(i.mul(3.7))).sub(0.5).mul(mix(float(0.22), float(0.03), isCore)).mul(grow0(age));
   // sparks fly off the trail a little (their own random direction), mist only drifts
   const kick = spark ? vec3(hash(i.mul(21.1)), hash(i.mul(23.3)), hash(i.mul(29.7))).sub(0.5).mul(0.5).mul(age.max(0).mul(3).add(0).min(1.2)) : vec3(0);
-  const pos = base.add(flow.mul(age.max(0))).add(billow).add(kick);
+  const placed = base.add(flow.mul(age.max(0))).add(billow).add(kick);
+  const pos = U.fx ? waveWarp(placed, U.fx) : placed;
   // diffusion: size with √age, density falling; condenses in ~0.1 s
   const grow = sqrt(age.max(0).add(0.02));
   function grow0(a: F): F {
@@ -207,7 +215,7 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
     lit.addAssign(C.xyz.mul(exp(sqrt(r2).mul(0.25).negate())).div(r2).mul(1.6));
   });
   const fresh = exp(age.div(0.3).negate());
-  const tint = mix(U.matter, U.anti, step(q, 0));
+  const tint = pairTint(U.matter, U.anti, U.shades, q, energy, birth.mul(91.7).add(vertex.x));
   const colour = spark ? tint.mul(2.5).add(lit.mul(0.3)) : lit.mul(mix(vec3(1), tint.mul(1.6), fresh.mul(0.6)));
   const dist = cameraPosition.sub(pos).length();
   const drawn = max(size, U.pixelAngle.mul(2).mul(dist));
@@ -216,7 +224,12 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
   const depth = exp(dist.div(22).negate()).mul(0.8).add(0.2);
   // not along the part of the path the pair never lived (the wave cut it)
   const lived = step(uu, z.w);
-  const alive = presence.mul(coverage).mul(energy).mul(depth).mul(lived).mul(float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85)));
+  // the front burns the sparks it reaches: a last flare, gone in a fifth of a second
+  const burnt = U.fx ? (() => {
+    const s = U.time.sub(frontTime(base, U.fx));
+    return mix(float(1), float(1).add(exp(s.div(0.05).negate()).mul(2)).mul(exp(s.div(0.2).negate())), step(0, s));
+  })() : float(1);
+  const alive = presence.mul(coverage).mul(energy).mul(depth).mul(lived).mul(burnt).mul(float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85)));
 
   const noise = noiseTexture();
   const material = new THREE.NodeMaterial();
@@ -234,7 +247,8 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
     const w = texture(noise, pr.mul(0.35).add(vec2(hash(i.mul(9.1)), hash(i.mul(11.3))))).r;
     const fall = exp(p.dot(p).mul(2.6).negate());
     // wisps: the noise carves the soft puff; older puffs are thinner and more broken
-    if (spark) return vec4(colour.mul(U.radiance).mul(alive).mul(exp(p.dot(p).mul(6).negate())), 1);
+    // (windowed to zero at the quad's edge, glow.ts)
+    if (spark) return vec4(colour.mul(U.radiance).mul(alive).mul(exp(p.dot(p).mul(6).negate())).mul(glowWindow(p.dot(p))), 1);
     const density = smoothstep(float(0.35).add(fresh.mul(-0.2)), 1, w.mul(fall).mul(1.8));
     return vec4(colour.mul(U.radiance).mul(alive).mul(density).mul(mix(float(0.28), float(0.9), isCore)), 1);
   })();

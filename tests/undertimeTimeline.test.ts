@@ -7,11 +7,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import { driftParams } from '../src/params/drift';
-import { BEATS, beatStarts, eyePath, fieldClock, undertimeState } from '../src/drift/undertime/timeline';
+import { BEATS, HERO_RUN, beatStarts, eyePath, fieldClock, heroPassTime, undertimeState, waveSweep, waveTimeAt } from '../src/drift/undertime/timeline';
+import { phraseHold } from '../src/drift/undertime/crawl';
+import { undertimeCrawl } from '../src/drift/undertime/crawlText';
 
 const p = { ...driftParams };
 const { starts, total } = beatStarts(p);
-const KEYS = ['clock', 'clockRate', 'pairDensity', 'flashGain', 'glow', 'wave', 'heroGrain', 'grains', 'scale', 'stars'] as const;
+const KEYS = ['clock', 'clockRate', 'pairDensity', 'flashGain', 'glow', 'wave', 'build', 'lens', 'crest', 'frontGain', 'heroGrain', 'grains', 'scale', 'stars'] as const;
 const at = (b: (typeof BEATS)[number], k: number) => undertimeState(starts[b] + p[b] * k, p);
 
 describe('Undertime timeline', () => {
@@ -53,11 +55,17 @@ describe('Undertime timeline', () => {
     }
   });
 
-  it('the wave is the second peak and darkness follows it; the remainder appears only after', () => {
+  it('the wave is the second peak and darkness follows it; the front leaves the one grain, the others come later', () => {
     expect(at('wave', 0.5).glow).toBeGreaterThan(at('cool', 1).glow);
     expect(at('remain', 0.1).glow).toBeLessThan(0.02);
     expect(at('remain', 0.2).pairDensity).toBe(0);
-    expect(at('wave', 1).heroGrain).toBe(0);
+    // the hero grain is LEFT BY THE FRONT (the 2026-10-30 story note): nothing there until the front has passed its
+    // spot, there for good before the wave is over
+    const pass = heroPassTime(p);
+    expect(pass).toBeGreaterThan(starts.wave);
+    expect(undertimeState(pass, p).heroGrain).toBe(0);
+    expect(at('wave', 1).heroGrain).toBeGreaterThan(0.9);
+    expect(undertimeState(pass + HERO_RUN + 1, p).heroGrain).toBeCloseTo(1, 6);
     expect(at('wave', 1).grains).toBe(0);
     // one grain first, the others later
     expect(at('remain', 0.3).heroGrain).toBeGreaterThan(0.9);
@@ -98,6 +106,80 @@ describe('Undertime timeline', () => {
 
   it('is a pure function of time: the same t gives the same frame', () => {
     for (let t = 0; t < total; t += 0.37) expect(undertimeState(t, p)).toEqual(undertimeState(t, p));
+  });
+});
+
+/**
+ * THE LIGHT WAVE AS A COLLAPSE (the 2026-10-30 review: "a better ramp into intensity … a total collapse of space and
+ * time … too tame"). Its envelope must build tension and then hold a peak, inside the act's timing, and leave the
+ * darkness the remainder needs. On a dome every one of these is felt by the whole room at once.
+ */
+describe('Undertime light wave envelope', () => {
+  // the cooling's last phrase leaves the dome at its fade-out's end (crawl.ts: 0.9 s in, the hold, 1.1 s out)
+  const lastPhraseGone = Math.max(
+    ...undertimeCrawl(p).filter((ph) => ph.at < starts.wave).map((ph) => ph.at + 0.9 + phraseHold(ph) + 1.1),
+  );
+
+  it('the build waits for the text to leave, then accelerates into the front (tension, not a fade-in)', () => {
+    expect(undertimeState(lastPhraseGone, p).build).toBe(0);
+    const t0 = starts.wave - p.waveBuild;
+    const mid = undertimeState(t0 + p.waveBuild / 2, p).build;
+    const late = undertimeState(starts.wave - 0.5, p).build;
+    // convex: there from the start, most of the rise in the last seconds
+    expect(mid).toBeGreaterThan(0.15);
+    expect(mid).toBeLessThan(0.4);
+    expect(late).toBeGreaterThan(0.7);
+    expect(undertimeState(starts.wave, p).build).toBeCloseTo(1, 6);
+    for (let t = t0; t < starts.wave; t += 0.1) expect(undertimeState(t + 0.1, p).build).toBeGreaterThanOrEqual(undertimeState(t, p).build);
+  });
+
+  it('the front STALLS over the audience, and its crest holds while it does (the climax is the front itself)', () => {
+    // the front's angular speed (frac/s) over the audience against its fastest
+    const speed = (t: number): number => (undertimeState(t + 0.01, p).wave - undertimeState(t - 0.01, p).wave) / 0.02;
+    const over = starts.wave + waveTimeAt(0.5, p.waveStall) * p.wave;
+    let fastest = 0;
+    for (let t = starts.wave + 0.05; t < starts.wave + p.wave - 0.05; t += 0.02) fastest = Math.max(fastest, speed(t));
+    expect(speed(over)).toBeLessThan(0.5 * fastest);
+    // and still moving: a stall, not a stop (a front that stops reads as a wall)
+    expect(speed(over)).toBeGreaterThan(0.15 * fastest);
+    let held = 0;
+    let first = Infinity;
+    let last = -Infinity;
+    for (let t = starts.wave; t < starts.wave + p.wave; t += 0.01) {
+      if (undertimeState(t, p).crest > 0.95) {
+        held += 0.01;
+        first = Math.min(first, t);
+        last = Math.max(last, t);
+      }
+    }
+    expect(held).toBeGreaterThan(1);
+    expect(first).toBeLessThan(over);
+    expect(last).toBeGreaterThan(over);
+  });
+
+  it('it is all over before the remainder: darkness first, the one grain singled out in it', () => {
+    for (const k of ['build', 'lens', 'crest', 'frontGain'] as const) expect(undertimeState(starts.remain + 0.1, p)[k], k).toBeLessThan(1e-6);
+    expect(undertimeState(starts.wave + p.wave - 1.2, p).crest).toBeLessThan(1e-6);
+  });
+
+  it('the front pulls hardest as it passes over the audience, and never more than waveLens', () => {
+    const max = (p.waveLens * Math.PI) / 180;
+    let peakT = 0;
+    let peak = 0;
+    for (let t = starts.cool; t < starts.remain; t += 0.02) {
+      const l = undertimeState(t, p).lens;
+      expect(l).toBeLessThanOrEqual(max + 1e-9);
+      if (l > peak) [peak, peakT] = [l, t];
+    }
+    expect(peak).toBeGreaterThan(0.95 * max);
+    // while it stalls over the audience
+    expect(undertimeState(peakT, p).crest).toBeGreaterThan(0.9);
+  });
+
+  it('the inverse of the sweep is exact (the GPU freezes trails on the same curve the CPU kills pairs on)', () => {
+    for (let k = 0; k <= 1; k += 0.01) expect(waveTimeAt(waveSweep(k, p.waveStall), p.waveStall)).toBeCloseTo(k, 6);
+    // and the sweep only goes forward
+    for (let k = 0; k < 1; k += 0.001) expect(waveSweep(k + 0.001, p.waveStall)).toBeGreaterThan(waveSweep(k, p.waveStall));
   });
 });
 

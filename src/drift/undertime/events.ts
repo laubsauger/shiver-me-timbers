@@ -10,6 +10,11 @@
  *                           still meet, the drift being shared
  *                   SPIRAL  the classic bubble-chamber pair: each spirals inward, turning faster as it loses
  *                           energy, and annihilates at its own end, with the medium (two flashes, not one)
+ *                   BRAID   (Act 1, `braid` in EventOptions) a BOUND pair — positronium — orbiting its own centre
+ *                           as the centre travels along the axis: two strands, amber and violet, wound round each
+ *                           other, the orbit opening from the vertex and closing where they meet. Seen from the
+ *                           side the strands cross and recross like interference fringes (the 2026-10-30 review
+ *                           asked for "more interesting shapes")
  *   annihilation  a flash that lights the medium around it, and gamma rays shooting out
  *
  * Every event is generated here, once, from a seed (CPU): a list of pairs with their birth time and
@@ -51,7 +56,13 @@ export interface PairEvent {
   /** 0..1 of its loop the pair lives: 1 normally; less when the wave front reaches it first (U3), and then
    * both beads annihilate where they are instead of meeting */
   end: number;
+  /** a BRAID: the centre's run along the axis, in loop radii (absent or 0: one of the other shapes). `arc` is then
+   * the orbit's total angle */
+  braid?: number;
 }
+
+/** the `spiral` the GPU sees: a braid rides in it as −braid (loops.ts arcPoint; WebGPU's 8 vertex buffers are spent) */
+export const packedSpiral = (e: Pick<PairEvent, 'spiral' | 'braid'>): number => (e.braid ? -e.braid : e.spiral);
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a: Vec3, b: Vec3, k = 1): Vec3 => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
@@ -65,7 +76,7 @@ const norm = (a: Vec3): Vec3 => {
 /** the arc a LOOP sweeps: from leaving the vertex to meeting its partner on the axis behind it */
 export const loopArc = (open: number): number => 2 * Math.PI - 2 * open;
 
-type PathEvent = Pick<PairEvent, 'vertex' | 'axis' | 'across' | 'open' | 'radius' | 'spiral' | 'drift' | 'arc'>;
+type PathEvent = Pick<PairEvent, 'vertex' | 'axis' | 'across' | 'open' | 'radius' | 'spiral' | 'drift' | 'arc' | 'braid'>;
 
 /** 0..1 how far round its loop a bead is at loop progress u (it slows as it goes, still moving when they meet) */
 export const loopEase = (u: number): number => {
@@ -81,6 +92,7 @@ export const loopEase = (u: number): number => {
  */
 export function loopPoint(e: PathEvent, q: number, u: number): Vec3 {
   const f = loopEase(u);
+  if (e.braid) return braidPoint(e, q, f);
   const phi = e.arc * f;
   const theta0 = e.open - Math.PI / 2;
   const r = e.radius * Math.exp(-e.spiral * phi);
@@ -91,6 +103,20 @@ export function loopPoint(e: PathEvent, q: number, u: number): Vec3 {
   const z = (e.drift * (1 - Math.cos(Math.PI * f))) / 2;
   const n = cross(e.axis, e.across);
   return add(add(add(e.vertex, e.axis, x), e.across, y), n, z);
+}
+
+/**
+ * A BRAID's bead q at arc fraction f: the centre `braid` radii along the axis by the end, the two on opposite sides
+ * of it (q·ρ), the orbit radius ρ opening from 0 at the vertex to half a loop radius and closing to 0 where they meet
+ * (sin(πf)^0.6: they part quickly, as a V does, and close more slowly). loops.ts arcPoint is the GPU twin.
+ */
+export function braidPoint(e: PathEvent, q: number, f: number): Vec3 {
+  const k = Math.min(1, Math.max(0, f));
+  const phi = e.arc * k;
+  const rho = e.radius * 0.5 * Math.pow(Math.max(0, Math.sin(Math.PI * k)), 0.6) * q;
+  const n = cross(e.axis, e.across);
+  const c = add(e.vertex, e.axis, e.radius * (e.braid ?? 0) * k);
+  return add(add(c, e.across, rho * Math.cos(phi)), n, rho * Math.sin(phi));
 }
 
 /** where bead q ends: for a loop or helix both end at the same point (where they meet) */
@@ -128,6 +154,11 @@ export interface EventOptions {
   /** loop size and duration ranges */
   loopRadius: [number, number];
   loopTime: [number, number];
+  /** Act 1: the fraction of pairs born as BRAIDS (taken from the loops; absent: none, and the pairs are exactly
+   * the ones they were — Act 3's field calls this too) */
+  braid?: number;
+  /** Act 1: added to every pair's energy draw (0..1 after it), for a phase whose pairs run hotter (the build) */
+  energyBias?: number;
 }
 
 /**
@@ -165,6 +196,33 @@ export function generatePairs(o: EventOptions, peakRate: number): PairEvent[] {
     const tight = r();
     const isSpiral = shape > 0.65;
     const isHelix = shape > 0.4 && !isSpiral;
+    // a braid takes the place of a loop (shape < braid ≤ 0.4); it needs no draws of its own, so a run without
+    // braids draws exactly the numbers it always did
+    const isBraid = !!o.braid && shape < Math.min(0.4, o.braid);
+    const e0 = Math.min(1, energy + (o.energyBias ?? 0));
+    if (isBraid) {
+      out.push({
+        birth: t,
+        // a bound pair lives longer than a free loop of its size (it winds 2–3.5 times before it closes: at 4–7 the
+        // strands, seen side-on, kinked at every turn at the 2K dome's pixel size — a coil spring, not a rope)
+        loop: (o.loopTime[0] + (o.loopTime[1] - o.loopTime[0]) * dur) * 1.5,
+        vertex,
+        axis,
+        across,
+        open: openA,
+        radius: radius * 0.8,
+        energy: 0.35 + 0.65 * e0 * e0,
+        gamma: norm(add(cross(axis, across), across, gam - 0.5)),
+        spiral: 0,
+        drift: 0,
+        arc: Math.PI * 2 * (2 + 1.5 * tight),
+        meets: 1,
+        burst: 0.25 + 0.7 * e0 * e0,
+        end: 1,
+        braid: 2.2 + 2.4 * size,
+      });
+      continue;
+    }
     out.push({
       birth: t,
       loop: (o.loopTime[0] + (o.loopTime[1] - o.loopTime[0]) * dur) * (isSpiral ? 1.2 : 1),
@@ -173,13 +231,13 @@ export function generatePairs(o: EventOptions, peakRate: number): PairEvent[] {
       across,
       open: openA,
       radius,
-      energy: 0.35 + 0.65 * energy * energy,
+      energy: 0.35 + 0.65 * e0 * e0,
       gamma: norm(add(cross(axis, across), across, gam - 0.5)),
       spiral: isSpiral ? 0.1 + 0.12 * tight : 0,
       drift: isHelix ? radius * (1.2 + 1.6 * tight) * (gam < 0.5 ? -1 : 1) : 0,
       arc: isSpiral ? Math.PI * (2.6 + 2 * tight) : loopArc(openA),
       meets: isSpiral ? 0 : 1,
-      burst: 0.25 + 0.7 * energy * energy,
+      burst: 0.25 + 0.7 * e0 * e0,
       end: 1,
     });
   }

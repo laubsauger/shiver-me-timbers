@@ -17,7 +17,7 @@ import { Fn, PI, abs, attribute, clamp, cos, exp, float, hash, instanceIndex, le
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { billboardMesh, eyeFacing } from './billboard';
 import { rng } from './web';
-import { patternToWorld, type WebKnot } from './webVolume';
+import type { WebKnot } from './webVolume';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -43,26 +43,11 @@ export interface GrainUniforms extends PocketUniforms {
   /** the grains' colour (matter warmed toward starlight) */
   warm: V3;
   star: V3;
-  /** the eye's place in the web's box, and the box's size in the world (timeline.ts webFlight) */
+  /** the eye's place in the web's box, and the box's size in the world (timeline.ts webFlight, then the dive:
+   * getTheDrift/webDive.ts), and the box's turn in the world (world = webToWorld · pattern; none: unturned) */
   eyePat: V3;
   box: F;
-}
-
-/**
- * World positions of the web's knots near the eye at the END of the pull-back (the flight's `eyePat` and
- * `box` then): where Act 2's galaxies open (drift/getTheDrift/galaxies.ts), so the first stars become the
- * first galaxies in place. The densest quarter are level 1 (the bigger galaxies).
- */
-export function finalKnots(knots: WebKnot[], eyePat: [number, number, number], eye: [number, number, number], box: number, reach = 0.55): Array<{ pos: [number, number, number]; level: number }> {
-  const near = knots.filter((k) => {
-    const d = k.pos.map((x, i) => {
-      const v = x - eyePat[i];
-      return v - Math.round(v);
-    });
-    return Math.hypot(d[0], d[1], d[2]) < reach;
-  });
-  const cut = [...near].sort((a, b) => b.density - a.density)[Math.floor(near.length / 4)]?.density ?? Infinity;
-  return near.map((k) => ({ pos: patternToWorld(k.pos, eyePat, eye, box), level: k.density >= cut ? 1 : 0 }));
+  webToWorld?: THREE.Node<'mat3'>;
 }
 
 /** the remainder's pattern (unit ball) → world: about the hero grain, shrinking into it with the zoom */
@@ -106,7 +91,9 @@ export function createGrains(count: number, U: GrainUniforms): THREE.InstancedMe
   const pos = toWorld(pattern, U).add(wander);
   const dist = pos.sub(U.eye).length();
   // the remainder appears grain by grain through U4 (a few, then a few more), filling out as the pull-back begins
-  const share = mix(U.reveal.mul(0.12), float(1), U.fill);
+  // (a quarter of the 12 % it was: the light wave now leaves its survivors on the dome, survivors.ts — they are the
+  // "very few"; these are the scale the pull-back reveals)
+  const share = mix(U.reveal.mul(0.03), float(1), U.fill);
   const present = smoothstep(info.y, info.y.add(0.02), share).mul(remainderPresence(U));
   const wanted = U.size.mul(U.scale).mul(info.x.mul(0.8).add(0.6));
   // a grain is a point of light, never a disc: capped at ~0.15° (a near disc reads as out-of-focus dirt)
@@ -160,9 +147,10 @@ export function createStars(U: GrainUniforms, knots: WebKnot[]): THREE.Instanced
   knots.forEach((k, i) => data.set([...k.pos, k.density / top], i * 4));
   const K = attribute<'vec4'>('starKnot', 'vec4');
   const k = float(instanceIndex);
-  // the knot's image nearest the eye, placed by the web's flight
-  const dp = K.xyz.sub(U.eyePat);
-  const pos = U.eye.add(dp.sub(dp.add(0.5).floor()).mul(U.box));
+  // the knot's image nearest the eye, placed by the web's flight (and turned by its frame, as the gas is)
+  const dp0 = K.xyz.sub(U.eyePat);
+  const dp = dp0.sub(dp0.add(0.5).floor());
+  const pos = U.eye.add((U.webToWorld ? U.webToWorld.mul(dp) : dp).mul(U.box));
   const seed = k.mul(3.31).add(0.5);
   // most knots ignite, each at its own moment, with a brief overshoot as it catches
   const lit = step(hash(seed), 0.88);

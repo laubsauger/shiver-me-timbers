@@ -10,9 +10,10 @@
 import * as THREE from 'three/webgpu';
 import { float, int, ivec2, textureLoad, uniform } from 'three/tsl';
 import type { DriftParams } from '../../params/drift';
-import { beatStarts, eyePath, fieldClock, heroGrainPosition, undertimeState, waveTimeAt, webFlight, type UndertimeState } from './timeline';
+import { beatStarts, eyePath, fieldClock, heroGrainPosition, sweepInverseTable, undertimeState, waveEnvelope, waveTimeAt, webFlight, type UndertimeState } from './timeline';
 import { heroSlot, pairSlot, trackPositionCpu, type PairUniforms } from './pairModel';
-import { HERO_TRACK_END, heroPair, survivorPair, waveFracCpu } from './scripted';
+import { HERO_TRACK_END, heroPair, survivorPair } from './scripted';
+import { frontFracCpu } from './front';
 import { domeBasis } from '../../cine/domeMaster';
 import { rng } from './web';
 import { createTracks, type TrackUniforms } from './tracks';
@@ -25,6 +26,10 @@ import { createLoopSprites, createLoopTrails } from './loops';
 import { createMist, type Mist } from './mist';
 import { DUST_LIGHTS, createDust } from './dust';
 import { createBursts, type Burst } from './burst';
+import { generateProducts, jet, type Blast, type ProductTrack } from './productModel';
+import { createProducts, type ProductMeshes } from './products';
+import { createSurvivorGrains, pickSurvivors, type SurvivorRest } from './survivors';
+import { SWEEP_LUT, type WaveFxUniforms } from './waveFx';
 import { createWebParticles, createWebVolume, type WebData } from './webVolume';
 
 type F = THREE.Node<'float'>;
@@ -40,13 +45,29 @@ export interface TextPocket {
   strength: number;
 }
 
+/**
+ * Where the eye is in the cosmic web, and how the web sits in the world (getTheDrift/webDive.ts webPlace and its
+ * frame): the web's box carries the pull-back, the dive and the approach on one curve across both acts.
+ */
+export interface WebView {
+  /** the eye's place in the box (pattern units), the box's size (world units), the eye's velocity (pattern units/s) */
+  eyePat: [number, number, number];
+  box: number;
+  vel: [number, number, number];
+  /** pattern → world, row-major */
+  R: readonly number[];
+  /** 0..1 the dive's near detail on (webVolume.ts createWebParticles `close`) */
+  close: number;
+}
+
 export interface UndertimeField {
   readonly group: THREE.Group;
   /** keep the field out of the sky the crawl is passing through */
   setPocket(pocket: TextPocket, tiltDeg: number): void;
   /** push the timeline state for act time `t`, seen from `eye` (world position); `fade` dims what remains
-   * as the next act takes over */
-  update(state: UndertimeState, t: number, eye: THREE.Vector3, fade?: number, webKeep?: number): void;
+   * as the next act takes over; `web`, where the eye is in the web and the web's frame (getTheDrift/webDive.ts —
+   * without it, the pull-back's own flight places the web, unturned) */
+  update(state: UndertimeState, t: number, eye: THREE.Vector3, fade?: number, webKeep?: number, web?: WebView): void;
   /** radians per pixel of the view about to be drawn (a cube face: (π/2)/faceSize) — ribbons never go sub-pixel */
   setPixelAngle(rad: number): void;
   dispose(): void;
@@ -84,14 +105,30 @@ function bakeBirthTable(p: DriftParams, pocketAt: (t: number) => TextPocket, dat
   return clockMax;
 }
 
+export interface ActEvents {
+  /** every pair, for loops.ts (trails, sprites), mist.ts and the lights */
+  events: PairEvent[];
+  /** the collisions' products (productModel.ts) */
+  tracks: ProductTrack[];
+  /** creation and annihilation fireballs, for burst.ts */
+  blasts: Blast[];
+  /** where the survivors come to rest, and when (survivors.ts) */
+  rests: SurvivorRest[];
+}
+
 /**
- * The act's pairs. U0 is one HERO event at the first-light spot, its loop plane facing the audience: two
- * photons converge on it from the left and right of the dome, and its two loops open up and out like the
- * classic picture. From the arising on, the field: births at the rate the timeline's density sets, around
- * the eye as it drifts, never right on top of it, never where the text is (or is about to be); loops last
- * longer as the field clock slows (time slows as it cools).
+ * The act's pairs and what they leave. U0 is one HERO event at the first-light spot, its loop plane facing the
+ * audience: two photons converge on it from the left and right of the dome, and its two loops open up and out like
+ * the classic picture; its gammas convert far out into the first new pairs. From the arising on, the field: births
+ * at the rate the timeline's density sets, around the eye as it drifts, never right on top of it, never where the
+ * text is (or is about to be); loops last longer as the field clock slows (time slows as it cools). Some are BRAIDS
+ * (bound pairs), some collisions are JETS (fans of tracks), and the annihilations throw stars, kinks, conversions
+ * (productModel.ts; the 2026-10-30 review: "more interesting shapes … more interesting results of particles").
+ *
+ * THE BUILD (timeline.ts waveEnvelope; the same review: "a better ramp into intensity"): over the cooling's last
+ * seconds, births gather low in front, where the front will rise, quicker and hotter, accelerating into it.
  */
-function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): PairEvent[] {
+export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): ActEvents {
   const { starts } = beatStarts(p);
   const g = heroGrainPosition(p);
   const eye0 = eyePath(p.heroBirth, p);
@@ -122,18 +159,30 @@ function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): P
   };
   const PEAK = 70;
   const D = Math.PI / 180;
+  const rate = (t: number): number => {
+    if (t < starts.arise) return 0;
+    const ar = Math.min(1, (t - starts.arise) / Math.max(1e-6, p.arise));
+    if (t < starts.cool) return PEAK * ar ** 2.2;
+    const c = Math.min(1, (t - starts.cool) / Math.max(1e-6, p.cool));
+    return PEAK * (1 - (1 - 0.05) * (1 - (1 - c) ** 6));
+  };
+  // not born in (or about to be in) the text's sky
+  const clearOfText = (birth: number, at: readonly number[]): boolean => {
+    const pk = pocketAt(birth);
+    if (pk.strength <= 0.05) return true;
+    const eye = eyePath(birth, p);
+    const v = [at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]];
+    const l = Math.hypot(v[0], v[1], v[2]) || 1;
+    const el = Math.asin((v[0] * b.axis[0] + v[1] * b.axis[1] + v[2] * b.axis[2]) / l) / D;
+    const az = Math.atan2(v[0] * b.right[0] + v[1] * b.right[1] + v[2] * b.right[2], v[0] * b.front[0] + v[1] * b.front[1] + v[2] * b.front[2]) / D;
+    return !(el > pk.lo - 6 && el < pk.hi + 6 && Math.abs(az) < pk.az + 8);
+  };
   const field = generatePairs(
     {
       seed: 4711,
       // the arising builds to the boil; the cooling calms FAST to a few pairs a second (each loop lasts longer
       // as time slows, so the rate must fall further than the density)
-      rate: (t) => {
-        if (t < starts.arise) return 0;
-        const ar = Math.min(1, (t - starts.arise) / Math.max(1e-6, p.arise));
-        if (t < starts.cool) return PEAK * ar ** 2.2;
-        const c = Math.min(1, (t - starts.cool) / Math.max(1e-6, p.cool));
-        return PEAK * (1 - (1 - 0.05) * (1 - (1 - c) ** 6));
-      },
+      rate,
       from: starts.arise,
       to: starts.wave + p.wave,
       centre: (t) => eyePath(t, p),
@@ -142,41 +191,125 @@ function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPocket): P
       clearance: 5,
       loopRadius: [0.8, 2.8],
       loopTime: [2.2, 3.8],
+      // one in eight a bound pair (a braid): the cooling's graceful shape
+      braid: 0.12,
     },
     PEAK,
-  ).filter((e) => {
-    // not born in (or about to be in) the text's sky
-    const pk = pocketAt(e.birth);
-    if (pk.strength <= 0.05) return true;
-    const eye = eyePath(e.birth, p);
-    const v = [e.vertex[0] - eye[0], e.vertex[1] - eye[1], e.vertex[2] - eye[2]];
-    const l = Math.hypot(v[0], v[1], v[2]) || 1;
-    const el = Math.asin((v[0] * b.axis[0] + v[1] * b.axis[1] + v[2] * b.axis[2]) / l) / D;
-    const az = Math.atan2(v[0] * b.right[0] + v[1] * b.right[1] + v[2] * b.right[2], v[0] * b.front[0] + v[1] * b.front[1] + v[2] * b.front[2]) / D;
-    return !(el > pk.lo - 6 && el < pk.hi + 6 && Math.abs(az) < pk.az + 8);
-  });
+  ).filter((e) => clearOfText(e.birth, e.vertex));
   // time slows as it cools: a loop born then lasts longer
   for (const e of field) e.loop /= Math.max(0.3, undertimeState(e.birth, p).clockRate);
-  // THE WAVE (U3): the front reaches a pair's direction at waveStart + frac·wave. A pair alive then ends
-  // where it is (both beads annihilate on the front); nothing is born behind the front.
+  // THE BUILD: births low in front where the front will rise (centred ~23° up the dome, 12 m out), quick and hot,
+  // their loops shortening as the tension rises — the field accelerating into the collapse
+  const rise = (t: number): number => waveEnvelope(t, p).build;
   const eyeW = eyePath(starts.wave, p);
-  const kept = field.filter((e) => {
-    const cut = starts.wave + waveTimeAt(waveFracCpu([e.vertex[0] - eyeW[0], e.vertex[1] - eyeW[1], e.vertex[2] - eyeW[2]], p.domeTilt)) * p.wave;
-    if (e.birth >= cut) return false;
-    if (e.birth + e.loop > cut) e.end = Math.max(0.02, (cut - e.birth) / e.loop);
-    return true;
-  });
-  // and the front itself is made of the grammar: hundreds of small pairs born and annihilated ON it —
-  // fireballs, quick loops, gamma rays — a wall of creation and cancellation sweeping over the audience
+  const lowFront = (t: number): [number, number, number] => {
+    const e = eyePath(t, p);
+    return [0, 1, 2].map((i) => e[i] + b.front[i] * 12 + b.axis[i] * 5) as [number, number, number];
+  };
+  // (46 at first: with their products and jets the build became a tangle; 2026-10-30 first look)
+  const BUILD_PEAK = 18;
+  const build = generatePairs(
+    {
+      seed: 5151,
+      rate: (t) => BUILD_PEAK * rise(t),
+      from: starts.wave - p.waveBuild,
+      to: starts.wave + 2.6,
+      centre: lowFront,
+      radius: 10,
+      eye: (t) => eyePath(t, p),
+      clearance: 5,
+      loopRadius: [0.5, 1.9],
+      loopTime: [1.1, 2.2],
+      braid: 0.1,
+      energyBias: 0.12,
+    },
+    BUILD_PEAK,
+  ).filter((e) => clearOfText(e.birth, e.vertex));
+  // quicker as the tension rises; their creation fireballs smaller (hot pairs low in front made orange puffs)
+  for (const e of build) {
+    e.loop /= 1 + 1.4 * rise(e.birth);
+    e.burst *= 0.45;
+  }
+  // THE WAVE (U3): the front reaches a pair's direction at waveStart + frac·wave (front.ts: the same ragged edge the
+  // GPU freezes trails on). A pair alive then ends where it is (both beads annihilate on the front); nothing is born
+  // behind the front.
+  const cutAt = (at: readonly number[]): number =>
+    starts.wave + waveTimeAt(frontFracCpu([at[0] - eyeW[0], at[1] - eyeW[1], at[2] - eyeW[2]], b.front), p.waveStall) * p.wave;
+  const cutPairs = (list: PairEvent[]): PairEvent[] =>
+    list.filter((e) => {
+      const cut = cutAt(e.vertex);
+      if (e.birth >= cut) return false;
+      if (e.birth + e.loop > cut) e.end = Math.max(0.02, (cut - e.birth) / e.loop);
+      return true;
+    });
+  const cutTracks = (list: ProductTrack[]): ProductTrack[] =>
+    list.filter((T) => {
+      const cut = cutAt(T.start);
+      if (T.t0 >= cut) return false;
+      if (T.t0 + T.life > cut) T.end = Math.max(0.02, (cut - T.t0) / T.life);
+      return true;
+    });
+  const kept = cutPairs([...field, ...build]);
+  // THE SURVIVORS (survivors.ts): a few of the pairs the front catches leave their matter bead running on, out of the
+  // light, to rest as a grain — the one in a billion; and the hero's onto the hero grain. Never where the remain
+  // beat's text will be (it says what they are)
+  const textThen = starts.remain + 3.5;
+  const survivors = pickSurvivors(kept, p, Math.round(p.survivors), (at) => clearOfText(textThen, at));
+  // JETS: now and then a collision is a fast particle hitting the medium, a fan of tracks out of one vertex
+  // (productModel.ts jet): about one for every sixteen pairs in the boil, more of them low in front in the build
+  const jr = rng(6262);
+  const jetTracks: ProductTrack[] = [];
+  const jetBlasts: Blast[] = [];
+  const JET_PEAK = 8;
+  for (let t = starts.arise; t < starts.wave + 2.6; ) {
+    t += -Math.log(Math.max(1e-9, jr())) / JET_PEAK;
+    const keep = jr();
+    const rb = rise(t);
+    const want = Math.min(JET_PEAK, rate(t) / 16 + 2 * rb);
+    const off = [jr() * 2 - 1, jr() * 2 - 1, jr() * 2 - 1];
+    const pos = jr();
+    const beam = [jr() * 2 - 1, jr() * 2 - 1, jr() * 2 - 1];
+    const en = 0.55 + 0.45 * jr();
+    if (keep > want / JET_PEAK) continue;
+    const ol = Math.hypot(...off) || 1;
+    const inBuild = jr() < (2 * rb) / Math.max(1e-6, want);
+    const c = inBuild ? lowFront(t) : eyePath(t, p);
+    const R = inBuild ? 10 : p.fieldRadius * 0.7;
+    const vtx = [0, 1, 2].map((i) => c[i] + (off[i] / ol) * R * Math.cbrt(pos)) as [number, number, number];
+    const eye = eyePath(t, p);
+    if (Math.hypot(vtx[0] - eye[0], vtx[1] - eye[1], vtx[2] - eye[2]) < 6 || !clearOfText(t, vtx) || t >= cutAt(vtx)) continue;
+    const bl = Math.hypot(...beam) || 1;
+    const J = jet(t, vtx, beam.map((x) => x / bl) as [number, number, number], en, jr);
+    jetTracks.push(...J.tracks);
+    jetBlasts.push(...J.blasts);
+  }
+  // and the front itself is made of the grammar: a wall of small pairs born and annihilated ON it — fireballs,
+  // quick loops, braids, gamma rays, stars and fans — creation and cancellation sweeping over the audience
   const front = frontEvents(p, eyeW, b);
-  return [hero, ...kept, ...front];
+  // what the collisions leave: the field's are cut by the front like the pairs; the front's own run their course
+  // just behind it (they are its light), and make no new pairs there
+  const fieldProducts = generateProducts([hero, ...kept], 8181, { hero: 0 });
+  const conversions = cutPairs(fieldProducts.conversions.filter((e) => clearOfText(e.birth, e.vertex)));
+  // (few stars on the front: a thousand of them were a field of scratches, not a front; 2026-10-30 first look)
+  const frontProducts = generateProducts(front.events, 8282, { conversions: false, stars: 0.3 });
+  return {
+    events: [hero, ...kept, ...conversions, ...front.events],
+    tracks: [...cutTracks([...fieldProducts.tracks, ...jetTracks]), ...frontProducts.tracks, ...front.tracks, ...survivors.tracks],
+    blasts: [hero, ...kept, ...conversions, ...front.events, ...fieldProducts.blasts, ...frontProducts.blasts, ...jetBlasts, ...front.blasts]
+      .filter((x) => x.burst > 0),
+    rests: survivors.rests,
+  };
 }
 
-function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }): PairEvent[] {
+function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }): { events: PairEvent[]; tracks: ProductTrack[]; blasts: Blast[] } {
   const { starts } = beatStarts(p);
   const r = rng(9090);
   const out: PairEvent[] = [];
-  const N = 750;
+  const tracks: ProductTrack[] = [];
+  const blasts: Blast[] = [];
+  // (750 until the 2026-10-30 review; more, smaller on average, a few brighter: the front is a seam of events, not a
+  // crowd of equal blobs)
+  const N = 1200;
   const unit = (): [number, number, number] => {
     const z = r() * 2 - 1;
     const a = r() * Math.PI * 2;
@@ -188,12 +321,21 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
     // (sin θ) so the front never thins out overhead, and weighted toward the CLIMAX over the audience
     const theta = r() * Math.PI;
     const climax = Math.sin(theta) ** 2;
-    if (r() > Math.sin(theta) * (0.55 + 0.45 * climax)) continue;
+    if (r() > Math.sin(theta) * (0.5 + 0.5 * climax)) continue;
     const phi = r() * Math.PI * 2;
     const d = [0, 1, 2].map((j) => Math.cos(theta) * b.front[j] + Math.sin(theta) * (Math.cos(phi) * b.right[j] + Math.sin(phi) * b.axis[j])) as [number, number, number];
     if (d[0] * b.axis[0] + d[1] * b.axis[1] + d[2] * b.axis[2] < -0.12) continue; // below the spring line
-    const t = starts.wave + waveTimeAt(Math.min(1, Math.max(0, theta / Math.PI + (r() - 0.5) * 0.02))) * p.wave;
-    const dist = 7 + r() * 16;
+    // born as the front's ragged edge reaches it (front.ts), a hair before
+    const t = starts.wave + waveTimeAt(Math.min(1, Math.max(0, frontFracCpu(d, b.front) + (r() - 0.5) * 0.012)), p.waveStall) * p.wave;
+    const dist = 6 + r() * 18;
+    const vertex: [number, number, number] = [eyeW[0] + d[0] * dist, eyeW[1] + d[1] * dist, eyeW[2] + d[2] * dist];
+    // now and then the front's event is a jet: a fan thrown out of the line
+    if (r() < 0.006 + 0.008 * climax) {
+      const J = jet(t, vertex, unit(), 0.6 + 0.3 * r(), r);
+      tracks.push(...J.tracks);
+      blasts.push(...J.blasts);
+      continue;
+    }
     const axis = unit();
     const t0 = unit();
     const dt = t0[0] * axis[0] + t0[1] * axis[1] + t0[2] * axis[2];
@@ -201,29 +343,33 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
     const al = Math.hypot(ac[0], ac[1], ac[2]) || 1;
     const across = ac.map((x) => x / al) as [number, number, number];
     const open = 0.25 + r() * 0.4;
-    const spiralish = r() < 0.4;
+    const shape = r();
+    const spiralish = shape < 0.38;
+    const braided = !spiralish && shape < 0.52;
+    const hot = r() < 0.04 + 0.07 * climax;
     out.push({
       birth: t - 0.05,
-      // short lives: the activity hugs the front line, darkness follows right behind it
-      loop: 0.18 + r() * 0.2,
-      vertex: [eyeW[0] + d[0] * dist, eyeW[1] + d[1] * dist, eyeW[2] + d[2] * dist],
+      // short lives: the activity hugs the front line, the afterglow follows right behind it
+      loop: (0.18 + r() * 0.24) * (braided ? 1.6 : 1),
+      vertex,
       axis,
       across,
       open,
-      radius: (0.2 + r() * 0.45) * (0.8 + 0.4 * climax),
-      // a few throw gamma rays (loops.ts rayKept), more of them at the climax
-      energy: r() < 0.06 + 0.1 * climax ? 0.75 : 0.32 + r() * 0.12,
+      radius: (0.18 + r() * 0.5) * (0.8 + 0.4 * climax),
+      // a few throw gamma rays (loops.ts rayKept) and stars (productModel.ts), more of them at the climax
+      energy: hot ? 0.62 + r() * 0.25 : 0.3 + r() * 0.16,
       gamma: across,
-      spiral: spiralish ? 0.15 : 0,
+      spiral: spiralish ? 0.15 + 0.15 * r() : 0,
       drift: 0,
-      arc: spiralish ? Math.PI * 3 : 2 * Math.PI - 2 * open,
+      arc: spiralish ? Math.PI * (2.5 + 1.5 * r()) : braided ? Math.PI * 2 * (1.5 + 1.2 * r()) : 2 * Math.PI - 2 * open,
       meets: spiralish ? 0 : 1,
       // small fireballs: hundreds at once must not bloom the dome into milk
-      burst: (0.12 + r() * 0.22) * (0.7 + 0.6 * climax),
+      burst: (0.1 + r() * 0.2) * (0.7 + 0.6 * climax),
       end: 1,
+      braid: braided ? 1.5 + 1.5 * r() : 0,
     });
   }
-  return out;
+  return { events: out, tracks, blasts };
 }
 
 export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t: number) => TextPocket = () => ({ lo: 0, hi: 0, az: 0, strength: 0 })): UndertimeField {
@@ -288,6 +434,11 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
     box: uniform(1),
     webPresence: uniform(0),
     webRadiance: uniform(1),
+    // the web's frame (webDive.ts): world = webToWorld · pattern; the world velocity the web streams past at; the dive
+    webToWorld: uniform(new THREE.Matrix3()),
+    webToPattern: uniform(new THREE.Matrix3()),
+    webFlow: uniform(new THREE.Vector3()),
+    webClose: uniform(0),
     fill: uniform(0),
     reveal: uniform(0),
     heroGrain: uniform(0),
@@ -314,6 +465,7 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   };
   // colour and vec3 uniforms are 'color'/'vec3' to @types/three 0.186; at runtime all are vec3 (terra-sim idiom)
   const v3 = (x: unknown): V3 => x as V3;
+  const m3 = (x: unknown): THREE.Node<'mat3'> => x as THREE.Node<'mat3'>;
   const matter = v3(u.matter);
   const anti = v3(u.anti);
   const light = v3(u.light);
@@ -393,16 +545,18 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
     time: u.actTime, eye: pair.eye, pivot: v3(u.pivot), scale: u.scale, reveal: u.reveal, fill: u.fill,
     heroGrain: u.heroGrain, stars: u.stars, radius: u.radius, size: u.size, radiance: u.grainRadiance,
     starRadiance: u.starRadiance, pixelAngle: u.pixelAngle, warm: v3(u.warm), star: v3(u.star),
-    eyePat: v3(u.eyePat), box: u.box,
+    eyePat: v3(u.eyePat), box: u.box, webToWorld: m3(u.webToWorld),
   };
   const grains = createGrains(p.grainCount, grainU);
   const stars = createStars(grainU, web.knots);
   // the web's gas (webVolume.ts), placed in its box by the same flight as the stars
   // the faint glow of the web's envelope, and its particles carrying the detail
   const webGlow = uniform(0.12);
-  const webVolume = createWebVolume(web, { eyePat: v3(u.eyePat), presence: u.webPresence, radiance: webGlow });
+  const webFrame = { toWorld: m3(u.webToWorld), toPattern: m3(u.webToPattern) };
+  const webVolume = createWebVolume(web, { eyePat: v3(u.eyePat), presence: u.webPresence, radiance: webGlow, ...webFrame });
   const webParticles = createWebParticles(web, {
     eyePat: v3(u.eyePat), presence: u.webPresence, radiance: u.webRadiance, eye: pair.eye, box: u.box, pixelAngle: u.pixelAngle,
+    flow: v3(u.webFlow), close: u.webClose, ...webFrame,
   });
   const heroGrain = createHeroGrain(grainU);
 
@@ -412,15 +566,39 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   // the events are built on the first update: they avoid the text, and the text exists only once the show has
   // wired its crawl (pocketAt)
   let events: PairEvent[] = [];
+  // the light wave's optics (waveFx.ts), shared by every layer it acts on; the sweep's inverse as a table the GPU
+  // reads (rebuilt when the stall changes)
+  const lutData = sweepInverseTable(SWEEP_LUT, p.waveStall);
+  const sweepInverse = new THREE.DataTexture(lutData, SWEEP_LUT, 1, THREE.RedFormat, THREE.FloatType);
+  sweepInverse.minFilter = sweepInverse.magFilter = THREE.NearestFilter;
+  sweepInverse.needsUpdate = true;
+  let lutStall = p.waveStall;
+  const fx: WaveFxUniforms = {
+    sweepInverse,
+    time: u.actTime, eye: v3(u.eye), front: v3(u.domeFront), sweep: uniform(0), lens: uniform(0),
+    width: uniform((p.waveLensWidth * Math.PI) / 180), start: u.waveStart, length: u.waveAct, afterglow: uniform(p.afterglow),
+  };
+  // "a few more shades" (the 2026-10-30 review): each family's range either side of its base
+  const shadeU = {
+    deep: uniform(new THREE.Color(p.matterDeep)), pale: uniform(new THREE.Color(p.matterPale)),
+    cyan: uniform(new THREE.Color(p.antiCyan)), magenta: uniform(new THREE.Color(p.antiMagenta)),
+    rose: uniform(new THREE.Color(p.productWarm)), teal: uniform(new THREE.Color(p.productCool)),
+  };
+  const shades = { deep: v3(shadeU.deep), pale: v3(shadeU.pale), cyan: v3(shadeU.cyan), magenta: v3(shadeU.magenta) };
+  // the lights' core-and-halo profile (glow.ts; the 2026-10-30 note on the particles' falloff)
+  const profileU = { core: uniform(p.glowCore), halo: uniform(p.glowHalo), haloGain: uniform(p.glowHaloGain) };
   const loopU = {
     time: u.actTime, pixelAngle: u.pixelAngle, fog: uniform(0.03), matter, anti, light,
     trailRadiance: uniform(3), beadRadiance: uniform(1.5), flashRadiance: uniform(1),
-    pocket: pair, eye: v3(u.eye),
+    pocket: pair, eye: v3(u.eye), shades, fx, sharp: true, profile: profileU,
   };
   let mist: Mist | null = null;
   let loopSprites: THREE.InstancedMesh | null = null;
   let loopTrails: THREE.InstancedMesh | null = null;
   let bursts: Burst | null = null;
+  let products: ProductMeshes | null = null;
+  let survivorGrains: THREE.InstancedMesh | null = null;
+  const survivorU = { focus: uniform(0), radiance: uniform(1) };
   // the cloud chamber's side light: cool white from the front-left, high
   const keyDir = (() => {
     const b = domeBasis(p.domeTilt);
@@ -430,28 +608,46 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   })();
   const mistU = {
     time: u.actTime, pixelAngle: u.pixelAngle, key: v3(uniform(keyDir)), keyColour: v3(uniform(new THREE.Color(0.8, 0.88, 1))),
-    matter, anti, radiance: uniform(1.2), life: uniform(0.7), pocket: pair, eye: v3(u.eye),
+    matter, anti, radiance: uniform(1.2), life: uniform(0.7), pocket: pair, eye: v3(u.eye), shades, fx,
   };
-  const dustU = { time: u.actTime, pixelAngle: u.pixelAngle, centre: v3(u.eye), radius: uniform(26), density: uniform(1), radiance: uniform(2) };
-  const dust = p.grammar ? createDust(110000, dustU) : null;
+  // the front as a sheet of light through the medium (dust.ts): its colours, set per frame from the params
+  const frontU = {
+    sheet: uniform(0), build: uniform(0), crest: uniform(0),
+    lead: uniform(new THREE.Color()), trail: uniform(new THREE.Color()), ember: uniform(new THREE.Color()),
+  };
+  const dustU = {
+    time: u.actTime, pixelAngle: u.pixelAngle, centre: v3(u.eye), radius: uniform(26), density: uniform(1), radiance: uniform(2),
+    front: { fx, sheet: frontU.sheet, build: frontU.build, crest: frontU.crest, light, lead: v3(frontU.lead), trail: v3(frontU.trail), domeFront: v3(u.domeFront), density: uniform(0) },
+  };
+  // (110 000 motes until the light wave lit them as a sheet; more where it pays: the front's depth is made of them)
+  const dust = p.grammar ? createDust(180000, dustU) : null;
 
   const group = new THREE.Group();
   group.name = 'undertime-field';
-  // the sky keeps only its wave band in the event grammar (its first-light shells belong to the old hero)
+  // the sky keeps only its wave in the event grammar (its first-light shells belong to the old hero)
   if (dust) group.add(sky.mesh, dust.mesh, webVolume, webParticles, grains, stars, heroGrain);
   else group.add(sky.mesh, tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain);
 
   const vx = (a: [number, number, number]): THREE.Vector3 => new THREE.Vector3(...a);
   return {
     group,
-    update(state, t, eye, fade = 1, webKeep = 1) {
+    update(state, t, eye, fade = 1, webKeep = 1, view) {
       if (dust && !mist) {
-        events = undertimeEvents(p, pocketAt);
+        const act = undertimeEvents(p, pocketAt);
+        events = act.events;
         mist = createMist(events, mistU, true);
         loopTrails = createLoopTrails(events, loopU);
         loopSprites = createLoopSprites(events, loopU);
-        bursts = createBursts(events, { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1) });
-        group.add(loopTrails, mist.mesh, loopSprites, bursts.mesh);
+        bursts = createBursts(act.blasts, { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1), fx });
+        products = createProducts(act.tracks, {
+          time: u.actTime, pixelAngle: u.pixelAngle, matter, anti, light, rose: v3(shadeU.rose), teal: v3(shadeU.teal), shades,
+          radiance: uniform(3), fog: loopU.fog, pocket: pair, eye: v3(u.eye), fx, profile: profileU,
+        });
+        survivorGrains = createSurvivorGrains(act.rests, heroGrainPosition(p), {
+          time: u.actTime, eye: v3(u.eye), pixelAngle: u.pixelAngle, pivot: v3(u.pivot), scale: u.scale, focus: survivorU.focus,
+          warm: v3(u.warm), radiance: survivorU.radiance,
+        });
+        group.add(loopTrails, products.trails, mist.mesh, loopSprites, products.heads, bursts.mesh, survivorGrains);
       }
       if (dust) {
         // the plasma: dense and dark in the cold open, glowing with the boil, thinning to clear as it cools
@@ -463,7 +659,11 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
         dust.setLights(lights);
         // the dust thins as the field fills (with many lights it would light everywhere: a grey wash)
         const waving = Math.min(1, Math.max(0, (t - st.wave) / 0.5)) * (1 - Math.min(1, Math.max(0, (t - st.wave - p.wave) / 0.5)));
+        // …and the light wave brings it back: the medium is what the front lights as a sheet and what visibly folds
+        // toward it, so through the build and the wave most of the motes are there
+        const sheetMotes = Math.max(0.6 * state.build, waving);
         dustU.density.value = (0.25 + 0.75 * density) * (1 - 0.7 * state.pairDensity) * (1 - 0.7 * waving);
+        (dustU.front.density as unknown as { value: number }).value = 0.85 * sheetMotes;
         mist?.setLights(lights);
         loopU.fog.value = 0.012 * density;
       }
@@ -535,22 +735,72 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
       // in the event grammar the band is only the glow behind the front's events
       // the band glows along the front's events, brightest as it passes over the audience
       const overhead = Math.sin(Math.PI * state.wave) ** 2;
-      sky.setWave(state.wave, u.domeFront.value, p.waveRadiance * (p.grammar ? 0.5 + 0.6 * overhead : 1));
+      // (the event grammar's front is the radiant line of sky.ts, at frontRadiance; the old grammar keeps its band)
+      sky.setWave(state.wave, u.domeFront.value, p.grammar ? p.frontRadiance * state.frontGain : p.waveRadiance);
+      void overhead;
+      // the colours of the collapse: the violet-cyan the front drives ahead (antimatter's side), the gold-amber of its
+      // wake (matter's), the ember of what it leaves
+      frontU.lead.value.set(p.antiCyan).lerp(new THREE.Color(p.antiMagenta), 0.4).lerp(u.light.value, 0.25);
+      frontU.trail.value.set(p.matterColor).lerp(u.light.value, 0.15);
+      frontU.ember.value.set(p.matterDeep).multiplyScalar(0.8);
+      sky.setCollapse(state.build, state.crest, p.crestRadiance, t, frontU.lead.value, frontU.trail.value, frontU.ember.value);
+      frontU.sheet.value = p.frontRadiance * state.frontGain * 0.35;
+      frontU.build.value = state.build;
+      frontU.crest.value = state.crest * p.crestRadiance;
+      (fx.sweep as unknown as { value: number }).value = state.wave;
+      (fx.lens as unknown as { value: number }).value = state.lens;
+      (fx.width as unknown as { value: number }).value = (p.waveLensWidth * Math.PI) / 180;
+      (fx.afterglow as unknown as { value: number }).value = p.afterglow;
+      if (p.waveStall !== lutStall) {
+        lutStall = p.waveStall;
+        lutData.set(sweepInverseTable(SWEEP_LUT, p.waveStall));
+        sweepInverse.needsUpdate = true;
+      }
+      profileU.core.value = p.glowCore;
+      profileU.halo.value = p.glowHalo;
+      profileU.haloGain.value = p.glowHaloGain;
+      shadeU.deep.value.set(p.matterDeep);
+      shadeU.pale.value.set(p.matterPale);
+      shadeU.cyan.value.set(p.antiCyan);
+      shadeU.magenta.value.set(p.antiMagenta);
+      shadeU.rose.value.set(p.productWarm);
+      shadeU.teal.value.set(p.productCool);
       sky.setLight(u.light.value);
       sky.follow(eye);
 
       // the web flight: where the eye is in the web's box, the box's size, and the hero grain it carries
       const flight = webFlight(t, p);
       const knot = web.knots[0].pos;
-      u.pivot.value.set(...flight.pivot);
-      // the eye's own travel (Act 2 flies on through the web) moves it through the box too
-      const still = eyePath(starts.zoom, p);
-      u.eyePat.value.set(
-        knot[0] + flight.offset[0] + (eye.x - still[0]) / flight.box,
-        knot[1] + flight.offset[1] + (eye.y - still[1]) / flight.box,
-        knot[2] + flight.offset[2] + (eye.z - still[2]) / flight.box,
-      );
-      u.box.value = flight.box;
+      if (view) {
+        // the show's curve through the web (getTheDrift/webDive.ts: the pull-back, the dive, the approach) and the
+        // web's frame: the hero grain sits on the hero knot wherever the eye is, in whichever act's world
+        const R = view.R;
+        u.webToWorld.value.set(R[0], R[1], R[2], R[3], R[4], R[5], R[6], R[7], R[8]);
+        u.webToPattern.value.copy(u.webToWorld.value).transpose();
+        u.eyePat.value.set(...view.eyePat);
+        u.box.value = view.box;
+        const h = [0, 1, 2].map((i) => {
+          const d = knot[i] - view.eyePat[i];
+          return d - Math.round(d);
+        });
+        u.pivot.value.set(h[0], h[1], h[2]).applyMatrix3(u.webToWorld.value).multiplyScalar(view.box).add(eye);
+        u.webFlow.value.set(...view.vel).applyMatrix3(u.webToWorld.value).multiplyScalar(-view.box);
+        u.webClose.value = view.close;
+      } else {
+        u.webToWorld.value.identity();
+        u.webToPattern.value.identity();
+        u.webFlow.value.set(0, 0, 0);
+        u.webClose.value = 0;
+        u.pivot.value.set(...flight.pivot);
+        // the eye's own travel (Act 2 flies on through the web) moves it through the box too
+        const still = eyePath(starts.zoom, p);
+        u.eyePat.value.set(
+          knot[0] + flight.offset[0] + (eye.x - still[0]) / flight.box,
+          knot[1] + flight.offset[1] + (eye.y - still[1]) / flight.box,
+          knot[2] + flight.offset[2] + (eye.z - still[2]) / flight.box,
+        );
+        u.box.value = flight.box;
+      }
       u.webPresence.value = flight.presence * webKeep;
       u.webRadiance.value = p.webRadiance;
       webGlow.value = p.webRadiance * 0.04;
@@ -563,6 +813,9 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
       u.stars.value = state.stars;
       u.size.value = p.particleSize;
       u.grainRadiance.value = p.particleRadiance * fade;
+      // the survivors: a little under the hero grain's light, stepping back as the remain beat singles it out
+      survivorU.radiance.value = p.particleRadiance * 1.1 * fade;
+      survivorU.focus.value = Math.min(1, Math.max(0, (t - (starts.remain + 0.5)) / 2.5));
       u.starRadiance.value = p.starRadiance * fade;
     },
     setPocket(pk, tiltDeg) {
@@ -584,6 +837,11 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
       dust?.dispose();
       mist?.dispose();
       bursts?.dispose();
+      products?.dispose();
+      if (survivorGrains) {
+        survivorGrains.geometry.dispose();
+        (survivorGrains.material as THREE.Material).dispose();
+      }
       for (const m of [tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain,  ...(loopSprites ? [loopSprites] : []), ...(loopTrails ? [loopTrails] : [])]) {
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();

@@ -8,12 +8,16 @@
  * Closed-form in act time like everything else; shaded from a tileable noise texture (mist.ts), so the
  * fireball is turbulent, never a disc. Sparks are stretched along their screen velocity (motion blur in
  * the geometry) and pixel-floored.
+ *
+ * The same fireball and spray now mark the strong ANNIHILATIONS too (productModel.ts blasts, the 2026-10-30
+ * review's "more interesting results"): any record with a birth, a size, an energy and a place.
  */
 import * as THREE from 'three/webgpu';
 import { Fn, attribute, cameraPosition, exp, float, hash, max, min, mix, normalize, pow, smoothstep, step, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
 import type { PairEvent } from './events';
 import { noiseTexture } from './mist';
 import { randomDir } from './pairModel';
+import { frontTime, spent, waveWarp, type WaveFxUniforms } from './waveFx';
 
 type F = THREE.Node<'float'>;
 
@@ -24,6 +28,8 @@ export interface BurstUniforms {
   time: F;
   pixelAngle: F;
   radiance: F;
+  /** the light wave's pull (waveFx.ts) */
+  fx?: WaveFxUniforms;
 }
 
 export interface Burst {
@@ -31,7 +37,7 @@ export interface Burst {
   dispose(): void;
 }
 
-export function createBursts(events: readonly PairEvent[], U: BurstUniforms): Burst {
+export function createBursts(events: readonly Pick<PairEvent, 'birth' | 'burst' | 'energy' | 'vertex'>[], U: BurstUniforms): Burst {
   const per = 1 + SPARKS;
   const n = events.length * per;
   const A = new Float32Array(n * 4);
@@ -66,7 +72,7 @@ export function createBursts(events: readonly PairEvent[], U: BurstUniforms): Bu
   const speed = v0.mul(exp(age.max(0).mul(-drag)));
   const sparkA = step(0, age).mul(exp(age.div(tau.mul(0.7)).negate())).mul(step(age, 1.2)).mul(step(hash(seed.mul(8.3)), 0.85));
 
-  const centre = mix(sparkPos, vertex, isBall);
+  const centre = U.fx ? waveWarp(mix(sparkPos, vertex, isBall), U.fx) : mix(sparkPos, vertex, isBall);
   const toEye = cameraPosition.sub(centre);
   const dist = toEye.length();
   const view = normalize(toEye);
@@ -77,7 +83,8 @@ export function createBursts(events: readonly PairEvent[], U: BurstUniforms): Bu
   const px = U.pixelAngle.mul(dist);
   const width = max(px.mul(1.5), mix(float(0.02), R.mul(2.2), isBall));
   const length = max(width, mix(speed.mul(0.06).mul(alongLen).add(0.02), R.mul(2.2), isBall));
-  const alpha = mix(sparkA, ballA, isBall);
+  // (spent behind the front: waveFx.ts)
+  const alpha = mix(sparkA, ballA, isBall).mul(U.fx ? spent(frontTime(vertex, U.fx), U.fx, 0.3) : float(1));
   const corner = attribute<'vec3'>('position', 'vec3');
   const noise = noiseTexture();
   const material = new THREE.NodeMaterial();
