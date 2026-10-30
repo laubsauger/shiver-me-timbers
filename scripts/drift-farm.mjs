@@ -43,11 +43,13 @@
  * loses nothing: a worker keeps reporting to the job it has. A job whose worker stops reporting for 2 min goes back to
  * the queue (twice at most, then it fails: "the box stopped answering").
  *
- * WHO GETS WHAT (pickWorker; the user: prefer the fastest free box for clips and long jobs, quick stills to whatever
- * is free): a still goes to any free box (the fastest of those asking); a clip or a long job waits for the fastest
- * box that is free — unless it has waited 2 min, then the fastest one asking takes it. `prefer` pins a box.
- * Speeds start from scripts/drift-farm-nodes.json ("speed": 4090 desktops 1.0, the 100 W 5090 laptop 0.5) and are
- * learned from what the boxes measure (frames per second per kind of job), out/drift/farm/speeds.json.
+ * WHO GETS WHAT (pickWorker): any free box that takes work takes any job — the highest priority first, the oldest
+ * first within it (PRIORITIES) — and of the boxes asking at once, the fastest. Nothing is held back for a faster box
+ * (the user, 2026-10-30: "I don't think we have to limit any of these machines artificially … even the EEG 5090 laptop
+ * can really pack a punch": clips and long jobs had waited up to 2 min for the fastest box while a slower one idled).
+ * `prefer` pins a box. Speeds start from scripts/drift-farm-nodes.json ("speed", a 4090 desktop 1.0) and are learned
+ * from what the boxes measure (frames per second per kind of job, out/drift/farm/speeds.json): for estimates and for
+ * the order among boxes asking at once, never to hold work back.
  *
  * WHETHER A BOX TAKES WORK is a run-time state, set from this Mac's dashboard (the user, 2026-10-30: "push a button
  * and deregister it … so that we are not magically blocking these things … and we can opt them out of taking tasks …
@@ -92,8 +94,6 @@ import { contentId } from './drift-node-lib.mjs';
 
 /** ms a preparing or running job may go without a word from its worker before it is queued again */
 export const LEASE_MS = 120_000;
-/** ms a clip or long job waits for the fastest free box before a slower one may take it */
-export const PATIENCE_MS = 120_000;
 /** ms a claim is held open */
 export const CLAIM_HOLD_MS = 25_000;
 /** ms since its last claim that a worker still counts as free */
@@ -140,10 +140,6 @@ export function jobClass(argv) {
 
 // ------------------------------------------------------------------------------------------------ scheduling
 /**
- * the worker that takes `job` now, or null (hold it). `waiting`: workers in a claim right now [{ node, speed }];
- * `free`: every worker free in the last FREE_MS (the waiting ones too).
- */
-/**
  * A JOB'S PRIORITY (the user, 2026-10-30: "I gave you all the computer in the world and everything is idle"): the
  * agents' review jobs are short and come in bursts while they code, so the boxes idle between them; a background
  * render (the whole show as a preview, drift-farm.mjs render) fills the gaps at `low` without slowing the agents'
@@ -158,21 +154,18 @@ export const queueOrder = (queued) => [...queued].sort((a, b) => rankOf(b) - ran
 /** may `job` take `node` while `queued` (the others) wait? Not while a higher job that could use that box is queued */
 export const yieldsTo = (job, node, queued) => queued.some((h) => h !== job && rankOf(h) > rankOf(job) && (!h.prefer || h.prefer === node));
 
-export function pickWorker(job, waiting, free, now, patienceMs = PATIENCE_MS) {
-  let cands = job.prefer ? waiting.filter((w) => w.node === job.prefer) : [...waiting];
-  if (cands.length === 0) return null;
-  cands = cands.sort((a, b) => b.speed - a.speed);
-  if (job.kind === 'still' || job.prefer) return cands[0].node;
-  const fastestFree = Math.max(cands[0].speed, ...free.map((f) => f.speed));
-  if (cands[0].speed >= fastestFree) return cands[0].node;
-  return now - (job.queuedAt ?? job.createdAt) > patienceMs ? cands[0].node : null;
+/** the worker that takes `job` now, or null (hold it): of the workers in a claim right now [{ node, speed }], the
+ * fastest (only the pinned one, when `prefer`) — header: WHO GETS WHAT */
+export function pickWorker(job, waiting) {
+  const cands = (job.prefer ? waiting.filter((w) => w.node === job.prefer) : [...waiting]).sort((a, b) => b.speed - a.speed);
+  return cands[0]?.node ?? null;
 }
 
 /**
  * why a queued job has no box yet, in words for the dashboard (FarmJob.why). `workers`: view()'s, each { node, state:
  * waiting | busy | busy-foreign | offline, why (busy-foreign: who, "ComfyUI 18 GB"), speed }
  */
-export function holdReason(job, workers, now, patienceMs = PATIENCE_MS, queued = []) {
+export function holdReason(job, workers, now, queued = []) {
   const word = (w) => (w.state === 'busy-foreign' ? `${w.node} busy (${w.why ?? 'someone else on the GPU'})` : w.state === 'busy' ? `${w.node} busy with another job` : w.state === 'offline' ? `${w.node} offline` : `${w.node} free`);
   // only boxes that take work (farmState accepting) are candidates; the others say so
   const takes = (w) => (w.farmState ?? 'accepting') === 'accepting';
@@ -187,13 +180,6 @@ export function holdReason(job, workers, now, patienceMs = PATIENCE_MS, queued =
   if (up.length === 0) return job.prefer ? `${job.prefer} offline (no worker running there)` : 'no worker online';
   const free = up.filter((w) => w.state === 'waiting').sort((a, b) => b.speed - a.speed);
   if (free.length === 0) return pool.map(word).join(', ');
-  if (job.kind !== 'still' && !job.prefer) {
-    const fastest = Math.max(...up.map((w) => w.speed));
-    if (free[0].speed < fastest) {
-      const left = Math.max(0, Math.round((patienceMs - (now - (job.queuedAt ?? job.createdAt))) / 1000));
-      return `waiting for a faster box (${up.filter((w) => w.speed === fastest).map(word).join(', ')}); ${free[0].node} takes it in ${left} s`;
-    }
-  }
   return 'being handed out';
 }
 
@@ -430,8 +416,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       const still = queued.filter((q) => jobs.get(q.id)?.state === 'queued');
       const waiting = [...claims.keys()].filter((node) => !yieldsTo(job, node, still)).map((node) => ({ node, speed: speedNow(node) }));
       if (waiting.length === 0) continue;
-      const free = [...workers.values()].filter((w) => w.state === 'waiting' && now() - w.at < FREE_MS).map((w) => ({ node: w.node, speed: speedNow(w.node) }));
-      const node = pickWorker(job, waiting, free, now());
+      const node = pickWorker(job, waiting);
       if (!node) continue;
       const c = claims.get(node);
       claims.delete(node);
@@ -507,7 +492,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         exitCode: j.exitCode ?? null, base: j.base, progress: j.progress ?? { done: null, total: null, unit: null, fps: null, etaS: null },
         estS: j.state === 'queued' && speeds.dur1?.[j.cls] ? Math.round(speeds.dur1[j.cls] / best) : null, last: j.last ?? null,
         results: (j.results ?? []).map((r) => ({ path: landingPath(j.outs[r.out], r.path), bytes: r.bytes })), error: j.error ?? null,
-        why: j.state === 'queued' ? holdReason(j, workerView, t, PATIENCE_MS, queuedNow) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
+        why: j.state === 'queued' ? holdReason(j, workerView, t, queuedNow) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
         priority: j.priority ?? 'normal',
         cancelRequested: j.cancelRequested === true && !FINAL.has(j.state),
         timing: j.timing ?? null,

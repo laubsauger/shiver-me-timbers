@@ -2,7 +2,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export const LEASE_MS: number;
-export const PATIENCE_MS: number;
 export const CLAIM_HOLD_MS: number;
 export const FREE_MS: number;
 export const FINAL: Set<string>;
@@ -11,9 +10,9 @@ export type FarmJobRecord = Record<string, any> & { id: string; state: string };
 export function transition(job: FarmJobRecord, to: string, patch?: Record<string, unknown>): FarmJobRecord;
 export function jobKind(argv: string[]): 'still' | 'clip' | 'long';
 export function jobClass(argv: string[]): string;
-export function pickWorker(job: { kind: string; prefer?: string | null; queuedAt?: number; createdAt?: number }, waiting: { node: string; speed: number }[], free: { node: string; speed: number }[], now: number, patienceMs?: number): string | null;
+export function pickWorker(job: { kind?: string; prefer?: string | null; queuedAt?: number; createdAt?: number }, waiting: { node: string; speed: number }[]): string | null;
 type Queued = { id?: string; kind?: string; priority?: string; prefer?: string | null; queuedAt?: number; createdAt?: number };
-export function holdReason(job: { kind: string; prefer?: string | null; priority?: string; queuedAt?: number; createdAt?: number }, workers: { node: string; state: string; why?: string | null; speed: number; farmState?: string }[], now: number, patienceMs?: number, queued?: Queued[]): string;
+export function holdReason(job: { kind: string; prefer?: string | null; priority?: string; queuedAt?: number; createdAt?: number }, workers: { node: string; state: string; why?: string | null; speed: number; farmState?: string }[], now: number, queued?: Queued[]): string;
 export const PRIORITIES: string[];
 export function rankOf(job: { priority?: string }): number;
 export function queueOrder<T extends Queued>(queued: T[]): T[];

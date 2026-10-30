@@ -72,7 +72,7 @@ describe('the machine cards', () => {
   it('a box the hub cannot reach is offline, with its farm hint still on the card', () => {
     const e = cards.find((c) => c.name === 'eeg-msi')!;
     expect(e.badge).toBe('offline');
-    expect(e.hint).toMatchObject({ speed: 0.5, battery: true });
+    expect(e.hint).toMatchObject({ speed: 0.85, battery: true }); // (drift-farm-nodes.json: measured, 2026-10-30)
   });
 
   it('matched by the tailnet address alone, when the heartbeat\'s names match nothing', () => {

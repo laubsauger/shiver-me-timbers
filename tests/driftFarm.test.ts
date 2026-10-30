@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, queueOrder, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition, yieldsTo,
+  createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, pickWorker, queueOrder, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition, yieldsTo,
 } from '../scripts/drift-farm.mjs';
 import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, roundTrip, submitterOf } from '../scripts/drift-farm-client.mjs';
 import { chunksOf } from '../scripts/drift-farm-render.mjs';
@@ -70,22 +70,19 @@ describe('who gets what', () => {
   const fast = { node: 'windows-monster', speed: 1 };
   const slow = { node: 'eeg-msi', speed: 0.5 };
 
-  it('a still goes to whoever asks', () => {
-    expect(pickWorker({ kind: 'still', createdAt: 0 }, [slow], [slow, fast], 1000)).toBe('eeg-msi');
+  // (the user, 2026-10-30: "I don't think we have to limit any of these machines artificially … even the EEG 5090
+  // laptop can really pack a punch": no job waits for a faster box while another one is free)
+  it('any free box takes any job at once — a still, a clip, a long render — even the slower laptop', () => {
+    for (const kind of ['still', 'clip', 'long']) expect(pickWorker({ kind, queuedAt: 0 }, [slow])).toBe('eeg-msi');
   });
 
-  it('a clip waits for the fastest free box rather than going to the slow laptop at once', () => {
-    expect(pickWorker({ kind: 'clip', queuedAt: 0 }, [slow], [slow, fast], 1000)).toBeNull();
-    expect(pickWorker({ kind: 'clip', queuedAt: 0 }, [slow, fast], [slow, fast], 1000)).toBe('windows-monster');
-  });
-
-  it('… but not for ever: after the patience the slower box takes it', () => {
-    expect(pickWorker({ kind: 'long', queuedAt: 0 }, [slow], [slow, fast], PATIENCE_MS + 1)).toBe('eeg-msi');
+  it('of the boxes asking at once, the fastest', () => {
+    expect(pickWorker({ kind: 'clip', queuedAt: 0 }, [slow, fast])).toBe('windows-monster');
   });
 
   it('a job pinned to a box goes only there', () => {
-    expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast], [fast], 1000)).toBeNull();
-    expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast, slow], [fast, slow], 1000)).toBe('eeg-msi');
+    expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast])).toBeNull();
+    expect(pickWorker({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [fast, slow])).toBe('eeg-msi');
   });
 
   // PRIORITIES (drift-farm.mjs; the user, 2026-10-30: "I gave you all the computer in the world and everything is
@@ -114,14 +111,14 @@ describe('who gets what', () => {
   it('a held low job says it waits for the jobs above it', () => {
     const workers = [{ node: 'eeg-msi', state: 'waiting', speed: 0.5, farmState: 'accepting' }];
     const low = { kind: 'long', priority: 'low', queuedAt: 0 };
-    expect(holdReason(low, workers, 1000, PATIENCE_MS, [low, { kind: 'still', queuedAt: 5 }])).toBe('low priority: after 1 queued job(s) above it');
+    expect(holdReason(low, workers, 1000, [low, { kind: 'still', queuedAt: 5 }])).toBe('low priority: after 1 queued job(s) above it');
   });
 
   it('a held job says why, in words the dashboard shows', () => {
     const w = (node: string, state: string, speed: number, why: string | null = null) => ({ node, state, speed, why });
     expect(holdReason({ kind: 'clip', queuedAt: 0 }, [w('windows-monster', 'offline', 1), w('eeg-msi', 'offline', 0.5)], 0)).toBe('no worker online');
     expect(holdReason({ kind: 'clip', queuedAt: 0 }, [w('windows-monster', 'busy-foreign', 1, 'ComfyUI 18 GB'), w('eeg-msi', 'offline', 0.5)], 0)).toBe('windows-monster busy (ComfyUI 18 GB), eeg-msi offline');
-    expect(holdReason({ kind: 'clip', queuedAt: 0 }, [w('windows-monster', 'busy', 1), w('eeg-msi', 'waiting', 0.5)], 30_000)).toBe(`waiting for a faster box (windows-monster busy with another job); eeg-msi takes it in ${PATIENCE_MS / 1000 - 30} s`);
+    expect(holdReason({ kind: 'clip', queuedAt: 0 }, [w('windows-monster', 'busy', 1), w('eeg-msi', 'waiting', 0.5)], 30_000)).toBe('being handed out');
     expect(holdReason({ kind: 'clip', prefer: 'eeg-msi', queuedAt: 0 }, [w('eeg-msi', 'offline', 0.5)], 0)).toBe('eeg-msi offline (no worker running there)');
   });
 

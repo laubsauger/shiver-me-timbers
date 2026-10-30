@@ -32,6 +32,8 @@ export interface GpuShare {
   foreignMB: number;
   systemMB: number;
   memKnown: boolean;
+  /** the sustained utilisation (gpuSnapshot's window over this process's samples) */
+  utilWindow?: { medianPct: number | null; n: number; spanS: number };
 }
 export interface ShareDecision {
   state: 'idle' | 'busy-foreign' | 'rendering' | 'rendering+shared';
@@ -69,3 +71,8 @@ export function waitForGpu(o?: {
   force?: boolean;
   snapshot?: () => Promise<GpuShare | null>;
 }): Promise<ShareDecision | null>;
+export const UTIL_WINDOW_S: number;
+export const UTIL_MIN_SAMPLES: number;
+export const UTIL_MIN_SPAN_S: number;
+export function utilWindow(samples: { at: number; pct: number | null; ours?: boolean }[], now: number, windowS?: number): { medianPct: number | null; n: number; spanS: number };
+export function sustainedSnapshot(snapshot?: () => Promise<GpuShare | null>, stepMs?: number): Promise<GpuShare | null>;

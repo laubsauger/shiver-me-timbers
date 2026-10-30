@@ -19,12 +19,17 @@
  *   waitForGpu()       before a chunk (drift-queue.mjs) or the GPU check (drift-node.mjs): wait while someone else
  *                      holds the card, re-checking every `recheckS`. It never touches another process.
  *
- * THE POLICY, drift-node.json "yield" (each key optional; these defaults are chosen, not measured on the studio's
- * machines — conservative: we yield readily, and --force renders anyway):
- *   foreignVramGB  4    GB of VRAM others may hold before we wait. An idle desktop with a browser holds 1–2.5 GB of
- *                       it (the desktop's own processes are not counted); a loaded diffusion model holds 4–20.
- *   foreignUtil    30   % GPU utilisation, while nothing of ours is on the card, before we wait: an idle desktop or
- *                       a browser stays under 10, a generating ComfyUI or a game sits at 90–100.
+ * THE POLICY, drift-node.json "yield" (each key optional; --force renders anyway). WHAT CONFLICTS is someone else
+ * WORKING the card, or too little memory left for our job — not memory an idle service holds (the coordinator,
+ * 2026-10-30: linux-monster sat out the farm all evening because an IDLE sd-webrtc held 5 GB of its 24 GB card, under a
+ * rule that yielded to any 4 GB held by others; "the share decision should key on what actually conflicts"):
+ *   foreignUtil    30   % GPU utilisation, SUSTAINED — the median of the samples of the last UTIL_WINDOW_S (20 s, a
+ *                       sample every 5 s), never one sample — while nothing of ours is on the card, before we wait: an
+ *                       idle desktop or a browser stays under 10, a generating ComfyUI or a game sits at 90–100
+ *                       (eeg-msi, its user's own apps at 100% for minutes: a real conflict, yielded to)
+ *   foreignVramGB  4    GB of VRAM others may hold — a TIEBREAKER only: it counts when the card is tight, its free
+ *                       memory within this much of our job's need (a service that holds 5 GB idle may load a model
+ *                       and take the rest). With room to spare it does not block.
  *   needVramGB     —    GB per lane our job needs free. Default by the master's size, from the Mac's measurements
  *                       (RENDER-NODE.md): 22 at 8192² (it peaked near 23.5 at ss 1.25), 10 below (the page alone was
  *                       about 11 GB before any master). Only checked while nothing of ours is on the card.
@@ -305,11 +310,17 @@ export function shareDecision(share, policy = YIELD_DEFAULTS, needGB = null) {
   const foreignMB = share.memKnown ? Math.min(share.foreignMB, share.usedMB === null ? Infinity : room) : ours ? null : room;
   const names = (list) => list.slice(0, 4).map((p) => `${p.label}${p.memMB != null ? ` ${gbs(p.memMB)}` : ''}`).join(', ');
   const why = [];
-  if (foreignMB !== null && foreignMB / 1024 > policy.foreignVramGB) why.push(`${gbs(foreignMB)} of VRAM held by others (${names(foreign) || 'unnamed'}; the policy allows ${policy.foreignVramGB} GB)`);
-  if (!ours && share.utilPct !== null && share.utilPct > policy.foreignUtil) why.push(`the GPU is ${share.utilPct}% busy (${names(foreign) || 'someone else'}; the policy allows ${policy.foreignUtil}%)`);
+  const freeGB = share.freeMB !== null ? share.freeMB / 1024 : null;
+  // (header, THE POLICY) someone WORKING the card: the sustained utilisation, never one sample
+  const win = share.utilWindow ?? null;
+  const sustained = win !== null && win.n >= UTIL_MIN_SAMPLES && win.spanS >= UTIL_MIN_SPAN_S && win.medianPct !== null;
+  if (!ours && sustained && win.medianPct > policy.foreignUtil) why.push(`the GPU is ${win.medianPct}% busy, sustained over ${Math.round(win.spanS)} s (${names(foreign) || 'someone else'}; the policy allows ${policy.foreignUtil}%)`);
+  // memory others hold: a tiebreaker only when the card is tight (free within foreignVramGB of the job's need)
+  const tight = needGB !== null && freeGB !== null && freeGB < needGB + policy.foreignVramGB;
+  if (tight && foreignMB !== null && foreignMB / 1024 > policy.foreignVramGB) why.push(`${gbs(foreignMB)} of VRAM held by others (${names(foreign) || 'unnamed'}) with ${freeGB.toFixed(1)} GB free, close to the job's ~${needGB} GB`);
+  // (memory unknown only while ours is on the card, Windows without counters: a heavy app by name makes it shared)
   if (foreignMB === null && foreign.some((p) => p.heavy)) why.push(`${names(foreign.filter((p) => p.heavy))} on the GPU (its memory unknown)`);
   const busy = why.length > 0;
-  const freeGB = share.freeMB !== null ? share.freeMB / 1024 : null;
   const short = !ours && needGB !== null && freeGB !== null && freeGB < needGB;
   if (short && !busy) why.push(`${freeGB.toFixed(1)} GB free, the job needs ~${needGB} GB`);
   return {
@@ -328,6 +339,26 @@ const sh = (cmd, args, timeout = 8000) =>
 
 let winCache = { at: 0, table: new Map(), gpuMemByLuid: new Map(), adapters: new Map() };
 let smiMissing = false;
+
+// ------------------------------------------------------------------------------------- sustained utilisation
+/** s of utilisation history a decision looks at (header: foreignUtil) */
+export const UTIL_WINDOW_S = 20;
+/** samples a window needs, and the span they must cover (s), before it may say "busy" */
+export const UTIL_MIN_SAMPLES = 3;
+export const UTIL_MIN_SPAN_S = 10;
+/**
+ * the utilisation over the last `windowS` of `samples` ([{ at ms, pct, ours }]; ours: something of ours was on the card,
+ * so the figure is not someone else's): { medianPct, n, spanS }, the median of the others' samples (the lower middle:
+ * one spike in an even window does not make it busy)
+ */
+export function utilWindow(samples, now, windowS = UTIL_WINDOW_S) {
+  const w = samples.filter((x) => !x.ours && x.pct !== null && x.pct !== undefined && now - x.at <= windowS * 1000 && x.at <= now);
+  if (w.length === 0) return { medianPct: null, n: 0, spanS: 0 };
+  const sorted = w.map((x) => x.pct).sort((a, b) => a - b);
+  return { medianPct: sorted[Math.floor((sorted.length - 1) / 2)], n: w.length, spanS: (Math.max(...w.map((x) => x.at)) - Math.min(...w.map((x) => x.at))) / 1000 };
+}
+/** this process's samples (gpuSnapshot adds one each time; drift-node.mjs's heartbeat takes one every 5 s) */
+const utilSeen = [];
 
 /** the process table (and on Windows the counters' GPU memory); `pids`: GPU processes it must hold (Windows reads again early) */
 async function processTable(pids) {
@@ -379,7 +410,26 @@ export async function gpuSnapshot({ agent = null } = {}) {
   const t = await processTable(pids);
   const used = [...parsed.gpus].sort((a, b) => (b.totalMB ?? 0) - (a.totalMB ?? 0))[0]?.usedMB ?? 0;
   const share = shareOf(parsed, t.table, t.gpuMemByLuid ? nvidiaGpuMem(t, used) : new Map(), agent?.services ?? []);
-  return share && agent?.gpuName ? { ...share, name: agent.gpuName } : share;
+  if (!share) return share;
+  // (the sustained utilisation, header: foreignUtil)
+  const now = Date.now();
+  utilSeen.push({ at: now, pct: share.utilPct, ours: share.procs.some((p) => p.kind === 'ours') });
+  while (utilSeen.length > 0 && now - utilSeen[0].at > 120_000) utilSeen.shift();
+  const withWindow = { ...share, utilWindow: utilWindow(utilSeen, now) };
+  return agent?.gpuName ? { ...withWindow, name: agent.gpuName } : withWindow;
+}
+
+/**
+ * a snapshot whose utilisation window can decide (UTIL_MIN_SAMPLES over UTIL_MIN_SPAN_S): more samples, 5 s apart,
+ * when this process has too few — a worker just started, a queue that checks every 30 s. At most ~15 s, once
+ */
+export async function sustainedSnapshot(snapshot = async () => gpuSnapshot({ agent: await localAgent() }), stepMs = 5000) {
+  let snap = await snapshot();
+  for (let i = 0; i < 4 && snap?.utilWindow && (snap.utilWindow.n < UTIL_MIN_SAMPLES || snap.utilWindow.spanS < UTIL_MIN_SPAN_S); i++) {
+    await new Promise((ok) => setTimeout(ok, stepMs));
+    snap = await snapshot();
+  }
+  return snap;
 }
 
 /**
@@ -391,7 +441,7 @@ export async function waitForGpu({ policy = YIELD_DEFAULTS, needGB = null, say =
   let since = null;
   let told = 0;
   for (;;) {
-    const d = shareDecision(await snapshot(), policy, needGB);
+    const d = shareDecision(await sustainedSnapshot(snapshot), policy, needGB);
     if (d.canStart) {
       if (since !== null) say(`the GPU is free again after ${Math.round((Date.now() - since) / 1000)} s: going on`);
       return d;

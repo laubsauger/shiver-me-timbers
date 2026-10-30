@@ -30,6 +30,17 @@ const JOB_STATES = new Set(['syncing', 'rendering', 'rendering+shared', 'waiting
 /** a hub service row that is running (FleetServiceState) */
 const RUNNING = new Set(['healthy', 'starting', 'busy']);
 
+/**
+ * the card busy with others' work, as the dashboard shows it (drift-share.mjs THE POLICY): utilisation over the policy,
+ * or others' memory over foreignVramGB while the card is tight — free within foreignVramGB of a 2K job's need. (The
+ * badge is one sample of the box's agent; the worker's own decision is the 20 s window.)
+ */
+export function othersBusy(othersGB, totalGB, usedGB, utilPct, policy = YIELD_DEFAULTS) {
+  const need = policy.needVramGB ?? 10;
+  const tight = totalGB != null && usedGB != null && totalGB - usedGB < need + policy.foreignVramGB;
+  return (utilPct != null && utilPct > policy.foreignUtil) || (tight && othersGB != null && othersGB > policy.foreignVramGB);
+}
+
 /** scripts/drift-farm-nodes.json's nodes */
 export function farmNodes(file) {
   const j = JSON.parse(readFileSync(file, 'utf8'));
@@ -118,7 +129,8 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
   let badge;
   if (!online) badge = 'offline';
   else if (jobState) badge = jobState;
-  else if ((othersGB != null && othersGB > policy.foreignVramGB) || (utilPct != null && utilPct > policy.foreignUtil)) badge = 'busy-foreign';
+  // (drift-share.mjs THE POLICY: someone working the card, or memory others hold when the card is tight for a 2K job)
+  else if (othersBusy(othersGB, totalGB, usedGB, utilPct, policy)) badge = 'busy-foreign';
   else badge = 'ready';
   // taking no work (its farm state, set from the dashboard: paused or removed): standby, whatever the box is doing —
   // its numbers still show; a job it still runs shows as that. Draining: its badge as it is (it finishes its job)
@@ -128,7 +140,7 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
   if (out && badge !== 'offline' && !jobState) badge = 'standby';
   const excluded = out ? `${fs} from the dashboard${farmState?.by ? ` (${String(farmState.by).split(' ')[0]})` : ''}` : null;
   const why = out && !jobState ? excluded : wasBusy
-    ? [othersGB != null && othersGB > policy.foreignVramGB ? `${othersGB} GB of VRAM in use` : null, utilPct != null && utilPct > policy.foreignUtil ? `GPU ${utilPct}% busy` : null].filter(Boolean).join(', ')
+    ? [othersBusy(othersGB, totalGB, usedGB, null, policy) ? `${othersGB} GB of VRAM in use by others, ${Math.round((totalGB - usedGB) * 10) / 10} GB free` : null, utilPct != null && utilPct > policy.foreignUtil ? `GPU ${utilPct}% busy` : null].filter(Boolean).join(', ')
     : null;
   return {
     excluded,

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
-  agentOf, classify, needVramGB, nvidiaGpuMem, parseNvidiaSmiXml, parsePsTable, parseWinPs, policyOf, readYieldPolicy, shareDecision, shareOf, waitForGpu, WIN_GPU_MARK,
+  agentOf, classify, needVramGB, nvidiaGpuMem, parseNvidiaSmiXml, parsePsTable, parseWinPs, policyOf, readYieldPolicy, shareDecision, shareOf, utilWindow, waitForGpu, WIN_GPU_MARK,
   YIELD_DEFAULTS, type GpuShare,
 } from '../scripts/drift-share.mjs';
 
@@ -139,10 +139,31 @@ describe('yield: may the next chunk start', () => {
     expect(d.canStart).toBe(true);
   });
 
-  it('a game at full load with little memory → wait (utilisation, while nothing of ours is on the card)', () => {
-    const d = shareDecision(share([XORG, [7000, 'G', '/home/studio/.steam/steamapps/common/Hades/Hades', '2048 MiB']], 2460, 88), policy, 10);
+  // (the coordinator, 2026-10-30: decide on what actually conflicts — someone WORKING the card, sustained, or too
+  // little memory left; never one sample, never memory an idle service holds)
+  const HADES: [number, string, string, string] = [7000, 'G', '/home/studio/.steam/steamapps/common/Hades/Hades', '2048 MiB'];
+  const busyFor = (pct: number) => ({ medianPct: pct, n: 4, spanS: 15 });
+
+  it('a game at full load for 15 s, with little memory → wait (sustained utilisation, while nothing of ours is on the card)', () => {
+    const d = shareDecision({ ...share([XORG, HADES], 2460, 88), utilWindow: busyFor(88) }, policy, 10);
     expect(d.canStart).toBe(false);
-    expect(d.why).toMatch(/88% busy.*Hades/);
+    expect(d.why).toMatch(/88% busy, sustained over 15 s.*Hades/);
+  });
+
+  it('one sample at 100% is not someone working the card: the window decides, and a short window cannot say busy', () => {
+    expect(shareDecision({ ...share([XORG, HADES], 2460, 100), utilWindow: { medianPct: 3, n: 4, spanS: 15 } }, policy, 10).canStart).toBe(true);
+    expect(shareDecision({ ...share([XORG, HADES], 2460, 100), utilWindow: { medianPct: 100, n: 1, spanS: 0 } }, policy, 10).canStart).toBe(true);
+  });
+
+  it('an IDLE service holding 5 GB of a 24 GB card does not block a 2K job (linux-monster\'s sd-webrtc, 2026-10-30)', () => {
+    const SD: [number, string, string, string] = [7300, 'C', '/home/render-clean/sd-webrtc/venv/bin/python', '5120 MiB'];
+    const d = shareDecision({ ...share([XORG, SD], 5600, 0), utilWindow: busyFor(0) }, policy, 10);
+    expect(d.canStart).toBe(true);
+    expect(d.state).toBe('idle');
+    // … but when the card is tight (free within 4 GB of the job's need), the memory it holds tips it: it may load more
+    const tight = shareDecision({ ...share([XORG, SD], 5600, 0), utilWindow: busyFor(0) }, policy, 16);
+    expect(tight.canStart).toBe(false);
+    expect(tight.why).toMatch(/held by others .* GB free, close to the job's ~16 GB/);
   });
 
   it('our own render at 99% is not someone else\'s load', () => {
@@ -164,6 +185,18 @@ describe('yield: may the next chunk start', () => {
 
   it('no NVIDIA card (the Mac): nothing to yield to', () => {
     expect(shareDecision(null, policy, 22)).toMatchObject({ state: 'idle', canStart: true });
+  });
+});
+
+describe('the utilisation window (sustained, not one sample)', () => {
+  const at = (s: number) => 1_000_000 + s * 1000;
+  it('the median of the last 20 s of others\' samples; a spike in an even window does not make it busy', () => {
+    const w = utilWindow([{ at: at(0), pct: 2 }, { at: at(5), pct: 100 }, { at: at(10), pct: 4 }, { at: at(15), pct: 3 }], at(15));
+    expect(w).toEqual({ medianPct: 3, n: 4, spanS: 15 });
+  });
+  it('samples older than the window, and those taken while ours was on the card, do not count', () => {
+    const w = utilWindow([{ at: at(0), pct: 90 }, { at: at(30), pct: 95, ours: true }, { at: at(35), pct: 5 }, { at: at(40), pct: 6 }], at(40));
+    expect(w).toEqual({ medianPct: 5, n: 2, spanS: 5 });
   });
 });
 

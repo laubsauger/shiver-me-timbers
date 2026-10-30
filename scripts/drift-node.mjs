@@ -74,7 +74,7 @@ import {
   bundleStamp, configHelp, contentId, dashboardUrl, farmSource, installedManifest, jobOfQueueStatus, needsLength, parseBundleSource, parseJsonc,
   parseSet, readConfig, resolveJobs, run, startHeartbeat, stateLabel, syncBundle,
 } from './drift-node-lib.mjs';
-import { gpuSnapshot, localAgent, needVramGB, readYieldPolicy, shareDecision, waitForGpu } from './drift-share.mjs';
+import { gpuSnapshot, localAgent, needVramGB, readYieldPolicy, shareDecision, sustainedSnapshot, waitForGpu } from './drift-share.mjs';
 import { workLoop } from './drift-farm-client.mjs';
 import { farmNodes } from './drift-fleet.mjs';
 
@@ -799,7 +799,8 @@ async function worker() {
     // a job only while the card is free of others' work, and (the laptop) on mains power
     gpuFree: async () => {
       if (String(probes.power ?? '').startsWith('battery')) return { ok: false, why: `on battery (${probes.power})` };
-      const share = await gpuSnapshot({ agent: await localAgent() });
+      // (the utilisation sustained over 20 s, drift-share.mjs: the heartbeat samples every 5 s, so this is at once)
+      const share = await sustainedSnapshot();
       const d = shareDecision(share, POLICY, needVramGB({ size: 2048, lanes: 1 }, POLICY));
       // (who, in a few words, for the dashboard's "windows-monster busy (ComfyUI 18 GB)"; the full sentence otherwise)
       const who = d.foreign.slice(0, 3).map((f) => (f.memGB != null ? `${f.name} ${Math.round(f.memGB)} GB` : f.name)).join(', ');
