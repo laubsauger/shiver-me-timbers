@@ -41,6 +41,8 @@ ap.add_argument('--eye-level', action='store_true')
 ap.add_argument('--glances', default='', help='curious looks on top of the drift: "t:yaw:pitch:hold,..." (s, deg, deg, s), eased in and out over 2.5 s')
 ap.add_argument('--crf', default='20')
 ap.add_argument('--seed', type=int, default=7)
+ap.add_argument('--maps', action='store_true', help='with --still: write ffmpeg remap tables (xmap.pgm, ymap.pgm) for the seat into the folder `dst` and stop (header of the maps block)')
+ap.add_argument('--still', action='store_true', help='no head movement: a fixed seat view at --pitch (the user, 2026-10-30: the sway was disorienting); the mapping is computed once')
 a = ap.parse_args()
 
 # ---------------------------------------------------------------- the theatre (metres; x right of the screen
@@ -74,6 +76,9 @@ waves = {k: [(amp * rng.uniform(0.6, 1.0), rng.uniform(6, 19), rng.uniform(0, 2 
 
 # and the glances: a viewer looks where something is happening, holds, and drifts back to the front
 glances = [tuple(float(v) for v in g.split(':')) for g in a.glances.split(',') if g]
+if a.still:  # (no drift and no glances: the seat's view held still)
+    waves = {k: [] for k in waves}
+    glances = []
 
 
 def bump(t: float, t0: float, hold: float, ease: float = 2.5) -> float:
@@ -107,6 +112,34 @@ def probe(path: str) -> tuple[int, float, float]:
 
 S, FPS, DUR = probe(a.src)
 t1 = a.t1 if a.t1 is not None else DUR
+if a.maps:
+    # THE STILL SEAT AS FFMPEG REMAP TABLES (the user, 2026-10-30: the per-frame Python gather of a 4K seat view of
+    # the whole show measured ~2–4 h on the Mac — "let's make it proper"). With the head held still the master
+    # pixel each output pixel reads is the same every frame, so it is worked out once here and ffmpeg's remap
+    # filter (C, nearest tap) does the per-frame work. Nearest is blocky where the seat view magnifies the master
+    # (~1.4× at 120° on 3840 wide), so the tables are made at --size × 2 and the result is area-scaled down: four
+    # nearest taps averaged per output pixel. Rays below the spring line (the dark room) point outside the master
+    # (65535) and take remap's fill colour. Writes xmap.pgm and ymap.pgm (16-bit, P5) into `dst`, a folder.
+    import os
+    w = cam_dirs @ head(a.t0).T.astype(np.float32)
+    oc0 = (eye - C).astype(np.float32)
+    b = w @ oc0
+    hit = -b + np.sqrt(np.maximum(b * b - (oc0 @ oc0 - R * R), 0))
+    d = (eye + w * hit[..., None] - C) / R
+    el = np.arcsin(np.clip(d @ AXIS, -1, 1))
+    az = np.arctan2(d @ RIGHT, d @ FRONT)
+    r = (1 - el / (math.pi / 2)) * 0.5
+    x = np.clip(np.rint((0.5 + r * np.sin(az)) * S - 0.5), 0, S - 1)
+    y = np.clip(np.rint((0.5 + r * np.cos(az)) * S - 0.5), 0, S - 1)
+    x[el < 0] = 65535
+    y[el < 0] = 65535
+    os.makedirs(a.dst, exist_ok=True)
+    for name, m in (('xmap', x), ('ymap', y)):
+        with open(os.path.join(a.dst, f'{name}.pgm'), 'wb') as fh:
+            fh.write(f'P5\n{W} {H}\n65535\n'.encode())
+            fh.write(m.astype('>u2').tobytes())
+    print(f'{a.dst}: xmap/ymap {W}×{H} for a {S}² master, row {a.row} seat {a.seat:+.1f} m, pitch {a.pitch}°, fov {a.fov}°', file=sys.stderr)
+    sys.exit(0)
 dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', str(a.t0), '-t', str(t1 - a.t0), '-i', a.src, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
                        stdout=subprocess.PIPE)
 # the source's sound (a cut with the score under it), if it has any, cut to the same span
@@ -126,26 +159,31 @@ while True:
     # (kept 8-bit: only the gathered taps go to float, not all 4096² of the frame)
     master = np.frombuffer(buf, np.uint8).reshape(S, S, 3)
     t = a.t0 + n / FPS
-    w = cam_dirs @ head(t).T.astype(np.float32)  # world ray directions
-    b = w @ oc
-    hit = -b + np.sqrt(np.maximum(b * b - cc, 0))
-    d = (eye + w * hit[..., None] - C) / R
-    el = np.arcsin(np.clip(d @ AXIS, -1, 1))
-    az = np.arctan2(d @ RIGHT, d @ FRONT)
-    r = (1 - el / (math.pi / 2)) * 0.5
-    # master pixel (row 0 at the top; the front at the bottom)
-    x = (0.5 + r * np.sin(az)) * S - 0.5
-    y = (0.5 + r * np.cos(az)) * S - 0.5
-    x0 = np.clip(np.floor(x).astype(int), 0, S - 2)
-    y0 = np.clip(np.floor(y).astype(int), 0, S - 2)
-    fx = np.clip(x - x0, 0, 1)[..., None]
-    fy = np.clip(y - y0, 0, 1)[..., None]
+    # (--still: the head never moves, so the rays, their master pixels and the taps' weights are the same every
+    # frame — worked out once, and each frame is only the four gathers)
+    if not (a.still and n > 0):
+        w = cam_dirs @ head(t).T.astype(np.float32)  # world ray directions
+        b = w @ oc
+        hit = -b + np.sqrt(np.maximum(b * b - cc, 0))
+        d = (eye + w * hit[..., None] - C) / R
+        el = np.arcsin(np.clip(d @ AXIS, -1, 1))
+        az = np.arctan2(d @ RIGHT, d @ FRONT)
+        r = (1 - el / (math.pi / 2)) * 0.5
+        # master pixel (row 0 at the top; the front at the bottom)
+        x = (0.5 + r * np.sin(az)) * S - 0.5
+        y = (0.5 + r * np.cos(az)) * S - 0.5
+        x0 = np.clip(np.floor(x).astype(int), 0, S - 2)
+        y0 = np.clip(np.floor(y).astype(int), 0, S - 2)
+        fx = np.clip(x - x0, 0, 1)[..., None]
+        fy = np.clip(y - y0, 0, 1)[..., None]
+        i00 = y0 * S + x0
+        w00, w01, w10, w11 = ((1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy)
+        inside = (el >= 0)[..., None]
     # the four taps by flat index (one take each, cheaper than 2-D fancy indexing)
     flat = master.reshape(-1, 3)
-    i00 = y0 * S + x0
-    img = (flat.take(i00, 0).astype(np.float32) * (1 - fx) * (1 - fy) + flat.take(i00 + 1, 0) * fx * (1 - fy)
-           + flat.take(i00 + S, 0) * (1 - fx) * fy + flat.take(i00 + S + 1, 0) * fx * fy)
-    img = np.where((el >= 0)[..., None], img, room)
+    img = (flat.take(i00, 0).astype(np.float32) * w00 + flat.take(i00 + 1, 0) * w01
+           + flat.take(i00 + S, 0) * w10 + flat.take(i00 + S + 1, 0) * w11)
+    img = np.where(inside, img, room)
     if a.eye_level:
         # the viewer's own horizontal: rays at 0° elevation from this seat, dotted every few degrees
         level = (np.abs(w[..., 2]) < 0.0025) & ((np.degrees(np.arctan2(w[..., 0], w[..., 1])) % 4) < 2)
