@@ -28,9 +28,17 @@ the sea's scene from 313.9 s (a 3 s crossfade during the landing), fade to black
 
 Built (direction v2). Beats: first 0, arise 7, cool 18, wave 38, remain 45, zoom 55, gather 73 s.
 
+2026-10-30 round (the user: richer collisions, "a few more shades", and the light wave as "a total collapse of space
+and time"): collision products (`productModel.ts`, `products.ts`: annihilation stars with kinks, delta rays, gamma
+conversions, jets with V0s), braided bound pairs, shades within each colour family; the light wave rebuilt as a build
+(from 32.5 s, inside the cooling), a radiant front, the field pulled toward it (`waveFx.ts`), trails frozen where it
+passes and cooling as an afterglow, a held caustic-web whiteout (`sky.ts`), the dust lit as a sheet; glow profiles as a
+windowed core + halo (`glow.ts`). Beat lengths unchanged.
+
 | open | |
 |---|---|
 | Crawl text | placeholder until Dimi's narration arrives (`src/drift/undertime/crawlText.ts`) |
+| The survivor | direction.md's "one near pair gets away" is not drawn in the event grammar (only the old track grammar had it): the hero grain appears without the matter track arriving |
 
 ## Act 2, Get the Drift (81–~314 s)
 

@@ -209,6 +209,25 @@ metal_jerrycan_green 400
 EOF
 ```
 
+and the people's things added for it (Poly Haven CC0, fetched at 1k: their inputs are `${a}_1k.gltf`):
+
+```sh
+while read a n; do
+  "$B" -b -P scripts/drift-prop-export.py -- public/drift/pbr/$a/${a}_1k.gltf public/drift/pbr/$a/${a}_float.glb $n 512
+done <<'EOF'
+plastic_monobloc_chair_01 500
+old_tyre 500
+ocean_buoy 800
+plastic_crate_01 1500
+plastic_jerrycan 400
+industrial_pastic_container 400
+rollershutter_door 400
+wooden_picnic_table 600
+cardboard_box_01 300
+vintage_suitcase 400
+EOF
+```
+
 **Rocks**, `scripts/drift-rock-lod.py` (its two rocks and budgets are in the script; the 4k glTFs):
 
 ```sh
@@ -306,10 +325,13 @@ credit, w, h}]`, Wikimedia Commons / ESA Hubble, public domain or CC BY). That f
 `galaxy-atlas.json` keeps every galaxy's title, source URL, licence and credit, so the list can be rebuilt from it.
 Output `galaxy-atlas.jpg` and `galaxy-atlas.json`.
 
-**Earth maps**: sources, licences and the rebuild are in [earth-data.md](earth-data.md). The raw files go in
-`out/drift/data/raw/`: the Blue Marble and Black Marble files under the names the script reads (listed in
-earth-data.md), `cloud_combined_8192.tif`, the VIIRS day saved as `wv/viirs_2023-09-08_7000.jpg`, and the terrain
-tiles as `terrarium/<z>_<x>_<y>.png`: all 256 tiles of zoom 4, and zoom 7 x 55–80, y 30–57 (728 tiles):
+**Earth maps**: sources, licences, the four levels (global, region, near, inset) and the rebuild are in
+[earth-data.md](earth-data.md). The raw files go in `out/drift/data/raw/`: the Blue Marble and Black Marble files
+under the names the script reads (listed in earth-data.md), `cloud_combined_8192.tif`, the VIIRS day saved as
+`wv/viirs_2023-09-08_7000.jpg`, the terrain tiles as `terrarium/<z>_<x>_<y>.png` (all 256 tiles of zoom 4, zoom 7
+x 55–80, y 30–57 (728 tiles); for the near level and the inset zoom 9 and 11, and the inset's Sentinel-2 cloudless
+tiles as `s2cloudless/11_<row>_<col>.img`: the loops are in earth-data.md, "Downloads"). After a rebuild, publish
+the maps to the render boxes with `node scripts/drift-bundle.mjs --manifest-only`:
 
 ```sh
 mkdir -p out/drift/data/raw/terrarium && cd out/drift/data/raw/terrarium
