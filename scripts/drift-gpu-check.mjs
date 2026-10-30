@@ -124,7 +124,13 @@ const PROBE = async () => {
   const keys = ['maxTextureDimension2D', 'maxBufferSize', 'maxStorageBufferBindingSize', 'maxSampledTexturesPerShaderStage', 'maxSamplersPerShaderStage',
     'maxStorageTexturesPerShaderStage', 'maxUniformBuffersPerShaderStage', 'maxColorAttachmentBytesPerSample', 'maxComputeWorkgroupStorageSize'];
   const one = async (opts) => {
-    const a = await navigator.gpu?.requestAdapter(opts);
+    // (asked again for up to 6 s: on Linux the GPU process brings Vulkan up ~2 s after launch, and an adapter asked
+    // for before that is null — src/core/gate.ts, linux-monster 2026-10-30)
+    let a = await navigator.gpu?.requestAdapter(opts);
+    for (let i = 0; !a && navigator.gpu && i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      a = await navigator.gpu.requestAdapter(opts);
+    }
     if (!a) return null;
     const i = a.info ?? {};
     const limits = Object.fromEntries(keys.map((k) => [k, a.limits[k]]));

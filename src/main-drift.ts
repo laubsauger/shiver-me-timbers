@@ -49,7 +49,8 @@ type View = 'flat' | 'dome';
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
-  if (!(await webgpuAvailable())) {
+  // (up to 6 s for the adapter: a Linux render node's headless GPU process needs ~2 s to bring Vulkan up, core/gate.ts)
+  if (!(await webgpuAvailable(6000))) {
     renderGatePage(root);
     return;
   }
