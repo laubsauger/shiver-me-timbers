@@ -13,3 +13,7 @@ export function removeTree(dir: string): void;
 export function submit(o: Record<string, unknown>): Promise<{ code?: number; fallback?: string }>;
 export function runJob(o: Record<string, unknown>): Promise<{ state: string; exitCode: number | null; fps?: number | null }>;
 export function workLoop(o: Record<string, unknown>): Promise<void>;
+export const HOLD_ON_MS: number;
+export function holdOn<T>(what: string, fn: () => Promise<T>, o?: { untilMs?: number; say?: (m: string) => void; steps?: number[] }): Promise<T>;
+export function submitterOf(env?: Record<string, string | undefined>, pid?: number, host?: string): { pid: number; host: string; agent: string };
+export function labelOf(argv: string[], max?: number): string;

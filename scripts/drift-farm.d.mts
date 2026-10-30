@@ -15,6 +15,9 @@ export function pickWorker(job: { kind: string; prefer?: string | null; queuedAt
 export function holdReason(job: { kind: string; prefer?: string | null; queuedAt?: number; createdAt?: number }, workers: { node: string; state: string; why?: string | null; speed: number }[], now: number, patienceMs?: number): string;
 export function learn(speeds: unknown, s: { node: string; cls: string; fps?: number; durS?: number; speed?: number }): { nodes: Record<string, Record<string, number>>; dur1: Record<string, number> };
 export function speedOf(node: string, speeds: unknown, hint?: number): number;
+export const SAMPLE_MS: number;
+export const SAMPLES_MAX: number;
+export function fpsSamples(samples: [number, number, number | null][] | undefined, t: number, fps: number, done?: number | null): [number, number, number | null][];
 export function safeRel(p: string | null | undefined): string | null;
 export function landingPath(out: { local: string; file: boolean }, rel: string): string;
 export function gitIgnoreState(file: string): 'ignored' | 'tracked' | 'not-ignored' | 'no-repo';
@@ -25,6 +28,8 @@ export function createFarmHub(o: {
   allow?: (ip: string | undefined) => boolean;
   hints?: () => { name: string; tailnetIp?: string; speed?: number }[];
   bundleDir?: string | null;
+  repo?: string | null;
+  assetsRoot?: string | null;
   now?: () => number;
   log?: (m: string) => void;
 }): {

@@ -29,11 +29,20 @@
  *     - the command inside the box's render slots (drift-slot.mjs, the checkout's slot folder), its output lines and
  *       progress sent to the hub every 2 s, every file it wrote under its out folders uploaded, the exit code reported.
  *
+ *   A DASHBOARD RESTART LOSES NOTHING (the coordinator, 2026-10-30, with two jobs running: "make sure a dashboard
+ *   restart doesn't lose them"): the hub keeps every job on disk, and both sides HOLD ON while it is away instead of
+ *   failing (holdOn: 1, 2, 5, 10, 15, 30 s between tries, up to 15 min; an answer that says no — a 4xx — is final).
+ *   The worker: the payload, its "running", every result file and its final state are tried until the hub takes
+ *   them (a final state lost meant the job ran twice: the hub requeues a job it stops hearing from); its log lines
+ *   wait in order and are sent again, numbered, so the hub drops any it already has. The submitter: it keeps
+ *   following through the gap, follows a job the dashboard requeued (requeuedAs), and its result downloads hold on.
+ *
  * Built-ins only, and the stock git and tar (Windows' own tar.exe) on every machine.
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, createReadStream, createWriteStream, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -320,10 +329,49 @@ const api = (hub, token) => async (path, { method = 'GET', body, json = true, ti
   if (r.status === 204) return null;
   const text = await r.text();
   const data = text ? JSON.parse(text) : null;
-  if (!r.ok) throw new Error(`${method} ${path}: ${r.status} ${data?.error ?? text}`);
+  if (!r.ok) throw Object.assign(new Error(`${method} ${path}: ${r.status} ${data?.error ?? text}`), { status: r.status });
   return data;
 };
+/** an HTTP answer that is not a 2xx, as an error holdOn can judge (its status: a 4xx is final, a 5xx is tried again) */
+const httpError = (what, r) => Object.assign(new Error(`${what}: ${r.status}`), { status: r.status });
+
+/** ms between tries while the hub does not answer (header: A DASHBOARD RESTART LOSES NOTHING) */
+const HOLD_ON_STEPS_MS = [1000, 2000, 5000, 10_000, 15_000, 30_000];
+/** ms a job's end (its final state, its result files) keeps trying before it gives up */
+export const HOLD_ON_MS = 15 * 60_000;
+/**
+ * `fn` until it works: a hub that is away (no answer, a timeout, a 5xx) is tried again, an answer that says no (a 4xx)
+ * is not. Says so once, then every fifth try. → fn's result, or its last error after `untilMs`
+ */
+export async function holdOn(what, fn, { untilMs = HOLD_ON_MS, say = () => {}, steps = HOLD_ON_STEPS_MS } = {}) {
+  const t0 = Date.now();
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if ((e.status >= 400 && e.status < 500) || Date.now() - t0 > untilMs) throw e;
+      if (i % 5 === 0) say(`farm: ${what}: ${e.message}; holding on (the dashboard restarting?)`);
+      await new Promise((ok) => setTimeout(ok, steps[Math.min(i, steps.length - 1)]));
+    }
+  }
+}
 const upload = (call, path, file) => call(path, { method: 'PUT', body: Readable.from(createReadStream(file)), json: false, timeoutMs: 3_600_000 });
+
+/**
+ * a job's name in the queue and its log: the whole command, each path by its last part, cut at 160 characters with an
+ * ellipsis. (It was the first six arguments: `… --width 1920 --out` read as if the --out path had gone missing, the
+ * swash agent's job 20261030-004850-caf364, 2026-10-30; the argv itself carried it.)
+ */
+export function labelOf(argv, max = 160) {
+  const s = argv.map((a) => (/[\\/]/.test(a) && !a.startsWith('--') ? basename(a) : a)).join(' ');
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+/** who sent a job, for the console's queue (From): DRIFT_AGENT, else the Claude Code session, else the pid */
+export function submitterOf(env = process.env, pid = process.pid, host = hostname()) {
+  const agent = env.DRIFT_AGENT?.trim() || (env.CLAUDE_CODE_SESSION_ID ? `claude ${env.CLAUDE_CODE_SESSION_ID.slice(0, 8)}` : null);
+  return { pid, host: host.split('.')[0], agent: agent ?? `pid ${pid}` };
+}
 
 // ------------------------------------------------------------------------------------------------------- submit
 /**
@@ -342,40 +390,59 @@ export async function submit({ root, hub, token, argv, prefer = 'auto', weight =
   const bundled = new Set((installedManifest(root)?.files ?? []).map((f) => f.path));
   const remap = remapArgv(argv, { root, cwd: process.cwd(), shipped: (rel) => tracked.has(rel) || untracked.has(rel) || bundled.has(rel) });
   const { payload, meta } = await packState({ root, stage, inputs: remap.inputs, say });
-  const { id } = await call('/farm/jobs', { method: 'POST', body: { label: argv.map((a) => basename(a)).slice(0, 6).join(' '), argv: remap.argv, prefer: prefer === 'auto' ? null : prefer, weight, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: { pid: process.pid } } });
+  let { id } = await call('/farm/jobs', { method: 'POST', body: { label: labelOf(argv), argv: remap.argv, prefer: prefer === 'auto' ? null : prefer, weight, base: meta.base, bundle: meta.bundle, outs: remap.outs, inputs: remap.inputs.map((i) => ({ i: i.i, name: i.name })), submitter: submitterOf() } });
   await upload(call, `/farm/jobs/${id}/payload`, payload);
   say(`farm: job ${id} queued${prefer === 'auto' ? '' : ` for ${prefer}`}; following it here (Ctrl-C cancels it)`);
   let cancelled = false;
   const onSig = () => {
     cancelled = true;
-    call(`/farm/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {});
+    call(`/farm/jobs/${id}/cancel`, { method: 'POST', body: {} }).catch(() => {});
   };
   process.on('SIGINT', onSig);
   process.on('SIGTERM', onSig);
   let from = 0;
   const t0 = Date.now();
   let job;
+  let away = 0;
   for (;;) {
-    job = await call(`/farm/jobs/${id}?from=${from}`).catch(() => job);
-    if (job?.log?.length) {
+    // (a dashboard restart: the last answer stands and the loop goes on; said once it has lasted 10 s)
+    const next = await call(`/farm/jobs/${id}?from=${from}`).catch(() => null);
+    if (next === null) {
+      if (away++ === 5) say('farm: the hub does not answer; still following (the dashboard restarting?)');
+    } else {
+      if (away > 5) say('farm: the hub is back');
+      away = 0;
+      job = next;
+    }
+    if (job?.log?.length && next !== null) {
       out(job.log.map((l) => `[farm ${job.node ?? '?'}] ${l}\n`).join(''));
       from = job.logTo;
     }
+    // requeued from the dashboard (taken off its box, or run again): the new job is this one now
+    if (job?.requeuedAs && !cancelled) {
+      say(`farm: job ${id} was requeued as ${job.requeuedAs}; following that`);
+      id = job.requeuedAs;
+      from = 0;
+      job = null;
+      continue;
+    }
     if (job && ['done', 'failed', 'cancelled'].includes(job.state)) break;
     if (prefer === 'auto' && job?.state === 'queued' && Date.now() - t0 > 60_000 && !cancelled) {
-      await call(`/farm/jobs/${id}/cancel`, { method: 'POST' }).catch(() => {});
+      await call(`/farm/jobs/${id}/cancel`, { method: 'POST', body: {} }).catch(() => {});
       return { fallback: 'no box took it in 60 s' };
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  // the results, at the local paths the command named
+  // the results, at the local paths the command named (each download holds on through a dashboard restart)
   for (const r of job.results ?? []) {
     const dst = landingPath(job.outs[r.out], r.path);
     mkdirSync(dirname(dst), { recursive: true });
-    const res = await call(`/farm/jobs/${id}/files/${r.out}/${r.path.split('/').map(encodeURIComponent).join('/')}`, { raw: true, timeoutMs: 3_600_000 });
-    if (!res.ok) throw new Error(`result ${r.path}: ${res.status}`);
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(`${dst}.part`));
-    renameSync(`${dst}.part`, dst);
+    await holdOn(`result ${r.path}`, async () => {
+      const res = await call(`/farm/jobs/${id}/files/${r.out}/${r.path.split('/').map(encodeURIComponent).join('/')}`, { raw: true, timeoutMs: 3_600_000 });
+      if (!res.ok) throw httpError(`result ${r.path}`, res);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(`${dst}.part`));
+      renameSync(`${dst}.part`, dst);
+    }, { say });
   }
   say(`farm: job ${id} ${job.state} on ${job.node} (exit ${job.exitCode ?? '—'})${job.results?.length ? `, ${job.results.length} file(s) back` : ''}${job.error ? `: ${job.error}` : ''}`);
   return { code: job.state === 'done' ? job.exitCode ?? 0 : job.exitCode || 1, job };
@@ -391,23 +458,50 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
   const jobDir = join(work, job.id);
   removeTree(jobDir);
   mkdirSync(jobDir, { recursive: true });
+  // the log lines the hub does not have yet, in order; `acked`: how many it has (header: A DASHBOARD RESTART LOSES
+  // NOTHING). One post at a time, so a batch that failed goes again before any later one.
   let lines = [];
+  let acked = 0;
+  let chain = Promise.resolve({ ok: true });
   let progress = { done: null, total: null, unit: null, fps: null, etaS: null };
   let cancel = false;
-  const flush = async (patch = {}) => {
-    const send = lines;
-    lines = [];
-    const r = await call(`/farm/jobs/${job.id}/status`, { method: 'POST', body: { lines: send, progress, ...patch } }).catch(() => null);
-    if (r?.cancel) cancel = true;
-  };
+  /** one status post (lines from `acked`, progress, `patch`), never throwing: → { ok } or { ok: false, e } */
+  const flush = (patch = {}) =>
+    (chain = chain.then(async () => {
+      const send = lines.slice(0, 2000);
+      try {
+        const x = await call(`/farm/jobs/${job.id}/status`, { method: 'POST', body: { lines: send, from: acked, progress, ...patch } });
+        acked += send.length;
+        lines = lines.slice(send.length);
+        if (x?.cancel) cancel = true;
+        return { ok: true };
+      } catch (e) {
+        // (away for long: the oldest lines go, never the memory; the hub sees the gap in the numbering)
+        if (lines.length > 20_000) {
+          acked += lines.length - 20_000;
+          lines = lines.slice(-20_000);
+        }
+        return { ok: false, e };
+      }
+    }));
+  /** a status post that must arrive (the job's state): tried until the hub takes it (holdOn: a 4xx is final) */
+  const tell = (patch) =>
+    holdOn(`job ${job.id} ${patch.state}`, async () => {
+      for (let first = true; first || lines.length > 0; first = false) {
+        const r = await flush(first ? patch : {});
+        if (!r.ok) throw r.e;
+      }
+    }, { say });
   const note = (l) => {
     lines.push(l);
     say(l);
   };
   try {
-    const res = await call(`/farm/jobs/${job.id}/payload`, { raw: true, timeoutMs: 3_600_000 });
-    if (!res.ok) throw new Error(`payload: ${res.status}`);
-    await pipeline(Readable.fromWeb(res.body), createWriteStream(join(jobDir, 'payload.tgz')));
+    await holdOn('payload', async () => {
+      const res = await call(`/farm/jobs/${job.id}/payload`, { raw: true, timeoutMs: 3_600_000 });
+      if (!res.ok) throw httpError('payload', res);
+      await pipeline(Readable.fromWeb(res.body), createWriteStream(join(jobDir, 'payload.tgz')));
+    }, { say, untilMs: 5 * 60_000 });
     const x = spawnSync(tar, ['-xzf', 'payload.tgz'], { cwd: jobDir, encoding: 'utf8', windowsHide: true });
     if (x.status !== 0) throw new Error(`payload unpack: ${x.stderr}`);
     const meta = JSON.parse(readFileSync(join(jobDir, 'job', 'meta.json'), 'utf8'));
@@ -418,7 +512,7 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     // inside the box's render slots: the checkout's slot folder, whoever else renders there (DRIFT_FARM off: no loop)
     const cmd = [join(tree, 'scripts', 'drift-slot.mjs'), '--weight', String(job.weight ?? 1), '--', ...argv];
     note(`farm: running ${job.label} on ${tree}`);
-    await flush({ state: 'running' });
+    await tell({ state: 'running' });
     const tick = setInterval(() => flush(), 2000);
     let child = null;
     const watch = setInterval(() => {
@@ -429,7 +523,8 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
     }, 1000);
     const r = await run(process.execPath, cmd, {
       cwd: tree,
-      env: { ...process.env, DRIFT_FARM: '', DRIFT_SLOTS_DIR: process.env.DRIFT_SLOTS_DIR ?? join(main, 'out', 'drift', '.slots') },
+      // (the box's own Chrome flags, drift-gpu-check.mjs --save, live in the checkout, not in the job's tree)
+      env: { ...process.env, DRIFT_FARM: '', DRIFT_SLOTS_DIR: process.env.DRIFT_SLOTS_DIR ?? join(main, 'out', 'drift', '.slots'), DRIFT_NODE_CHROME: process.env.DRIFT_NODE_CHROME || join(main, 'out', 'drift', 'node-chrome.json') },
       onSpawn: (p) => (child = p),
       onLine: (l) => {
         progress = progressOf(l, progress);
@@ -445,17 +540,17 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
       const dir = join(jobDir, 'out', String(o.i));
       for (const rel of filesUnder(dir)) {
         if (rel.endsWith('.part')) continue;
-        await upload(call, `/farm/jobs/${job.id}/files?out=${o.i}&path=${encodeURIComponent(rel)}`, join(dir, ...rel.split('/')));
+        await holdOn(`result ${rel}`, () => upload(call, `/farm/jobs/${job.id}/files?out=${o.i}&path=${encodeURIComponent(rel)}`, join(dir, ...rel.split('/'))), { say });
         sent++;
       }
     }
     const state = cancel ? 'cancelled' : r.code === 0 ? 'done' : 'failed';
     note(`farm: exit ${r.code}, ${sent} file(s) sent back`);
-    await flush({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error: `exit ${r.code}` } : {}) });
+    await tell({ state, exitCode: r.code, fps: progress.fps, ...(state === 'failed' ? { error: `exit ${r.code}` } : {}) });
     return { state, exitCode: r.code, fps: progress.fps };
   } catch (e) {
     note(`farm: FAILED: ${e.message}`);
-    await flush({ state: 'failed', error: String(e.message).slice(0, 500) });
+    await tell({ state: 'failed', error: String(e.message).slice(0, 500) }).catch((e2) => say(`farm: could not tell the hub (${e2.message}): it requeues the job when its lease runs out`));
     return { state: 'failed', exitCode: null, error: e.message };
   } finally {
     removeTree(jobDir);
@@ -464,26 +559,70 @@ export async function runJob({ job, call, main, work, tar, say, ensureBundle = a
 
 /**
  * the worker's loop: claim while the GPU is free of others' work (`gpuFree()` → { ok, why }), run, repeat.
- * Returns only when `stop()` says so.
+ * Returns only when `stop()` says so, or with { exit } when `onPulse` asks for one (a restart).
+ *
+ * THE PULSE (drift-farm.mjs header), read from every claim's answer and handed to `onPulse({ state, command, head,
+ * bundle })` between jobs — never during one:
+ *   state    accepting | draining | paused | removed. Not accepting: no GPU check (a paused box idles without probing
+ *            its card); removed: its claim is answered at once, so it waits 5 min before asking again
+ *   command  sync-now | gpu-check-now | restart, from the dashboard
+ *   head     origin/main as the Mac sees it; bundle: the newest assets' content id
+ * `onPulse` returns { exit: code } to leave the loop (drift-node.mjs: a restart, so the wrapper syncs and starts it
+ * again), or nothing. A hub that does not answer: 15, 30, 60, then every 120 s.
  */
-export async function workLoop({ hub, token, node, main, work, tar, say, gpuFree, ensureBundle, onState = () => {}, stop = () => false }) {
+export async function workLoop({ hub, token, node, main, work, tar, say, gpuFree, ensureBundle, onState = () => {}, onPulse = async () => null, stop = () => false }) {
   const call = api(hub, token);
   mkdirSync(work, { recursive: true });
+  let farmState = 'accepting';
+  let away = 0;
+  const pulseOf = (r) => ({
+    state: r.headers.get('x-drift-farm-state') ?? 'accepting',
+    command: r.headers.get('x-drift-farm-command'),
+    head: r.headers.get('x-drift-farm-head'),
+    bundle: r.headers.get('x-drift-farm-bundle'),
+  });
   while (!stop()) {
-    const g = await gpuFree();
-    if (!g.ok) {
-      onState('busy-foreign', null, g.why);
-      await call(`/farm/claim?node=${encodeURIComponent(node)}&busy=${encodeURIComponent(g.why)}`).catch(() => {});
-      await new Promise((r) => setTimeout(r, 30_000));
-      continue;
-    }
-    onState('waiting', null);
+    if (farmState === 'accepting') {
+      const g = await gpuFree();
+      if (!g.ok) {
+        onState('busy-foreign', null, g.why);
+        const r = await call(`/farm/claim?node=${encodeURIComponent(node)}&busy=${encodeURIComponent(g.why)}`, { raw: true }).catch(() => null);
+        if (r) {
+          const p = pulseOf(r);
+          farmState = p.state;
+          const out = await onPulse(p);
+          if (out?.exit !== undefined) return out;
+        }
+        await new Promise((ok) => setTimeout(ok, 30_000));
+        continue;
+      }
+      onState('waiting', null);
+    } else onState('standby', null, `${farmState} from the dashboard`);
     let job = null;
     try {
-      job = await call(`/farm/claim?node=${encodeURIComponent(node)}`, { timeoutMs: 40_000 });
+      const r = await call(`/farm/claim?node=${encodeURIComponent(node)}`, { timeoutMs: 40_000, raw: true });
+      if (r.status !== 200 && r.status !== 204) throw new Error(`claim: ${r.status} ${(await r.text()).slice(0, 200)}`);
+      if (away > 0) say('farm: the hub answers again');
+      away = 0;
+      const p = pulseOf(r);
+      if (p.state !== farmState) say(`farm: this box is ${p.state} (set from the dashboard)`);
+      farmState = p.state;
+      job = r.status === 200 ? await r.json() : null;
+      // (between jobs only: a command, a newer head or bundle; a job handed over in this answer runs first)
+      if (!job) {
+        const out = await onPulse(p);
+        if (out?.exit !== undefined) return out;
+      }
+      if (!job && farmState === 'removed') {
+        onState('standby', null, 'removed from the farm (the dashboard)');
+        await new Promise((ok) => setTimeout(ok, 5 * 60_000));
+        continue;
+      }
     } catch (e) {
-      say(`farm: the hub does not answer (${e.message}); trying again in 15 s`);
-      await new Promise((r) => setTimeout(r, 15_000));
+      const waitS = [15, 30, 60, 120][Math.min(away, 3)];
+      away++;
+      say(`farm: the hub does not answer (${e.message}); trying again in ${waitS} s`);
+      await new Promise((ok) => setTimeout(ok, waitS * 1000));
       continue;
     }
     if (!job) continue;

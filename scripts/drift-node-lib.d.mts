@@ -70,12 +70,35 @@ export function syncBundle(o: {
   say?: (line: string) => void;
   bundleScript: string;
   tar?: string;
-}): Promise<{ changed: boolean; record: BundleRecord | null }>;
-export function bundleStamp(rec: { file?: string; created?: string } | null | undefined): string | null;
+  onProgress?: (p: { name: string; done: number; total: number; unit: string; rateBps: number; etaS: number }) => void;
+  full?: boolean;
+}): Promise<{ changed: boolean; record: BundleRecord | null; moved?: BundleMoved }>;
+export type BundleMoved = { mode: 'current' | 'patch' | 'tarball' | 'tarball+patch'; files: number; bytes: number; seconds: number };
+export type BundleManifest = { files: ManifestFile[]; created?: string; commit?: string; count?: number; bytes?: number };
+type FetchLike = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
+export function bundlePath(p: string | null | undefined): string | null;
+export function diffBundle(
+  root: string,
+  man: BundleManifest,
+  old: BundleManifest | null,
+  index: Record<string, { bytes: number; mtimeMs: number; sha256: string }>,
+): Promise<{ need: ManifestFile[]; drop: string[]; hashed: number }>;
+export function fetchBundleFile(o: { root: string; source: BundleSource & { hub: string; token?: string | null }; entry: ManifestFile; onBytes?: (n: number) => void; fetchImpl?: FetchLike }): Promise<number>;
+export function patchBundle(o: {
+  root: string;
+  source: BundleSource & { hub: string; token?: string | null };
+  old: BundleManifest | null;
+  say?: (line: string) => void;
+  onProgress?: (p: { name: string; done: number; total: number; unit: string; rateBps: number; etaS: number }) => void;
+  fetchImpl?: FetchLike;
+  parallel?: number;
+}): Promise<{ man: BundleManifest; content: string; files: number; bytes: number; removed: number; hashed: number; seconds: number } | null>;
+export function seedIndex(root: string, man: BundleManifest): void;
+export function bundleStamp(rec: { file?: string; created?: string; patched?: unknown } | null | undefined): string | null;
 export const JOB_FIELDS: string[];
 export function parseSet(list: string[]): Record<string, unknown>;
 export function resolveJobs(spec: QueueSpec, o?: { length?: number | null; out?: string | null; set?: Record<string, unknown> }): QueueSpec;
 export function needsLength(spec: QueueSpec, set?: Record<string, unknown>): boolean;
 export function stateLabel(commit: string, dirty: boolean, content: string | null): string;
 export function jobOfQueueStatus(st: unknown): { name: string; chunk: number; chunks: number; frames: number; framesTotal: number; fps?: number; etaS?: number; out: string } | undefined;
-export function startHeartbeat(url: string | null, payload: () => unknown, everyMs?: number): { url: string | null; beat: () => Promise<unknown>; stop: () => Promise<unknown> };
+export function startHeartbeat(url: string | null, payload: () => unknown, everyMs?: number | (() => number)): { url: string | null; beat: () => Promise<unknown>; stop: () => Promise<unknown> };

@@ -1,7 +1,8 @@
 # The Drift's render-farm worker on this box (shiver-me-timbers: node scripts/drift-node.mjs worker), a systemd user
 # service (render-clean lingers: it runs without a login session). Node 24 from ~/.local/node24 (the system's is 18,
 # too old for Vite 7). It syncs first (git pull, npm ci when the lockfile changed, the asset bundle from the Mac's farm
-# hub, the GPU check when Chrome or the driver changed), then works; on any exit it starts over after 60 s.
+# hub, the GPU check when Chrome or the driver changed), then works; when the worker ends it starts over after 60 s,
+# at once when it exits 75 (a restart the dashboard asked for, or origin/main moved on).
 # Output: ~/shiver-me-timbers/out/drift/node/worker-service.log (node scripts/drift-node.mjs logs -f)
 # Stop: systemctl --user stop drift-worker · status: systemctl --user status drift-worker
 [Unit]
@@ -13,7 +14,7 @@ Type=simple
 WorkingDirectory=%h/shiver-me-timbers
 Environment=PATH=%h/.local/node24/bin:/usr/local/bin:/usr/bin:/bin
 Environment=DRIFT_NODE_LOG=%h/shiver-me-timbers/out/drift/node/worker-service.log
-ExecStart=/bin/sh -c 'mkdir -p out/drift/node && exec >>"$${DRIFT_NODE_LOG}" 2>&1 && echo "==== $$(date -Is) drift-worker: sync" && node scripts/drift-node.mjs sync && echo "==== $$(date -Is) drift-worker: working" && exec node scripts/drift-node.mjs worker'
+ExecStart=/bin/sh -c 'mkdir -p out/drift/node && exec >>"$${DRIFT_NODE_LOG}" 2>&1; while :; do echo "==== $$(date -Is) drift-worker: sync"; c=1; if node scripts/drift-node.mjs sync; then echo "==== $$(date -Is) drift-worker: working"; node scripts/drift-node.mjs worker; c=$$?; fi; [ "$$c" = 75 ] && continue; echo "==== $$(date -Is) drift-worker: ended (exit $$c), starting over in 60 s"; sleep 60; done'
 KillSignal=SIGINT
 TimeoutStopSec=30
 Restart=always

@@ -19,9 +19,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  createFarmHub, farmToken, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, safeRel, speedOf, transition,
+  createFarmHub, farmToken, fpsSamples, gitIgnoreState, holdReason, jobClass, jobKind, landingPath, learn, LEASE_MS, PATIENCE_MS, pickWorker, safeRel, SAMPLE_MS, SAMPLES_MAX, speedOf, transition,
 } from '../scripts/drift-farm.mjs';
-import { applyState, assetOverlay, packState, progressOf, remapArgv, removeTree, resolveArgv } from '../scripts/drift-farm-client.mjs';
+import { applyState, assetOverlay, holdOn, labelOf, packState, progressOf, remapArgv, removeTree, resolveArgv, submitterOf } from '../scripts/drift-farm-client.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'drift-farm-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -49,6 +49,19 @@ describe('the queue', () => {
     expect(jobKind(['node', 'scripts/drift-render.mjs', '--size', '4096'])).toBe('long');
     expect(jobKind(['node', 'scripts/drift-review-clip.mjs', '--from', '300'])).toBe('clip');
     expect(jobClass(['node', 'scripts/drift-render.mjs', '--size', '4096'])).toBe('drift-render.mjs:4096');
+  });
+
+  // the console's fps sparkline reads these: a status post every 2 s must not grow job.json without bound, and a gap
+  // in the samples must mean the box went quiet, not that the hub dropped one
+  it('keeps one fps sample per SAMPLE_MS, the newest SAMPLES_MAX, and ignores a report without a frame rate', () => {
+    let s = fpsSamples(undefined, 0, 2.5, 10);
+    s = fpsSamples(s, SAMPLE_MS - 1, 9, 11); // too soon: dropped
+    s = fpsSamples(s, SAMPLE_MS, 3, 40);
+    s = fpsSamples(s, 2 * SAMPLE_MS, Number.NaN, 50); // no fps (a still's line): nothing
+    expect(s).toEqual([[0, 2.5, 10], [SAMPLE_MS, 3, 40]]);
+    for (let i = 2; i < SAMPLES_MAX + 10; i++) s = fpsSamples(s, i * SAMPLE_MS, 1, i);
+    expect(s).toHaveLength(SAMPLES_MAX);
+    expect(s.at(-1)).toEqual([(SAMPLES_MAX + 9) * SAMPLE_MS, 1, SAMPLES_MAX + 9]);
   });
 });
 
@@ -105,6 +118,22 @@ describe('paths', () => {
     expect(r.argv).toEqual(['node', 'scripts/drift-review-stills.mjs', '{{in:0}}', '--width', '1280', '--out', '{{out:0}}']);
     expect(r.inputs).toEqual([{ i: 0, local: join(scratch, 'shots.json'), name: 'shots.json' }]);
     expect(r.outs).toEqual([{ i: 0, local: join(scratch, 'out', 'stills'), file: false }]);
+  });
+
+  // the swash agent's job 20261030-004850-caf364 (2026-10-30): its log read `… --width 1920 --out on <tree>`, as if the
+  // --out path had been swallowed. It was the label (the first six arguments); the argv and the landing were right.
+  it('an agent\'s scratchpad paths: the input travels, --out comes back to the same folder, the label shows them all', () => {
+    const pad = join(scratch, 'claude-501', 'scratchpad');
+    mkdirSync(pad, { recursive: true });
+    writeFileSync(join(pad, 'v.json'), '[]');
+    const argv = ['node', 'scripts/drift-review-stills.mjs', join(pad, 'v.json'), '--width', '1920', '--out', join(pad, 'r3a'), '--port', '5372'];
+    const r = remapArgv(argv, { root, cwd: pad, shipped: (rel) => rel === 'scripts/drift-review-stills.mjs' });
+    expect(r.argv).toEqual(['node', 'scripts/drift-review-stills.mjs', '{{in:0}}', '--width', '1920', '--out', '{{out:0}}', '--port', '5372']);
+    expect(r.outs).toEqual([{ i: 0, local: join(pad, 'r3a'), file: false }]);
+    expect(landingPath(r.outs[0], 's365_show.png')).toBe(join(pad, 'r3a', 's365_show.png'));
+    expect(labelOf(argv)).toBe('node drift-review-stills.mjs v.json --width 1920 --out r3a --port 5372');
+    expect(labelOf(['node', 'x.mjs', '--query', 'a'.repeat(300)])).toMatch(/^node x\.mjs --query a+…$/);
+    expect(labelOf(['node', 'x.mjs', '--query', 'a'.repeat(300)])).toHaveLength(160);
   });
 
   it('an --out file (a clip) is a file on the box too, and its result lands at that file', () => {
@@ -301,6 +330,118 @@ describe('the door', () => {
     hub.sweep();
     expect(hub.jobs().find((j) => j.id === id)).toMatchObject({ state: 'failed', error: 'eeg-msi stopped answering (twice)' });
   });
+
+  // A DASHBOARD RESTART LOSES NOTHING (drift-farm-client.mjs header; the coordinator, 2026-10-30, with two jobs
+  // running: "make sure a dashboard restart doesn't lose them"): the jobs are on disk, and a box that kept rendering
+  // while the dashboard was down for minutes keeps its job — taking it would run the job twice
+  const newJob = async (argv = ['node', 'scripts/drift-review-stills.mjs']) => {
+    from = '127.0.0.1';
+    const { id } = await (await call('/farm/jobs', { method: 'POST', body: { argv, base: 'abcdef1' } })).json();
+    await call(`/farm/jobs/${id}/payload`, { method: 'PUT', raw: 'P' });
+    return id as string;
+  };
+  const claimAs = async (node: string, ip: string) => {
+    from = ip;
+    const r = await call(`/farm/claim?node=${node}`, { token: null });
+    return r.status === 200 ? r.json() : null;
+  };
+
+  it('a restart: the running job is read back from disk, and its box is not timed out by the downtime', async () => {
+    const id = await newJob();
+    expect((await claimAs('eeg-msi', '100.126.127.68')).id).toBe(id);
+    await call(`/farm/jobs/${id}/status`, { method: 'POST', token: null, body: { state: 'running', lines: ['a'], from: 0 } });
+    // the dashboard is down for longer than a lease, then starts again on the same folder
+    now += 3 * LEASE_MS;
+    const again = createFarmHub({ dir: join(scratch, 'farm'), token: TOKEN, hints, now: () => now, allow: () => true });
+    try {
+      expect(again.jobs().find((j) => j.id === id)).toMatchObject({ state: 'running', node: 'eeg-msi' });
+      again.sweep();
+      expect(again.jobs().find((j) => j.id === id)?.state).toBe('running'); // (the box gets a lease from the restart)
+      now += LEASE_MS + 1;
+      again.sweep();
+      expect(again.jobs().find((j) => j.id === id)?.state).toBe('queued'); // (silent past that: given back as ever)
+    } finally {
+      again.close();
+    }
+  });
+
+  it('a status batch sent again (its answer lost) adds its lines once; lines lost on the box are noted', async () => {
+    const id = await newJob();
+    await claimAs('eeg-msi', '100.126.127.68');
+    const post = (body: unknown) => call(`/farm/jobs/${id}/status`, { method: 'POST', token: null, body });
+    await post({ state: 'running', lines: ['one', 'two'], from: 0 });
+    await post({ lines: ['one', 'two', 'three'], from: 0 }); // the first answer never arrived: sent again, one more
+    await post({ lines: ['six'], from: 5 }); // the box dropped two lines while the hub was away
+    from = '127.0.0.1';
+    const j = await (await call(`/farm/jobs/${id}?from=0`)).json();
+    expect(j.log).toEqual(['one', 'two', 'three', '(farm: 2 line(s) lost while the hub was away)', 'six']);
+  });
+
+  it('a final state said twice (its answer lost) changes nothing, and the box is free, not busy', async () => {
+    const id = await newJob();
+    await claimAs('eeg-msi', '100.126.127.68');
+    const post = (body: unknown) => call(`/farm/jobs/${id}/status`, { method: 'POST', token: null, body });
+    await post({ state: 'running', from: 0, lines: [] });
+    await post({ state: 'done', exitCode: 0, from: 0, lines: [] });
+    expect((await post({ state: 'done', exitCode: 0, from: 0, lines: [] })).status).toBe(200);
+    expect(hub.jobs().find((j) => j.id === id)?.state).toBe('done');
+    expect(hub.view().workers.find((w: { node: string }) => w.node === 'eeg-msi')).toMatchObject({ state: 'waiting', job: null });
+  });
+
+  // THE CONTROLS (drift-farm.mjs header; the user, 2026-10-30: "push a button and deregister it … and not poke holes")
+  const control = (path: string, body: unknown, o: { json?: boolean; origin?: string } = {}) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: { ...(o.json === false ? {} : { 'content-type': 'application/json' }), ...(o.origin ? { origin: o.origin } : {}) }, body: JSON.stringify(body) });
+
+  it('a box\'s farm state is set only from this Mac: never over the tailnet (not even with the token), JSON only, its own origin', async () => {
+    from = '100.77.131.101';
+    expect((await call('/farm/nodes/eeg-msi/state', { method: 'POST', body: { state: 'paused' } })).status).toBe(403);
+    from = '127.0.0.1';
+    expect((await control('/farm/nodes/eeg-msi/state', { state: 'paused' }, { json: false })).status).toBe(415);
+    expect((await control('/farm/nodes/eeg-msi/state', { state: 'paused' }, { origin: 'https://evil.example' })).status).toBe(403);
+    expect((await control('/farm/nodes/nobody/state', { state: 'paused' })).status).toBe(404);
+    expect(hub.view().nodes['eeg-msi'].state).toBe('accepting');
+  });
+
+  it('paused: its running job goes back to the queue as a new job, it gets no work, and that survives a restart', async () => {
+    const id = await newJob();
+    await claimAs('eeg-msi', '100.126.127.68');
+    from = '127.0.0.1';
+    const r = await (await control('/farm/nodes/eeg-msi/state', { state: 'paused' })).json();
+    expect(r).toMatchObject({ node: 'eeg-msi', state: 'paused', from: 'accepting' });
+    const old = hub.jobs().find((j) => j.id === id)!;
+    expect(old.requeuedAs).toBeTruthy();
+    expect(hub.jobs().find((j) => j.id === old.requeuedAs)?.state).toBe('queued');
+    // its worker's next status answer tells it to stop
+    from = '100.126.127.68';
+    expect(await (await call(`/farm/jobs/${id}/status`, { method: 'POST', token: null, body: { lines: [] } })).json()).toMatchObject({ cancel: true, state: 'paused' });
+    // a claim from it is held, never handed the queued job
+    const held = await fetch(`${base}/farm/claim?node=eeg-msi`, { signal: AbortSignal.timeout(300) }).then((x) => x.status, () => 'held');
+    expect(held).toBe('held');
+    expect(hub.jobs().find((j) => j.id === old.requeuedAs)?.state).toBe('queued');
+    // across a restart
+    const again = createFarmHub({ dir: join(scratch, 'farm'), token: TOKEN, hints, now: () => now, allow: () => true });
+    try {
+      expect(again.view().nodes['eeg-msi']).toMatchObject({ state: 'paused', actions: ['accepting', 'removed'] });
+    } finally {
+      again.close();
+    }
+    from = '127.0.0.1';
+    expect((await control('/farm/nodes/eeg-msi/state', { state: 'draining' })).status).toBe(400); // (not a move from paused)
+    expect((await control('/farm/nodes/eeg-msi/state', { state: 'accepting' })).status).toBe(200);
+    // accepting again: its next claim is handed a job requeued from it (the oldest first: every job it ran went back)
+    expect((await claimAs('eeg-msi', '100.126.127.68'))?.requeuedFrom).toBeTruthy();
+  });
+
+  it('removed: its claim is answered at once with its state (the worker asks again in minutes)', async () => {
+    from = '127.0.0.1';
+    expect((await control('/farm/nodes/windows-monster/state', { state: 'removed' })).status).toBe(200);
+    from = '100.77.131.101';
+    const r = await call('/farm/claim?node=windows-monster', { token: null });
+    expect(r.status).toBe(204);
+    expect(r.headers.get('x-drift-farm-state')).toBe('removed');
+    from = '127.0.0.1';
+    expect((await control('/farm/nodes/windows-monster/state', { state: 'accepting' })).status).toBe(200);
+  });
 });
 
 describe('farm.json and git (the repo is public)', () => {
@@ -328,5 +469,40 @@ describe('farm.json and git (the repo is public)', () => {
     sh(repo, 'add', 'farm.json');
     expect(gitIgnoreState(join(repo, 'farm.json'))).toBe('tracked');
     expect(() => farmToken(join(repo, 'farm.json'))).toThrow(/tracked by git/);
+  });
+});
+
+describe('holding on through a dashboard restart (drift-farm-client.mjs holdOn)', () => {
+  const steps = [1, 1, 1];
+  it('tries again while the hub is away (no answer, a 5xx), and goes on once it answers', async () => {
+    let n = 0;
+    const r = await holdOn('x', async () => {
+      n++;
+      if (n === 1) throw new TypeError('fetch failed');
+      if (n === 2) throw Object.assign(new Error('502'), { status: 502 });
+      return 'ok';
+    }, { steps });
+    expect([r, n]).toEqual(['ok', 3]);
+  });
+
+  it('an answer that says no (a 4xx) is final: not tried again', async () => {
+    let n = 0;
+    await expect(holdOn('x', async () => {
+      n++;
+      throw Object.assign(new Error('403 not yours'), { status: 403 });
+    }, { steps })).rejects.toThrow(/403/);
+    expect(n).toBe(1);
+  });
+
+  it('gives up after its time, with the last error', async () => {
+    await expect(holdOn('x', async () => {
+      throw new TypeError('fetch failed');
+    }, { steps: [5], untilMs: 20 })).rejects.toThrow(/fetch failed/);
+  });
+
+  it('names who sent a job: DRIFT_AGENT, else the Claude Code session, else the pid', () => {
+    expect(submitterOf({ DRIFT_AGENT: 'beach-agent', CLAUDE_CODE_SESSION_ID: '0797e262-d034' }, 7, 'laubs-mbp.local')).toEqual({ pid: 7, host: 'laubs-mbp', agent: 'beach-agent' });
+    expect(submitterOf({ CLAUDE_CODE_SESSION_ID: '0797e262-d034' }, 7, 'h').agent).toBe('claude 0797e262');
+    expect(submitterOf({}, 7, 'h').agent).toBe('pid 7');
   });
 });

@@ -16,6 +16,7 @@
  *   node scripts/drift-node.mjs worker                     a render-farm worker: takes jobs from the Mac's farm hub
  *                                                          while the GPU is free of others' work (drift-farm-client.mjs)
  *   common: --dry-run (say what would happen, change nothing) · sync: --gpu-check (run it anyway) · --no-gpu-check
+ *           · --full-bundle (the whole tarball, not a patch file by file)
  *   render: --length <s> (the show's length, instead of asking the page) · anything else goes to drift-queue.mjs
  *           (--only, --retries, --decode-check, --no-concat, --port, --dry-run, --force)
  *   --force: start even while someone else holds the GPU (sync's GPU check and the queue's chunks; see below)
@@ -30,7 +31,9 @@
  *   3. the asset bundle (scripts/drift-node-lib.mjs syncBundle): the source in drift-node.json (gitignored, this
  *      machine's own) — the Mac's out/drift-bundle over SSH on the tailnet, or a folder it was copied to by hand.
  *      The source's latest-assets.json (a few hundred bytes) first; the 1.4 GB .tar.gz only when it names other
- *      files than the ones unpacked here; then `tar -xzf` and drift-bundle.mjs --verify --quick
+ *      files than the ones unpacked here; then `tar -xzf` and drift-bundle.mjs --verify --quick. From the farm hub,
+ *      a machine that has a bundle patches it instead: only the files that differ move (the bytes in the console and
+ *      the heartbeat's "bundleSync"); the tarball for a first install, or with --full-bundle
  *   4. scripts/drift-gpu-check.mjs on the first sync, when Chrome's version or the GPU driver changed, or when the
  *      last one failed. It also prints the show's length, which `"to": "end"` jobs use (cached per commit). Like
  *      every chunk of the queue, it first waits while someone else holds the GPU (drift-share.mjs: ComfyUI, a game;
@@ -304,6 +307,9 @@ function payload() {
     state: live?.state === 'waiting-foreign' ? 'waiting-foreign' : shared ? 'rendering+shared' : report.state, gpu: probes.gpu, power: probes.power, job: jobOfQueueStatus(live) ?? report.job, last: (live?.last || lastLine).slice(0, 300), error: report.error?.slice(0, 1000),
     ...(sh ? { vram: { usedGB: gbOf(sh.usedMB), totalGB: gbOf(sh.totalMB), oursGB: gbOf(sh.oursMB), foreignGB: probes.decision?.foreignGB ?? undefined, freeGB: gbOf(sh.freeMB) }, foreign: probes.decision?.foreign.slice(0, 6) } : {}),
     ...(waiting ? { waiting } : {}),
+    // (the last bundle sync: what moved over the wire; a download in progress as `step`)
+    ...(report.bundleSync ? { bundleSync: report.bundleSync } : {}),
+    ...(report.step ? { step: report.step } : {}),
   };
 }
 function startReporting(source) {
@@ -410,10 +416,24 @@ async function stepNpm() {
 
 async function stepBundle(source) {
   say(`bundle: ${source.kind === 'ssh' ? `the Mac over SSH, ${source.label}` : source.kind === 'farm' ? source.label : `the folder ${source.label}`}`);
-  const { changed, record } = await syncBundle({ root: ROOT, source, prev: state.bundle ?? null, dryRun: DRY, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR });
+  const { changed, record, moved } = await syncBundle({ root: ROOT, source, prev: state.bundle ?? null, dryRun: DRY, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR, full: flag('full-bundle'), onProgress: bundleProgress });
   if (!DRY && record) saveState({ bundle: record });
-  if (!DRY) say(changed ? `bundle: ${record.file} unpacked and verified` : 'bundle: current, verified');
+  if (!DRY) say(changed ? `bundle: ${movedLine(moved, record)}` : 'bundle: current, verified');
+  if (!DRY && moved) beat({ bundleSync: { ...moved, content: record?.content?.slice(0, 12) ?? null, at: new Date().toISOString() }, step: undefined });
   return true;
+}
+
+/** "patched 3 file(s), 12 MB moved in 2.1 s" — what a sync moved, for the console */
+function movedLine(moved, record) {
+  const size = (b) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(2)} GB` : `${(b / 2 ** 20).toFixed(1)} MB`);
+  if (!moved) return `${record?.file ?? 'the bundle'} unpacked and verified`;
+  if (moved.mode === 'patch') return `patched ${moved.files} file(s), ${size(moved.bytes)} moved in ${moved.seconds.toFixed(1)} s, verified`;
+  return `${record?.file ?? 'the tarball'} unpacked${moved.mode === 'tarball+patch' ? ' and patched on' : ''}, ${size(moved.bytes)} moved in ${moved.seconds.toFixed(0)} s, verified`;
+}
+/** a sync's download, for the dashboard's progress bar (the heartbeat's "step") */
+function bundleProgress(p) {
+  report.step = p;
+  hb?.beat();
 }
 
 async function stepGpuCheck() {
@@ -423,7 +443,7 @@ async function stepGpuCheck() {
   }
   const fp = gpuFingerprint();
   const last = state.gpuCheck;
-  const due = flag('gpu-check') ? 'asked for (--gpu-check)' : !last ? 'first sync on this machine' : last.fingerprint !== fp ? `Chrome or the driver changed (${last.fingerprint} → ${fp})` : last.result !== 'PASS' ? 'it did not pass last time' : null;
+  const due = flag('gpu-check') ? 'asked for (--gpu-check)' : !last ? 'first sync on this machine' : last.fingerprint !== fp ? `Chrome or the driver changed (${last.fingerprint} → ${fp})` : last.result === 'ASKED' ? 'asked for from the dashboard' : last.result !== 'PASS' ? 'it did not pass last time' : null;
   if (due === null) {
     say(`GPU check: passed ${last.at.slice(0, 16).replace('T', ' ')} with this Chrome and driver (${fp}) — not run again; --gpu-check runs it`);
     return true;
@@ -613,7 +633,7 @@ async function render() {
   if (out) say(`output: ${out}  (this commit and bundle; the same command again resumes it)`);
 
   // everything that is not drift-node's own goes to the queue
-  const own = new Set(['--no-sync', '--detach', '--gpu-check', '--no-gpu-check']);
+  const own = new Set(['--no-sync', '--detach', '--gpu-check', '--no-gpu-check', '--full-bundle']);
   const at = rest.findIndex((a, i) => a === target && !OWN_VALUE.has(rest[i - 1]) && !QUEUE_VALUE.has(rest[i - 1]));
   const pass = rest.filter((a, i) => i !== at && !own.has(a) && !OWN_VALUE.has(a) && !OWN_VALUE.has(rest[i - 1]));
   beat({ state: 'rendering' });
@@ -751,7 +771,24 @@ async function worker() {
   openRunLog('worker');
   startReporting(source);
   say(`farm worker ${me.name} → ${hubUrl}; jobs run in ${join(dirname(ROOT), 'smt-farm')}`);
-  await workLoop({
+  // the job's asset bundle: this checkout's, synced from the hub (or drift-node.json's source) when it is another
+  const ensureBundle = async (want) => {
+    const have = () => {
+      const m = installedManifest(ROOT);
+      return m ? contentId(m.files) : null;
+    };
+    if (want === null || have() === want) return;
+    if (!source) throw new Error('the job needs another asset bundle and this machine has no bundle source ("bundle" or "farm" in drift-node.json)');
+    say(`farm: the assets wanted are ${want.slice(0, 6)}, this machine has ${have()?.slice(0, 6) ?? 'none'}: syncing them`);
+    const { record, moved } = await syncBundle({ root: ROOT, source, prev: loadState().bundle ?? null, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR, onProgress: bundleProgress });
+    if (record) saveState({ bundle: record });
+    say(`farm: bundle ${movedLine(moved, record)}`);
+    beat({ bundleSync: { ...moved, content: record?.content?.slice(0, 12) ?? null, at: new Date().toISOString() }, step: undefined });
+    if (have() !== want) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) is not the hub's newest (now ${have()?.slice(0, 6) ?? 'none'} here): publish it on the Mac (node scripts/drift-bundle.mjs --manifest-only, seconds)`);
+  };
+  // (the head this worker last restarted to pull: once per head, header of onPulse below)
+  let restartedFor = loadState().restartedFor ?? null;
+  const out = await workLoop({
     hub: hubUrl,
     token: CFG.farm.token ?? null,
     node: me.name,
@@ -768,30 +805,56 @@ async function worker() {
       const who = d.foreign.slice(0, 3).map((f) => (f.memGB != null ? `${f.name} ${Math.round(f.memGB)} GB` : f.name)).join(', ');
       return { ok: d.canStart, why: who || d.why };
     },
-    // the job's asset bundle: this checkout's, synced from the hub (or drift-node.json's source) when it is another
-    ensureBundle: async (want) => {
-      const have = () => {
-        const m = installedManifest(ROOT);
-        return m ? contentId(m.files) : null;
-      };
-      if (want === null || have() === want) return;
-      if (!source) throw new Error('the job needs another asset bundle and this machine has no bundle source ("bundle" or "farm" in drift-node.json)');
-      say(`farm: the job needs another asset bundle (${want.slice(0, 6)}, this machine has ${have()?.slice(0, 6) ?? 'none'}): syncing it`);
-      const { record } = await syncBundle({ root: ROOT, source, prev: loadState().bundle ?? null, say: emit, bundleScript: join(SCRIPTS, 'drift-bundle.mjs'), tar: TAR });
-      if (record) saveState({ bundle: record });
-      if (have() !== want) throw new Error(`the job's asset bundle (${want.slice(0, 6)}) is not the hub's newest (now ${have()?.slice(0, 6) ?? 'none'} here): rebuild the bundle on the Mac (node scripts/drift-bundle.mjs)`);
-    },
+    ensureBundle,
     onState: (st, job, why) =>
       beat({
-        // (standby: the hub keeps this box out of the farm, drift-farm-nodes.json "exclude"; the reason as `why`)
+        // (standby: this box takes no work, its farm state set from the dashboard: paused, removed; the reason as `why`)
         state: st === 'rendering' ? 'rendering' : st === 'busy-foreign' ? 'busy-foreign' : st === 'standby' ? 'standby' : 'idle',
         why: st === 'standby' ? why : undefined,
         job: job ? { name: job.label, chunk: null, chunks: null, frames: job.progress?.done ?? null, framesTotal: job.progress?.total ?? null, fps: job.progress?.fps ?? null, etaS: job.progress?.etaS ?? null, out: job.id } : undefined,
         error: undefined,
       }),
+    // THE PULSE (drift-farm-client.mjs workLoop), between jobs. A restart is exit 75: the wrapper (drift-worker.cmd,
+    // the systemd unit) syncs — git pull, npm ci, the bundle, the GPU check when due — and starts the worker again
+    onPulse: async (p) => {
+      if (p.command === 'restart' || p.command === 'sync-now') {
+        say(`farm: ${p.command} asked from the dashboard: restarting (the wrapper syncs first)`);
+        return { exit: 75 };
+      }
+      if (p.command === 'gpu-check-now') {
+        say('farm: a GPU check asked from the dashboard: restarting (the sync runs it)');
+        saveState({ gpuCheck: { ...(loadState().gpuCheck ?? {}), result: 'ASKED' } });
+        return { exit: 75 };
+      }
+      // origin/main moved past this checkout: restart, so the wrapper pulls it (once per head: a pull the sync
+      // refuses — a local change — must not turn into a restart every claim)
+      if (p.head && /^[0-9a-f]{40}$/.test(p.head) && p.head !== restartedFor) {
+        const mine = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true }).stdout?.trim();
+        const behind = mine && mine !== p.head && spawnSync('git', ['-C', ROOT, 'merge-base', '--is-ancestor', p.head, 'HEAD'], { windowsHide: true }).status !== 0;
+        if (behind) {
+          restartedFor = p.head;
+          saveState({ restartedFor: p.head });
+          say(`farm: origin/main is at ${p.head.slice(0, 7)}, this checkout at ${mine.slice(0, 7)}: restarting to pull it`);
+          return { exit: 75 };
+        }
+      }
+      // newer assets on the Mac (drift-bundle.mjs, or --manifest-only): patched now, file by file, not at the next job
+      if (p.bundle && /^[0-9a-f]{64}$/.test(p.bundle)) {
+        const m = installedManifest(ROOT);
+        if (!m || contentId(m.files) !== p.bundle) {
+          try {
+            beat({ state: 'syncing' });
+            await ensureBundle(p.bundle);
+          } catch (e) {
+            say(`farm: the bundle sync failed (${e.message}); the next job tries again`);
+          }
+        }
+      }
+      return null;
+    },
     stop: () => interrupted > 0,
   });
-  return finish(0);
+  return finish(out?.exit ?? 0, out?.exit ? 'restarting (exit 75): the wrapper syncs and starts the worker again' : undefined);
 }
 
 // ---------------------------------------------------------------------------------------------------- main

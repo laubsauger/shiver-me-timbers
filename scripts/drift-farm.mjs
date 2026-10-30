@@ -17,11 +17,18 @@
  *   PUT  /farm/jobs/:id/files?out=&path=   a result file, streamed
  *   GET  /farm/jobs/:id[?from=n]       the job, and its log from line n (the submitter follows it with this)
  *   GET  /farm/jobs/:id/files/:out/<path>  a result file
- *   POST /farm/jobs/:id/cancel
+ *   POST /farm/jobs/:id/cancel, /requeue, POST /farm/nodes/:name/state   the dashboard's CONTROLS (below: loopback only)
  *   GET  /farm/workers                 who is free, busy or busy with someone else's work, and their speed
  *   GET  /farm/bundle/latest-assets.json, /farm/bundle/drift-assets-<date>.tar.gz
  *                                      THE ASSET BUNDLE over the same door (out/drift-bundle): the Windows boxes have no
  *                                      SSH, so a worker syncs its bundle from here (drift-node-lib.mjs, a "farm" source)
+ *   GET  /farm/bundle/manifest         the newest assets' manifest (out/drift-bundle/manifest-assets.json, as a full
+ *                                      build or drift-bundle.mjs --manifest-only last wrote it)
+ *   GET  /farm/bundle/file?path=<p>    ONE FILE of it, by its manifest path only, from this checkout; its sha256 in
+ *                                      x-sha256, Range for a resumed fetch. A box with a bundle patches it file by file
+ *                                      (drift-node-lib.mjs patchBundle; the user, 2026-10-30: "make sure the bundle can
+ *                                      be incrementally patched instead of having to upload the whole huge thing all
+ *                                      the time"); the tarball is for a box with none
  *
  * AUTH: only from loopback or the tailnet (the dashboard's fromTailnet), and then either
  *   - the shared token in a bearer header: the Mac's farm.json (gitignored — farmToken refuses to write or use one
@@ -41,12 +48,40 @@
  * box that is free — unless it has waited 2 min, then the fastest one asking takes it. `prefer` pins a box.
  * Speeds start from scripts/drift-farm-nodes.json ("speed": 4090 desktops 1.0, the 100 W 5090 laptop 0.5) and are
  * learned from what the boxes measure (frames per second per kind of job), out/drift/farm/speeds.json.
+ *
+ * WHETHER A BOX TAKES WORK is a run-time state, set from this Mac's dashboard (the user, 2026-10-30: "push a button
+ * and deregister it … so that we are not magically blocking these things … and we can opt them out of taking tasks …
+ * and not poke holes"), kept in out/drift/farm/nodes-state.json — nothing to commit or push to opt a box in or out:
+ *   accepting  takes new jobs (the default)
+ *   draining   finishes the job it has, takes no new one
+ *   paused     takes nothing, and a job it has goes back to the queue (requeued as a new job): it idles with no GPU use
+ *   removed    as paused, and its worker leaves its work loop and only asks every 5 min whether it is back
+ * POST /farm/nodes/:name/state { state }, POST /farm/jobs/:id/cancel and /requeue are the CONTROLS: from loopback
+ * only (the dashboard page on this Mac), never through the tailnet listener, not even with the token; JSON only
+ * (a cross-site form cannot send it without a preflight this server never answers), and an Origin, when sent, must be
+ * this machine's. Each change is a line in out/drift/farm/farm.log with its time and source. A worker learns its
+ * state from every claim's answer (header x-drift-farm-state) and every status reply.
+ *
+ * THE PULSE, BOTH WAYS (the user, 2026-10-30: "more back and forth so things don't just wait forever … we have the
+ * pulse of these things and push them and pull them"): a worker always has a claim open, and every answer carries
+ *   x-drift-farm-state    its farm state
+ *   x-drift-farm-command  a command from the dashboard, when one waits: sync-now, gpu-check-now, restart (pause,
+ *                         resume, drain are state changes: POST /farm/nodes/:name/command, the same CONTROLS rules)
+ *   x-drift-farm-head     origin/main's commit as this Mac last saw it (git ls-remote, every 30 s)
+ *   x-drift-farm-bundle   the content id of the newest assets (latest-assets.json: its "manifest", which
+ *                         --manifest-only moves on without a tarball; else the tarball's own)
+ * A held claim is answered AT ONCE when a command or a state change arrives for its box, so nothing waits out a timer;
+ * a worker whose code or bundle is behind syncs while it is idle (drift-node.mjs worker).
+ *   node scripts/drift-farm.mjs kick <box> sync-now|gpu-check-now|restart|pause|resume|drain     (this Mac, loopback)
+ *   node scripts/drift-farm.mjs state <box> accepting|draining|paused|removed
  */
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { copyFileSync, createReadStream, createWriteStream, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
+import { contentId } from './drift-node-lib.mjs';
 
 /** ms a preparing or running job may go without a word from its worker before it is queued again */
 export const LEASE_MS = 120_000;
@@ -117,8 +152,12 @@ export function pickWorker(job, waiting, free, now, patienceMs = PATIENCE_MS) {
  */
 export function holdReason(job, workers, now, patienceMs = PATIENCE_MS) {
   const word = (w) => (w.state === 'busy-foreign' ? `${w.node} busy (${w.why ?? 'someone else on the GPU'})` : w.state === 'busy' ? `${w.node} busy with another job` : w.state === 'offline' ? `${w.node} offline` : `${w.node} free`);
-  const pool = job.prefer ? workers.filter((w) => w.node === job.prefer) : workers;
-  if (pool.length === 0) return `${job.prefer} is not a farm box`;
+  // only boxes that take work (farmState accepting) are candidates; the others say so
+  const takes = (w) => (w.farmState ?? 'accepting') === 'accepting';
+  const asked = job.prefer ? workers.filter((w) => w.node === job.prefer) : workers;
+  if (asked.length === 0) return `${job.prefer} is not a farm box`;
+  const pool = asked.filter(takes);
+  if (pool.length === 0) return job.prefer ? `${job.prefer} is ${asked[0].farmState} in the farm (the dashboard)` : `no box takes jobs (${asked.map((w) => `${w.node} ${w.farmState}`).join(', ')})`;
   const up = pool.filter((w) => w.state !== 'offline');
   if (up.length === 0) return job.prefer ? `${job.prefer} offline (no worker running there)` : 'no worker online';
   const free = up.filter((w) => w.state === 'waiting').sort((a, b) => b.speed - a.speed);
@@ -159,6 +198,26 @@ export function speedOf(node, speeds, hint = 1) {
   }
   return ratios.length > 0 ? Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100) / 100 : hint;
 }
+
+/** ms between two of a job's fps samples (fpsSamples), and how many it keeps: 120 × 10 s, the last 20 min */
+export const SAMPLE_MS = 10_000;
+export const SAMPLES_MAX = 120;
+
+/**
+ * a running job's frame rate over time, for the console's sparkline (the user, 2026-10-30, a studio hub showing
+ * "time, processing, FPS"): [ms epoch, fps, frames done] appended at most every SAMPLE_MS, the newest SAMPLES_MAX
+ */
+export function fpsSamples(samples, t, fps, done) {
+  const list = Array.isArray(samples) ? samples : [];
+  if (!Number.isFinite(fps) || (list.length > 0 && t - list.at(-1)[0] < SAMPLE_MS)) return list;
+  return [...list, [t, Math.round(fps * 100) / 100, Number.isFinite(done) ? done : null]].slice(-SAMPLES_MAX);
+}
+
+/** a box's farm states, and the states each may move to from the dashboard (header: WHETHER A BOX TAKES WORK) */
+export const NODE_STATES = ['accepting', 'draining', 'paused', 'removed'];
+/** the dashboard's commands for a box (header: THE PULSE); pause/resume/drain set its farm state */
+export const NODE_COMMANDS = ['sync-now', 'gpu-check-now', 'restart', 'pause', 'resume', 'drain'];
+export const NODE_ACTIONS = { accepting: ['draining', 'paused', 'removed'], draining: ['accepting', 'paused', 'removed'], paused: ['accepting', 'removed'], removed: ['accepting'] };
 
 /** a result file's path below its out folder: plain relative parts only (a worker may not write elsewhere) */
 export function safeRel(p) {
@@ -215,7 +274,7 @@ const tokenOk = (header, token) => {
  * the hub: { handle(req, res, url) → true when it answered (a /farm/ path), view() → the dashboard's Farm, sweep() }.
  * `allow(ip)`: may this address use the farm (loopback, tailnet); `hints`: () → drift-farm-nodes.json's nodes.
  */
-export function createFarmHub({ dir, token, allow = () => true, hints = () => [], bundleDir = null, now = Date.now, log = () => {} }) {
+export function createFarmHub({ dir, token, allow = () => true, hints = () => [], bundleDir = null, repo = null, assetsRoot = repo, now = Date.now, log = () => {} }) {
   const jobsDir = join(dir, 'jobs');
   mkdirSync(jobsDir, { recursive: true });
   const jobs = new Map();
@@ -239,6 +298,83 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
   /** open claims by node: { res, timer } */
   const claims = new Map();
   const hintOf = (node) => hints().find((n) => n.name === node)?.speed ?? 1;
+  // THE BOXES' FARM STATES (header), across restarts
+  const statesFile = join(dir, 'nodes-state.json');
+  let nodeStates = (() => {
+    try {
+      return JSON.parse(readFileSync(statesFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  })();
+  const farmStateOf = (node) => (NODE_STATES.includes(nodeStates[node]?.state) ? nodeStates[node].state : 'accepting');
+  const farmLog = (line) => writeFileSync(join(dir, 'farm.log'), `${new Date(now()).toISOString()}  ${line}\n`, { flag: 'a' });
+  // THE PULSE (header): commands waiting per box, claims held for boxes that take no work, origin's head, the bundle
+  const commands = new Map();
+  const holds = new Map();
+  let head = null;
+  const pollHead = () => {
+    if (!repo) return;
+    execFile('git', ['-C', repo, 'ls-remote', 'origin', 'refs/heads/main'], { timeout: 15_000, windowsHide: true }, (e, out) => {
+      const m = /^([0-9a-f]{40})\s/.exec(String(out ?? ''));
+      if (!e && m) head = m[1];
+    });
+  };
+  pollHead();
+  const headTimer = setInterval(pollHead, 30_000);
+  headTimer.unref?.();
+  let bundleCache = { at: 0, id: null };
+  const bundleId = () => {
+    if (now() - bundleCache.at < 5000) return bundleCache.id;
+    let id = null;
+    try {
+      const ptr = JSON.parse(readFileSync(join(bundleDir ?? '', 'latest-assets.json'), 'utf8'));
+      id = ptr.manifest?.content ?? ptr.content ?? null;
+    } catch {
+      id = null;
+    }
+    bundleCache = { at: now(), id };
+    return id;
+  };
+  // THE NEWEST FILES, ONE BY ONE (header: GET /farm/bundle/manifest, /file): the manifest re-read when its file
+  // changes (a --manifest-only run on this Mac), its paths the only files served
+  let manCache = { mtimeMs: -1, man: null, byPath: null, content: null };
+  const currentManifest = () => {
+    const f = join(bundleDir ?? '', 'manifest-assets.json');
+    let st;
+    try {
+      st = statSync(f);
+    } catch {
+      return null;
+    }
+    if (st.mtimeMs !== manCache.mtimeMs) {
+      try {
+        const man = JSON.parse(readFileSync(f, 'utf8'));
+        if (!Array.isArray(man.files)) return null;
+        manCache = { mtimeMs: st.mtimeMs, man, byPath: new Map(man.files.map((x) => [x.path, x])), content: contentId(man.files) };
+      } catch {
+        return null; // (half-written: drift-bundle.mjs writes it with a rename, so only a hand edit gets here)
+      }
+    }
+    return manCache;
+  };
+  /** what every claim answer says (header: THE PULSE); `withCommand`: hand over the next waiting command */
+  const replyHeaders = (node, withCommand = true) => {
+    const q = commands.get(node) ?? [];
+    const c = withCommand ? q.shift() : null;
+    if (q.length === 0) commands.delete(node);
+    const b = bundleId();
+    return { 'x-drift-farm-state': farmStateOf(node), ...(c ? { 'x-drift-farm-command': c.cmd } : {}), ...(head ? { 'x-drift-farm-head': head } : {}), ...(b ? { 'x-drift-farm-bundle': b } : {}) };
+  };
+  /** a box's open claim answered now (a command or a state change waits for it) */
+  const wake = (node) => {
+    const h = claims.get(node) ?? holds.get(node);
+    if (!h) return;
+    clearTimeout(h.timer);
+    claims.delete(node);
+    holds.delete(node);
+    h.res.writeHead(204, replyHeaders(node)).end();
+  };
   const speedNow = (node) => speedOf(node, speeds, hintOf(node));
 
   const save = (job) => {
@@ -276,14 +412,19 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       save(taken);
       workers.set(node, { ...(workers.get(node) ?? {}), node, at: now(), state: 'busy', job: job.id });
       log(`farm: ${job.id} (${job.label}) → ${node}`);
-      c.res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(taken));
+      c.res.writeHead(200, { 'content-type': 'application/json', ...replyHeaders(node, false) }).end(JSON.stringify(taken));
     }
   };
 
-  /** a worker that went quiet: its job back to the queue (or failed after two tries) */
+  /**
+   * a worker that went quiet: its job back to the queue (or failed after two tries). Counted from this hub's start at
+   * the earliest: a dashboard that was down for minutes does not take a job from a box that was rendering all along
+   * (its worker holds on and reports again, drift-farm-client.mjs holdOn)
+   */
+  const bootAt = now();
   const sweep = () => {
     for (const job of jobs.values()) {
-      if (!['preparing', 'running'].includes(job.state) || now() - (job.heardAt ?? 0) < LEASE_MS) continue;
+      if (!['preparing', 'running'].includes(job.state) || now() - Math.max(job.heardAt ?? 0, bootAt) < LEASE_MS) continue;
       const tries = (job.attempts ?? 0) + 1;
       save(tries >= 2
         ? transition(job, 'failed', { error: `${job.node} stopped answering (twice)`, endedAt: now(), attempts: tries })
@@ -323,7 +464,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
     const workerView = hints().map((n) => {
       const w = workers.get(n.name);
       const state = !w || t - w.at > (w.state === 'busy' ? LEASE_MS : FREE_MS) ? 'offline' : w.state;
-      return { node: n.name, state, seen: w?.at ?? 0, speed: speedNow(n.name), job: w?.job ?? null, why: w?.why ?? null };
+      return { node: n.name, state, farmState: farmStateOf(n.name), seen: w?.at ?? 0, speed: speedNow(n.name), job: w?.job ?? null, why: w?.why ?? null };
     });
     return {
       enabled: true,
@@ -332,10 +473,51 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         exitCode: j.exitCode ?? null, base: j.base, progress: j.progress ?? { done: null, total: null, unit: null, fps: null, etaS: null },
         estS: j.state === 'queued' && speeds.dur1?.[j.cls] ? Math.round(speeds.dur1[j.cls] / best) : null, last: j.last ?? null,
         results: (j.results ?? []).map((r) => ({ path: landingPath(j.outs[r.out], r.path), bytes: r.bytes })), error: j.error ?? null,
-        why: j.state === 'queued' ? holdReason(j, workerView, t) : null,
+        why: j.state === 'queued' ? holdReason(j, workerView, t) : null, requeuedFrom: j.requeuedFrom ?? null, requeuedAs: j.requeuedAs ?? null,
+        cancelRequested: j.cancelRequested === true && !FINAL.has(j.state),
+        // (the console's queue manager: who sent it, its command for the settings, its times, its fps over time while
+        // it runs — a finished job's samples stay in its job.json, not in every 3 s answer)
+        submitter: j.submitter ?? null, argv: j.argv ?? [], cls: j.cls ?? null, queuedAt: j.queuedAt ?? null, claimedAt: j.claimedAt ?? null,
+        attempts: j.attempts ?? 0, samples: FINAL.has(j.state) ? [] : j.samples ?? [],
       })),
       workers: workerView,
+      nodes: Object.fromEntries(hints().map((n) => [n.name, { state: farmStateOf(n.name), at: nodeStates[n.name]?.at ?? null, by: nodeStates[n.name]?.by ?? null, actions: NODE_ACTIONS[farmStateOf(n.name)] }])),
     };
+  };
+
+  /**
+   * run `job` again as a new job (the same code state, inputs and outs, its payload linked): a finished one on the
+   * user's word, a running one taken off its box (which is told to stop: cancel on its next status). → the new job
+   */
+  const requeue = (job, why) => {
+    const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
+    const keep = ['label', 'argv', 'kind', 'cls', 'prefer', 'weight', 'base', 'bundle', 'outs', 'inputs', 'submitter', 'payloadBytes'];
+    const fresh = { id, state: 'queued', ...Object.fromEntries(keep.map((k) => [k, job[k]])), createdAt: now(), queuedAt: now(), attempts: 0, results: [], requeuedFrom: job.id };
+    mkdirSync(join(jobsDir, id), { recursive: true });
+    try {
+      linkSync(join(jobsDir, job.id, 'payload.tgz'), join(jobsDir, id, 'payload.tgz'));
+    } catch {
+      copyFileSync(join(jobsDir, job.id, 'payload.tgz'), join(jobsDir, id, 'payload.tgz'));
+    }
+    save(fresh);
+    save({ ...jobs.get(job.id), requeuedAs: id, ...(FINAL.has(job.state) ? {} : { cancelRequested: true }) });
+    farmLog(`job ${job.id} (${job.label}) requeued as ${id}: ${why}`);
+    return fresh;
+  };
+
+  /** a box's farm state set (the dashboard's control); paused/removed: its job goes back to the queue */
+  const setFarmState = (node, to, by) => {
+    const from = farmStateOf(node);
+    if (!NODE_STATES.includes(to)) throw new Error(`state ${to}: ${NODE_STATES.join(' | ')}`);
+    if (to !== from && !NODE_ACTIONS[from].includes(to)) throw new Error(`${node}: ${from} → ${to} is not a move (${NODE_ACTIONS[from].join(', ')})`);
+    nodeStates = { ...nodeStates, [node]: { state: to, at: now(), by } };
+    writeFileSync(`${statesFile}.part`, JSON.stringify(nodeStates, null, 1));
+    renameSync(`${statesFile}.part`, statesFile);
+    farmLog(`${node}: ${from} → ${to} (by ${by})`);
+    if (to === 'paused' || to === 'removed') for (const j of [...jobs.values()]) if (j.node === node && ['preparing', 'running'].includes(j.state)) requeue(j, `${node} ${to}`);
+    wake(node);
+    dispatch();
+    return { node, state: to, from, actions: NODE_ACTIONS[to] };
   };
 
   const deny = (res, code, why) => json(res, code, { error: why });
@@ -350,6 +532,45 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
     if (!url.pathname.startsWith('/farm/')) return false;
     if (!allow(req.socket.remoteAddress)) return deny(res, 403, 'loopback and tailnet only'), true;
     const p = url.pathname.split('/').filter(Boolean); // ['farm', 'jobs', id, …]
+    // THE CONTROLS (header): this Mac's dashboard page only — loopback, JSON, its own Origin — and no token needed
+    if (req.method === 'POST' && ((p[1] === 'nodes' && (p[3] === 'state' || p[3] === 'command')) || (p[1] === 'jobs' && (p[3] === 'cancel' || p[3] === 'requeue')))) {
+      const ip = String(req.socket.remoteAddress ?? '');
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip)) return deny(res, 403, 'farm controls only from this Mac\'s dashboard (loopback), never over the tailnet'), true;
+      const origin = req.headers.origin;
+      if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) return deny(res, 403, `farm controls only from the dashboard page, not ${origin}`), true;
+      if (!/^application\/json\b/.test(req.headers['content-type'] ?? '')) return deny(res, 415, 'farm controls take JSON (content-type: application/json)'), true;
+      const by = `${ip}${origin ? ` ${origin}` : ''}${req.headers['user-agent'] ? ` ${String(req.headers['user-agent']).slice(0, 40)}` : ''}`;
+      try {
+        const b = await readJson(req);
+        if (p[1] === 'nodes') {
+          if (!hints().some((n) => n.name === p[2])) return deny(res, 404, `${p[2]}: not in drift-farm-nodes.json`), true;
+          if (p[3] === 'state') return json(res, 200, setFarmState(p[2], b.state, by)), true;
+          const cmd = String(b.cmd ?? b.command ?? '');
+          if (!NODE_COMMANDS.includes(cmd)) return deny(res, 400, `command ${cmd}: ${NODE_COMMANDS.join(' | ')}`), true;
+          if (cmd === 'pause' || cmd === 'resume' || cmd === 'drain') return json(res, 200, setFarmState(p[2], { pause: 'paused', resume: 'accepting', drain: 'draining' }[cmd], by)), true;
+          commands.set(p[2], [...(commands.get(p[2]) ?? []).filter((c) => c.cmd !== cmd), { cmd, at: now(), by }]);
+          farmLog(`${p[2]}: command ${cmd} (by ${by})`);
+          const waiting = claims.has(p[2]) || holds.has(p[2]);
+          wake(p[2]);
+          return json(res, 200, { node: p[2], cmd, delivered: waiting ? 'now (its claim was open)' : 'with its next claim' }), true;
+        }
+        const job = jobs.get(p[2]);
+        if (!job) return deny(res, 404, `no farm job ${p[2]}`), true;
+        if (p[3] === 'requeue') {
+          if (['uploading', 'queued'].includes(job.state)) return json(res, 200, job), true;
+          const fresh = requeue(job, `by ${by}`);
+          dispatch();
+          return json(res, 200, fresh), true;
+        }
+        if (FINAL.has(job.state)) return json(res, 200, job), true;
+        const next = ['uploading', 'queued'].includes(job.state) ? transition(job, 'cancelled', { endedAt: now() }) : { ...job, cancelRequested: true };
+        save(next);
+        farmLog(`job ${job.id} (${job.label}) cancelled (by ${by})`);
+        return json(res, 200, next), true;
+      } catch (e) {
+        return deny(res, 400, String(e.message)), true;
+      }
+    }
     const byToken = tokenOk(req.headers.authorization, token);
     const byAddress = !byToken && workerRoute(p, req.method) ? nodeAt(req.socket.remoteAddress) : null;
     if (!byToken && !byAddress) return deny(res, 401, 'no or wrong farm token (farm.json / drift-node.json "farm"), and not a farm box\'s own tailnet address'), true;
@@ -358,6 +579,49 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
     if (byAddress && p[1] === 'jobs' && jobs.get(p[2])?.node !== byAddress) return deny(res, 403, `job ${p[2]} is not ${byAddress}'s`), true;
     try {
       if (p[1] === 'workers' && req.method === 'GET') return json(res, 200, view().workers), true;
+      if (p[1] === 'bundle' && req.method === 'GET' && (p[2] === 'manifest' || p[2] === 'file')) {
+        const cur = currentManifest();
+        if (!cur) return deny(res, 404, 'no manifest-assets.json in the hub\'s bundle folder (node scripts/drift-bundle.mjs --manifest-only on the Mac writes it)'), true;
+        if (p[2] === 'manifest') {
+          const body = Buffer.from(JSON.stringify(cur.man));
+          res.writeHead(200, { 'content-type': 'application/json', 'content-length': body.length, 'x-drift-farm-bundle': cur.content, 'cache-control': 'no-store' });
+          res.end(body);
+          return true;
+        }
+        // only a path the manifest lists, and only inside this checkout (a manifest is ours, but a path is checked anyway)
+        const rel = url.searchParams.get('path') ?? '';
+        const entry = cur.byPath.get(rel);
+        if (!entry || safeRel(rel) !== rel || !assetsRoot) return deny(res, 404, `${rel}: not a file of the bundle's manifest (only those are served)`), true;
+        const abs = resolve(assetsRoot, rel);
+        if (!abs.startsWith(resolve(assetsRoot) + sep)) return deny(res, 404, `${rel}: outside the checkout`), true;
+        let st;
+        try {
+          st = statSync(abs);
+        } catch {
+          return deny(res, 410, `${rel}: in the manifest but gone from this Mac: node scripts/drift-bundle.mjs --manifest-only`), true;
+        }
+        // (changed since the manifest was written: the box would fetch bytes that are not the manifest's, and say so
+        // when their sha256 is checked; a size that differs is caught here, before any byte moves)
+        if (st.size !== entry.bytes) return deny(res, 409, `${rel}: ${st.size} bytes here, ${entry.bytes} in the manifest — changed since: node scripts/drift-bundle.mjs --manifest-only`), true;
+        const range = req.headers.range;
+        let start = 0;
+        let end = st.size - 1;
+        if (range) {
+          const m = /^bytes=(\d+)-(\d*)$/.exec(range);
+          if (!m || Number(m[1]) >= st.size) return res.writeHead(416, { 'content-range': `bytes */${st.size}` }).end(), true;
+          start = Number(m[1]);
+          if (m[2]) end = Math.min(Number(m[2]), st.size - 1);
+          if (end < start) return res.writeHead(416, { 'content-range': `bytes */${st.size}` }).end(), true;
+        }
+        res.writeHead(range ? 206 : 200, {
+          'content-type': 'application/octet-stream', 'content-length': Math.max(0, end - start + 1), 'accept-ranges': 'bytes',
+          'x-sha256': entry.sha256, 'x-bytes': String(entry.bytes), 'cache-control': 'no-store',
+          ...(range ? { 'content-range': `bytes ${start}-${end}/${st.size}` } : {}),
+        });
+        if (st.size === 0) return res.end(), true;
+        await pipeline(createReadStream(abs, { start, end }), res);
+        return true;
+      }
       if (p[1] === 'bundle' && req.method === 'GET') {
         const name = p[2] ?? '';
         const f = bundleDir && /^(latest-assets\.json|drift-assets-\d{8}\.tar\.gz)$/.test(name) ? join(bundleDir, name) : null;
@@ -369,17 +633,39 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
       if (p[1] === 'claim' && req.method === 'GET') {
         const node = url.searchParams.get('node');
         if (!node || !hints().some((n) => n.name === node)) return deny(res, 400, `node ${node}: not in drift-farm-nodes.json`), true;
-        const busy = url.searchParams.get('busy');
-        if (busy) {
-          workers.set(node, { node, at: now(), state: 'busy-foreign', why: busy, job: null });
-          return json(res, 204), true;
+        // not accepting (header): never in `claims`, so dispatch never sees it. Removed: answered at once (its worker
+        // waits minutes); paused, draining: held like a claim (it asks again in 25 s); the state in the header
+        const fs = farmStateOf(node);
+        if (fs !== 'accepting') {
+          workers.set(node, { ...(workers.get(node) ?? {}), node, at: now(), state: 'waiting', job: null });
+          if (fs === 'removed' || commands.has(node)) return res.writeHead(204, replyHeaders(node)).end(), true;
+          holds.get(node)?.res.writeHead(204, replyHeaders(node, false)).end();
+          clearTimeout(holds.get(node)?.timer);
+          const t = setTimeout(() => {
+            if (holds.get(node)?.res === res) holds.delete(node);
+            res.writeHead(204, replyHeaders(node)).end();
+          }, CLAIM_HOLD_MS);
+          holds.set(node, { res, timer: t });
+          req.on('close', () => {
+            if (holds.get(node)?.res === res) {
+              holds.delete(node);
+              clearTimeout(t);
+            }
+          });
+          return true;
         }
-        claims.get(node)?.res.writeHead(204).end();
+        claims.get(node)?.res.writeHead(204, replyHeaders(node, false)).end();
         clearTimeout(claims.get(node)?.timer);
+        // a command waiting: answered at once (the worker acts on it, then claims again)
+        if (commands.has(node)) {
+          claims.delete(node);
+          workers.set(node, { node, at: now(), state: 'waiting', job: null });
+          return res.writeHead(204, replyHeaders(node)).end(), true;
+        }
         workers.set(node, { node, at: now(), state: 'waiting', job: null });
         const t = setTimeout(() => {
           if (claims.get(node)?.res === res) claims.delete(node);
-          res.writeHead(204).end();
+          res.writeHead(204, replyHeaders(node)).end();
         }, CLAIM_HOLD_MS);
         claims.set(node, { res, timer: t });
         req.on('close', () => {
@@ -397,6 +683,7 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         if (!Array.isArray(b.argv) || b.argv.length === 0 || !b.argv.every((a) => typeof a === 'string')) return deny(res, 400, 'argv: a list of strings'), true;
         if (typeof b.base !== 'string' || !/^[0-9a-f]{7,40}$/.test(b.base)) return deny(res, 400, 'base: the commit (on origin) the code is based on'), true;
         if (b.prefer && !hints().some((n) => n.name === b.prefer)) return deny(res, 400, `prefer ${b.prefer}: not in drift-farm-nodes.json`), true;
+        if (b.prefer && farmStateOf(b.prefer) !== 'accepting') return deny(res, 400, `${b.prefer} is ${farmStateOf(b.prefer)} in the farm (the dashboard): it takes no jobs`), true;
         const id = `${new Date(now()).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-')}-${randomBytes(3).toString('hex')}`;
         const job = {
           id, state: 'uploading', label: String(b.label ?? b.argv.join(' ')).slice(0, 160), argv: b.argv, kind: ['still', 'clip', 'long'].includes(b.kind) ? b.kind : jobKind(b.argv),
@@ -427,10 +714,20 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         const b = await readJson(req);
         let j = { ...job, heardAt: now() };
         if (Array.isArray(b.lines)) {
-          appendLog(j, b.lines.map(String));
-          j.last = String(b.lines.at(-1) ?? j.last ?? '').slice(0, 300);
+          // numbered (`from`: the worker's count of lines before these): a batch sent again after a lost answer adds
+          // only what this hub does not have; a gap (lines the worker dropped while the hub was away) is noted
+          let lines = b.lines.map(String);
+          if (Number.isInteger(b.from) && b.from >= 0) {
+            const have = j.linesIn ?? 0;
+            if (b.from < have) lines = lines.slice(have - b.from);
+            else if (b.from > have) lines = [`(farm: ${b.from - have} line(s) lost while the hub was away)`, ...lines];
+            j.linesIn = Math.max(have, b.from + b.lines.length);
+          }
+          appendLog(j, lines);
+          if (lines.length) j.last = String(lines.at(-1)).slice(0, 300);
         }
         if (b.progress && typeof b.progress === 'object') j.progress = b.progress;
+        if (Number.isFinite(b.progress?.fps)) j.samples = fpsSamples(j.samples, now(), b.progress.fps, b.progress.done);
         if (b.state && b.state !== j.state && !FINAL.has(j.state)) {
           const patch = b.state === 'running' ? { startedAt: now() } : FINAL.has(b.state) ? { endedAt: now(), exitCode: b.exitCode ?? null, error: b.error ?? null } : {};
           j = transition(j, b.state, patch);
@@ -442,9 +739,9 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
               writeFileSync(speedsFile, JSON.stringify(speeds, null, 1));
             }
           }
-        } else if (j.node) workers.set(j.node, { ...(workers.get(j.node) ?? {}), node: j.node, at: now(), state: 'busy', job: j.id });
+        } else if (j.node && !FINAL.has(j.state)) workers.set(j.node, { ...(workers.get(j.node) ?? {}), node: j.node, at: now(), state: 'busy', job: j.id });
         save(j);
-        return json(res, 200, { cancel: j.cancelRequested === true }), true;
+        return json(res, 200, { cancel: j.cancelRequested === true, state: farmStateOf(j.node) }), true;
       }
       if (p[3] === 'files' && req.method === 'PUT') {
         const out = Number(url.searchParams.get('out'));
@@ -467,12 +764,6 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
         await pipeline(createReadStream(f), res);
         return true;
       }
-      if (p[3] === 'cancel' && req.method === 'POST') {
-        if (FINAL.has(job.state)) return json(res, 200, job), true;
-        const next = ['uploading', 'queued'].includes(job.state) ? transition(job, 'cancelled', { endedAt: now() }) : { ...job, cancelRequested: true };
-        save(next);
-        return json(res, 200, next), true;
-      }
       if (p.length === 3 && req.method === 'GET') {
         const from = Math.max(0, Number(url.searchParams.get('from')) || 0);
         const lines = logLines(job);
@@ -485,5 +776,33 @@ export function createFarmHub({ dir, token, allow = () => true, hints = () => []
     }
   }
 
-  return { handle, view, sweep, close: () => clearInterval(timer), jobs: () => [...jobs.values()] };
+  return {
+    handle,
+    view,
+    sweep,
+    close: () => {
+      clearInterval(timer);
+      clearInterval(headTimer);
+    },
+    jobs: () => [...jobs.values()],
+  };
+}
+
+// ----------------------------------------------------------------------------------------------- the CLI
+// (header: THE PULSE) — on this Mac, through the dashboard's loopback controls
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [what, box, arg] = process.argv.slice(2);
+  const base = process.env.DRIFT_DASH_URL ?? 'http://127.0.0.1:5190';
+  const send = async (path, body) => {
+    const r = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const t = await r.text();
+    console.log(r.ok ? t : `${r.status}: ${t}`);
+    process.exit(r.ok ? 0 : 1);
+  };
+  if (what === 'kick' && box && arg) await send(`/farm/nodes/${encodeURIComponent(box)}/command`, { cmd: arg });
+  else if (what === 'state' && box && arg) await send(`/farm/nodes/${encodeURIComponent(box)}/state`, { state: arg });
+  else {
+    console.error(`usage: node scripts/drift-farm.mjs kick <box> ${NODE_COMMANDS.join('|')}\n       node scripts/drift-farm.mjs state <box> ${NODE_STATES.join('|')}`);
+    process.exit(2);
+  }
 }

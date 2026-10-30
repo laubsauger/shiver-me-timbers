@@ -61,7 +61,7 @@ const gb = (mb) => (Number.isFinite(mb) ? Math.round(mb / 102.4) / 10 : null);
  * order, each from the hub's view of it (`hub`: GET /api/fleet's body, or null when the hub is not running) and its
  * newest heartbeat (`reports`: the dashboard's node reports, each with `seen` and `from`)
  */
-export function fleetCards({ agents = {}, hub = null, reports = [], farm = [], allow = [], mac = null, policy = YIELD_DEFAULTS, now = Date.now() }) {
+export function fleetCards({ agents = {}, hub = null, reports = [], farm = [], farmNodes: states = {}, allow = [], mac = null, policy = YIELD_DEFAULTS, now = Date.now() }) {
   const hubViews = (hub?.nodes ?? []).filter((v) => !v.self);
   const cards = allow.map((n) => {
     const ak = allowKeys(n);
@@ -72,7 +72,7 @@ export function fleetCards({ agents = {}, hub = null, reports = [], farm = [], a
     const vk = view ? new Set([...ak, ...hubKeys(view)]) : ak;
     const report = reports.filter((r) => meets(reportKeys(r), vk)).sort((a, b) => (b.seen ?? 0) - (a.seen ?? 0))[0] ?? null;
     const farmJob = farm.filter((j) => j.node === n.name && ['preparing', 'running'].includes(j.state)).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] ?? null;
-    return machineCard(n, view, report, policy, now, farmJob);
+    return machineCard(n, view, report, policy, now, farmJob, states[n.name] ?? null);
   });
   return mac ? [mac, ...cards] : cards;
 }
@@ -93,8 +93,11 @@ export function agentView(n, a) {
   };
 }
 
-/** one machine: its farm hints (n), the box's view (its agent's, or the hub's; or null), our newest heartbeat (or null) */
-export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date.now(), farmJob = null) {
+/**
+ * one machine: its farm hints (n), the box's view (its agent's, or the hub's; or null), our newest heartbeat (or null),
+ * the farm job running there, and its farm state (the hub's view().nodes[name]: { state, at, by, actions })
+ */
+export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date.now(), farmJob = null, farmState = null) {
   const fresh = report !== null && now - (report.seen ?? 0) < STALE_MS;
   const g = view?.metrics?.gpus?.[0] ?? null;
   const rg = fresh ? report.gpu : null;
@@ -117,10 +120,21 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
   else if (jobState) badge = jobState;
   else if ((othersGB != null && othersGB > policy.foreignVramGB) || (utilPct != null && utilPct > policy.foreignUtil)) badge = 'busy-foreign';
   else badge = 'ready';
-  const why = badge === 'busy-foreign'
+  // taking no work (its farm state, set from the dashboard: paused or removed): standby, whatever the box is doing —
+  // its numbers still show; a job it still runs shows as that. Draining: its badge as it is (it finishes its job)
+  const fs = farmState?.state ?? 'accepting';
+  const out = fs === 'paused' || fs === 'removed';
+  const wasBusy = badge === 'busy-foreign';
+  if (out && badge !== 'offline' && !jobState) badge = 'standby';
+  const excluded = out ? `${fs} from the dashboard${farmState?.by ? ` (${String(farmState.by).split(' ')[0]})` : ''}` : null;
+  const why = out && !jobState ? excluded : wasBusy
     ? [othersGB != null && othersGB > policy.foreignVramGB ? `${othersGB} GB of VRAM in use` : null, utilPct != null && utilPct > policy.foreignUtil ? `GPU ${utilPct}% busy` : null].filter(Boolean).join(', ')
     : null;
   return {
+    excluded,
+    farmState: fs,
+    farmActions: farmState?.actions ?? null,
+    farmStateAt: farmState?.at ?? null,
     key: n.name,
     name: n.name,
     tailnet: n.tailnet,
@@ -146,6 +160,8 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
     power: report?.power ?? null,
     commit: report?.commit ?? null,
     bundle: report?.bundle ?? null,
+    bundleSync: report?.bundleSync ?? null,
+    step: fresh ? report.step ?? null : null,
     seen: report?.seen ?? null,
     farm: farmJob,
     source: view?.source ?? (view ? 'hub' : null),

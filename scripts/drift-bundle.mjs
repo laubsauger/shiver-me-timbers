@@ -11,6 +11,16 @@
  *   options: --out out/drift-bundle · --dry-run (list and size, write nothing) · --narrative <dir>
  *            --list-json <file> (the asset files a bundle would hold, with size and time: the farm's submitter)
  *
+ *   node scripts/drift-bundle.mjs --manifest-only      PUBLISH WITHOUT A TARBALL (seconds): the newest assets' manifest
+ *        (the user, 2026-10-30: "make sure the bundle can be incrementally patched instead of having to upload the
+ *        whole huge thing all the time"). It hashes only the files whose size or time changed since the last run
+ *        (out/drift-bundle/hash-cache.json), writes manifest-assets.json, and puts the newest manifest's id beside
+ *        the last tarball's in latest-assets.json ("manifest": { content, count, bytes, created }). The render boxes
+ *        then fetch only the files that differ, one by one, through the farm hub (drift-node-lib.mjs
+ *        syncBundleFiles); a box without a bundle still unpacks the last tarball first. latest-assets.json's own
+ *        "content" stays the TARBALL's: an older worker that knows only tarballs is never told a content it cannot
+ *        get from one.
+ *
  *   node scripts/drift-bundle.mjs --verify [manifest.json …] [--quick] [--base <dir>]
  *        on the node, after unpacking: every file of every bundle manifest found (out/drift-bundle/manifest-*.json,
  *        ../drift-narrative/.drift-bundle-manifest.json) is there with its size and sha256 (--quick: sizes only)
@@ -294,6 +304,8 @@ async function writeBundle(target, sel) {
   // changed nothing, so a publish without new assets costs a node a few hundred bytes, not 1.4 GB. Written last and
   // whole (a temp file renamed): a node reading it mid-build sees the old bundle's, whose tarball is still the old one
   const pointer = { bundle: target, file: basename(file), bytes: size, sha256: await sha256File(file), content: contentId(files), created: manifest.created, ...(commit ? { commit } : {}), count: files.length, filesBytes: done, unpack: manifest.unpack, licence: LICENCE[target] };
+  // (the newest files, for the boxes that patch file by file: here the tarball's own; --manifest-only moves it on)
+  pointer.manifest = { content: pointer.content, count: files.length, bytes: done, created: manifest.created, ...(commit ? { commit } : {}) };
   writeFileSync(join(OUT, `${pointerName(target)}.part`), `${JSON.stringify(pointer, null, 1)}\n`);
   renameSync(join(OUT, `${pointerName(target)}.part`), join(OUT, pointerName(target)));
   console.log(`[bundle]   ${join(OUT, pointerName(target))}: content ${pointer.content.slice(0, 6)}, sha256 ${pointer.sha256.slice(0, 12)}…`);
@@ -361,8 +373,61 @@ async function verify() {
 }
 
 // ------------------------------------------------------------------------------------------------------ main
+/**
+ * the manifest of `sel` with each file's sha256 — hashed only when its size or time differs from the cache's record
+ * (out/drift-bundle/hash-cache.json, { path: { bytes, mtimeMs, sha256 } }), so a publish after one new model takes
+ * seconds, not a 1.6 GB read
+ */
+async function manifestOf(sel) {
+  const cacheFile = join(OUT, 'hash-cache.json');
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
+  } catch {
+    cache = {};
+  }
+  const files = [];
+  let hashed = 0;
+  for (const f of sel.keep) {
+    const abs = join(baseDir(sel.base), f.path);
+    const st = statSync(abs);
+    const c = cache[f.path];
+    const sha256 = c && c.bytes === st.size && c.mtimeMs === Math.round(st.mtimeMs) ? c.sha256 : (hashed++, await sha256File(abs));
+    cache[f.path] = { bytes: st.size, mtimeMs: Math.round(st.mtimeMs), sha256 };
+    files.push({ path: f.path, bytes: st.size, sha256 });
+  }
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(cacheFile, JSON.stringify(cache));
+  return { files, hashed };
+}
+
+/** --manifest-only (header): the newest assets' manifest and its id in latest-assets.json, no tarball */
+async function manifestOnly() {
+  const t0 = Date.now();
+  const sel = selectAssets();
+  const { files, hashed } = await manifestOf(sel);
+  const commit = spawnSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout?.trim();
+  const bytes = files.reduce((a, f) => a + f.bytes, 0);
+  const manifest = { bundle: 'assets', created: new Date().toISOString(), base: 'repo', unpack: 'in the repo root: tar -xzf <bundle>', ...(commit ? { commit } : {}), licence: LICENCE.assets, bytes, count: files.length, files };
+  writeFileSync(join(OUT, 'manifest-assets.json.part'), `${JSON.stringify(manifest, null, 1)}\n`);
+  renameSync(join(OUT, 'manifest-assets.json.part'), join(OUT, 'manifest-assets.json'));
+  const ptrFile = join(OUT, pointerName('assets'));
+  let ptr = {};
+  try {
+    ptr = JSON.parse(readFileSync(ptrFile, 'utf8'));
+  } catch {
+    ptr = {};
+  }
+  const next = { ...ptr, manifest: { content: contentId(files), count: files.length, bytes, created: manifest.created, ...(commit ? { commit } : {}) } };
+  writeFileSync(`${ptrFile}.part`, `${JSON.stringify(next, null, 1)}\n`);
+  renameSync(`${ptrFile}.part`, ptrFile);
+  console.log(`[bundle] manifest only: ${files.length} files, ${gb(bytes)}, ${hashed} hashed (the rest unchanged since the last run), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  console.log(`[bundle]   content ${next.manifest.content.slice(0, 6)}${ptr.file ? `; the last tarball, ${ptr.file}, stays for a box without any bundle` : '; no tarball yet: build one (no --manifest-only) for first installs'}`);
+}
+
 async function main() {
   if (flag('verify')) return verify();
+  if (flag('manifest-only')) return manifestOnly();
   // the asset files a bundle would hold now, with their size and time, as JSON to a file (the render farm's
   // submitter, drift-farm-client.mjs: which of them a box's bundle lacks, to send along with a job)
   if (arg('list-json', null)) {

@@ -75,10 +75,20 @@
  *
  * @typedef {object} Slots
  * @property {number} limit
- * @property {{ slot: string, pid: number, label: string, cmd: string, started: number, done?: number, total?: number, unit?: string, etaS?: number, last?: string }[]} held
+ * @property {{ slot: string, pid: number, label: string, cmd: string, started: number, done?: number, total?: number, unit?: string, etaS?: number, last?: string, info?: ClipInfo|null, fpsHistory?: number[] }[]} held
+ *           fpsHistory: the fps of each of the clip's progress lines (one per 30 frames), the newest 60
  * @property {{ pid: number, label: string, cmd: string, since: number }[]} waiting
- * @property {{ label: string, cmd: string, out: string|null, exit: string, started: number|null, ended: number }[]} recent
- *           out: the job's --out, absolute (null: it named none); started/ended ms epoch
+ * @property {{ label: string, cmd: string, out: string|null, exit: string, started: number|null, ended: number, slot: string, done: number|null, total: number|null, unit: string|null, fps: number|null, info: ClipInfo|null }[]} recent
+ *           out: the job's --out, absolute (null: it named none); started/ended ms epoch; fps: its last progress line's
+ *
+ * @typedef {object} ClipInfo             a review clip's header line ("[review] 240 frames [642, 650) s at 30 fps, 1280×720, ss 5.82")
+ * @property {number} frames
+ * @property {number} from               s
+ * @property {number} to                 s
+ * @property {number} fps                the clip's frame rate (not the render's)
+ * @property {number} width
+ * @property {number} height
+ * @property {number} ss                 supersampling
  *
  * @typedef {object} Stream               one work stream of work.json
  * @property {string} title
@@ -124,10 +134,20 @@
  * @property {string|null} power         "AC" | "battery 80%"
  * @property {string|null} commit
  * @property {string|null} bundle        asset bundle date, "20261029"
+ * @property {{ mode: 'current'|'patch'|'tarball'|'tarball+patch', files: number, bytes: number, seconds: number, content: string|null, at: string }|null} [bundleSync]
+ *           the box's last bundle sync: what moved over the wire (patch: only the files that differed), the content
+ *           id it reached (12 hex), when
+ * @property {{ name: string, done: number, total: number, unit: string, rateBps?: number, etaS?: number }|null} [step]
+ *           a step in progress on the box ("bundle patch", bytes): a progress bar
  * @property {number|null} seen          ms epoch of our last heartbeat
  * @property {'agent'|'hub'|null} source where the box's numbers came from
  * @property {string|null} agentError    its agent did not answer: why
  * @property {{ held: number, limit: number|null, waiting: number, jobs: string[] }} [slots]   this Mac only
+ * @property {'accepting'|'draining'|'paused'|'removed'} [farmState]   a farm box's run-time state (Farm.nodes);
+ *           paused/removed: badge 'standby' (unless a job of ours still runs there), `excluded` and `why` say so
+ * @property {string[]|null} [farmActions]   the states it may be set to from here (POST /farm/nodes/:name/state)
+ * @property {number|null} [farmStateAt]     ms epoch of its last change
+ * @property {string|null} [excluded]        paused/removed, in words: 'paused from the dashboard (127.0.0.1)'
  *
  * @typedef {object} Job                  a drift-node render (its heartbeat; drift-queue's status.json)
  * @property {string} name               the queue job ("preview-2k")
@@ -166,10 +186,26 @@
  * @property {string|null} last          newest output line
  * @property {{ path: string, bytes: number }[]} results   files it sent back, each landed at its local path (path)
  * @property {string|null} error
+ * @property {object|null} submitter     what the submitting drift-farm-client sent ({ pid } today)
+ * @property {string[]} argv             its command (paths as on the submitting machine): the console reads the settings from it
+ * @property {string|null} cls           the class its speed is measured in ("drift-review-clip.mjs:1280")
+ * @property {number|null} queuedAt      ms epoch: its payload arrived (createdAt → queuedAt: uploading)
+ * @property {number|null} claimedAt     ms epoch: a box took it (preparing until startedAt)
+ * @property {number} attempts           times it went back to the queue (a box stopped answering)
+ * @property {[number, number, number|null][]} samples   while it runs: [ms epoch, fps, frames done], one per 10 s, the last 20 min (drift-farm.mjs fpsSamples)
+ *
+ * GET /api/history, read by the page every 15 s (kept out of the 3 s answer):
+ * @typedef {object} History
+ * @property {number} now
+ * @property {number} stepS              s between utilisation samples
+ * @property {Record<string, [number, number|null, number|null, number|null, string][]>} util   by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge], the last 30 min
+ * @property {(Slots['recent'][number] & { key: string })[]} jobs   this Mac's finished slot jobs, newest first, the last 7 days (history.jsonl)
+ *
+ * GET /api/log?farm=<job id>|slot=<n>[&lines=200]: { lines: string[] }, the newest lines of a farm job's log or a slot's
  */
 import { createServer } from 'node:http';
 import { execFile, spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writeFileSync, mkdirSync, appendFileSync, openSync, readSync, fstatSync, closeSync } from 'node:fs';
 import { join, dirname, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
@@ -240,15 +276,22 @@ function shotTotal(cmd) {
   return Array.isArray(shots) ? shots.length : Array.isArray(shots?.shots) ? shots.shots.length : undefined;
 }
 
+/** a review clip's settings from its header line (drift-review-clip.mjs), or null (ClipInfo) */
+function clipInfo(text) {
+  const m = /\[review\] (\d+) frames \[([\d.]+), ([\d.]+)\) s at ([\d.]+) fps, (\d+)×(\d+)(?: dome)?, ss ([\d.]+)/.exec(text);
+  return m ? { frames: +m[1], from: +m[2], to: +m[3], fps: +m[4], width: +m[5], height: +m[6], ss: +m[7] } : null;
+}
+
 /** progress from a slot's log: frames n/N and fps (a clip), or shots done (stills) */
 function progress(cmd, text, startedMs) {
   const lines = text.split('\n').filter(Boolean);
   const last = lines.at(-1) ?? '';
   const elapsed = (Date.now() - startedMs) / 1000;
-  const frames = [...text.matchAll(/\[review\] (\d+)\/(\d+)\s+([\d.]+) fps/g)].at(-1);
+  const all = [...text.matchAll(/\[review\] (\d+)\/(\d+)\s+([\d.]+) fps/g)];
+  const frames = all.at(-1);
   if (frames) {
     const [, n, N, fps] = frames.map(Number);
-    return { done: n, total: N, unit: 'frames', etaS: fps > 0 ? (N - n) / fps : undefined, last };
+    return { done: n, total: N, unit: 'frames', etaS: fps > 0 ? (N - n) / fps : undefined, last, info: clipInfo(text), fpsHistory: all.slice(-60).map((m) => Number(m[3])) };
   }
   const shots = [...text.matchAll(/\[review\] \S+\.(?:png|jpg)\s+t /g)].length;
   if (cmd.includes('stills')) {
@@ -301,7 +344,8 @@ function slots() {
         if (exit !== undefined) {
           const { at, cmd } = stamped(text.split('\n')[0]);
           const out = cmd.match(/--out\s+(\S+)/)?.[1];
-          recent.push({ label: label(cmd), cmd, out: out ? resolve(ROOT, out) : null, exit, started: at, ended: statSync(p).mtimeMs });
+          const pr = progress(cmd, text, at ?? Date.now());
+          recent.push({ label: label(cmd), cmd, out: out ? resolve(ROOT, out) : null, exit, started: at, ended: statSync(p).mtimeMs, slot: f.replace(/\.log$/, ''), done: pr.done ?? null, total: pr.total ?? null, unit: pr.unit ?? null, fps: pr.fpsHistory?.at(-1) ?? null, info: pr.info ?? null });
         }
       }
     } catch {
@@ -502,7 +546,7 @@ function machinesNow(m, sl, farm) {
     return { machines: [], sources: { agents: {}, hub: { url: HUB, ok: false, at: 0, error: String(e.message), used: false } } };
   }
   const hubUsed = allow.some((n) => agents[n.name] && !agents[n.name].ok);
-  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl }), policy, now: Date.now() });
+  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl }), policy, now: Date.now() });
   const sources = { agents: Object.fromEntries(allow.map((n) => [n.name, { ok: agents[n.name]?.ok ?? false, at: agents[n.name]?.at ?? 0, error: agents[n.name] ? agents[n.name].error : 'not asked yet' }])), hub: { url: HUB, ok: hub.ok, at: hub.at, error: hub.error, used: hubUsed } };
   return { machines, sources };
 }
@@ -511,6 +555,7 @@ function machinesNow(m, sl, farm) {
 async function status() {
   const work = readJson(WORK);
   const [m, sl] = [await machine(), slots()];
+  remember(sl);
   const farm = farmView();
   const { machines, sources } = machinesNow(m, sl, farm);
   // (fleet: the same cards under the name the previous page read, until scripts/drift-dash-ui/ replaces it)
@@ -519,15 +564,104 @@ async function status() {
 }
 
 /** the render farm's hub (header); off, with the reason on the console, when farm.json cannot be read */
+const FARM_DIR = process.env.DRIFT_FARM_DIR ?? join(ROOT, 'out/drift/farm');
 let farm = null;
 try {
   const tokenFile = process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json');
   const t = farmToken(tokenFile);
   if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token. Each render machine needs it in its drift-node.json: "farm": { "token": "<the token in ${tokenFile}>" }`);
-  farm = createFarmHub({ dir: process.env.DRIFT_FARM_DIR ?? join(ROOT, 'out/drift/farm'), token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), log: (m) => console.log(`[dash] ${m}`) });
+  // (repo: origin's head for the pulse; assetsRoot: where the bundle's files are served from, one by one)
+  farm = createFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
   farmView = farm.view;
 } catch (e) {
   console.error(`[dash] farm off: ${e.message}`);
+}
+
+// ---------------------------------------------------------------------- THE CONSOLE'S HISTORY (/api/history)
+/**
+ * THE LOCAL JOBS' HISTORY AND THE MACHINES OVER TIME, for the console's queue manager (the user, 2026-10-30: "clearer
+ * about the queue, what is waiting, what is done, time, processing, FPS … a studio hub that tries to gather render
+ * jobs"). Served apart from /api, to a page that asks every 15 s, so the 3 s answer stays small.
+ *   - A slot's log keeps only its newest job, so each finished one is appended once to history.jsonl (keyed by slot
+ *     and start) when the dashboard first sees its exit line, and kept HISTORY_DAYS across restarts. The farm keeps
+ *     its own jobs (out/drift/farm/jobs).
+ *   - Every UTIL_STEP_S each machine's GPU use, our VRAM and others', and its badge, the last 30 min, in memory: so a
+ *     box sitting idle shows. This sampler is the one background cost added: the system probes (cached 2.5 s) and the
+ *     slot files once per 15 s, also while no page is open.
+ */
+const HISTORY_FILE = process.env.DRIFT_DASH_HISTORY ?? join(ROOT, 'out/drift/dashboard/history.jsonl');
+/** days a finished slot job stays in the history */
+const HISTORY_DAYS = 7;
+/** by key: Slots.recent entries */
+const history = new Map();
+{
+  const keep = Date.now() - HISTORY_DAYS * 86400e3;
+  let lines = [];
+  try {
+    lines = readFileSync(HISTORY_FILE, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    // none yet
+  }
+  for (const l of lines) {
+    try {
+      const e = JSON.parse(l);
+      if (e.ended > keep) history.set(e.key, e);
+    } catch {
+      // a torn last line
+    }
+  }
+  if (history.size < lines.length) writeFileSync(HISTORY_FILE, [...history.values()].map((e) => `${JSON.stringify(e)}\n`).join(''));
+}
+/** the finished slot jobs of `sl` not in the history yet, added and appended to its file */
+function remember(sl) {
+  for (const r of sl.recent ?? []) {
+    const key = `${r.slot}:${r.started ?? r.ended}`;
+    if (history.has(key)) continue;
+    const e = { key, ...r };
+    history.set(key, e);
+    try {
+      mkdirSync(dirname(HISTORY_FILE), { recursive: true });
+      appendFileSync(HISTORY_FILE, `${JSON.stringify(e)}\n`);
+    } catch {
+      // (a read-only checkout: kept in memory only)
+    }
+  }
+}
+
+/** s between utilisation samples, and how many are kept (120 × 15 s: the last 30 min) */
+const UTIL_STEP_S = 15;
+const UTIL_KEEP = 120;
+/** by Machine.key: [ms epoch, GPU %, our VRAM GB, others' VRAM GB, badge][] */
+const util = new Map();
+async function sampleUtil() {
+  try {
+    const sl = slots();
+    remember(sl);
+    const { machines } = machinesNow(await machine(), sl, farmView());
+    const t = Date.now();
+    for (const c of machines) util.set(c.key, [...(util.get(c.key) ?? []), [t, c.gpu?.utilPct ?? null, c.gpu?.oursGB ?? null, c.gpu?.othersGB ?? null, c.badge]].slice(-UTIL_KEEP));
+  } catch {
+    // (the next one)
+  }
+}
+sampleUtil();
+setInterval(sampleUtil, UTIL_STEP_S * 1000).unref();
+
+/** the newest `n` lines of a log file, reading at most its last 256 KB */
+function tail(file, n) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, 256 * 1024);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString('utf8').split('\n').filter(Boolean).slice(len < size ? 1 : 0).slice(-n);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -559,6 +693,23 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(await status()));
+    return;
+  }
+  if (url.pathname === '/api/history') {
+    const keep = Date.now() - HISTORY_DAYS * 86400e3;
+    const jobs = [...history.values()].filter((e) => e.ended > keep).sort((a, b) => b.ended - a.ended).slice(0, 300);
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ now: Date.now(), stepS: UTIL_STEP_S, util: Object.fromEntries(util), jobs }));
+    return;
+  }
+  if (url.pathname === '/api/log') {
+    // (an opened job row's log: a farm job's, or a slot's — the newest job in that slot)
+    const id = url.searchParams.get('farm');
+    const slot = url.searchParams.get('slot');
+    const n = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines')) || 200));
+    const file = id && /^[\w-]+$/.test(id) ? join(FARM_DIR, 'jobs', id, 'log.txt') : slot && /^\d+$/.test(slot) ? join(SLOTS, `${slot}.log`) : null;
+    res.writeHead(file ? 200 : 400, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ lines: file ? tail(file, n) : [] }));
     return;
   }
   if (url.pathname === '/file') {

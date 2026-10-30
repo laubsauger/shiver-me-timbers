@@ -34,9 +34,9 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join, posix, relative, resolve, sep } from 'node:path';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
@@ -328,18 +328,26 @@ async function copyWithProgress(src, dst, total, say) {
  * 10/11 ship bsdtar as tar.exe), and verify it with drift-bundle.mjs --verify --quick. A bundle that is current is
  * still verified (sizes only, a second): an unpack interrupted earlier is found and redone.
  *
- *   { root, source, prev, dryRun, say, bundleScript, tar }   → { changed, record } (record: node-state.json's
- *   "bundle"), or throws with the fix. `tar`: the tar to run (default `tar` on PATH; drift-node.mjs passes Windows'
- *   own, so a GNU tar that Git for Windows put first on PATH, which reads C: as a host name, is not the one used).
+ *   { root, source, prev, dryRun, say, bundleScript, tar, full }   → { changed, record, moved } (record:
+ *   node-state.json's "bundle"; moved: { mode: 'current' | 'patch' | 'tarball' | 'tarball+patch', files, bytes,
+ *   seconds }, what went over the wire), or throws with the fix. `tar`: the tar to run (default `tar` on PATH;
+ *   drift-node.mjs passes Windows' own, so a GNU tar that Git for Windows put first on PATH, which reads C: as a host
+ *   name, is not the one used).
+ *
+ * FROM THE FARM HUB, a box that has a bundle PATCHES it file by file to the hub's newest manifest (patchBundle: only
+ * the files that differ move); the tarball is for a first install (then patched on to the newest manifest, when
+ * --manifest-only moved it past the tarball), for SSH and folder sources, and when asked for (`full`).
  */
-export async function syncBundle({ root, source, prev = null, dryRun = false, say = console.log, bundleScript, tar = 'tar' }) {
+export async function syncBundle({ root, source, prev = null, dryRun = false, say = console.log, bundleScript, tar = 'tar', onProgress = () => {}, full = false }) {
   const bundleDir = join(root, 'out/drift-bundle');
   const pointer = await readPointer(source, root);
   const where = source.kind === 'ssh' ? `${source.target}:${source.path}` : source.kind === 'farm' ? `${source.hub}/farm/bundle` : resolve(root, source.path);
   say(`  source: ${where}/${pointer.file} (${mb(pointer.bytes)}${pointer.created ? `, built ${pointer.created.slice(0, 16).replace('T', ' ')}` : ''}${pointer.commit ? ` at ${pointer.commit}` : ''})`);
   const man = installedManifest(root);
   const installed = man ? contentId(man.files) : null;
-  let d = decideBundle(pointer, installed, prev);
+  // file by file (header) when the hub names its newest manifest and this box has a bundle to patch
+  const patching = source.kind === 'farm' && !full && man !== null && HEX64.test(String(pointer.manifest?.content ?? ''));
+  let d = decideBundle(patching ? { ...pointer, content: pointer.manifest.content } : pointer, installed, prev);
   const verify = async () => {
     const r = await run(process.execPath, [bundleScript, '--verify', join(bundleDir, 'manifest-assets.json'), '--base', root, '--quick'], { onLine: (l) => say(`  ${l}`) });
     return r.code === 0;
@@ -347,17 +355,29 @@ export async function syncBundle({ root, source, prev = null, dryRun = false, sa
   if (d.action === 'current') {
     say(`  current: ${d.why}`);
     if (dryRun) return { changed: false, record: prev };
-    if (await verify()) return { changed: false, record: prev ?? recordOf(pointer, man, installed, source, null) };
-    d = { action: 'fetch', why: 'the files unpacked here do not match their manifest (an interrupted unpack?): unpacking again' };
+    if (await verify()) return { changed: false, record: prev ?? recordOf(pointer, man, installed, source, null), moved: { mode: 'current', files: 0, bytes: 0, seconds: 0 } };
+    d = { action: 'fetch', why: `the files here do not match their manifest (an interrupted unpack?): ${patching ? 'patching the ones that differ' : 'unpacking again'}` };
   }
-  say(`  ${dryRun ? 'would fetch' : 'fetching'}: ${d.why}`);
+  say(`  ${dryRun ? 'would fetch' : 'fetching'}: ${d.why}${patching ? ' (file by file: only what differs)' : ''}`);
   if (dryRun) return { changed: true, record: prev };
+  if (patching) {
+    const p = await patchBundle({ root, source, old: man, say, onProgress });
+    if (p !== null) {
+      if (!(await verify())) throw new Error('the patched files do not match the manifest (lines above): disk full, or a file in use?');
+      say(`  patched: ${p.files} file(s), ${mb(p.bytes)} moved, ${p.removed} removed, in ${p.seconds.toFixed(1)} s`);
+      const record = { ...recordOf(pointer, p.man, p.content, source, prev?.local ?? null), patched: { at: new Date().toISOString(), files: p.files, bytes: p.bytes, removed: p.removed } };
+      return { changed: true, record, moved: { mode: 'patch', files: p.files, bytes: p.bytes, seconds: p.seconds } };
+    }
+    say('  the hub serves no manifest (a dashboard from before file-by-file bundles): the whole tarball');
+  }
+  const tStart = Date.now();
 
   mkdirSync(bundleDir, { recursive: true });
   const local = join(bundleDir, pointer.file);
   // the tarball may be here already (an unpack that failed after the copy): reuse it when it is the source's
   let have = false;
   if (!pointer.fallback && existsSync(local) && statSync(local).size === pointer.bytes) have = (await sha256File(local)) === pointer.sha256;
+  const tarBytes = have ? 0 : pointer.bytes;
   if (have) say(`  ${pointer.file} is here already (sha256 matches): not copied again`);
   else {
     // room for the tarball and its files unpacked (they overwrite the old ones, so this asks for more than it takes)
@@ -375,8 +395,16 @@ export async function syncBundle({ root, source, prev = null, dryRun = false, sa
       const src = Readable.fromWeb(r.body);
       let n = 0;
       let last = Date.now();
+      const t0 = Date.now();
+      let lastTick = 0;
       src.on('data', (c) => {
         n += c.length;
+        // (the pulse: bytes, rate and ETA for the dashboard, at most twice a second)
+        if (Date.now() - lastTick > 500) {
+          lastTick = Date.now();
+          const rate = n / Math.max(0.001, (Date.now() - t0) / 1000);
+          onProgress({ name: 'bundle download', done: n, total: pointer.bytes, unit: 'bytes', rateBps: Math.round(rate), etaS: Math.round((pointer.bytes - n) / Math.max(1, rate)) });
+        }
         if (Date.now() - last > 5000) {
           last = Date.now();
           say(`  fetched ${mb(n)} of ${mb(pointer.bytes)}`);
@@ -417,9 +445,257 @@ export async function syncBundle({ root, source, prev = null, dryRun = false, sa
   if (!pointer.fallback && content !== pointer.content) throw new Error(`${pointer.file}'s manifest is not the one ${pointerName()} describes — rebuilt on the Mac between the two reads? Run sync again`);
   say(`  unpacked ${now.count} files, ${mb(now.bytes)}, in ${((Date.now() - t1) / 1000).toFixed(0)} s`);
   if (!(await verify())) throw new Error('the unpacked files do not match the bundle\'s manifest (lines above): disk full, or a file in use?');
+  // (the tarball's sha256 was checked, so each file is its manifest's: remembered, and the first patch hashes nothing)
+  seedIndex(root, now);
   // the tarball fetched before this one is only disk now (this one stays: an unpack can be redone without a copy)
   if (prev?.file && prev.file !== pointer.file) rmSync(join(bundleDir, prev.file), { force: true });
-  return { changed: true, record: recordOf(pointer, now, content, source, local) };
+  const record = recordOf(pointer, now, content, source, local);
+  const moved = { mode: 'tarball', files: now.count, bytes: tarBytes, seconds: (Date.now() - tStart) / 1000 };
+  // a first install from the hub, whose newest files are past the tarball (--manifest-only): patched on to them
+  if (source.kind === 'farm' && !full && HEX64.test(String(pointer.manifest?.content ?? '')) && pointer.manifest.content !== content) {
+    say(`  the hub's newest files (${pointer.manifest.content.slice(0, 6)}) are past its tarball's: patching on`);
+    const again = await syncBundle({ root, source, prev: record, say, bundleScript, tar, onProgress });
+    return { changed: true, record: again.record, moved: { mode: 'tarball+patch', files: moved.files, bytes: moved.bytes + (again.moved?.bytes ?? 0), seconds: moved.seconds + (again.moved?.seconds ?? 0) } };
+  }
+  return { changed: true, record, moved };
+}
+
+// ------------------------------------------------------------------------------------ the bundle, file by file
+/** where a box remembers each bundle file's sha256 by its size and time: hashed once, not at every sync */
+const INDEX_FILE = 'out/drift-bundle/hash-index.json';
+const readIndex = (root) => {
+  try {
+    return JSON.parse(readFileSync(join(root, INDEX_FILE), 'utf8'));
+  } catch {
+    return {};
+  }
+};
+const writeIndex = (root, index) => {
+  const f = join(root, INDEX_FILE);
+  mkdirSync(dirname(f), { recursive: true });
+  writeFileSync(`${f}.part`, JSON.stringify(index));
+  renameSync(`${f}.part`, f);
+};
+
+/**
+ * a manifest path a box may write: relative, forward slashes, no `..`, and under public/ (the asset bundle's only
+ * root: a hub that is not ours, or a manifest gone wrong, can never write into scripts/ or src/)
+ */
+export function bundlePath(p) {
+  const s = String(p ?? '');
+  if (!s.startsWith('public/') || s.includes('\\') || s.includes('\0') || /^[a-z]:/i.test(s)) return null;
+  const parts = s.split('/');
+  return parts.some((x) => x === '' || x === '.' || x === '..') ? null : s;
+}
+
+/**
+ * what differs between a manifest and the files under `root`: { need: [entries to fetch], drop: [paths to remove],
+ * hashed } — a file is current when its size is the manifest's and its sha256 is (from `index` when the size and time
+ * are the ones hashed last, else hashed now and put in `index`). `drop`: files the OLD manifest (`old`, the one
+ * installed here) held and the new one does not; a file no manifest of ours held is never in it.
+ */
+export async function diffBundle(root, man, old, index) {
+  const need = [];
+  let hashed = 0;
+  for (const f of man.files) {
+    const abs = join(root, f.path);
+    let st;
+    try {
+      st = statSync(abs);
+    } catch {
+      need.push(f);
+      continue;
+    }
+    if (!st.isFile() || st.size !== f.bytes) {
+      need.push(f);
+      continue;
+    }
+    const mtimeMs = Math.round(st.mtimeMs);
+    const known = index[f.path];
+    let sha = known && known.bytes === st.size && known.mtimeMs === mtimeMs ? known.sha256 : null;
+    if (sha === null) {
+      sha = await sha256File(abs);
+      hashed++;
+      index[f.path] = { bytes: st.size, mtimeMs, sha256: sha };
+    }
+    if (sha !== f.sha256) need.push(f);
+  }
+  const keep = new Set(man.files.map((f) => f.path));
+  const drop = (old?.files ?? []).map((f) => f.path).filter((p) => !keep.has(p) && bundlePath(p) !== null);
+  return { need, drop, hashed };
+}
+
+/**
+ * ONE FILE from the hub, atomically: streamed to `<file>.part` with its sha256 taken as it comes, checked against the
+ * manifest's (and the hub's x-sha256: a manifest that moved on between the two reads fails loud), then renamed over
+ * the old file. A .part left by a fetch cut short is resumed with a Range when the hub serves one. The rename, not a
+ * write in place, also keeps the job trees right: they hard-link the bundle's files (drift-farm-client.mjs), and a
+ * job still running keeps the old file's bytes. → bytes moved over the wire
+ */
+export async function fetchBundleFile({ root, source, entry, onBytes = () => {}, fetchImpl = fetch }) {
+  const abs = join(root, entry.path);
+  const part = `${abs}.part`;
+  mkdirSync(dirname(abs), { recursive: true });
+  let h = createHash('sha256');
+  let from = 0;
+  try {
+    const st = statSync(part);
+    if (st.size > 0 && st.size <= entry.bytes) {
+      for await (const c of createReadStream(part)) h.update(c);
+      from = st.size;
+    } else rmSync(part, { force: true });
+  } catch {
+    // no .part: a fresh fetch
+  }
+  // (a .part that is whole already — its last bytes came, then the connection broke — only needs its rename)
+  if (from === entry.bytes) {
+    if (h.copy().digest('hex') === entry.sha256) return (await replaceWith(part, abs, entry.path), 0);
+    rmSync(part, { force: true });
+    from = 0;
+    h = createHash('sha256');
+  }
+  const url = `${source.hub}/farm/bundle/file?path=${encodeURIComponent(entry.path)}`;
+  const headers = { ...(source.token ? { authorization: `Bearer ${source.token}` } : {}), ...(from > 0 ? { range: `bytes=${from}-` } : {}) };
+  const r = await fetchImpl(url, { headers, signal: AbortSignal.timeout(1_800_000) });
+  if (!(r.status === 200 || r.status === 206)) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`fetching ${entry.path} from the farm hub: ${r.status} ${text.slice(0, 200)}`);
+  }
+  const said = r.headers.get('x-sha256');
+  if (said && said !== entry.sha256) throw new Error(`${entry.path}: the hub's file is ${said.slice(0, 12)}…, its manifest said ${entry.sha256.slice(0, 12)}… — the bundle moved on while this sync ran: sync again`);
+  // (a 200 to a Range: the hub sent the whole file, so it starts over, with a fresh hash)
+  const hash = r.status === 206 ? h : createHash('sha256');
+  let n = 0;
+  const { Readable } = await import('node:stream');
+  const count = new Transform({
+    transform(chunk, _enc, cb) {
+      hash.update(chunk);
+      n += chunk.length;
+      onBytes(chunk.length);
+      cb(null, chunk);
+    },
+  });
+  await pipeline(Readable.fromWeb(r.body), count, createWriteStream(part, { flags: r.status === 206 ? 'a' : 'w' }));
+  const size = statSync(part).size;
+  const sha = hash.digest('hex');
+  if (size !== entry.bytes || sha !== entry.sha256) {
+    rmSync(part, { force: true });
+    throw new Error(`${entry.path}: fetched ${size} bytes, sha256 ${sha.slice(0, 12)}…; the manifest says ${entry.bytes}, ${entry.sha256.slice(0, 12)}… (cut short, or changed on the Mac since its manifest: node scripts/drift-bundle.mjs --manifest-only there)`);
+  }
+  await replaceWith(part, abs, entry.path);
+  return n;
+}
+
+/** the .part over the file: a rename (Windows: a file open elsewhere, a Chrome reading it, refuses it for a moment) */
+async function replaceWith(part, abs, rel) {
+  for (let i = 0; ; i++) {
+    try {
+      renameSync(part, abs);
+      return;
+    } catch (e) {
+      if (i >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw new Error(`${rel}: cannot replace it (${e.code}): a program has it open?`);
+      await new Promise((ok) => setTimeout(ok, 500 * (i + 1)));
+    }
+  }
+}
+
+/**
+ * PATCH THE BUNDLE FILE BY FILE (the user, 2026-10-30: "make sure the bundle can be incrementally patched instead of
+ * having to upload the whole huge thing all the time … wasteful and takes forever if you just change a little
+ * asset"): the hub's newest manifest (GET /farm/bundle/manifest) against the files here (diffBundle: size, then
+ * sha256, each file hashed once and remembered in out/drift-bundle/hash-index.json), only the missing or changed
+ * files fetched (fetchBundleFile: .part, sha256, rename; 4 at a time), the files the old manifest held and the new
+ * one drops removed, and the new manifest written LAST: a patch cut short leaves the old manifest, so the next sync
+ * diffs again and fetches only what is still missing.
+ *   → { man, content, files, bytes, removed, hashed, seconds } (files, bytes: what moved over the wire)
+ */
+export async function patchBundle({ root, source, old, say = console.log, onProgress = () => {}, fetchImpl = fetch, parallel = 4 }) {
+  const t0 = Date.now();
+  const where = `${source.hub}/farm/bundle/manifest`;
+  const r = await fetchImpl(where, { headers: source.token ? { authorization: `Bearer ${source.token}` } : {}, signal: AbortSignal.timeout(30_000) });
+  if (r.status === 404) return null; // (a hub from before file-by-file bundles, or none published: the tarball)
+  if (!r.ok) throw new Error(`cannot read ${where}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+  const man = await r.json();
+  if (!Array.isArray(man?.files)) throw new Error(`${where}: not a bundle manifest`);
+  for (const f of man.files) {
+    if (bundlePath(f.path) === null) throw new Error(`${where}: a path a box may not write: ${JSON.stringify(f.path)} (bundle files live under public/)`);
+    if (!(Number.isInteger(f.bytes) && f.bytes >= 0) || !HEX64.test(String(f.sha256))) throw new Error(`${where}: ${f.path} has no bytes or sha256`);
+  }
+  const content = contentId(man.files);
+  const index = readIndex(root);
+  const known = Object.keys(index).length;
+  if (known < man.files.length / 2) say(`  checking ${man.files.length} files here (the first patch hashes each once; later ones only what changed)`);
+  const { need, drop, hashed } = await diffBundle(root, man, old, index);
+  writeIndex(root, index);
+  const total = need.reduce((a, f) => a + f.bytes, 0);
+  say(`  ${need.length} of ${man.files.length} file(s) to fetch (${mb(total)}), ${drop.length} to remove${hashed ? `, ${hashed} hashed` : ''}`);
+  if (total > 0) {
+    const st = statfsSync(join(root, 'out'));
+    const free = st.bavail * st.bsize;
+    if (free < total + 2 ** 30) throw new Error(`not enough disk under ${root}: ${mb(free)} free, the patch needs ${mb(total)} and 1 GB to spare`);
+  }
+  let done = 0;
+  let lastTick = 0;
+  let lastSay = Date.now();
+  const tick = (k) => {
+    done += k;
+    const t = Date.now();
+    if (t - lastTick > 500) {
+      lastTick = t;
+      const rate = done / Math.max(0.001, (t - t0) / 1000);
+      onProgress({ name: 'bundle patch', done, total, unit: 'bytes', rateBps: Math.round(rate), etaS: Math.round((total - done) / Math.max(1, rate)) });
+    }
+    if (t - lastSay > 5000) {
+      lastSay = t;
+      say(`  fetched ${mb(done)} of ${mb(total)}`);
+    }
+  };
+  let moved = 0;
+  const queue = [...need];
+  const lane = async () => {
+    for (let f = queue.shift(); f; f = queue.shift()) {
+      let n;
+      try {
+        n = await fetchBundleFile({ root, source, entry: f, onBytes: tick, fetchImpl });
+      } catch (e) {
+        // once more from scratch (a transfer cut or garbled on the way), then fail loud
+        if (/moved on|not a file of|gone from|changed since/.test(String(e.message))) throw e;
+        say(`  ${f.path}: ${e.message}; fetching it again`);
+        n = await fetchBundleFile({ root, source, entry: f, onBytes: tick, fetchImpl });
+      }
+      moved += n;
+      const st = statSync(join(root, f.path));
+      index[f.path] = { bytes: st.size, mtimeMs: Math.round(st.mtimeMs), sha256: f.sha256 };
+      if (need.length <= 20) say(`  got ${f.path} (${mb(f.bytes)})`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(parallel, need.length)) }, lane));
+  for (const p of drop) {
+    rmSync(join(root, p), { force: true });
+    delete index[p];
+  }
+  writeIndex(root, index);
+  // the manifest last (header): what is installed here now
+  const mf = join(root, 'out/drift-bundle/manifest-assets.json');
+  writeFileSync(`${mf}.part`, `${JSON.stringify(man, null, 1)}\n`);
+  renameSync(`${mf}.part`, mf);
+  const seconds = (Date.now() - t0) / 1000;
+  onProgress({ name: 'bundle patch', done: total, total, unit: 'bytes', rateBps: Math.round(moved / Math.max(0.001, seconds)), etaS: 0 });
+  return { man, content, files: need.length, bytes: moved, removed: drop.length, hashed, seconds };
+}
+
+/** after a full unpack (the tarball's sha256 checked): each file's sha256 is its manifest's, remembered by size and time */
+export function seedIndex(root, man) {
+  const index = readIndex(root);
+  for (const f of man.files) {
+    try {
+      const st = statSync(join(root, f.path));
+      if (st.size === f.bytes) index[f.path] = { bytes: st.size, mtimeMs: Math.round(st.mtimeMs), sha256: f.sha256 };
+    } catch {
+      // (missing: --verify says so)
+    }
+  }
+  writeIndex(root, index);
 }
 
 function recordOf(pointer, man, content, source, local) {
@@ -430,8 +706,8 @@ function recordOf(pointer, man, content, source, local) {
   };
 }
 
-/** "20261029" from drift-assets-20261029.tar.gz, else the manifest's date */
-export const bundleStamp = (rec) => /(\d{8})/.exec(rec?.file ?? '')?.[1] ?? rec?.created?.slice(0, 10).replace(/-/g, '') ?? null;
+/** "20261029" from drift-assets-20261029.tar.gz, else (and when patched past it) the manifest's date */
+export const bundleStamp = (rec) => (rec?.patched ? null : /(\d{8})/.exec(rec?.file ?? '')?.[1]) ?? rec?.created?.slice(0, 10).replace(/-/g, '') ?? null;
 
 // --------------------------------------------------------------------------------------------------- the jobs
 /** the fields a queue job takes (drift-queue.mjs DEFAULTS, plus name/from/to/size/out/extra/enabled) */
@@ -496,6 +772,7 @@ export function jobOfQueueStatus(st) {
  * unref'd: it never keeps a finished process alive. `stop()` sends the last one and waits for it (≤ 2 s).
  */
 export function startHeartbeat(url, payload, everyMs = 5000) {
+  // (everyMs: a number, or a function asked before each beat — the pulse quickens while a box is busy)
   const send = () => {
     if (!url) return Promise.resolve();
     let body;
@@ -509,13 +786,23 @@ export function startHeartbeat(url, payload, everyMs = 5000) {
       () => false,
     );
   };
-  const timer = url ? setInterval(send, everyMs) : null;
-  timer?.unref();
+  let timer = null;
+  let stopped = false;
+  const next = () => {
+    if (!url || stopped) return;
+    timer = setTimeout(() => {
+      send();
+      next();
+    }, typeof everyMs === 'function' ? everyMs() : everyMs);
+    timer.unref?.();
+  };
+  next();
   return {
     url,
     beat: send,
     stop: async () => {
-      if (timer) clearInterval(timer);
+      stopped = true;
+      if (timer) clearTimeout(timer);
       return send();
     },
   };
