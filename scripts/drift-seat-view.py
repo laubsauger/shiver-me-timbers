@@ -34,6 +34,7 @@ ap.add_argument('--row', type=int, default=5)
 ap.add_argument('--seat', type=float, default=0.0)
 ap.add_argument('--size', default='1280x720')
 ap.add_argument('--fov', type=float, default=110.0, help='horizontal field of view, deg')
+ap.add_argument('--lens', type=float, default=1.0, help='the lens curve k: r = tan(k·θ)/k — 1 rectilinear (straight lines straight), 0.5 stereographic, toward 0 equidistant fisheye')
 ap.add_argument('--pitch', type=float, default=30.0, help='mean head pitch above horizontal, deg')
 ap.add_argument('--from', dest='t0', type=float, default=0.0)
 ap.add_argument('--to', dest='t1', type=float, default=None)
@@ -61,9 +62,17 @@ row_y = -(Y0 + a.row * PITCH_ROW)  # forward of the dome centre (negative: behin
 eye = np.array([a.seat, row_y - 0.15, a.row * PITCH_ROW * math.tan(RAKE) + 1.2])
 
 W, H = (int(v) for v in a.size.split('x'))
-f = (W / 2) / math.tan(math.radians(a.fov) / 2)
+# THE LENS (the client, 2026-10-31: "wider … a little bit more curvature", toward the first version's look): a
+# point θ off the view's axis lands at r = tan(k·θ)/k. k = 1 is the rectilinear view (straight lines straight, the
+# edges stretched — past ~130° wide very much so); k = 0.5 the stereographic one (gentle curves, shapes kept);
+# toward 0 the equidistant fisheye. f scales it so --fov spans the frame's width.
+K = min(max(a.lens, 1e-3), 1.0)
+f = (W / 2) / (math.tan(K * math.radians(a.fov) / 2) / K)
 px, py = np.meshgrid(np.arange(W) + 0.5 - W / 2, np.arange(H) + 0.5 - H / 2)
-cam_dirs = np.stack([px / f, -py / f, np.ones_like(px)], -1)  # camera space: x right, y up, z forward
+rho = np.hypot(px, py) / f
+theta = np.arctan(K * rho) / K
+sin_over = np.where(rho > 0, np.sin(theta) / np.maximum(rho, 1e-9), 1.0)
+cam_dirs = np.stack([px / f * sin_over, -py / f * sin_over, np.cos(theta)], -1)  # camera space: x right, y up, z forward
 cam_dirs /= np.linalg.norm(cam_dirs, axis=-1, keepdims=True)
 cam_dirs = cam_dirs.astype(np.float32)  # (float32 through the per-frame maths: half the work of float64)
 
@@ -138,7 +147,7 @@ if a.maps:
         with open(os.path.join(a.dst, f'{name}.pgm'), 'wb') as fh:
             fh.write(f'P5\n{W} {H}\n65535\n'.encode())
             fh.write(m.astype('>u2').tobytes())
-    print(f'{a.dst}: xmap/ymap {W}×{H} for a {S}² master, row {a.row} seat {a.seat:+.1f} m, pitch {a.pitch}°, fov {a.fov}°', file=sys.stderr)
+    print(f'{a.dst}: xmap/ymap {W}×{H} for a {S}² master, row {a.row} seat {a.seat:+.1f} m, pitch {a.pitch}°, fov {a.fov}°, lens {a.lens}', file=sys.stderr)
     sys.exit(0)
 dec = subprocess.Popen(['ffmpeg', '-v', 'error', '-ss', str(a.t0), '-t', str(t1 - a.t0), '-i', a.src, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
                        stdout=subprocess.PIPE)
