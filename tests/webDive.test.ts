@@ -15,7 +15,8 @@ import { describe, expect, it } from 'vitest';
 import { driftParams as p } from '../src/params/drift';
 import { getTheDriftParams as p2 } from '../src/params/getTheDrift';
 import { beatStarts, eyePath, webFlight, webTurnEnd } from '../src/drift/undertime/timeline';
-import { arrivalEye, arrivalState, beatStarts as actBeats, ourGalaxy } from '../src/drift/getTheDrift/timeline';
+import { arrivalEye, arrivalState, beatStarts as actBeats, domeDir, ourGalaxy } from '../src/drift/getTheDrift/timeline';
+import { diveGalaxies } from '../src/drift/getTheDrift/webGalaxies';
 import { WEB_DIVE, WEB_PULL, diveWorld, toWorld, webFrame, webPlace, wrap } from '../src/drift/getTheDrift/webDive';
 import type { Vec3 } from '../src/cine/domeMaster';
 
@@ -128,5 +129,34 @@ describe('the web dive', () => {
     const startDist = len(sub(arrivalEye(-p2.diveLead, p2, g), g.sun));
     // under a degree across at the dive's start (it was ~13° across at the act's start before the dive)
     expect((2 * Math.atan(g.radius / startDist) * 180) / Math.PI).toBeLessThan(1);
+  });
+
+  // The 2026-10-31 review (~95–110 s): "this galaxy to the left of our actual Milky Way where we're zooming in stays
+  // there for way too long and looks cheap … make sure it goes away so that once we are in the zoom we can focus on the
+  // Milky Way". The two small irregulars by ours (the Magellanic Clouds' role) lay beyond it and so hugged its edge,
+  // growing with it, the whole way in; laid in front of it, the approach's own parallax must carry them away: beside
+  // ours as it is recognised, far out of the focus by the zoom, and behind the eye soon after
+  it('lets the Local Group’s small neighbours of ours leave by parallax before the zoom', () => {
+    const ours = { centre: g.centre, normal: g.normal, xAxis: g.xAxis, radius: g.radius, arms: 2, wind: 4, phase: 0, seed: 0, elliptical: 0, appear: 0.62, brightness: 1, tile: -1, planar: true, roll: 0 };
+    const atlas = [
+      { tile: 0, kind: 'spiral', planar: true },
+      { tile: 1, kind: 'irregular', planar: true },
+      { tile: 2, kind: 'elliptical', planar: false },
+    ];
+    const specs = diveGalaxies(
+      { frame: f, knots: [], particles: new Uint16Array(0), ours, size: p2.galaxySize, zenith: domeDir(90, 0, p.domeTilt), start: arrivalEye(-p2.diveLead, p2, g) },
+      atlas,
+    );
+    const sats = specs.filter((s) => s.tile === 1 && s.radius < 0.4 * g.radius);
+    expect(sats.length).toBe(2);
+    const zoom = actStart + actBeats(p2).starts.ours;
+    for (const s of sats) {
+      const off = (t: number): number => angleDeg(sub(s.centre, eyeAt(t)), sub(g.centre, eyeAt(t)));
+      // beside ours as it is recognised (~88 s)
+      expect(off(88)).toBeLessThan(25);
+      // well out of the focus by the zoom, and behind the eye a few seconds into it
+      expect(off(zoom)).toBeGreaterThan(70);
+      expect(off(zoom + 5)).toBeGreaterThan(100);
+    }
   });
 });

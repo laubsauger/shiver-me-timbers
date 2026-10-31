@@ -17,7 +17,7 @@
  *             would be fireworks, not a field opening)
  *   LOCAL     the Local Group, so ours reads as a place: a big inclined spiral in Andromeda's role, which the dive
  *             passes ~18 m (11 radii) off its line — growing out of the flow ahead, then sweeping up over the audience
- *             at ~6°/s as the dive slows (~93–97 s) — with a smaller spiral beside it, and two small irregulars by ours
+ *             at ~6°/s as the dive slows (~93–97 s) — with a smaller spiral beside it, and two small irregulars just in front of ours
  *
  * Every galaxy keeps clear of the dive's line by several of its own radii (one crossing the eye would be a blur
  * filling the dome), and of ours. Seeded: every lane renders the same sky.
@@ -49,6 +49,8 @@ const CLEAR_OURS = 2.4;
 const M31_RADIUS = 1.4;
 const M31_ALONG = 7.5;
 const M31_OFF = 11;
+/** ours' radii the two small irregulars (the Magellanic Clouds' role) lie in front of ours along the approach */
+const SAT_ALONG = 3.5;
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a: Vec3, b: Vec3, k = 1): Vec3 => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
@@ -175,8 +177,13 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
   // side of ours away from the line
   const side = norm([f.approach[1] * up[2] - f.approach[2] * up[1], f.approach[2] * up[0] - f.approach[0] * up[2], f.approach[0] * up[1] - f.approach[1] * up[0]]);
   place(add(add(m31, side, 4.5 * R), f.approach, -2 * R), 0.45 * R, draw(discs), 0.8, 0.42, 1);
-  const behind = add(ours.centre, f.approach, 2.2 * R);
-  place(add(add(behind, side, -2.6 * R), up, -1.2 * R), 0.32 * R, draw(irregulars.length ? irregulars : others), 0.8, 0.7, 0);
-  place(add(add(behind, side, -3.4 * R), up, -0.4 * R), 0.22 * R, draw(irregulars.length ? irregulars : others), 0.7, 0.74, 0);
+  // ON THE NEAR SIDE of ours (SAT_ALONG radii back toward the eye), so the approach carries them out of the frame by
+  // parallax: beside ours as it is recognised (~88–92 s), out past 50° from it by ~96 s and passing the eye before
+  // the zoom. They were 2.2 radii BEYOND ours: from the eye they then kept ~2 of ours' own angular radii off its edge
+  // the whole way in, growing with it — "this galaxy to the left of our actual Milky Way where we're zooming in stays
+  // there for way too long and looks cheap" (the 2026-10-31 review, ~95–110 s)
+  const near = add(ours.centre, f.approach, -SAT_ALONG * R);
+  place(add(add(near, side, -4 * R), up, -1.2 * R), 0.32 * R, draw(irregulars.length ? irregulars : others), 0.8, 0.7, 0);
+  place(add(add(add(near, f.approach, -1.2 * R), side, -4.6 * R), up, -0.3 * R), 0.22 * R, draw(irregulars.length ? irregulars : others), 0.7, 0.74, 0);
   return out;
 }

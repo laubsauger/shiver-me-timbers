@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { ARRIVED, DEBRIS_SPIN, EYE_AT, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { ARRIVED, DEBRIS_SPIN, EYE_AT, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, orbitLook, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -115,34 +115,74 @@ describe('Get the Drift arrival', () => {
   it('lands as one glide: down to the raft the eye never parks or lurches, then drifts on with the raft', () => {
     // A descent that stops gliding forward while it is still coming down reads as two shots spliced together
     // (the v6 notes): the ground's apparent motion (speed over height) and the descent (e-folds of height per
-    // second) must change smoothly from Drift-2's end to the raft. Down at the deck's height it does not park
+    // second) must change smoothly from the flood down to the raft. Down at the deck's height it does not park
     // either (direction.md C1, "then a very slow follow"; a still dome reads as a frozen frame): it drifts on
     // with the debris galaxy's slow turn, the current the raft floats on.
+    // Measured where it shows — the eye over the planet as earthPose places it — from before the descent's own track
+    // takes over (35 s before Drift-2's end) through it: the old landing set off from rest at Drift-2's end while
+    // the approach still streamed the ground by at a flow of 0.9, blended over ±5 s, and the eye surged, stopped
+    // and slid BACK for two seconds (the 2026-10-30 review: "going kind of back and forth", ~280–310 s).
     const endT = starts.drift2 + p.drift2;
     const h = 0.1;
-    const height = (t: number): number => earthPose(t, p, tilt).distance - 6.371;
-    const flow = (t: number): number => {
-      const a = landingTrack(t, p, tilt);
-      const b = landingTrack(t + h, p, tilt);
-      return Math.hypot(b.east - a.east, b.north - a.north) / a.alt / h;
+    const g = gatherFrame(p, tilt);
+    /** the eye relative to the planet's centre, Mm */
+    const eye = (t: number): THREE.Vector3 => {
+      const e = earthPose(t, p, tilt);
+      return new THREE.Vector3(...e.centreDir).multiplyScalar(-e.distance);
     };
+    const height = (t: number): number => eye(t).length() - 6.371;
+    /** the eye's ground velocity, Mm/s (the motion along the planet's surface) */
+    const ground = (t: number): THREE.Vector3 => {
+      const a = eye(t);
+      const v = eye(t + h).sub(a).divideScalar(h);
+      const n = a.normalize();
+      return v.addScaledVector(n, -v.dot(n));
+    };
+    const flow = (t: number): number => ground(t).length() / height(t);
     const descent = (t: number): number => Math.abs(Math.log(height(t + h)) - Math.log(height(t))) / h;
     const motion = (t: number): number => Math.max(flow(t), descent(t));
+    // the way to the raft (where the eye comes down, EYE_AT, on the sphere), along the planet's surface at the eye
+    const raft = new THREE.Vector3(...g.up).multiplyScalar(6.371).addScaledVector(new THREE.Vector3(...g.east), EYE_AT[0] * 1e-6).addScaledVector(new THREE.Vector3(...g.north), EYE_AT[1] * 1e-6);
+    const ahead = (t: number): THREE.Vector3 => {
+      const e = eye(t);
+      const n = e.clone().normalize();
+      const w = raft.clone().sub(e);
+      return w.addScaledVector(n, -w.dot(n)).normalize();
+    };
     let jolt = 0;
     let fastest = 0;
     let slowest = Infinity;
-    let was = motion(endT - 6);
-    for (let t = endT - 6; t < total; t += h) {
+    let back = Infinity;
+    let straight = Infinity;
+    let peaked = false;
+    let speedUp = 0;
+    let wasSpeed = ground(endT - 40).length();
+    let was = motion(endT - 40);
+    for (let t = endT - 40; t < total; t += h) {
       const now = motion(t);
+      const v = ground(t);
       jolt = Math.max(jolt, Math.abs(now - was) / h);
       fastest = Math.max(fastest, flow(t));
       if (height(t) > LANDED * 1.2) slowest = Math.min(slowest, now);
+      // never back: the ground streams the one way until the eye is down to the current's metre a second — straight
+      // at the raft while it flies (over 50 m/s), turning only as the field's slow turn takes over in the last metres
+      const along = v.dot(ahead(t)) / v.length();
+      if (v.length() * 1e6 > 50) straight = Math.min(straight, along);
+      if (v.length() * 1e6 > 2) back = Math.min(back, along);
+      // one surge, then only slower (until the current carries it)
+      const speed = v.length();
+      if (speed < wasSpeed) peaked = true;
+      if (peaked && speed * 1e6 > 2) speedUp = Math.max(speedUp, (speed - wasSpeed) / wasSpeed);
+      wasSpeed = speed;
       was = now;
     }
+    expect(straight).toBeGreaterThan(0.999);
+    expect(back).toBeGreaterThan(0.95);
+    expect(speedUp).toBeLessThan(1e-3);
     expect(jolt).toBeLessThan(0.12);
-    // (the ground's flow under the same comfort cap as the flight's e-folds)
-    expect(fastest).toBeLessThan(0.35);
-    expect(slowest).toBeGreaterThan(0.05);
+    // (the ground's flow about the comfort cap of the flight's e-folds; the approach's own flood reached 0.33)
+    expect(fastest).toBeLessThan(0.37);
+    expect(slowest).toBeGreaterThan(0.04);
     expect(height(total) / LANDED).toBeCloseTo(1, 2);
     const a = landingTrack(total, p, tilt);
     const b = landingTrack(total + 1, p, tilt);
@@ -150,16 +190,26 @@ describe('Get the Drift arrival', () => {
     expect(Math.hypot(b.east - a.east, b.north - a.north) / current).toBeCloseTo(1, 2);
     // (slow: under a metre a second)
     expect(current).toBeLessThan(1);
+    // and the track picks up exactly where the approach leaves the eye (no step in place)
+    const from = endT - 35;
+    expect(eye(from - 1e-3).distanceTo(eye(from + 1e-3)) * 1e6).toBeLessThan(400);
   });
 
   it('looks down onto the debris spiral from high up, then levels out at the raft — turning gently', () => {
-    // The spiral must read as a shape from the air (v7 notes: "more look down on the spiral from higher up"),
-    // so at Drift-2's end its centre lies well below level (a spiral seen at a grazing angle is a smear). The
-    // eye turns for it, not the planet (turning the planet would turn it under its Sun), and every turn on a
-    // dome stays slow.
+    // The spiral must read as a shape from the air (v7 notes: "more look down on the spiral from higher up"): the
+    // descent comes over it steeply while still kilometres up (a spiral seen at a grazing angle is a smear). The
+    // eye turns for it, not the planet (turning the planet would turn it under its Sun), and every turn on a dome
+    // stays slow — about the comfort's 1°/s (the 2026-10-30 review: no going back and forth): from where the orbit
+    // look has been given back the levelling only ever turns the view up.
     const endT = starts.drift2 + p.drift2;
-    const at = landingTrack(endT, p, tilt);
-    expect((Math.atan2(at.alt, Math.hypot(at.east, at.north)) * 180) / Math.PI).toBeGreaterThan(40);
+    const down = (t: number): number => {
+      const at = landingTrack(t, p, tilt);
+      return (Math.atan2(at.alt, Math.hypot(at.east, at.north)) * 180) / Math.PI;
+    };
+    expect(down(endT)).toBeGreaterThan(25);
+    let steep = 0;
+    for (let t = endT; t < total; t += 0.5) if (down(t) > 40) steep = Math.max(steep, landingTrack(t, p, tilt).alt);
+    expect(steep).toBeGreaterThan(8000);
     const g = gatherFrame(p, tilt);
     const up = new THREE.Vector3(...g.up);
     const front = new THREE.Vector3(...g.front);
@@ -168,9 +218,21 @@ describe('Get the Drift arrival', () => {
       const l = landingTurn(t, p, tilt);
       return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -l.look).slerp(level, l.k);
     };
+    // the view's pitch against the eye's own horizon (the planet under it), deg
+    const pitch = (t: number): number => {
+      const e = earthPose(t, p, tilt);
+      const f = new THREE.Vector3(0, 0, -1).applyQuaternion(turn(t));
+      return (Math.asin(-f.dot(new THREE.Vector3(...e.centreDir))) * 180) / Math.PI;
+    };
     let fastest = 0;
-    for (let t = starts.drift2 - 6; t < total; t += 0.1) fastest = Math.max(fastest, (turn(t).angleTo(turn(t + 0.1)) * 180) / Math.PI / 0.1);
-    expect(fastest).toBeLessThan(2);
+    let downAgain = 0;
+    const settled = starts.flood + 0.6 * (p.flood + p.drift2) + 1;
+    for (let t = starts.drift2 - 6; t < total; t += 0.1) {
+      fastest = Math.max(fastest, (turn(t).angleTo(turn(t + 0.1)) * 180) / Math.PI / 0.1);
+      if (t > settled) downAgain = Math.max(downAgain, pitch(t) - pitch(t + 0.1));
+    }
+    expect(fastest).toBeLessThan(1);
+    expect(downAgain).toBeLessThan(1e-3);
     expect(turn(total).angleTo(level)).toBeLessThan(1e-6);
   });
 
@@ -228,6 +290,54 @@ describe('Get the Drift arrival', () => {
       const limbTop = 90 - deg(last.centreDir, domeDir(90, 0, tilt)) + last.radiusDeg;
       expect(limbTop).toBeGreaterThan(p.limbEl - p.dawnSink - 0.5);
       expect(limbTop).toBeLessThan(p.limbEl + 0.5);
+    });
+
+    // THE ORBIT LOOK (the 2026-10-30 seat review, ~185–200 s: in the master the limb was a straight chord across the
+    // lower dome, which from a seat reads as an arch standing in front, not a horizon round and below). As the planet
+    // arrives the eye turns up, so in the VIEW (the eye's turn applied) the planet's centre lies low enough under the
+    // front that its limb curves round the dome with its edge: the circle through the limb's ends on the springline
+    // and its middle ahead has its centre on the zenith's side of the master, not beyond its front edge (an arch) or
+    // at infinity (a chord). The Sun turns down with the planet, so the dawn stays a dawn; the turn is slow, and it is
+    // given back before Drift-2 looks down onto the spiral.
+    it('turns the eye up over the planet so its limb curves round the dome like an orbit horizon', () => {
+      const front = new THREE.Vector3(...domeDir(0, 0, tilt));
+      const axis = new THREE.Vector3(...domeDir(90, 0, tilt));
+      const view = (t: number, w: number[]): THREE.Vector3 => {
+        const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -landingTurn(t, p, tilt).look);
+        return new THREE.Vector3(w[0], w[1], w[2]).applyQuaternion(q.invert());
+      };
+      // the master's y of the circle through the limb's ends and middle (master radius 0.5; + toward the zenith's side)
+      const fitCentre = (t: number): { limb: number; y: number } => {
+        const e = earthPose(t, p, tilt);
+        const c = view(t, e.centreDir);
+        const el = Math.asin(c.dot(axis));
+        expect(Math.abs(c.clone().addScaledVector(axis, -c.dot(axis)).normalize().dot(front) - 1)).toBeLessThan(1e-3);
+        const rho = (e.radiusDeg * Math.PI) / 180;
+        const limb = el + rho;
+        const half = Math.acos(Math.cos(rho) / Math.cos(el));
+        const y0 = -0.5 * (1 - limb / (Math.PI / 2));
+        const [x1, y1] = [0.5 * Math.sin(half), -0.5 * Math.cos(half)];
+        return { limb: (limb * 180) / Math.PI, y: (x1 * x1 + y1 * y1 - y0 * y0) / (2 * (y1 - y0)) };
+      };
+      const arrived = starts.earth + ARRIVED * p.earthApproach;
+      for (const t of [arrived, arrived + 5, arrived + 15, starts.lights, starts.lights + 0.5 * p.lights]) {
+        const { limb, y } = fitCentre(t);
+        expect(limb, `limb ahead at ${t}`).toBeLessThan(28);
+        expect(limb, `limb ahead at ${t}`).toBeGreaterThan(18);
+        expect(y, `limb's circle at ${t}`).toBeGreaterThan(0);
+        expect(y, `limb's circle at ${t}`).toBeLessThan(t >= arrived + 15 ? 1.6 : 2.6);
+      }
+      // the dawn: the Sun is still just over the limb in the view (an angle: the turn keeps it)
+      const e = earthPose(arrived, p, tilt);
+      const sunOverLimb = (Math.acos(dot(e.sun, e.centreDir)) * 180) / Math.PI - e.radiusDeg;
+      expect(sunOverLimb).toBeLessThan(30);
+      // slow (the dome-comfort rule: ~10° in 10 s at most), and given back before Drift-2's look down
+      let fastest = 0;
+      for (let t = starts.earth; t < starts.drift2; t += 0.05) fastest = Math.max(fastest, (Math.abs(orbitLook(t + 0.05, p) - orbitLook(t, p)) * 180) / Math.PI / 0.05);
+      expect(fastest).toBeLessThan(1);
+      // (the last few degrees of it run into Drift-2's first seconds, where its own look down begins: one turn, one way)
+      expect((orbitLook(starts.drift2 + 6, p) * 180) / Math.PI).toBeLessThan(0.1);
+      expect((orbitLook(arrived + 5, p) * 180) / Math.PI).toBeCloseTo(p.orbitLook, 1);
     });
   });
 });

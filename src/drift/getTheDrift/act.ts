@@ -16,11 +16,12 @@ import { lifeState } from './life';
 import { OUR_LOOK, createGalaxies, type GalaxyAtlas, type GalaxySpec } from './galaxies';
 import { diveGalaxies } from './webGalaxies';
 import type { WebFrame } from './webDive';
-import type { WebKnot } from '../undertime/webVolume';
+import { FOG as WEB_FOG, type WebKnot } from '../undertime/webVolume';
 import { createMilkyWay } from './milkyWay';
 import { DEBRIS_SPIN, createDebrisField, debrisPieces } from './debrisField';
 import { EARTH_R, SUN_E } from './atmosphere';
 import { skyIrradiance, sunlightCpu } from '../wandering/seaSky';
+import { CLOUD_TOP } from '../wandering/clouds';
 
 /** rad/s the sky wheels at over Earth, and the s it eases in over */
 const SKY_TURN = (0.5 * Math.PI) / 180;
@@ -28,6 +29,15 @@ const SKY_EASE = 8;
 /** m: the eye's height the sea's scene takes over at (main-drift crossfades there) — low enough that the sea's
  * own ocean and pieces carry the view, high enough that the hand-over is still part of the descent */
 const SEA_FROM_ALT = 150;
+/** s the sea's clouds take to form, from where the descent comes down through their layer's top (cloudsFrom: ~304 s,
+ * 2.3 km up) — under them by ~307 s, formed by ~320 s, before the slow follow at the raft. They formed over 25 s from
+ * the hand-over at 150 m until the 2026-10-30 review of the final render ("we go from titanium sky to clouds"): the
+ * descent's sky had none, so the cut to the sea showed a clear sky turning into cumulus */
+const CLOUDS_FORM = 16;
+
+/** s: the focus on ours (u.focus) starts this long before the ours beat, and takes this long */
+const FOCUS_LEAD = 3;
+const FOCUS_S = 6;
 
 const smoothstep01 = (x: number): number => {
   const k = Math.min(1, Math.max(0, x));
@@ -40,6 +50,11 @@ export interface ArrivalAct {
   readonly total: number;
   /** act s the landing comes down through SEA_FROM_ALT, where the sea's scene takes over */
   readonly seaFrom: number;
+  /** act s the descent comes down through the sea's cloud layer's top (wandering/clouds.ts CLOUD_TOP): its clouds form
+   * from here (seaDrive's `formFrom`), in the descent's sky and on in the sea's */
+  readonly cloudsFrom: number;
+  /** the turn from Act 2's world into the debris galaxy's frame (the sea's: x east, y up, z north) */
+  readonly toField: THREE.Quaternion;
   /** resolves once the Earth's maps are loaded (a render must wait for it) */
   readonly ready: Promise<void>;
   /** put the act into the state of its time t; returns the state (and the eye's height over the water, Mm) and
@@ -68,8 +83,15 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
     atlas.galaxies,
   );
   const skyTurn = new THREE.Matrix3();
-  const u = { time: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn) };
-  const galaxies = createGalaxies(specs, { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'> }, atlas);
+  const u = {
+    time: uniform(0), ours: uniform(1), field: uniform(1), radiance: uniform(p.galaxyRadiance), pixelAngle: uniform(0.0015), skyTurn: uniform(skyTurn),
+    fog: uniform(WEB_FOG * web.frame.box), focus: uniform(0), oursAt: uniform(new THREE.Vector3(...g.centre)), oursAngle: uniform(0),
+  };
+  const galaxies = createGalaxies(
+    specs,
+    { ...u, skyTurn: u.skyTurn as unknown as THREE.Node<'mat3'>, oursAt: u.oursAt as unknown as THREE.Node<'vec3'> },
+    atlas,
+  );
   const milky = createMilkyWay(g, p.marchSteps);
   const earth = createEarth();
   const group = new THREE.Group();
@@ -100,13 +122,17 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   // from the planet's scene into the debris galaxy's frame (the sea's: x east, y up, z north)
   const toField = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(east, up, north)).invert();
   // where the descent comes down through SEA_FROM_ALT (its height falls all the way)
-  let lo = starts.landing;
-  let hi = starts.landing + p.landing;
-  for (let i = 0; i < 40; i++) {
-    const mid = (lo + hi) / 2;
-    if (landingTrack(mid, p, tiltDeg).alt > SEA_FROM_ALT) lo = mid;
-    else hi = mid;
-  }
+  const comesDown = (alt: number): number => {
+    let lo = starts.drift2;
+    let hi = starts.landing + p.landing;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (landingTrack(mid, p, tiltDeg).alt > alt) lo = mid;
+      else hi = mid;
+    }
+    return hi;
+  };
+  const hi = comesDown(SEA_FROM_ALT);
   // WHERE ON EARTH (direction.md: "a high angle POV looking eastward"): the matter gathers over the
   // drowned Po plain between Padua and Rovigo (~5–10 m up today), the view heading east. The flood flies
   // ~1300 km east to it, so we arrive over the Bay of Biscay: France below, the Alps, Italy and the Adriatic
@@ -158,6 +184,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
     group,
     total: beatStarts(p).total,
     seaFrom: hi,
+    cloudsFrom: comesDown(CLOUD_TOP),
+    toField,
     ready: earth.ready,
     update(t, eye, turn) {
       const s = arrivalState(t, p);
@@ -167,6 +195,11 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       // our galaxy's far disc hands over to its volume; the other galaxies dim once we are inside its
       // dust and stars (they are still there, faintly, through the gaps)
       u.ours.value = 1 - s.volume;
+      // THE FOCUS (galaxies.ts; the 2026-10-31 review: the neighbours "stay there for way too long … once we are in
+      // the zoom we can focus on the Milky Way"): over FOCUS_S s from FOCUS_LEAD s before the zoom (the ours beat)
+      // the others near ours on the sky go out, as far round it as its own disc has grown
+      u.focus.value = smoothstep01((t - starts.ours + FOCUS_LEAD) / FOCUS_S);
+      u.oursAngle.value = Math.atan(g.radius / Math.max(1e-6, Math.hypot(eye.x - g.centre[0], eye.y - g.centre[1], eye.z - g.centre[2])));
       skyTurn.setFromMatrix4(turn4.makeRotationAxis(geo.north, turnAt(t)));
       u.skyTurn.value.copy(skyTurn);
       // Earth: the planet comes to the eye (earthPose); its Sun takes over from the Milky Way's Sun star over
@@ -198,6 +231,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       const drift = {
         up, east, north, time: Math.max(0, t - lift), presence: Math.min(1, Math.max(0, (t - lift) / 6)),
         clear: smoothstep01((t - starts.flood - 0.35 * p.flood) / (0.65 * p.flood + p.drift2 * 0.3)),
+        // (the eye in the field's frame, m: the descent's waves are laid out from it, earth.ts ripples)
+        eye: ((tr) => [tr.east, tr.alt, tr.north] as [number, number, number])(landingTrack(t, p, tiltDeg)),
       };
       earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
       // the pieces: where the gathering point is now (the planet only translates), turning with the field, lit by
@@ -238,7 +273,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
         turn: eyeTurn(t, new THREE.Quaternion()).premultiply(toField),
         sun: new THREE.Vector3(s3.dot(east), s3.dot(up), s3.dot(north)).normalize(),
         driftTime: Math.max(0, t - lift),
-        clouds: smoothstep01((t - formFrom) / 25),
+        clouds: smoothstep01((t - formFrom) / CLOUDS_FORM),
       };
     },
     dispose() {

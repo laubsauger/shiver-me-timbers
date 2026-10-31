@@ -154,10 +154,12 @@ async function boot(): Promise<void> {
   const sea = seaTest
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
     : createSea(renderer, {
-        drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.seaFrom),
+        drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.cloudsFrom),
         c1End: arrival.total - arrival.seaFrom + C1_FOLLOW,
       });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
+  // the sea's clouds in the descent's sky before the hand-over (sea.ts descentSky): the one field, coming in
+  if (sea.descentSky) arrival.group.add(sea.descentSky.mesh);
   const total = seaStart + sea.total;
   /** s the dive's near detail (webVolume.ts createWebParticles `close`) comes up over, from where it starts */
   const DIVE_CLOSE = 4;
@@ -290,6 +292,10 @@ async function boot(): Promise<void> {
     dome.setGrade(1 + (SEA_GRADE[0] - 1) * look, 1 + (SEA_GRADE[1] - 1) * look);
     eye.quaternion.identity();
     act2 = t2 >= 0 ? arrival.update(t2, eye.position, eye.quaternion) : null;
+    if (sea.descentSky) {
+      if (act2) sea.descentSky.update(at - seaStart, renderer, eye.position, arrival.toField);
+      else sea.descentSky.mesh.visible = false;
+    }
     if (!act2) eye.position.set(...eyePath(at, p));
     // Undertime hands its world over to the galaxies, then leaves the scene
     const k = Math.min(1, Math.max(0, t2 / (p2.overlap + 2)));

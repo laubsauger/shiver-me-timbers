@@ -15,7 +15,7 @@
  * sheet), capped so an edge-on galaxy is a bright needle rather than a blown-out line.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, abs, attribute, cameraPosition, clamp, cos, exp, float, max, min, mix, normalize, sin, smoothstep, step, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, abs, acos, attribute, cameraPosition, clamp, cos, exp, float, max, min, mix, normalize, sin, smoothstep, step, texture, uv, vec2, vec3, vec4 } from 'three/tsl';
 import { galaxyFace } from './galaxyModel';
 import type { Vec3 } from '../../cine/domeMaster';
 
@@ -92,6 +92,36 @@ const FLARE_FALL = 0.55;
 const GROW = 2.6;
 /** rad, the furthest a photographed disc tilts from facing the eye */
 const TILT_MAX = (55 * Math.PI) / 180;
+/**
+ * INTO THE WEB'S LIGHT (the 2026-10-31 review of ~95–110 s: "most of these look a little bit pasted in, not merging
+ * with the surroundings … like a stuck decal"). The atlas tiles are photographs cut out of their skies: drawn whole
+ * on their quads, each kept the cut-out's hard rim and the photo's stretched outskirts (a display stretch lifts the
+ * faint disc to a flat plateau that ends at the mask), at one brightness and in warm Hubble colour at any distance —
+ * against a web whose light is blue and falls off with depth (undertime/webVolume.ts FOG). Now:
+ *   SOFT_MIP, SOFT_FROM  the outskirts (from SOFT_FROM of the tile's half-width out) are read from a blurred mip,
+ *                        so the cut-out's rim becomes a falloff, and a round window (WINDOW, tile half-widths) takes
+ *                        them to nothing before the quad's edge — no square, no rim
+ *   DESTRETCH            the photo's stretch undone, roughly: light ∝ luminance^DESTRETCH, so the core keeps its
+ *                        light and the plateau of the outer disc sinks into the dark as a real disc's exponential does
+ *   the web's fog        a galaxy's light falls with its distance as the web's own does (e-folding over FOG box
+ *                        units), and turns toward the web's pale blue as it fades (WEB_TINT, at most COOL of it):
+ *                        the far ones are faint bluish smudges in the filaments, the near ones keep their colour
+ */
+const SOFT_MIP = 4;
+const SOFT_FROM: [number, number] = [0.35, 0.8];
+const WINDOW: [number, number] = [0.6, 0.97];
+const DESTRETCH = 1.45;
+/** the web's pale filament colour (webVolume.ts palette), normalised to luminance 1 */
+const WEB_TINT: [number, number, number] = [0.75, 1.02, 1.5];
+const COOL = 0.55;
+/**
+ * THE FOCUS (the same review: "this galaxy to the left of our actual Milky Way … stays there for way too long … make
+ * sure it goes away so that once we are in the zoom we can focus on the Milky Way"): from the zoom's start (`focus`,
+ * act.ts) the other galaxies near ours on the sky go out — inside FOCUS_CONE degrees beyond ours' own angular radius
+ * ×1.5 (its disc as drawn), softly to nothing over FOCUS_SOFT more. The rest of the field, round the dome, stays.
+ */
+const FOCUS_CONE = 22;
+const FOCUS_SOFT = 25;
 
 /** OUR galaxy's model parameters (the volume reads the same ones) */
 export const OUR_LOOK = { arms: 2, wind: 1 / Math.tan((13 * Math.PI) / 180), phase: 0.6, seed: 3.7, elliptical: 0 };
@@ -107,6 +137,13 @@ export interface GalaxyUniforms {
   pixelAngle: F;
   /** the sky's turn about the eye (world from sky) */
   skyTurn: THREE.Node<'mat3'>;
+  /** m, the web's fog length in Get the Drift's world (webVolume.ts FOG × the box's size) */
+  fog: F;
+  /** 0..1 the zoom into ours has begun (the others near it on the sky go out), ours' centre (world) and angular
+   * radius (rad) */
+  focus: F;
+  oursAt: THREE.Node<'vec3'>;
+  oursAngle: F;
 }
 
 export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: GalaxyAtlas): THREE.InstancedMesh {
@@ -178,7 +215,15 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
   const cosI = abs(toEye.dot(N));
   // a disc seen at a slant packs its light into less area (ours: capped, edge-on is a bright needle)
   const gain = mix(float(1), min(float(1).div(max(cosI, 0.15)), 3), planar);
-  const present = mix(U.field, U.ours, isOurs).mul(lit);
+  // (the focus: the others near ours on the sky go out as the zoom starts)
+  const oursW = cameraPosition.add(U.skyTurn.mul(U.oursAt.sub(cameraPosition)));
+  const offOurs = acos(toEye.negate().dot(normalize(oursW.sub(cameraPosition))).clamp(-1, 1));
+  const cone = U.oursAngle.mul(1.5).add((FOCUS_CONE * Math.PI) / 180);
+  const aside = smoothstep(cone, cone.add((FOCUS_SOFT * Math.PI) / 180), offOurs);
+  const focused = float(1).sub(U.focus.mul(float(1).sub(aside)));
+  // (the web's fog over the distance)
+  const fogged = exp(cameraPosition.sub(centreW).length().div(U.fog).negate());
+  const present = mix(U.field.mul(focused), U.ours, isOurs).mul(lit);
   // a galaxy narrower than a few pixels is a point of light: keep it from vanishing between pixels
   const tiny = clamp(R.div(dist.mul(U.pixelAngle).mul(3)), 0, 1);
 
@@ -199,7 +244,19 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
     const col = atlasTile.sub(atlasTile.div(atlas.cols).floor().mul(atlas.cols));
     const row = atlasTile.div(atlas.cols).floor();
     const st = vec2(col.add(g.x.clamp(0, 1)).div(atlas.cols), row.add(float(1).sub(g.y.clamp(0, 1))).div(atlas.rows));
-    const real = texture(atlas.texture, st).rgb.mul(ATLAS_GAIN);
+    // soft outskirts and a round window (no rim, no square), the photo's stretch undone, the web's fog and tint
+    // (INTO THE WEB'S LIGHT above)
+    const r = g.sub(0.5).length().mul(2);
+    const sharp = texture(atlas.texture, st).rgb;
+    const soft = texture(atlas.texture, st).level(float(SOFT_MIP)).rgb;
+    const photo = mix(sharp, soft, smoothstep(SOFT_FROM[0], SOFT_FROM[1], r)).sub(0.002).max(0);
+    const lum = photo.dot(vec3(0.2126, 0.7152, 0.0722));
+    const destretched = photo.mul(lum.max(1e-4).pow(DESTRETCH - 1));
+    const cool = vec3(...WEB_TINT).mul(destretched.dot(vec3(0.2126, 0.7152, 0.0722)));
+    const real = mix(destretched, cool, float(1).sub(fogged).mul(COOL))
+      .mul(fogged)
+      .mul(float(1).sub(smoothstep(WINDOW[0], WINDOW[1], r)))
+      .mul(ATLAS_GAIN);
     const light = mix(real, model, isOurs).mul(gain).mul(X4.w);
     return vec4(light.mul(present).mul(tiny.mul(0.7).add(0.3)).mul(U.radiance), 1);
   })();

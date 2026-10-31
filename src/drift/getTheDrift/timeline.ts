@@ -303,16 +303,16 @@ export const LANDED = 3e-6;
 /** rad/s Drift-2's debris galaxy turns at, as one (debrisField.ts): at the raft, ~2.4 km out, a current of
  * ~0.5 m/s the raft drifts on and the eye follows */
 export const DEBRIS_SPIN = 0.0002;
-/** how fast the landing's ground track closes on the raft against the height it comes down (see landingTrack) */
-const TRACK_Q = 2;
 /** m east, north of the field's centre: where the eye comes down, in an arm of the debris galaxy (the raft
  * floats beside it: wandering/sea.ts) */
 export const EYE_AT: [number, number] = [-2200, 900];
 
 /**
  * THE GATHERING POINT, where Drift-2's debris galaxy floats (its centre), and the tangent frame there: the
- * point a ray at gatherEl straight ahead meets the planet at Drift-2's end (the planet only translates
- * until then, so it stays put on it). `up` is the planet's normal there, `front` the dome's front laid into
+ * point a ray at gatherEl straight ahead meets the planet at Drift-2's end as the approach's placement (earthPlace0)
+ * would have it (the planet only translates, so it stays put on it; since 2026-10-31 the descent's own track has the
+ * eye ~50 km short of that place by then, landingTrack, and the place only anchors the field). `up` is the planet's
+ * normal there, `front` the dome's front laid into
  * the tangent plane (the heading the landing levels out on), `east`, `north` complete the frame.
  */
 export interface GatherFrame {
@@ -345,30 +345,120 @@ export function gatherFrame(p: GetTheDriftParams, tiltDeg: number): GatherFrame 
 }
 
 /**
- * The landing (C1): from Drift-2's end the eye glides down over the debris galaxy to the raft (`landingTrack`:
- * the eye's ground position, m east and north of the field's centre, and its height, m). Its ground
- * track runs from where Drift-2 left it to the raft, steered by the height: with u the e-folds come down,
- * the share of the way still to go is (1 + qu)·e^(−qu) — it sets off gently, and the ground's apparent
- * motion (speed over height, ∝ u·e^(−(q−1)u)·u̇) rises and dies away with the descent, never stopping before
- * it does. What it comes down onto is a point of the debris galaxy (EYE_AT when the landing ends), turning with
- * it: once down, the eye drifts on with the raft and the matter round it (direction.md C1: "then a very slow
- * follow"). The planet places itself under it; a short blend across Drift-2's end joins the two without a kink.
+ * THE DESCENT'S GROUND TRACK (C1, and the end of the flood and Drift-2 before it): from `TRACK_LEAD` s before Drift-2's
+ * end the eye flies one track over the planet down to the raft (`landingTrack`: the eye's ground position, m east and
+ * north of the field's centre in the gathering point's tangent plane — gnomonic: the point under the eye is
+ * norm(up·R + east·e + north·n) — and its height, m). Before it the eye is where the approach's placement puts it
+ * (earthPlace0: the planet slid so its limb holds its place on the dome, which flies the eye north over the ground at
+ * ~45–50 km/s through the flood); at TRACK_LEAD the track takes the eye over at that very place and ground speed, and
+ * carries it along the straight line to the raft with its speed drawn as a FLOW (ground speed over height: how fast
+ * the ground under the eye seems to stream) through smooth keys — one surge over the spiral's sea, then the long
+ * glide, then nothing but the debris galaxy's slow turn (direction.md C1: "then a very slow follow"). The surge's
+ * peak is solved so the track comes down exactly on the raft (EYE_AT, turning with the field) when the landing ends.
+ *
+ * Why (the 2026-10-30 review of the final render: "the flight path over and into the debris spiral is a bit janky,
+ * going kind of back and forth", ~280–310 s): the old landing set off from rest at Drift-2's end, where the approach's
+ * placement was still flying the eye over the ground at ~30 km/s (a flow of 0.9: the ground streaming by at 0.9
+ * heights a second), and the two were blended by position over ±5 s — the eye surged to a flow of 0.91, stopped dead
+ * at ~287 s, slid BACK ~3 km/s for two seconds and set off forward again. Velocity-matched here, the track never
+ * reverses (its speed along the line only falls once past the surge), and its flow stays under ~0.36 (the approach's
+ * own flood reached 0.33 by Drift-2's start). The price: the eye now comes over the spiral later (~30° down onto it at
+ * Drift-2's end, 45° before; ~40° from ~10 km up at ~294 s) — the "look down on the spiral from higher up" of the v7
+ * notes is a steep look from 10–20 km rather than 30.
  */
 export function landingTrack(t: number, p: GetTheDriftParams, tiltDeg: number): { east: number; north: number; alt: number } {
+  const tr = trackFor(p, tiltDeg);
+  const alt = earthAltitude(t, p) * 1e6;
+  if (t <= tr.from) {
+    const [east, north] = tr.ground(t);
+    return { east, north, alt };
+  }
+  // (the field turns as three's rotation.y does: x east, z north)
+  const { starts } = beatStarts(p);
+  const a = DEBRIS_SPIN * (t - (starts.drift2 + p.drift2 + p.landing));
+  const target = [EYE_AT[0] * Math.cos(a) + EYE_AT[1] * Math.sin(a), -EYE_AT[0] * Math.sin(a) + EYE_AT[1] * Math.cos(a)];
+  const k = tr.share(t);
+  return { east: tr.start[0] + (target[0] - tr.start[0]) * k, north: tr.start[1] + (target[1] - tr.start[1]) * k, alt };
+}
+
+/** s before Drift-2's end the descent's own track takes over from the approach's placement (landingTrack): mid-flood,
+ * while the eye's flow (0.14) and its ground speed (~50 km/s, at its peak) leave room to surge into the spiral's sea
+ * and glide down from there under the flow cap — later, the approach is already streaming faster than a glide that
+ * still has ~1000 km to go can carry on smoothly */
+const TRACK_LEAD = 35;
+/** the track's flow keys (ground speed over height, 1/s) after the surge: [s from Drift-2's end, or a share of the
+ * landing's length (`L`), flow] — 0.34 just before Drift-2's end, the glide's ~0.2 (the old landing's 0.17–0.19, the
+ * glide the 2026-10 reviews liked), easing out over the last 150 m as the sea's scene takes over, at rest at the end */
+const TRACK_FLOW: ReadonlyArray<readonly [number, number, number]> = [
+  [-6, 0, 0.34],
+  [0, 0.1, 0.22],
+  [0, 0.38, 0.18],
+  [0, 0.54, 0.07],
+  [0, 0.7, 0.025],
+  [0, 1, 0],
+];
+/** s before the take-over the approach's flow is read a second time (trackFor) */
+const TRACK_SLOPE = 3;
+/** s after the track takes over its flow surges to its peak (solved: TRACK_FLOW) */
+const TRACK_SURGE = 12;
+
+interface Track {
+  /** act s the track takes over */
+  from: number;
+  /** m east, north: where it starts (the approach's placement there) */
+  start: [number, number];
+  /** 0..1: the share of the way to the raft covered by act time t (from `from` on) */
+  share: (t: number) => number;
+  /** the approach's placement as a ground position (m east, north; before `from`) */
+  ground: (t: number) => [number, number];
+}
+const trackCache = new Map<string, Track>();
+function trackFor(p: GetTheDriftParams, tiltDeg: number): Track {
+  const key = JSON.stringify(p) + tiltDeg;
+  const hit = trackCache.get(key);
+  if (hit) return hit;
   const { starts } = beatStarts(p);
   const endT = starts.drift2 + p.drift2;
+  const land = endT + p.landing;
   const g = gatherFrame(p, tiltDeg);
-  const alt = earthAltitude(t, p);
-  // where Drift-2 left the eye's ground track (tangent coordinates at the gathering point)
-  const before = earthPlace0(endT, p, tiltDeg);
-  const eyeAt = before.centreDir.map((x) => -x * before.distance) as Vec3;
-  const g0 = [dot(eyeAt, g.east) * 1e6, dot(eyeAt, g.north) * 1e6];
-  const u = Math.max(0, Math.log(earthAltitude(endT, p)) - Math.log(alt));
-  const k = 1 - (1 + TRACK_Q * u) * Math.exp(-TRACK_Q * u);
-  // (the field turns as three's rotation.y does: x east, z north)
-  const a = DEBRIS_SPIN * (t - (endT + p.landing));
-  const target = [EYE_AT[0] * Math.cos(a) + EYE_AT[1] * Math.sin(a), -EYE_AT[0] * Math.sin(a) + EYE_AT[1] * Math.cos(a)];
-  return { east: g0[0] + (target[0] - g0[0]) * k, north: g0[1] + (target[1] - g0[1]) * k, alt: alt * 1e6 };
+  const ground = (t: number): [number, number] => {
+    const e = earthPlace0(t, p, tiltDeg);
+    const dir: Vec3 = [-e.centreDir[0], -e.centreDir[1], -e.centreDir[2]];
+    const up = dot(dir, g.up);
+    return [((EARTH_RADIUS * dot(dir, g.east)) / up) * 1e6, ((EARTH_RADIUS * dot(dir, g.north)) / up) * 1e6];
+  };
+  const from = endT - TRACK_LEAD;
+  const start = ground(from);
+  // the approach's flow where the track takes over, and TRACK_SLOPE s before: its ground speed (gnomonic m/s) over its
+  // height — two keys, so the track's flow sets off at the approach's rate of change too (from one key, held flat for
+  // a moment, the speed dipped 0.6% and rose again)
+  const h = 0.05;
+  const height = (t: number): number => earthAltitude(t, p) * 1e6;
+  const flowAt = (t: number): number => {
+    const [a, b] = [ground(t - h), ground(t + h)];
+    return Math.hypot(b[0] - a[0], b[1] - a[1]) / (2 * h) / height(t);
+  };
+  const way = Math.hypot(EYE_AT[0] - start[0], EYE_AT[1] - start[1]);
+  const ts = [from - TRACK_SLOPE, from, from + TRACK_SURGE, ...TRACK_FLOW.map(([s, l]) => endT + s + l * p.landing)];
+  const made = (peak: number): ((t: number) => number) => {
+    const j = journey(ts, [flowAt(from - TRACK_SLOPE), flowAt(from), peak, ...TRACK_FLOW.map(([, , v]) => v)], height);
+    const at0 = j(from);
+    return (t: number) => j(t) - at0;
+  };
+  // the surge's peak: the one that comes down on the raft (the way covered grows with it)
+  let lo = 0;
+  let hi = 4;
+  for (let i = 0; i < 32; i++) {
+    const mid = (lo + hi) / 2;
+    if (made(mid)(land) < way) lo = mid;
+    else hi = mid;
+  }
+  const covered = made((lo + hi) / 2);
+  const all = covered(land);
+  const track: Track = { from, start, share: (t) => covered(t) / all, ground };
+  trackCache.clear();
+  trackCache.set(key, track);
+  return track;
 }
 
 function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
@@ -381,37 +471,68 @@ function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centr
 }
 
 /**
- * The eye's turn over Drift-2 and the landing: from Act 2's framing it looks `driftLook` further down through
- * Drift-2 (`look`, rad, a pitch about the dome's left–right axis: onto the spiral from high up — the eye
- * turns, not the planet, which would turn the planet under its Sun), then levels out (`k`, toward level at the
- * raft, looking ahead).
+ * The eye's turn over the planet, Drift-2 and the landing: up by the orbit look over the planet (orbitLook), given
+ * back through the flood; from Act 2's framing it looks `driftLook` further down through Drift-2 (`look`, rad, a
+ * pitch about the dome's left–right axis, + down: onto the spiral from high up — the eye turns, not the planet,
+ * which would turn the planet under its Sun), then levels out (`k`, toward level at the raft, looking ahead).
  */
 export function landingTurn(t: number, p: GetTheDriftParams, tiltDeg: number): { k: number; look: number; up: Vec3; front: Vec3 } {
   const { starts } = beatStarts(p);
   const endT = starts.drift2 + p.drift2;
   const g = gatherFrame(p, tiltDeg);
-  const look = ((p.driftLook * Math.PI) / 180) * smooth((t - starts.drift2 + 4) / (p.drift2 + 4));
-  return { k: smooth((t - endT + 4) / (p.landing * 0.85)), look, up: g.up, front: g.front };
+  const look = ((p.driftLook * Math.PI) / 180) * smooth((t - starts.drift2 + 4) / (p.drift2 + 4)) - orbitLook(t, p);
+  // THE LEVELLING: one slow turn up from where the orbit look has been given back (the flood's limb settled, ~267 s)
+  // to level at LEVEL_END of the landing (~328 s). It used to start 4 s before Drift-2's end and take 0.85 of the
+  // landing, after a 15° look further down (driftLook) — a turn down, then 43° back up peaking at 1.5°/s (the
+  // 2026-10-30 review of the final render: "janky … going kind of back and forth", ~280–310 s). Now the descent's
+  // track (landingTrack) brings the spiral up to the middle of the view by itself (~30° down at Drift-2's end), so
+  // the levelling runs over ~60 s: ≤ ~1°/s, the dome's comfort.
+  const from = starts.flood + 0.6 * (p.flood + p.drift2);
+  const to = endT + LEVEL_END * p.landing;
+  return { k: ramped((t - from) / Math.max(1e-6, to - from), LEVEL_EASE[0], LEVEL_EASE[1]), look, up: g.up, front: g.front };
 }
 
-/** where the planet is (centre direction, distance) at act time t — everything but the Sun */
-function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
+/** share of the landing by which the eye has levelled out (landingTurn) */
+const LEVEL_END = 0.9;
+/** the levelling's ease in and out (shares of its span: ramped) — slow at first, so the spiral the track brings up
+ * stays in the middle of the view through Drift-2's end; quicker over the last few km */
+const LEVEL_EASE: [number, number] = [0.6, 0.4];
+
+/** s before the planet has slid to the front (ARRIVED) the orbit look starts turning up, and the s it takes */
+const ORBIT_LOOK_LEAD = 22;
+const ORBIT_LOOK_S = 26;
+
+/**
+ * THE ORBIT LOOK (rad, up): as the planet arrives the eye turns up by `orbitLook`, and through the flood turns back
+ * (with the limb's own rise to floodLimbEl, on the same curve), so Drift-2's spiral and the landing see the frame they
+ * always did (its last few degrees run into Drift-2's first seconds, where its own look down begins: one turn, one
+ * way). Why (the 2026-10-30 seat review, ~185–200 s: the approach "not projected right"): with its limb at limbEl
+ * (42°) straight ahead, the planet's centre sat only ~15° below the dome's edge; a circle of the planet's ~55–62° drawn
+ * round a point that high crosses the master as a nearly straight chord, from the springline at ±55° azimuth up to
+ * 42° in front, and from a seat that reads as an arch, a hill standing in front, not a horizon round and below. An
+ * orbit's horizon is a level ring round the nadir; on a 180° dome a ~60° planet cannot ring it (its limb would lie
+ * ~30° under the springline all round), but the lower its centre the more the limb curves WITH the dome's edge:
+ * with the limb at ~21–27° ahead (dome; ~6–12° over the audience's true horizon in front, the dome tilted 15°) the
+ * master's limb curves round the master's centre: the circle through its ends and its middle has its centre on the
+ * zenith's side, ~4.7 master radii out at 185 s, ~2.4 at 190 s, ~1.5 at 200 s (at 0 it would be a level ring);
+ * before, it lay at infinity or past the front edge (a chord, an arch). Turning the EYE, not the planet: lowering the planet alone left the dawn's Sun, still at the
+ * approach's 48°, 40° clear of the limb (no longer a dawn), and turning the Sun with it would slide it across the
+ * stars; the eye's turn takes the whole sky down together (at most ~0.95°/s, eased: the dome-comfort rule's 10° in
+ * 10 s). Pure in t: the planet and the Sun keep their world placement (earthPose), only the view turns.
+ */
+export function orbitLook(t: number, p: GetTheDriftParams): number {
   const { starts } = beatStarts(p);
-  const endT = starts.drift2 + p.drift2;
-  if (t <= endT - BLEND) return earthPlace0(t, p, tiltDeg);
-  const land = landingPlace(t, p, tiltDeg);
-  if (t >= endT + BLEND) return land;
-  const w = smooth((t - endT + BLEND) / (2 * BLEND));
-  const was = earthPlace0(t, p, tiltDeg);
-  const pa = was.centreDir.map((x) => x * was.distance);
-  const pb = land.centreDir.map((x) => x * land.distance);
-  const c = [0, 1, 2].map((i) => pa[i] + (pb[i] - pa[i]) * w) as Vec3;
-  const d = Math.hypot(c[0], c[1], c[2]);
-  return { centreDir: c.map((x) => x / d) as Vec3, distance: d };
+  const from = starts.earth + ARRIVED * p.earthApproach - ORBIT_LOOK_LEAD;
+  const flood = smooth((t - starts.flood) / Math.max(1e-6, 0.6 * (p.flood + p.drift2)));
+  return ((p.orbitLook * Math.PI) / 180) * smooth((t - from) / ORBIT_LOOK_S) * (1 - flood);
 }
 
-/** s each side of Drift-2's end the two placements are blended over */
-const BLEND = 5;
+/** where the planet is (centre direction, distance) at act time t — everything but the Sun: the approach's placement,
+ * then from the descent's track on (landingTrack) the planet under the eye's track — the same place and the same
+ * velocity where they meet, so no blend */
+function earthPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {
+  return t <= trackFor(p, tiltDeg).from ? earthPlace0(t, p, tiltDeg) : landingPlace(t, p, tiltDeg);
+}
 
 /** where the planet is up to Drift-2's end: the approach, the slide, the limb across the front */
 function earthPlace0(t: number, p: GetTheDriftParams, tiltDeg: number): { centreDir: Vec3; distance: number } {

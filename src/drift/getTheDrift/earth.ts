@@ -46,6 +46,7 @@ import {
   asin,
   atan,
   cameraPosition,
+  cos,
   cross,
   exp,
   float,
@@ -84,6 +85,18 @@ type V4 = THREE.Node<'vec4'>;
 /** Mm, the cloud tops */
 const CLOUD_H = 0.007;
 const KM = 1 / 6371;
+/**
+ * THE MOONLIGHT THROUGH THE AIR, grey: the moonlit ambient (MOONLIGHT) takes the air's transmittance toward the eye as
+ * one grey factor, not the chromatic one the sunlight takes, and lights the ground's luminance, not its colour.
+ * Chromatic, the night side's moonlit desert near the limb — the Sahara's orange, seen through ~1000 km of grazing air
+ * that leaves its red and none of its blue — came out a dark brown crescent beyond the bright day-side limb (the
+ * 2026-10-30 seat review at ~185 s: "a dark brown crescent sits beyond the bright limb on the right"; 13–22° past the
+ * terminator, sRGB ~(27, 11, 1) in the master; with the grey transmittance alone still a warm (24, 17, 12)). Real
+ * moonlit air along that path also scatters the moonlight back toward the eye, bluish, which the shell (sunlight only)
+ * does not draw: the loss and the gain together leave it about grey; and a moonlit land is seen by night vision,
+ * without its colour. So it is a dim cool ground, as the rest of the night side.
+ */
+const moonGrey = (T: THREE.Node<'vec3'>): THREE.Node<'vec3'> => vec3(T.dot(vec3(0.2126, 0.7152, 0.0722)));
 /** the night side's moonlit ambient, against the Sun's light */
 const MOONLIGHT = 0.035;
 /** the Sun's glint off the sea while the planet is small (see the glint, below): its point's peak at STAR_SIGMA
@@ -117,7 +130,7 @@ export interface Earth {
     /** Part B (life.ts): the time-wave layers, the lights, the flood; omitted = the young world */
     life?: LifeState & { waveOrigin: THREE.Vector3 };
     /** Drift-2's floating matter (debris.ts): the gathering point's normal and tangents, s since it lifted, 0..1 */
-    drift?: { up: THREE.Vector3; east: THREE.Vector3; north: THREE.Vector3; time: number; presence: number; clear: number };
+    drift?: { up: THREE.Vector3; east: THREE.Vector3; north: THREE.Vector3; time: number; presence: number; clear: number; eye?: [number, number, number] };
   }): void;
   dispose(): void;
 }
@@ -161,6 +174,26 @@ const LOWLAND_M = 150;
  * measured to a metre or two, and 7 m of noise in a plain that falls 1 m a km moved its flood line by kilometres) */
 const LOWLAND_DETAIL: [number, number] = [3000, 7];
 const LOWLAND_DETAIL_INSET: [number, number] = [40000, 1];
+/** Mm above the sea: the descent's last few km come in over this (its waves, the sky in its water, the full haze at the
+ * horizon: `low` in createEarth) — from the top of the range to all of it at the bottom */
+const LOW_FROM: [number, number] = [0.005, 0.03];
+/** the descent's ripple trains (createEarth `ripples`): wavelength m, rad off the sea's wind (wandering/sea.ts WIND_TO,
+ * toward −z), phase rad — a light breeze's sea, from the chop's 1 m to its longest 14 m crests */
+const RIPPLES: ReadonlyArray<readonly [number, number, number]> = [
+  [14, 0.15, 0.3],
+  [9.3, -0.35, 2.1],
+  [6.1, 0.5, 4.4],
+  [4.2, -0.6, 1.2],
+  [2.8, 0.9, 5.3],
+  [1.9, -1.0, 3.6],
+  [1.2, 0.3, 0.8],
+];
+/** each train's slope amplitude: seven at 0.06 give an RMS slope of ~0.11, about Cox–Munk's for a 3–4 m/s breeze */
+const RIPPLE_SLOPE = 0.06;
+/** deg: the near cap's angular radius (the horizon is 5.6° off from 30 km up), and Mm: the height it is drawn below */
+const CAP_DEG = 6;
+const CAP_BELOW = 0.03;
+const Y_UP = new THREE.Vector3(0, 1, 0);
 /** deg/s the cloud field drifts east (a time-lapse wind) */
 const CLOUD_DRIFT = 0.012;
 
@@ -185,7 +218,11 @@ export function createEarth(): Earth {
     fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
     waveOrigin: lu.waveOrigin as unknown as V3,
   };
-  const du = { clear: uniform(0), time: uniform(0), presence: uniform(0), up: uniform(new THREE.Vector3(0, 1, 0)), east: uniform(new THREE.Vector3(1, 0, 0)), north: uniform(new THREE.Vector3(0, 0, -1)) };
+  const du = {
+    clear: uniform(0), time: uniform(0), presence: uniform(0), up: uniform(new THREE.Vector3(0, 1, 0)), east: uniform(new THREE.Vector3(1, 0, 0)), north: uniform(new THREE.Vector3(0, 0, -1)),
+    /** the eye in the debris galaxy's frame (m: x east, y above the sea, z north of its centre: the sea's scene's) */
+    eye: uniform(new THREE.Vector3(0, 1e7, 0)),
+  };
   const D: DriftUniforms = { time: du.time, presence: du.presence, up: du.up as unknown as V3, east: du.east as unknown as V3, north: du.north as unknown as V3 };
   const C = u.centre as unknown as V3;
   const S = u.sun as unknown as V3;
@@ -207,6 +244,39 @@ export function createEarth(): Earth {
   };
   /** a pixel's footprint on the sphere (unit-sphere units), stretched where the view is grazing */
   const footprint = (t: F, muV: F): F => t.mul(P).div(sqrt(muV.max(0.03))).div(EARTH_R);
+  /** 0..1: how far down the eye is into the descent's last few km (the waves and the sea's sky in the water, below) */
+  const low = float(1).sub(smoothstep(LOW_FROM[0], LOW_FROM[1], eyeR.sub(EARTH_R)));
+  /**
+   * THE DESCENT'S WAVES (the 2026-10-30 review of the final render: the water "goes from perfectly flat to wavy" at the
+   * hand-over to the sea's scene): a light breeze's ripples on the water under the eye, as the sea's scene's own sea
+   * (wandering/sea.ts RIPPLE: 4 m/s toward −z, the debris galaxy's frame) — a few long-crested trains, 1–14 m, each
+   * drawn only where it is wider than a few pixels (`fpm`, the pixel's footprint, m) and its slopes otherwise folded
+   * into the glint's roughness (`rough2`, added to GGX's α²), so the sea's texture comes up out of the glint as the eye
+   * comes down. Laid on the flat sea under the eye (the curve's drop is far below a ripple where they show), in metres
+   * from the eye's own place in the field (`du.eye`): f32 Mm world positions are 0.5 m apart this close in. Returns the
+   * rippled normal (world).
+   */
+  const ripples = (d: V3, n: V3, fpm: F, calm: F): { N: V3; rough2: F } => {
+    const dUp = d.dot(D.up);
+    const reach = du.eye.y.div(dUp.negate().max(1e-4));
+    const x = du.eye.x.add(d.dot(D.east).mul(reach));
+    const z = du.eye.z.add(d.dot(D.north).mul(reach));
+    let gx: F = float(0);
+    let gz: F = float(0);
+    let lost: F = float(0);
+    for (const [len, dir, phase] of RIPPLES) {
+      const k = (2 * Math.PI) / len;
+      const w = Math.sqrt(9.81 * k);
+      const [cx, cz] = [Math.sin(dir), -Math.cos(dir)];
+      const seen = float(1).sub(smoothstep(len / 3, len / 1.5, fpm));
+      const slope = cos(x.mul(cx * k).add(z.mul(cz * k)).sub(u.time.mul(w)).add(phase)).mul(RIPPLE_SLOPE).mul(seen);
+      gx = gx.add(slope.mul(cx)) as F;
+      gz = gz.add(slope.mul(cz)) as F;
+      lost = lost.add(float(1).sub(seen).mul((RIPPLE_SLOPE * RIPPLE_SLOPE) / 2)) as F;
+    }
+    const keep = float(1).sub(calm);
+    return { N: normalize(n.sub(D.east.mul(gx.mul(keep))).sub(D.north.mul(gz.mul(keep)))), rough2: lost.mul(keep.mul(keep)).mul(2) as F };
+  };
   /** the two maps' coordinates at unit normal n, `shift` deg east */
   const coords = (n: V3, shift: F | number = 0) => {
     const { lat, lon } = latLon(n, G);
@@ -314,32 +384,63 @@ export function createEarth(): Earth {
     // the clouds dimly, cool grey)
     const night = float(1).sub(smoothstep(-0.2, 0.03, muS));
     const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT).mul(night);
-    const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky).add(moon)).mul(SUN_E / Math.PI);
+    const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky)).mul(SUN_E / Math.PI);
+    // (moonlit, colour goes: the eye's night vision sees the albedo's luminance, not its hue — MOONLIGHT's own cool
+    // tint is the night's colour; moonGrey)
+    const moonLit = moon.mul(albedo.dot(vec3(0.2126, 0.7152, 0.0722))).mul(SUN_E / Math.PI);
     // glint: GGX on the open water, its roughness by wind patches; Fresnel and the long grazing paths make
     // it swell and redden toward the terminator
     const h = normalize(S.add(v));
     // (along the eddy's slicks the floating matter calms the ripples: a smoother, brighter glint)
     const a = mix(float(0.07), float(0.22), smoothstep(-0.35, 0.35, fbm(n.add(vec3(1, 4, 2)), 14, 4, 0.5, fp))).mul(float(1).sub(matter.y.mul(0.75)));
-    const a2 = a.mul(a);
-    const nh = n.dot(h).max(0);
+    // (low down, the ripples: their normal for the glint and the sky in the water, the rest of their slopes in its α²)
+    const near = low.mul(float(1).sub(land)).toVar();
+    const rip = ripples(d, n, fp.mul(EARTH_R * 1e6), matter.y.mul(0.75));
+    const Nw = normalize(mix(n, rip.N, near)).toVar();
+    const a2 = a.mul(a).add(rip.rough2.mul(near));
+    const nh = Nw.dot(h).max(0);
     const ggx = a2.div(PI.mul(pow(nh.mul(nh).mul(a2.sub(1)).add(1), 2)));
     const fresnel = pow(float(1).sub(v.dot(h).max(0)), 5).mul(0.98).add(0.02);
     const smith = (m: F): F => m.mul(2).div(m.add(sqrt(a2.add(float(1).sub(a2).mul(m.mul(m))))));
     // floating matter kills the glint where it lies; its specks catch the Sun
     const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade).mul(float(1).sub(matter.x.mul(0.85)));
     // the sky in the water: Fresnel at grazing angles
-    const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land));
+    const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land)).mul(float(1).sub(near));
+    // ... and low down, the sky itself in the water (the sea's scene's far sea, seaSky.ts farSea): Fresnel's share of
+    // the air's light along the ray the rippled water mirrors, held just over the horizon. Near grazing it is nearly
+    // all of it — what makes the far sea meet the sky at the horizon; without it the water there drew only the dim
+    // glint fill and a held haze, darker than the sky over it (with the near cap below, the other half of the dark
+    // line along the horizon in the 2026-10-30 seat review, ~305–315 s)
+    const mirrored = vec3(0).toVar();
+    If(near.greaterThan(1e-3), () => {
+      const r = d.sub(Nw.mul(d.dot(Nw).mul(2)));
+      const rr = normalize(r.add(eyeUp.mul(float(0.003).sub(r.dot(eyeUp)).max(0))));
+      const fresnelW = pow(float(1).sub(Nw.dot(v).max(1e-3)), 5).mul(0.98).add(0.02);
+      mirrored.assign(scatter(cameraPosition, rr, C, S).light.mul(fresnelW).mul(near).mul(float(1).sub(matter.x.mul(0.85))));
+    });
     // the lights of the night side, dimmed and spread by the cloud over them
     // the lights come up behind the terminator as the dusk deepens (a gradient that follows it, not a switch)
     const lights = nightLights(n, lcw.x, land, L, fp).mul(night).mul(float(1).sub(overhead.mul(0.75)));
-    const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E)).add(lights);
+    const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E)).add(lights).add(mirrored);
     const T = towardEye(float(EARTH_R), muV, eyeR, eyeUp.dot(v));
-    return vec4(out.mul(T).mul(u.presence), 1);
+    // the moonlight through the air: grey (moonGrey)
+    return vec4(out.mul(T).add(moonLit.mul(moonGrey(T))).mul(u.presence), 1);
   })();
   surfMat.name = 'drift-earth-surface';
   const surface = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 256, 128), surfMat);
   surface.frustumCulled = false;
   surface.name = 'drift-earth-surface';
+  // THE NEAR CAP: the same surface on a finely cut cap of the sphere under the eye, low down. The sphere's 256 × 128
+  // faces are chords up to ~1 km inside the true sphere, so from a few hundred metres up the mesh's own horizon lay
+  // well under the true one, and the rays between them met no surface at all — only the air's held haze over the
+  // void: the dark line along the whole horizon in the descent (the 2026-10-30 seat review, ~305–315 s: "a thick
+  // black line across the whole horizon … breaks the immersion"; 6 px, 0.37°, at 312 s in 16:9, the chord sag's
+  // dip). Here a face is 0.016° deep and 0.06° across at the rim: its chords sag ≤ ~1 m, under a pixel of the dip
+  // from 150 m. Its rim at CAP_DEG is past the horizon from the 30 km it is drawn below.
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R, 384, 384, 0, 2 * Math.PI, 0, (CAP_DEG * Math.PI) / 180), surfMat);
+  cap.frustumCulled = false;
+  cap.name = 'drift-earth-near-cap';
+  const capUp = new THREE.Vector3();
 
   // ------------------------------------------------------------------ clouds
   const cloudMat = new THREE.MeshBasicNodeMaterial();
@@ -381,7 +482,8 @@ export function createEarth(): Earth {
     const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
     // (the clouds a little dimmer than the ground's moonlight would make them: they read as cut-outs otherwise)
     const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT * 0.25).mul(float(1).sub(smoothstep(-0.2, 0.03, muS)));
-    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).add(moon).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T);
+    const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T)
+      .add(moon.mul((0.9 * SUN_E) / Math.PI).mul(thick).mul(moonGrey(T)));
     // while the planet is small the shell is left out: its shading is unreliable at those distances (and a
     // cloud deck a few pixels across is better carried by the disc's own colour)
     const big = smoothstep(40, 120, asin(float(EARTH_R).div(eyeR).min(1)).div(P));
@@ -411,7 +513,13 @@ export function createEarth(): Earth {
     const overGround = select(hitGround, float(1), float(0));
     const alpha = float(1).sub(T.x.add(T.y).add(T.z).div(3)).mul(float(1).sub(overGround));
     // (and more so from low down, where the view looks steeply through the densest air to the sea)
-    const held = mix(float(0.6), float(0.32), float(1).sub(smoothstep(0.03, 0.12, eyeR.sub(EARTH_R))));
+    const heldSteep = mix(float(0.6), float(0.32), float(1).sub(smoothstep(0.03, 0.12, eyeR.sub(EARTH_R))));
+    // (but not toward the horizon in the descent's last few km: the far sea's air is the horizon's own haze, which the
+    // sky just over it shows whole — held there, it drew a dark band along the horizon, the 2026-10-30 seat review.
+    // The cosine at the ray's ground point by the sine rule: 1 − (r/R)²·sin²θ)
+    const mu = eyeUp.dot(normalize(positionWorld.sub(cameraPosition)));
+    const muHit = sqrt(float(1).sub(eyeR.div(EARTH_R).pow(2).mul(float(1).sub(mu.mul(mu)))).max(0));
+    const held = mix(heldSteep, float(1), low.mul(float(1).sub(smoothstep(0, 0.2, muHit))));
     return vec4(light.mul(mix(float(1), held, overGround)).mul(u.presence), alpha.mul(u.presence));
   })();
   atmMat.name = 'drift-earth-atmosphere';
@@ -526,7 +634,7 @@ export function createEarth(): Earth {
 
   const group = new THREE.Group();
   group.name = 'drift-earth';
-  group.add(surface, clouds, atmosphere, sun, point, glint);
+  group.add(surface, cap, clouds, atmosphere, sun, point, glint);
   return {
     group,
     ready: maps.ready,
@@ -545,6 +653,7 @@ export function createEarth(): Earth {
         du.up.value.copy(o.drift.up);
         du.east.value.copy(o.drift.east);
         du.north.value.copy(o.drift.north);
+        if (o.drift.eye) du.eye.value.set(...o.drift.eye);
       }
       const l = o.life;
       lu.fields.value = l?.fields ?? 0;
@@ -560,10 +669,15 @@ export function createEarth(): Earth {
       u.sunPresence.value = o.sunPresence;
       u.pixelAngle.value = o.pixelAngle;
       surface.position.copy(o.centre);
+      capUp.subVectors(o.eye, o.centre);
+      cap.visible = capUp.length() - EARTH_R < CAP_BELOW;
+      cap.position.copy(o.centre);
+      cap.quaternion.setFromUnitVectors(Y_UP, capUp.normalize());
       clouds.position.copy(o.centre);
       atmosphere.position.copy(o.centre);
     },
     dispose() {
+      cap.geometry.dispose();
       for (const m of [surface, clouds, atmosphere, sun, point, glint]) {
         m.geometry.dispose();
         (m.material as THREE.Material).dispose();

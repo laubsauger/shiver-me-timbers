@@ -14,9 +14,9 @@
  *                                                    at +30 in up30_0050), the web, the galaxies, the band, the Earth
  *                                                    coming in low on the right and its limb across the bottom third
  *   200–260   the lights and the flood               one slow tilt down to 0 (the limb up out of the frame, the night
- *                                                    side's cities filling it), done BEFORE Drift-2, whose own eye
- *                                                    looks 15° further down onto the spiral (getTheDrift landingTurn):
- *                                                    the two never add up to a faster turn
+ *                                                    side's cities filling it), done BEFORE the eye's own levelling
+ *                                                    from ~267 s (getTheDrift landingTurn; it looked 15° further down
+ *                                                    onto the spiral until 2026-10-31): the two never add up
  *   260–629   the spiral, the landing, Part C,       pitch 0: the spiral centred (s_0285–0300), the horizon mid-frame,
  *             the coast, the beach                   the raft and the coast on it
  *   484–548   w1 the coast                           8° right: the raft holds its place right of the front all through

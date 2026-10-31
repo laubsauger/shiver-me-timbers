@@ -41,6 +41,10 @@ export interface SeaSky {
    * of the clouds' clock, soft over the volume's 100 m cells as a shadow cast from 1.2 km by a 0.5° Sun is); none
    * without clouds */
   readonly cloudSun?: (p: V3) => F;
+  /** the clouds alone along `d` (sea frame, unit) from the eye `o` (m, the eye `update` was given): premultiplied
+   * (light, alpha) to lay over another scene's sky — Act 2's descent (wandering/sea.ts `descentSky`); none without
+   * clouds */
+  readonly cloudsOver?: (o: V3, d: V3) => THREE.Node<'vec4'>;
   /** the eye (world, m above the mean sea) and the unit toward the Sun */
   update(eye: THREE.Vector3, sun: THREE.Vector3): void;
   /** rad per pixel of what is being drawn (the stars are drawn as wide as one) */
@@ -331,6 +335,22 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     dome,
     sunTerm,
     cloudSun: cloudLight ? (p: V3) => mix(float(1), cloudLight.sunThrough(p, cameraPosition), cloudShadow) as F : undefined,
+    cloudsOver: clouds && cloudLight ? (eye: V3, d: V3) => {
+      // (withClouds' `over`, as a layer: L = (1 − α)·sky + α·L_air + T_air·L_cloud, the cirrus under the cumulus —
+      // src = s₁(1 − α₂) + s₂, α = 1 − (1 − α₁)(1 − α₂); no light shafts, which need the sky under them)
+      const layer = (c: { light: V3; alpha: F; dist: F }, steps: number): V3 => {
+        const out = vec3(0).toVar();
+        If(c.alpha.greaterThan(1e-4), () => {
+          const air = airTo(o, C, d, S, c.dist, steps, cloudLight.jitter, GROUND);
+          out.assign(air.L.mul(c.alpha).add(air.T.mul(c.light)));
+        });
+        return out as unknown as V3;
+      };
+      const ci = cirrus(eye, d, clouds.data, clouds.uniforms);
+      const cu = cloudMarch(eye, d, clouds.data, clouds.uniforms, { quality: FULL, light: cloudLight, sunAt });
+      const light = layer(ci, Math.max(2, FULL.airSteps >> 1)).mul(cu.alpha.oneMinus()).add(layer(cu, FULL.airSteps));
+      return vec4(light, float(1).sub(ci.alpha.oneMinus().mul(cu.alpha.oneMinus())));
+    } : undefined,
     sunColour,
     irradiance,
     horizon,

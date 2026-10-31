@@ -32,7 +32,9 @@ export interface GetTheDriftParams {
   /** deg, the limb's elevation through the flood and Drift-2's glide down; Mm, the height it ends at over
    * the debris spiral */
   floodLimbEl: number;
-  /** deg the eye looks further down through Drift-2, onto the spiral from high up (the landing levels it out) */
+  /** deg the eye looks further down through Drift-2, onto the spiral from high up (the landing levels it out). 0 since
+   * the descent's track of 2026-10-31 (timeline.ts landingTrack): it brings the spiral to the middle of the view itself,
+   * and a look down first made the levelling a turn down and back up */
   driftLook: number;
   driftAltitude: number;
   /** deg, dome elevation (straight ahead) of the point the floating matter gathers round, at Drift-2's end */
@@ -78,6 +80,12 @@ export interface GetTheDriftParams {
   limbEl: number;
   /** deg the limb sinks through the dawn (the Sun climbing clear of it) */
   dawnSink: number;
+  /**
+   * deg the eye looks UP as it arrives over the planet (timeline.ts orbitLook): the whole view — planet, Sun and
+   * stars together — turns down the dome by this much, so the limb lies low and curves round the front like an
+   * orbit's horizon instead of standing across the dome as an arch; given back through the flood
+   */
+  orbitLook: number;
   /** deg the Sun climbs through the dawn (a time-lapse: the terminator sweeps toward the audience) */
   sunRise: number;
   galaxyRadiance: number;
@@ -103,7 +111,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     drift2: 20,
     landing: 50,
     floodLimbEl: 38,
-    driftLook: 15,
+    driftLook: 0,
     driftAltitude: 0.03,
     gatherEl: -1.5,
     gatherLat: 45.05,
@@ -126,6 +134,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     orbitAltitude: 0.45,
     limbEl: 42,
     dawnSink: 5,
+    orbitLook: 16,
     sunRise: 38,
     galaxyRadiance: 1.2,
     volumeRadiance: 0.2,
@@ -169,6 +178,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     orbitAltitude: { min: 0.2, max: 20, step: 0.05 },
     limbEl: { min: 0, max: 50, step: 1 },
     dawnSink: { min: 0, max: 20, step: 0.5 },
+    orbitLook: { min: 0, max: 30, step: 0.5 },
     sunRise: { min: 0, max: 80, step: 1 },
     galaxyRadiance: { min: 0, max: 10, step: 0.05 },
     volumeRadiance: { min: 0, max: 10, step: 0.05 },

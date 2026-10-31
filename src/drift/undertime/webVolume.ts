@@ -113,7 +113,7 @@ const STEPS = 96;
  * simulations' exterior renders, not a projection's dense mesh */
 const NEAR = 0.0025;
 const FAR = 1.3;
-const FOG = 0.38;
+export const FOG = 0.38;
 
 /** colour of the gas by its log density v (0..1): navy voids → blue filaments → warm white knots */
 function palette(v: F): V3 {

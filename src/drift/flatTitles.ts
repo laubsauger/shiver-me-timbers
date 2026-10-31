@@ -10,8 +10,8 @@
  *
  * So the cut gets its own layer, drawn in the frame's own space and swapped in by the capture while the flat view is
  * on (DomeCapture `flatOverlay`): the same phrases on the same clock (`phrasePlacement`: when each comes, how long it
- * holds, its fade, the sink and the shrink as it is read), the same faces, colours and dark halo, but on straight
- * lines centred across the frame, sized to the frame, kept inside its title-safe area.
+ * holds, its fade, the sink and the shrink as it is read), the same faces, colours and dark halo, but on gentle
+ * arcs centred across the frame (THE ARC below), sized to the frame, kept inside its title-safe area.
  *
  * WHERE: in the lower middle of the frame (first line at FLAT_TOP of the frame's height as it appears), below the
  * centre — where the dome's text sits relative to its action, under it toward the front. At the cut's Act 1 framing
@@ -23,6 +23,14 @@
  * ems (~0.8), and the signature settles from `elTop` to `holdEl` (~1.2 em). The dome's placement stays the dome's: only
  * these offsets are read from it, and a change to its elevations moves the flat text by the same number of ems, held
  * inside the title-safe area (FLAT_SAFE).
+ *
+ * THE ARC (the client, 2026-10-31: titles "with gentle curvature parallel to the coming Earth horizon … high to low
+ * orbit, grand and sweeping"): on the dome each line already lies on its circle of elevation; here every line — the
+ * crawl's and the signature — is set on an arc of radius FLAT_ARC frame widths whose centre lies below it, its middle
+ * where the straight line's was and its ends falling away, as a planet's limb arches across a frame. Gentle: a line of
+ * 60 % of the frame's width falls ~3.5 % of the frame's height at its ends, its end glyphs turned ~8°. The body is set
+ * glyph by glyph along the arc (each placed by the face's own advances, kerning included, and turned to it); the
+ * written-on signature, a picture, is bent in thin vertical slices, each turned to the arc at its place.
  *
  * The canvas is SQUARE, the master's size: the flat view is drawn square and cut to 16:9 after (scripts/drift-review-
  * clip.mjs), so its uv is the overlay's uv and the text is drawn into the middle 9/16 of the canvas.
@@ -42,6 +50,16 @@ export const FLAT_EM = 0.075;
 export const FLAT_WIDTH = 0.8;
 /** title-safe: every line's centre stays this far (fraction of the height) plus half its em inside the frame's edges */
 export const FLAT_SAFE = 0.1;
+/** the radius of every line's arc, in frame widths (its centre below the line: THE ARC above) */
+export const FLAT_ARC = 2.2;
+/** px of the square canvas: the width of the slices the signature is bent in */
+const ARC_SLICE = 2;
+
+/** a point `s` px along a line's arc from its middle (mx, my): where it lies and how far it is turned (rad, clockwise) */
+export function arcPoint(s: number, mx: number, my: number, radius: number): { x: number; y: number; angle: number } {
+  const a = s / radius;
+  return { x: mx + radius * Math.sin(a), y: my + radius * (1 - Math.cos(a)), angle: a };
+}
 
 /**
  * The faces, as the dome's crawl draws them (undertime/crawl.ts FONTS; repeated here, not shared, so the flat cut
@@ -119,6 +137,7 @@ export class FlatTitles {
     ctx.textBaseline = 'middle';
     const h = size * FLAT_BAND;
     const top = (size - h) / 2;
+    const radius = FLAT_ARC * size;
     for (const line of lines) {
       if (line.signature) {
         // written on in its own canvas (fill, halo, the light on the pen), set centred on the line
@@ -129,7 +148,14 @@ export class FlatTitles {
         const img = this.word.canvas;
         ctx.save();
         ctx.globalAlpha = line.alpha;
-        ctx.drawImage(img, size / 2 - img.width / 2, top + line.y * h - img.height / 2);
+        // bent onto the arc in thin slices, each turned to it (THE ARC)
+        for (let x0 = 0; x0 < img.width; x0 += ARC_SLICE) {
+          const sw = Math.min(ARC_SLICE, img.width - x0);
+          const at = arcPoint(x0 + sw / 2 - img.width / 2, size / 2, top + line.y * h, radius);
+          ctx.setTransform(Math.cos(at.angle), Math.sin(at.angle), -Math.sin(at.angle), Math.cos(at.angle), at.x, at.y);
+          // (a hair wider than the slice, so no seam opens between neighbours turned a hair apart)
+          ctx.drawImage(img, x0, 0, sw, img.height, -sw / 2 - 0.25, -img.height / 2, sw + 0.5, img.height);
+        }
         ctx.restore();
         continue;
       }
@@ -151,9 +177,25 @@ export class FlatTitles {
       // the dome's dark halo behind every glyph (crawl.ts): the letterforms keep their edge over whatever is behind
       ctx.shadowColor = `rgba(0,0,0,${0.85 * line.alpha})`;
       ctx.shadowBlur = px * 0.5;
-      // (centred: shifted by half the trailing letter space)
-      ctx.fillText(line.text, size / 2 + (tracking * px) / 2, top + line.y * h);
+      // glyph by glyph along the arc (THE ARC): each at its advance in the whole line (the prefix's width: the face's
+      // kerning and the tracking included), centred on the line, turned to the arc at its middle
+      const glyphs = Array.from(line.text);
+      const total = ctx.measureText(line.text).width - tracking * px;
+      let prefix = '';
+      for (const g of glyphs) {
+        const x0 = ctx.measureText(prefix).width;
+        prefix += g;
+        const gw = ctx.measureText(g).width - tracking * px;
+        if (g.trim() === '') continue;
+        const at = arcPoint(x0 + gw / 2 - total / 2, size / 2, top + line.y * h, radius);
+        ctx.save();
+        ctx.translate(at.x, at.y);
+        ctx.rotate(at.angle);
+        ctx.fillText(g, 0, 0);
+        ctx.restore();
+      }
     }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.texture.needsUpdate = true;
   }
 }
