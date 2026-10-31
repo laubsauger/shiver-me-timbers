@@ -15,8 +15,15 @@
  *
  * `phrasePlacement` is pure (tested); `CrawlOverlay` draws it into a canvas texture the dome capture
  * composites over the master.
+ *
+ * THE TYPE (the client's note of 2026-10-31: the Avenir Next "not good enough", it did not fit the epic mood): the copy
+ * in EB Garamond Italic, the title "the Drift" in Pinyon Script, written on along its strokes (../titleInk.ts). Both
+ * OFL, served from public/drift/fonts and loaded before the first frame (../titleFonts.ts). The body is set at weight
+ * 560, not the face's 400: the dome softens a hairline serif to nothing at an x-height of 3°, and the halo eats into
+ * thin strokes too; 500–600 keeps the italic's shape and reads (the user's brief: "not thinner than ~500").
  */
 import * as THREE from 'three/webgpu';
+import { InkWord, inkProgress } from '../titleInk';
 
 export interface CrawlPhrase {
   /** one or two lines, read top to bottom */
@@ -50,6 +57,8 @@ export interface Placement {
   /** fraction of master width */
   size: number;
   alpha: number;
+  /** 0..1, how much of it is written (the signature draws on: ../titleInk.ts; the body is always 1) */
+  ink: number;
 }
 
 const clamp01 = (x: number): number => Math.min(1, Math.max(0, x));
@@ -61,6 +70,12 @@ const FADE_IN = 0.9;
 const FADE_OUT = 1.1;
 /** line pitch, in text heights */
 export const LINE_PITCH = 1.35;
+/**
+ * the signature's em over the body's: 1.6 in Avenir Next; 2 in Pinyon Script, whose lowercase is small for its em
+ * (x-height ~0.2 em) — at 1.6 "the Drift" was a thin, small word from the back rows (a seat view from row 9 of
+ * Horizon 18, 2026-10-31: out/drift/review/titles_1031/seat_dome_title_79.5s_row9.png)
+ */
+export const SIGNATURE_SCALE = 2;
 
 /** s a phrase is fully up: long enough to read it */
 export function phraseHold(p: CrawlPhrase): number {
@@ -74,14 +89,15 @@ export function phrasePlacement(t: number, p: CrawlPhrase, L: CrawlLayout): Plac
   const hold = phraseHold(p);
   if (p.signature) {
     const k = smooth((t - p.at) / (FADE_IN + hold));
-    const alpha = smooth((t - p.at) / FADE_IN) * clamp01((L.end - t) / Math.max(1e-6, L.fade));
-    return alpha > 0 ? { el: L.elTop + (L.holdEl - L.elTop) * k, size: L.size * 1.6, alpha } : null;
+    // no fade-in: the pen writes it out of nothing (its alpha is up from the start, so the field's pocket clears first)
+    const alpha = clamp01((L.end - t) / Math.max(1e-6, L.fade));
+    return alpha > 0 ? { el: L.elTop + (L.holdEl - L.elTop) * k, size: L.size * SIGNATURE_SCALE, alpha, ink: inkProgress(t - p.at) } : null;
   }
   const life = FADE_IN + hold + FADE_OUT;
   const k = (t - p.at) / life;
   if (k >= 1) return null;
   const alpha = smooth((t - p.at) / FADE_IN) * smooth((p.at + life - t) / FADE_OUT);
-  return alpha > 0 ? { el: L.elTop - L.sink * k, size: L.size * (1 - 0.15 * k), alpha } : null;
+  return alpha > 0 ? { el: L.elTop - L.sink * k, size: L.size * (1 - 0.15 * k), alpha, ink: 1 } : null;
 }
 
 /** deg of elevation one text height spans (the master's width covers 180° across its diameter) */
@@ -116,16 +132,22 @@ export interface CrawlFonts {
 }
 
 const FONTS: CrawlFonts = {
-  body: '500 {px}px "Avenir Next", "Helvetica Neue", Helvetica, sans-serif',
-  bodyTracking: 0.04,
-  signature: '400 {px}px "Avenir Next", "Helvetica Neue", Helvetica, sans-serif',
-  signatureTracking: 0.12,
+  body: 'italic 560 {px}px "EB Garamond", Georgia, serif',
+  bodyTracking: 0.01,
+  // (a script's letters join: no tracking, and the baked pen path is for the word as the face sets it)
+  signature: '400 {px}px "Pinyon Script", cursive',
+  signatureTracking: 0,
 };
+
+/** the signature's colour, warm; the body's is a cool white */
+const SIGNATURE_RGB = '255,236,206';
 
 export class CrawlOverlay {
   readonly texture: THREE.CanvasTexture;
   private readonly ctx: CanvasRenderingContext2D;
   private readonly size: number;
+  /** the signature, written on, before it is bent onto its circle */
+  private readonly word = new InkWord();
 
   constructor(
     /** replaceable: the phrase times follow the beat lengths, which are live tunables */
@@ -153,17 +175,54 @@ export class CrawlOverlay {
     for (const p of this.phrases) {
       const at = phrasePlacement(t, p, this.layout);
       if (!at) continue;
-      p.lines.forEach((line, j) => this.drawLine(line, at.el - j * textDeg(at.size) * LINE_PITCH, at.size, at.alpha, !!p.signature));
+      p.lines.forEach((line, j) => {
+        const el = at.el - j * textDeg(at.size) * LINE_PITCH;
+        if (p.signature) this.drawSignature(line, el, at.size, at.alpha, at.ink);
+        else this.drawLine(line, el, at.size, at.alpha);
+      });
     }
     this.texture.needsUpdate = true;
   }
 
-  private drawLine(text: string, el: number, sizeFrac: number, alpha: number, signature: boolean): void {
+  /**
+   * The signature: written on in a canvas of its own (InkWord: the fill, the halo, the light on the pen), then bent onto
+   * its circle of elevation in strips two pixels wide, each turned upright toward the zenith as the body's glyphs are.
+   * (Glyph by glyph, as the body is drawn, would break a script's joins and could not follow a pen across them.)
+   */
+  private drawSignature(text: string, el: number, sizeFrac: number, alpha: number, ink: number): void {
+    const { ctx, size } = this;
+    const c = size / 2;
+    const R = ((90 - el) / 90) * c;
+    let px = sizeFrac * size;
+    const font = (): string => this.fonts.signature.replace('{px}', px.toFixed(1));
+    const w = this.word.measure(text, font());
+    if (w / R > this.layout.maxArc) px *= (this.layout.maxArc * R) / w;
+    this.word.render(text, font(), px, ink, `rgb(${SIGNATURE_RGB})`);
+    const img = this.word.canvas;
+    const W = img.width;
+    const H = img.height;
+    /** px of the word per strip */
+    const STRIP = 2;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    for (let x = 0; x < W; x += STRIP) {
+      const sw = Math.min(STRIP, W - x);
+      const mid = (x + sw / 2 - W / 2) / R;
+      ctx.setTransform(1, 0, 0, 1, c + R * Math.sin(mid), c + R * Math.cos(mid));
+      ctx.rotate(-mid);
+      // (0.4 px wider than the strip: below the line the circle is longer than the word, and the strips would part —
+      // by 0.2 px at the f's descender; wider still would smear the letters above the line, where they crowd)
+      ctx.drawImage(img, x, 0, sw, H, -sw / 2, -H / 2, sw + 0.4, H);
+    }
+    ctx.restore();
+  }
+
+  private drawLine(text: string, el: number, sizeFrac: number, alpha: number): void {
     const { ctx, size } = this;
     const c = size / 2;
     const R = ((90 - el) / 90) * c; // master radius of this elevation circle
-    const font = signature ? this.fonts.signature : this.fonts.body;
-    const tracking = signature ? this.fonts.signatureTracking : this.fonts.bodyTracking;
+    const font = this.fonts.body;
+    const tracking = this.fonts.bodyTracking;
     let px = sizeFrac * size;
     const measure = (): { chars: string[]; widths: number[]; total: number } => {
       ctx.font = font.replace('{px}', px.toFixed(1));
@@ -177,7 +236,7 @@ export class CrawlOverlay {
       px *= (this.layout.maxArc * R) / m.total;
       m = measure();
     }
-    ctx.fillStyle = signature ? `rgba(255,236,206,${alpha})` : `rgba(236,239,246,${0.92 * alpha})`;
+    ctx.fillStyle = `rgba(236,239,246,${0.92 * alpha})`;
     // a soft dark halo behind every glyph: whatever the field does behind the text, the letterforms keep
     // their own edge (the overlay is mixed over the frame by its alpha, so the halo darkens what is behind)
     ctx.shadowColor = `rgba(0,0,0,${0.85 * alpha})`;

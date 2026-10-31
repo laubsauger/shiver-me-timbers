@@ -173,7 +173,9 @@ export interface DriftParams {
   /** deg, where the END title ("the Drift" again, over W6's night) settles: under the Rose's beams and the coast
    * towers' lamps (main-drift.ts endTitle), not at crawlHoldEl, where the beams crossed it */
   endTitleEl: number;
-  /** text height as a fraction of the master width (0.033 ≈ a 3° x-height) */
+  /** text height (the body's em) as a fraction of the master width. 0.038 in EB Garamond Italic is a 2.9° x-height, a
+   * shade over Avenir Next's at 0.033 (its x-height is 12 % larger: 0.474 em against 0.424): the 2026-10-31 type change
+   * kept the letters' size, the brief's "not smaller than today's" */
   crawlSize: number;
   /** rad, the widest a line may span in azimuth (±50° safe zone ≈ 1.75) */
   crawlMaxArc: number;
@@ -275,7 +277,7 @@ export const driftParams: DriftParams = registerParams(
     crawlSink: 5,
     crawlHoldEl: 30,
     endTitleEl: 18,
-    crawlSize: 0.033,
+    crawlSize: 0.038,
     crawlMaxArc: 1.6,
     crawlRadiance: 1.4,
     crawlPocket: 1,

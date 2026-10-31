@@ -45,6 +45,7 @@ import { EARTH_R } from './drift/getTheDrift/atmosphere';
 import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
 import { flatFramingTrack, type FlatView } from './drift/flatFraming';
 import { FlatTitles } from './drift/flatTitles';
+import { loadTitleFonts } from './drift/titleFonts';
 
 type View = 'flat' | 'dome';
 
@@ -100,7 +101,8 @@ async function boot(): Promise<void> {
   // to place Act 2's galaxies at its knots
   const web = loadWebData();
   const galaxyAtlas = loadGalaxyAtlas();
-  await Promise.all([web.ready, galaxyAtlas.ready]);
+  // the titles' faces, before anything can draw a title (drift/titleFonts.ts: a canvas draws a fallback otherwise)
+  await Promise.all([web.ready, galaxyAtlas.ready, loadTitleFonts()]);
   const field = createUndertimeField(p, web, (at) => pocketAt(at));
   scene.add(field.group);
   // ?markers: orientation check for the dome master — front red, right green, zenith blue, back yellow.

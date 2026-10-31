@@ -17,7 +17,7 @@
  * centre — where the dome's text sits relative to its action, under it toward the front. At the cut's Act 1 framing
  * (pitch 30, flatFraming.ts) the frame's centre holds the action, Undertime's one warm grain among it (remain, 45–55 s:
  * "For every billion lost, one grain remained." comes at 48 s), and the text would cover it there.
- * HOW BIG: a body em of FLAT_EM of the frame's height (~75 px at 1152; subtitles run ~6 %), the signature 1.6× that as
+ * HOW BIG: a body em of FLAT_EM of the frame's height (~86 px at 1152; subtitles run ~6 %), the signature SIGNATURE_SCALE× that as
  * on the dome, a line no wider than FLAT_WIDTH of the frame (longer ones drawn smaller, as the dome's `maxArc`).
  * HOW IT MOVES: as on the dome, in ems — a phrase sinks `sink` degrees while read, which is sink / its text height in
  * ems (~0.8), and the signature settles from `elTop` to `holdEl` (~1.2 em). The dome's placement stays the dome's: only
@@ -29,13 +29,15 @@
  */
 import * as THREE from 'three/webgpu';
 import { LINE_PITCH, phrasePlacement, type CrawlLayout, type CrawlPhrase } from './undertime/crawl';
+import { InkWord } from './titleInk';
 
 /** the 16:9 frame's height as a fraction of the square frame it is cut from */
 export const FLAT_BAND = 9 / 16;
 /** fraction of the 16:9 frame's height from its top: the centre of a phrase's first line as it appears */
 export const FLAT_TOP = 0.62;
-/** a body line's em (font px) as a fraction of the 16:9 frame's height, before the shrink */
-export const FLAT_EM = 0.065;
+/** a body line's em (font px) as a fraction of the 16:9 frame's height, before the shrink (0.065 in Avenir Next; 15 %
+ * more in EB Garamond Italic, whose x-height is 12 % smaller: a shade larger letters, as the dome's crawlSize) */
+export const FLAT_EM = 0.075;
 /** the widest a line may be, as a fraction of the frame's width */
 export const FLAT_WIDTH = 0.8;
 /** title-safe: every line's centre stays this far (fraction of the height) plus half its em inside the frame's edges */
@@ -46,10 +48,9 @@ export const FLAT_SAFE = 0.1;
  * never changes what the dome's text draws)
  */
 const FONTS = {
-  body: '500 {px}px "Avenir Next", "Helvetica Neue", Helvetica, sans-serif',
-  bodyTracking: 0.04,
-  signature: '400 {px}px "Avenir Next", "Helvetica Neue", Helvetica, sans-serif',
-  signatureTracking: 0.12,
+  body: 'italic 560 {px}px "EB Garamond", Georgia, serif',
+  bodyTracking: 0.01,
+  signature: '400 {px}px "Pinyon Script", cursive',
 };
 
 /** one line of a phrase in the 16:9 frame: centre y and em as fractions of its height, opacity */
@@ -59,6 +60,8 @@ export interface FlatLine {
   em: number;
   alpha: number;
   signature: boolean;
+  /** 0..1, how much of it is written (the signature draws on: titleInk.ts) */
+  ink: number;
 }
 
 /**
@@ -78,7 +81,7 @@ export function flatTitleLines(t: number, phrases: readonly CrawlPhrase[], L: Cr
       const y = top + j * em * LINE_PITCH;
       const lo = FLAT_SAFE + em / 2;
       const hi = 1 - FLAT_SAFE - em / 2;
-      out.push({ text, y: Math.min(hi, Math.max(lo, y)), em, alpha: at.alpha, signature: !!p.signature });
+      out.push({ text, y: Math.min(hi, Math.max(lo, y)), em, alpha: at.alpha, signature: !!p.signature, ink: at.ink });
     });
   }
   return out;
@@ -90,6 +93,8 @@ export class FlatTitles {
   private readonly size: number;
   /** what the canvas holds now (`draw` redraws only on a change: the canvas upload is the cost) */
   private drawn = '';
+  /** the signature, written on (the dome's crawl has its own) */
+  private readonly word = new InkWord();
 
   constructor(size = 2048) {
     this.size = size;
@@ -115,8 +120,21 @@ export class FlatTitles {
     const h = size * FLAT_BAND;
     const top = (size - h) / 2;
     for (const line of lines) {
-      const font = line.signature ? FONTS.signature : FONTS.body;
-      const tracking = line.signature ? FONTS.signatureTracking : FONTS.bodyTracking;
+      if (line.signature) {
+        // written on in its own canvas (fill, halo, the light on the pen), set centred on the line
+        let px = line.em * h;
+        const w = this.word.measure(line.text, FONTS.signature.replace('{px}', px.toFixed(1)));
+        if (w > FLAT_WIDTH * size) px *= (FLAT_WIDTH * size) / w;
+        this.word.render(line.text, FONTS.signature.replace('{px}', px.toFixed(1)), px, line.ink, 'rgb(255,236,206)');
+        const img = this.word.canvas;
+        ctx.save();
+        ctx.globalAlpha = line.alpha;
+        ctx.drawImage(img, size / 2 - img.width / 2, top + line.y * h - img.height / 2);
+        ctx.restore();
+        continue;
+      }
+      const font = FONTS.body;
+      const tracking = FONTS.bodyTracking;
       let px = line.em * h;
       const width = (): number => {
         ctx.font = font.replace('{px}', px.toFixed(1));
@@ -129,7 +147,7 @@ export class FlatTitles {
         px *= (FLAT_WIDTH * size) / w;
         width();
       }
-      ctx.fillStyle = line.signature ? `rgba(255,236,206,${line.alpha})` : `rgba(236,239,246,${0.92 * line.alpha})`;
+      ctx.fillStyle = `rgba(236,239,246,${0.92 * line.alpha})`;
       // the dome's dark halo behind every glyph (crawl.ts): the letterforms keep their edge over whatever is behind
       ctx.shadowColor = `rgba(0,0,0,${0.85 * line.alpha})`;
       ctx.shadowBlur = px * 0.5;
