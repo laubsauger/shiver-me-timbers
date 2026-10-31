@@ -89,6 +89,8 @@ const FORE_GUARA_DEPTH = 0.8;
 /** REVIEW ONLY: `drift.html?raftplain` draws the hero raft as the game builds it, undressed (an A/B against
  * raftLook.ts / raftDress.ts) */
 const PLAIN = typeof location !== 'undefined' && new URLSearchParams(location.search).has('raftplain');
+/** the least drop the sails are set to (0..1 of the cloth's drop): struck, but not degenerate (see `update`) */
+const SAIL_STRUCK = 0.01;
 /** `far`: a raft seen only on the horizon (its lanterns carry no point lights: raftLanterns.ts) */
 export function createRaft(heightAt: (x: number, z: number, t: number) => number, o: { far?: boolean } = {}): RaftProp {
   // (read into each sail's shape as the blueprint is built)
@@ -155,7 +157,12 @@ export function createRaft(heightAt: (x: number, z: number, t: number) => number
     ready: Promise.all([look?.ready, dressed?.ready]).then(() => undefined),
     update(t, x, z, heading, light, sails = 0, speed = 0, windTo, windSpeed) {
       for (const id of sailIds) {
-        assembly.setSailDropScale(id, sails);
+        // (never quite 0: at a drop of exactly 0 the cloth shader's frame is cross(du, dv) with dv = 0, normalised —
+        // NaN, and the whole sail mesh, its furled bundle with it, rasterises nothing: through c1 the raft had no sail
+        // at all until the hoist began, then the furled bundle popped in, the 2026-10-31 review: "up to 5:36 our raft
+        // has no sail at all; at 5:37 the sail suddenly appears, furled". SAIL_STRUCK is a few cm of cloth, inside
+        // the bundle; the game's trim never strikes below 0.23)
+        assembly.setSailDropScale(id, Math.max(SAIL_STRUCK, sails));
         assembly.setYardHoist(id, sails);
         // the wind frame the game's rig would publish: the hull's heading and its way through the water
         writeSailWindFrame(assembly.sailMesh(id), {

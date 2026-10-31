@@ -168,6 +168,27 @@ export interface HullContactParams {
   pushLength: number;
   pushDecay: number;
   pushEvery: number;
+  /**
+   * THE TRAIL ITSELF, laid from the transom (the 2026-10-31 review: "the wake left in the water should start closer to
+   * the boat and needs to be a bit more speed dependent and on the distance traveled"). The stirred band was the
+   * eddies' alone, and they are shed only every `shedSpacing` m and fade in over their first second: the band began
+   * up to ~9 m astern, at the newest eddy, and its strength did not know the way the raft made. Now the stern's centre
+   * leaves a point every `trailSpacing` m of distance covered through the water (none while it lies still: the trail is
+   * as long as the way actually made), each holding the way it was laid at; the band is the chain of segments between
+   * them and on to the transom as it is now. Its strength (stir, `trailStir` at full way), its half-width (the logs' half
+   * beam × 0.5–1 with the way, widening `trailSpread` m/s) and its life (`trailLife` s at full way, a third of it at
+   * rest) all scale with the way it was laid at, against WAY_REF. It feeds the boils (domes with glassy tops: the
+   * scar the user likes is the lane's slick, untouched) and, over its first `trailFoamReach` m astern, a little
+   * coverage (`trailFoam` per s at full way, × the way: the dose ∝ the way) — a smooth band, no small-scale shape in the source for the eddies to
+   * shear into streaks, which the ocean's wake lace draws as broken curved filaments (surfaceMaterial LACE_FILAMENTS)
+   * that thin and go as it decays: a fast raft leaves a longer, denser, wider trail than a slow one
+   */
+  trailSpacing: number;
+  trailSpread: number;
+  trailLife: number;
+  trailStir: number;
+  trailFoam: number;
+  trailFoamReach: number;
 }
 
 export const HULL_CONTACT_DEFAULTS: HullContactParams = {
@@ -238,12 +259,24 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   pushLength: 2.2,
   pushDecay: 10,
   pushEvery: 0.4,
+  trailSpacing: 1.5,
+  trailSpread: 0.05,
+  trailLife: 45,
+  trailStir: 1.2,
+  // (0.12 per s over 3 m: a patch the transom passes over at WAY_REF is left at ~0.3 coverage — ∝ the way, see the
+  // field — under the lace's dense-white 0.6, and thins below its 0.04 gate ~16 s (~19 m) on; at c3's 0.6 m/s ~6 m)
+  trailFoam: 0.12,
+  trailFoamReach: 3,
 };
 
 /** eddy slots (at 1.9 m/s and 3.2 m apart, a minute of eddies would be 36: the oldest go first, already faint) */
 export const HULL_EDDIES = 40;
 /** push-aside launches kept (at `pushEvery` 0.4 s, the last 19 s of them; older ones have faded by then) */
 export const HULL_PUSHES = 48;
+/** trail points kept (at `trailSpacing` 1.5 m, 96 m of trail: a full-way trail's 45 s at 1.8 m/s is 81 m) */
+export const HULL_TRAIL = 64;
+/** m/s: the way the trail is at full strength, width and life at (c2's course speed, beats.ts speedAt) */
+const WAY_REF = 1.2;
 /** m/s² */
 const G = 9.81;
 /** floor for divisors and smoothstep spans (§V28) */
@@ -326,14 +359,24 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const uCurl = uniform(0);
   /** (boilHeight, boilCell, boilSlick, boilPeriod) */
   const uBoil = uniform(new THREE.Vector4());
+  /** per trail point, oldest first: (x, z, strength now 0..1.5, half-width now m); and the transom as it is now, the
+   * chain's head, in the same layout */
+  const trailVecs = Array.from({ length: HULL_TRAIL }, () => new THREE.Vector4());
+  const uTrail = uniformArray<'vec4'>(trailVecs);
+  const uTrailCount = uniform(0);
+  const uTrailHead = uniform(new THREE.Vector4());
+  /** (trailStir, trailFoam, trailFoamReach, 0) */
+  const uTrailLook = uniform(new THREE.Vector4());
 
   const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0, t: 0, cx: 0, cz: 1 };
   /** m/s: the water's own drift this step (the current that carries the raft and its wake alike) */
   const drift = { x: 0, z: 0 };
   let odo = 0;
   let shed = 0;
-  const eddies: Array<Eddy & { dimple: number }> = [];
+  const eddies: Array<Eddy & { dimple: number; k: number }> = [];
   const pushes: Array<{ x: number; z: number; rx: number; rz: number; born: number; amp: number }> = [];
+  /** the trail's points (the stern's centre every `trailSpacing` m), each with the way it was laid at (WAY_REF = 1) */
+  const trail: Array<{ x: number; z: number; k: number; born: number }> = [];
   /** the last launch slot (floor(t / pushEvery)); NaN until the first step after a reset */
   let lastPush = Number.NaN;
 
@@ -576,11 +619,14 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         If(float(i).lessThan(uEddyCount), () => {
           const e = uEddies.element(int(i));
           const age = e.w;
-          const rad = uEddyShape.z.add(uEddyShape.w.mul(age));
+          // (the way it was shed at, WAY_REF = 1: a slow raft's eddies stir less, narrower and for less long — the
+          // 2026-10-31 review, "a bit more speed dependent")
+          const kE = uDimples.element(int(i)).y;
+          const rad = uEddyShape.z.add(uEddyShape.w.mul(age)).mul(kE.min(1).mul(0.3).add(0.7));
           const dp = worldXZ.sub(vec2(e.x, e.y));
           const r2 = dp.dot(dp);
-          const life = age.div(uStir.x.max(EPS)).negate().exp().mul(age.min(1));
-          const wgt = r2.div(rad.mul(rad).max(EPS)).negate().exp().mul(life);
+          const life = age.div(uStir.x.mul(kE.min(1).mul(0.6).add(0.4)).max(EPS)).negate().exp().mul(age.min(1));
+          const wgt = r2.div(rad.mul(rad).max(EPS)).negate().exp().mul(life).mul(kE);
           sum.addAssign(wgt);
           const rc = uEddyShape.x.add(uEddyShape.y.mul(age));
           const r = r2.sqrt().max(EPS);
@@ -604,11 +650,44 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         });
       });
       const stir = sum.add(churn).negate().exp().oneMinus().toVar();
+      // ── 3b. THE TRAIL (see `trailSpacing`): the chain of segments the stern's centre left, oldest first, on to the
+      // transom as it is now; its strength and half-width interpolated along each (max over them: no double dose at
+      // the joints), its edge ragged as the lane's is (the same world-anchored noise, so the two edges go together)
+      const trailK = float(0).toVar();
+      If(uTrailCount.greaterThan(0), () => {
+        const raggedT = fbm2(worldXZ.mul(0.18).add(vec2(3.1, 17.9)), 2).sub(0.5).mul(2).mul(uLane.z).mul(0.6);
+        Loop(HULL_TRAIL, ({ i }) => {
+          If(float(i).lessThan(uTrailCount), () => {
+            const a = uTrail.element(int(i));
+            const b = select(float(i).add(1).lessThan(uTrailCount), uTrail.element(int(i).add(1).min(int(HULL_TRAIL - 1))), uTrailHead);
+            const ab = vec2(b.x.sub(a.x), b.y.sub(a.y));
+            const ap = worldXZ.sub(vec2(a.x, a.y));
+            const h = ap.dot(ab).div(ab.dot(ab).max(EPS)).clamp(0, 1);
+            const dd = ap.sub(ab.mul(h)).length();
+            const half = mix(a.w, b.w, h).add(raggedT).max(0.3);
+            trailK.assign(trailK.max(mix(a.z, b.z, h).mul(smoothstep(half, half.mul(0.35), dd))));
+          });
+        });
+      });
+      /** the water the boils stand in: the eddies' and the logs' stir, and the trail's */
+      const stirB = sum.add(churn).add(trailK.mul(uTrailLook.x)).negate().exp().oneMinus().toVar();
+      if (detail) {
+        // the trail's bubbles, laid over its first `trailFoamReach` m astern of the transom (see `trailFoam`): per s ∝
+        // the trail's strength there × the way now, so the dose a patch of water gets as the stern passes over it is
+        // ∝ the way (a slow raft dwells longer over it: a rate ∝ the way alone would lay the same dose at any speed).
+        // Broken only at a large scale (a ~3 m fbm): small-scale structure in a source the hull carries is swept into
+        // lines along the track, and sheared by the eddies into fans
+        const srT = worldXZ.sub(vec2(uCourse.x, uCourse.y));
+        const behindT = srT.dot(vec2(uCourse.z, uCourse.w)).negate();
+        const zoneT = smoothstep(-0.3, 0.5, behindT).mul(smoothstep(uTrailLook.z, uTrailLook.z.mul(0.3), behindT));
+        const broad = smoothstep(0.3, 0.65, fbm2(worldXZ.mul(0.3).add(vec2(23.1, 8.7)), 2)).mul(0.7).add(0.3);
+        foam.addAssign(uTrailLook.y.mul(trailK).mul(uLane.w).mul(zoneT).mul(broad));
+      }
       // THE BOILS (see `boilHeight`): domes on a drifting cellular field, each cell pulsing at its own phase; kept off
       // the logs' first metre as the lumps are. Their share of the stirred water also decides where it is glassy (on a
       // dome) and where it banks roughness (between them)
       const boilTop = float(0).toVar();
-      If(stir.greaterThan(0.002), () => {
+      If(stirB.greaterThan(0.002), () => {
         const drift = vec2(t.mul(0.02), t.mul(-0.015));
         const domeAt = (xz: any): any => {
           const c = cellular2(xz.div(uBoil.y).add(drift).add(13.7));
@@ -616,13 +695,13 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           return smoothstep(0.45, 0.05, c.x).mul(pulse);
         };
         const dome0 = domeAt(worldXZ).toVar();
-        boilTop.assign(dome0.mul(stir).mul(smoothstep(0.3, 1.2, offLogs)));
+        boilTop.assign(dome0.mul(stirB).mul(smoothstep(0.3, 1.2, offLogs)));
         if (detail) {
           // η = H·dome·stir, and its slope by forward differences over BOIL_STEP (a dome is ~2 m across)
           const step = BOIL_STEP;
           const dx = domeAt(worldXZ.add(vec2(step, 0))).sub(dome0).div(step);
           const dz = domeAt(worldXZ.add(vec2(0, step))).sub(dome0).div(step);
-          const k = uBoil.x.mul(stir).mul(smoothstep(0.3, 1.2, offLogs));
+          const k = uBoil.x.mul(stirB).mul(smoothstep(0.3, 1.2, offLogs));
           elev.addAssign(dome0.mul(k));
           slope.addAssign(vec2(dx, dz).mul(k));
         }
@@ -777,10 +856,43 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           // way): Lamb–Oseen's v(rc) = 0.72·Γ/(2π·rc)
           gamma: (-side * p.shedStrength * 0.3 * pose.speed * 2 * Math.PI * p.eddyCore) / 0.72,
           dimple: p.eddyDimple * pose.speed,
+          k: Math.min(1.5, pose.speed / WAY_REF),
           born: pose.t,
         });
       }
       while (eddies.length > 0 && (eddies.length > HULL_EDDIES || pose.t - eddies[0].born > p.eddyLife)) eddies.shift();
+      // THE TRAIL (see `trailSpacing`): a point at the stern's centre at each multiple of the spacing the odometer
+      // passes — and the first as soon as the raft has way, so the chain reaches the transom from its first metre
+      for (const q of trail) {
+        q.x += drift.x * dt;
+        q.z += drift.z * dt;
+      }
+      const kNow = Math.min(1.5, pose.speed / WAY_REF);
+      const sx = pose.x + pose.fx * stern;
+      const sz = pose.z + pose.fz * stern;
+      const tSpacing = Math.max(0.25, p.trailSpacing);
+      if (pose.speed > 0.02 && (trail.length === 0 || Math.floor(odo / tSpacing) > Math.floor(prev / tSpacing))) {
+        trail.push({ x: sx, z: sz, k: kNow, born: pose.t });
+      }
+      /** s a point laid at way k lasts (a third of `trailLife` at rest, all of it from WAY_REF) */
+      const trailLifeOf = (k: number): number => Math.max(1, p.trailLife) * (0.3 + 0.7 * Math.min(1, k));
+      const halfOf = (k: number): number => halfBeam * (0.5 + 0.5 * Math.min(1, k));
+      while (trail.length > 0 && (trail.length > HULL_TRAIL || pose.t - trail[0].born > trailLifeOf(trail[0].k))) trail.shift();
+      for (let i = 0; i < HULL_TRAIL; i++) {
+        const q = trail[i];
+        if (!q) {
+          trailVecs[i].set(0, 0, 0, 0);
+          continue;
+        }
+        const age = Math.max(0, pose.t - q.born);
+        const life = trailLifeOf(q.k);
+        // (strength by e over half its life, and gone smoothly by its end; no fade-in: it starts at the transom)
+        const left = Math.exp(-age / (life * 0.5)) * smooth01((life - age) / (life * 0.3));
+        trailVecs[i].set(q.x, q.z, q.k * left, halfOf(q.k) + Math.max(0, p.trailSpread) * age);
+      }
+      uTrailCount.value = Math.min(trail.length, HULL_TRAIL);
+      uTrailHead.value.set(sx, sz, kNow, halfOf(kNow));
+      uTrailLook.value.set(Math.max(0, p.trailStir), Math.max(0, p.trailFoam), Math.max(0.5, p.trailFoamReach), 0);
       // a push wave launched each `pushEvery` s of sea time (slots on the absolute clock: the same launches however
       // the replay is stepped) from where the hull is, to the sides of the heading it has
       const every = Math.max(0.05, p.pushEvery);
@@ -821,7 +933,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         const fade = Math.min(1, age) * smooth01((p.eddyLife - age) / (p.eddyLife * 0.3));
         const left = Math.exp(-age / Math.max(EPS, p.eddyDecay)) * fade;
         eddyVecs[i].set(e.x, e.z, e.gamma * left, age);
-        dimpleVecs[i].set(e.dimple * left, 0, 0, 0);
+        dimpleVecs[i].set(e.dimple * left, e.k, 0, 0);
       }
       uEddyCount.value = Math.min(eddies.length, HULL_EDDIES);
       uFoam.value.set(p.slapFoam, p.bowFoam, p.collarWidth, p.chopSpread);
@@ -853,6 +965,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       uEddyCount.value = 0;
       pushes.length = 0;
       lastPush = Number.NaN;
+      trail.length = 0;
+      uTrailCount.value = 0;
       uPushCount.value = 0;
     },
   };

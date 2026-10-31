@@ -27,7 +27,7 @@
  * Act 2's turn, which has levelled out by the time it rests.
  */
 import * as THREE from 'three/webgpu';
-import { float, positionWorld, texture, uniform, vec3 } from 'three/tsl';
+import { Fn, cameraPosition, float, normalize, positionWorld, smoothstep, texture, uniform, vec3 } from 'three/tsl';
 import { createSky } from '../../sky';
 import { skyParams } from '../../params/sky';
 import { createOceanSim, oceanParams } from '../../ocean';
@@ -69,11 +69,11 @@ import { createGroundDebris, type GroundDebris } from './groundDebris';
 import { SAND_ALBEDO, createBeachDressing, type BeachDressing } from './beachDressing';
 import { createPlants } from './plants';
 import { createPalms, palmFeet } from './palms';
-import { FAR_RAFTS, createFarLantern } from './farRafts';
+import { FAR_RAFTS, createFarCraft, createFarCraftLook, createFarLantern, farRaftsIn } from './farRafts';
 import { lanternNight } from '../../ship/raftLanterns';
 import { nightStep } from './radioTower';
 import { createDrownedShallows, createSeaPowerLine } from './drowned';
-import { C1_FOLLOW, COAST_YAW, airAt, beatSky, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, type BeatName, type RaftPose, type WorldName } from './beats';
+import { C1_FOLLOW, COAST_YAW, airAt, beatSky, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, spec, speedAt, travelled, type BeatName, type BeatSpec, type RaftPose, type WorldName } from './beats';
 
 /** the game's world seed (Raft 2100) */
 const SEED = 2100;
@@ -246,6 +246,14 @@ export interface SeaAct {
    * raft, before anything reads the eye (the sky's shadow focus, the surface's grid, the mirror's capture) — an eye
    * moved after update kept the show eye's mirror, its reflections metres off */
   reviewEye?: (eye: THREE.Object3D, raft: { x: number; z: number; heading: number }) => void;
+  /**
+   * ACT 2'S DESCENT BEFORE THE HAND-OVER (driven only; main-drift.ts): the sea's own cloud field laid over Act 2's sky,
+   * so the clouds the sea's scene shows are already in the sky as the descent comes down to it (the 2026-10-30 review of
+   * the final render: "we go from titanium sky to clouds"). `mesh` goes into Act 2's scene (a sphere round its eye,
+   * drawn over its air); `update` puts the clouds in their state at sea time t (negative before the hand-over) for
+   * Act 2's eye (world) and its frame's turn into the field's (`toField`: world → x east, y up, z north)
+   */
+  readonly descentSky?: { mesh: THREE.Mesh; update(t: number, renderer: THREE.WebGPURenderer, eyeWorld: THREE.Vector3, toField: THREE.Quaternion): void };
   /** REVIEW ONLY: the sea the rafts float on (the CpuOcean pool) and the ground, at (x, z) and sea time t */
   probeWater(x: number, z: number, t: number): { sea: number; ground: number };
   /** REVIEW ONLY: the raft as the wake is shed from it at sea time t in a world (x, z m; heading rad; speed m/s) */
@@ -764,8 +772,10 @@ export function createSea(
     if (nearDebris) debris.add(nearDebris);
     if (things) debris.add(Object.assign(things, { name: 'drift-debris-things' }));
   }
-  // the far rafts, about the eye, each its own size, and a lantern each (farRafts.ts)
-  const farRafts = o.drive ? FAR_RAFTS.map(() => Object.assign(createRaft(floating, { far: true }), { lantern: createFarLantern(), lampAt: new THREE.Vector3() })) : [];
+  // the far craft, about the eye, each its own kind and size — none of them a copy of our raft — and a lantern each
+  // (farRafts.ts)
+  const farLook = createFarCraftLook();
+  const farRafts = o.drive ? FAR_RAFTS.map((f) => Object.assign(createFarCraft(f.kind, farLook, floating), { lantern: createFarLantern(), lampAt: new THREE.Vector3() })) : [];
   farRafts.forEach((r, i) => {
     r.group.scale.setScalar(FAR_RAFTS[i].scale);
     afloat.add(r.group, r.lantern.mesh);
@@ -914,7 +924,85 @@ export function createSea(
       flowFoam.update(renderer, WAKE_DT);
     }
   };
+  /** THE SKY AND ITS CLOUDS at sea time t, for an eye at `at` under a Sun toward `sun` (the sea's frame): the air's light,
+   * the clouds' uniforms and their light volume. Shared by the sea's own frames (update) and Act 2's descent before the
+   * hand-over (`descentSky`), so both draw the one cloud field in one state */
+  const skyAt = (t: number, at: THREE.Vector3, sun: THREE.Vector3, d: SeaDrive | undefined, b: BeatSpec | undefined, sailing: boolean, renderer: THREE.WebGPURenderer): void => {
+    seaSky.update(at, sun);
+    // (the time-lapse hurries the clouds: their clock runs LAPSE_CLOUDS × at its middle)
+    cu.time.value = sailing ? t + lapsedClouds(t) : t;
+    cu.sun.value.copy(sun);
+    // c1's clouds form as thin veils over most of their field and thicken (coverage rising from zero only
+    // pops scattered lumps into the sky); each later beat has its own sky
+    const formed = d ? d.clouds : 1;
+    const beatClouds = b ? beatSky(b.name, t, c1End) : undefined;
+    cu.coverage.value = beatClouds ? beatClouds.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
+    cu.presence.value = formed;
+    cu.cirrusCover.value = beatClouds ? beatClouds.cirrus : CIRRUS_COVER * formed;
+    if (sailing && t < followStart + LAPSE[1]) {
+      // c1's sky turns into c2's through the time-lapse, across the beats' boundary (c2's own sky only once it is
+      // done: switched at the boundary, the cover stepped there)
+      const k = smooth01((t - followStart - LAPSE[0]) / (LAPSE[1] - LAPSE[0]));
+      const c2 = spec('c2')!;
+      cu.coverage.value = CLOUD_COVER * (0.4 + 0.6 * formed) + (c2.cover - CLOUD_COVER * (0.4 + 0.6 * formed)) * k;
+      cu.cirrusCover.value = CIRRUS_COVER * formed + (c2.cirrus - CIRRUS_COVER * formed) * k;
+    }
+    const atCloud = (h: number, out: THREE.Vector3): void => {
+      const c = sunlightCpu(EARTH_R + h * 1e-6, sun.y);
+      out.set(c[0], c[1], c[2]).multiplyScalar(SUN_E / Math.PI);
+    };
+    atCloud(CLOUD_BASE, cu.sunBase.value);
+    atCloud(CLOUD_TOP, cu.sunTop.value);
+    atCloud(CIRRUS_H, cu.sunCirrus.value);
+    cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
+    // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
+    // sea's clock: clouds.ts)
+    seaSky.updateClouds(renderer, t);
+  };
+  const descentSky = o.drive && seaSky.cloudsOver
+    ? (() => {
+        const drive = o.drive;
+        const over = seaSky.cloudsOver;
+        const toSea = uniform(new THREE.Matrix3());
+        const eyeSea = uniform(new THREE.Vector3());
+        const material = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false, depthTest: false, transparent: true, fog: false });
+        // (premultiplied, as Act 2's air: earth.ts atmosphere)
+        material.blending = THREE.CustomBlending;
+        material.blendSrc = THREE.OneFactor;
+        material.blendDst = THREE.OneMinusSrcAlphaFactor;
+        material.colorNode = Fn(() => {
+          const d = normalize(toSea.mul(normalize(positionWorld.sub(cameraPosition))));
+          // (over the eye's horizontal only: below it is Act 2's own sea, which the layer's march would find a far
+          // crossing of the shell for)
+          return over(eyeSea as unknown as THREE.Node<'vec3'>, d).mul(smoothstep(-0.002, 0.004, d.y));
+        })();
+        material.name = 'drift-sea-descent-clouds';
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 96, 48), material);
+        mesh.frustumCulled = false;
+        // (after Act 2's air, earth.ts: renderOrder 2)
+        mesh.renderOrder = 2.5;
+        mesh.name = 'drift-sea-descent-clouds';
+        const m4 = new THREE.Matrix4();
+        return {
+          mesh,
+          update(t: number, renderer: THREE.WebGPURenderer, eyeWorld: THREE.Vector3, toField: THREE.Quaternion): void {
+            const d = drive(t);
+            // (none above the layer: the march looks up through it, and from above the forming field is still thin)
+            mesh.visible = d.clouds > 0 && d.eye.y < CLOUD_TOP;
+            if (!mesh.visible) return;
+            // (10 km round the eye in Act 2's Mm: f32 world positions there are ~1 µm apart, a direction's error 1e-4°)
+            mesh.position.copy(eyeWorld);
+            mesh.scale.setScalar(0.01);
+            mesh.updateMatrixWorld();
+            toSea.value.setFromMatrix4(m4.makeRotationFromQuaternion(toField));
+            eyeSea.value.copy(d.eye);
+            skyAt(t, d.eye, d.sun, d, undefined, false, renderer);
+          },
+        };
+      })()
+    : undefined;
   const act: SeaAct = {
+    descentSky,
     scene,
     far: FAR,
     total,
@@ -1036,7 +1124,12 @@ export function createSea(
       // what each world holds
       if (debris) debris.visible = world === 'flood' || world === 'open';
       if (powerLine) powerLine.group.visible = world === 'flood' || world === 'open';
-      for (const r of farRafts) r.group.visible = r.lantern.mesh.visible = sailing;
+      // (c2–c4 only, coming up out of the haze from c2's start: switched on with the follow they popped in at 335 s, in
+      // the sea's first shot — "suddenly we see a second raft in the distance", the 2026-10-31 review — farRafts.ts)
+      const farIn = sailing ? farRaftsIn(t, beats.starts.c2) : 0;
+      const farOn = farIn > 0;
+      farLook.fade.value = farIn;
+      for (const r of farRafts) r.group.visible = r.lantern.mesh.visible = farOn;
       land.group.visible = world === 'coast' || world === 'test';
       if (scannedRocks) scannedRocks.group.visible = land.group.visible;
       if (plants) plants.group.visible = land.group.visible;
@@ -1084,37 +1177,8 @@ export function createSea(
       sky.sunLight.position.set(sx, sy, sz).addScaledVector(sun, skyParams.sunDistance);
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
       // the water below), the haze at the horizon
-      seaSky.update(eye.position, sun);
-      // (the time-lapse hurries the clouds: their clock runs LAPSE_CLOUDS × at its middle)
-      cu.time.value = sailing ? t + lapsedClouds(t) : t;
-      cu.sun.value.copy(sun);
+      skyAt(t, eye.position, sun, d, b, sailing, renderer);
       seabedSun.value.copy(sun);
-      // c1's clouds form as thin veils over most of their field and thicken (coverage rising from zero only
-      // pops scattered lumps into the sky); each later beat has its own sky
-      const formed = d ? d.clouds : 1;
-      const beatClouds = b ? beatSky(b.name, t, c1End) : undefined;
-      cu.coverage.value = beatClouds ? beatClouds.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
-      cu.presence.value = formed;
-      cu.cirrusCover.value = beatClouds ? beatClouds.cirrus : CIRRUS_COVER * formed;
-      if (sailing && t < followStart + LAPSE[1]) {
-        // c1's sky turns into c2's through the time-lapse, across the beats' boundary (c2's own sky only once it is
-        // done: switched at the boundary, the cover stepped there)
-        const k = smooth01((t - followStart - LAPSE[0]) / (LAPSE[1] - LAPSE[0]));
-        const c2 = spec('c2')!;
-        cu.coverage.value = CLOUD_COVER * (0.4 + 0.6 * formed) + (c2.cover - CLOUD_COVER * (0.4 + 0.6 * formed)) * k;
-        cu.cirrusCover.value = CIRRUS_COVER * formed + (c2.cirrus - CIRRUS_COVER * formed) * k;
-      }
-      const atCloud = (h: number, out: THREE.Vector3): void => {
-        const c = sunlightCpu(EARTH_R + h * 1e-6, sun.y);
-        out.set(c[0], c[1], c[2]).multiplyScalar(SUN_E / Math.PI);
-      };
-      atCloud(CLOUD_BASE, cu.sunBase.value);
-      atCloud(CLOUD_TOP, cu.sunTop.value);
-      atCloud(CIRRUS_H, cu.sunCirrus.value);
-      cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
-      // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
-      // sea's clock: clouds.ts)
-      seaSky.updateClouds(renderer, t);
       sky.sunLight.color.copy(seaSky.sunColour);
       sky.sunLight.intensity = SUN_E;
       forest?.setEye(eye.position);
@@ -1157,17 +1221,17 @@ export function createSea(
       const windTo = sailing ? raftHeading : undefined;
       const windSpeed = sailing ? RIPPLE.windSpeed * airAt(t, beats.starts) : undefined;
       raft.update(t, raftX, raftZ, raftHeading, light, sails, speed, windTo, windSpeed);
-      if (sailing) {
+      if (farOn) {
         // (each on its own heading off the course, not ours — ours swings broadside in c3; its lantern lit as our
         // raft's are, stepped down at night as the towers' beacons are: farRafts.ts)
         const lit = lanternNight((Math.asin(Math.min(1, Math.max(-1, sun.y))) * 180) / Math.PI) * nightStep(lum(seaSky.horizon));
         FAR_RAFTS.forEach(({ bearing, distance, off }, i) => {
           across(eyeYaw, (bearing * Math.PI) / 180, v);
           const heading = eyeYaw + Math.PI + off;
-          farRafts[i].update(t, eye.position.x + v.x * distance, eye.position.z + v.z * distance, heading, light, sails, speed, heading, windSpeed);
           const r = farRafts[i];
-          r.group.getObjectByName('raft-lantern-0')?.getWorldPosition(r.lampAt);
-          r.lantern.update(r.lampAt, eye.position, lit);
+          r.update(t, eye.position.x + v.x * distance, eye.position.z + v.z * distance, heading);
+          r.lamp.getWorldPosition(r.lampAt);
+          r.lantern.update(r.lampAt, eye.position, lit * farIn);
         });
       }
       if (props) {

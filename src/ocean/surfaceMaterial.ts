@@ -218,7 +218,9 @@ const MICRO_AMP_SCALE = Math.sqrt(
 const COX_MUNK_CALM_SLOPE_VAR = 0.003;
 /** m: the film wake lace's world coordinate is wrapped this often (its noise kept in float32's good range far out) */
 const LACE_WRAP = 4096;
-/** the film wake lace's filaments and blotches (0 = off: only dense coverage white, see the wake composite) */
+/** the film wake lace's filaments and blotches (0 = off: only dense coverage white, see the wake composite). Tried
+ * on again 2026-10-31 over the raft's new smooth trail band (flowfoam/hullContact.ts `trailFoam`): the aerial at 530 s
+ * still drew fine parallel straight streaks across the trail, so the streaks are not the old sources' shape — off */
 const LACE_FILAMENTS = 0;
 
 /**
@@ -2175,8 +2177,9 @@ export function buildOceanSurfaceMaterial(
         const filament = mix(float(0.12), fil.mul(fil).mul(pieces), resolvedLace);
         const cover = wakeOnlyCoverage.clamp(0, 1);
         // @band-limited-elsewhere: VALUE gates on the filtered wake coverage sample
-        // (OFF for now — LACE_FILAMENTS 0: in the last farm round, 2026-10-30, the filaments still read as fanned smears
-        // in a grazing view behind the raft. Only dense coverage is drawn white; thin coverage is the aeration tint alone)
+        // (OFF — LACE_FILAMENTS 0: in the farm round of 2026-10-30 the filaments read as fanned smears in a grazing view
+        // behind the raft, and again on 2026-10-31 over a smooth trail band, as fine parallel streaks in the 530 s aerial.
+        // Only dense coverage is drawn white; thin coverage is the aeration tint alone)
         const laceW = filament.max(blot.mul(0.8)).mul(smoothstep(0.04, 0.35, cover)).mul(LACE_FILAMENTS)
           .add(smoothstep(0.6, 0.95, cover).mul(0.5)).clamp(0, 1);
         wakeAmount = laceW.mul(0.85).mul(foamGain).mul(whitecapAmount.oneMinus());
