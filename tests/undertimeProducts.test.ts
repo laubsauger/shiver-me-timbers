@@ -212,7 +212,7 @@ describe('Undertime light wave front', () => {
 
 /**
  * The one in a billion (the 2026-10-30 story note: "the big explosion of things that ultimately leaves only … the ONE
- * BILLIONTH — is not fully clear yet"). The front must visibly LEAVE them: few against the thousands it spends, spread
+ * BILLIONTH — is not fully clear yet"; since the 2026-11-01 note, ONE: the hero grain). The front must visibly LEAVE them: few against the thousands it spends, spread
  * over the sky rather than in a clump, each coming to rest after the front has passed where it rests (it outran the
  * light), and the hero's run ending on the hero grain just as the grain comes up.
  */
@@ -222,15 +222,20 @@ describe('Undertime survivors', () => {
   const eyeW = eyePath(starts.wave, p);
   const runs = act.tracks.filter((T) => T.family === SURVIVOR);
 
-  it('are visibly few against what the front spends', () => {
-    const spentOnFront = act.events.filter((e) => e.birth > starts.wave - p.waveBuild).length;
-    expect(act.rests.length).toBeGreaterThan(5);
-    expect(act.rests.length).toBeLessThanOrEqual(p.survivors);
-    expect(act.rests.length * 50).toBeLessThan(spentOnFront);
+  it('is ONE: the hero grain alone remains (the 2026-11-01 note: "I liked this better when it really was just one")', () => {
+    expect(p.survivors).toBe(0);
+    expect(act.rests.length).toBe(0);
+    // the hero's run is the only survivor's run: the one moving line on the dome as the front leaves
+    expect(runs.length).toBe(1);
   });
 
-  it('are spread over the sky, not clumped', () => {
-    const dirs = act.rests.map((s) => {
+  it('when there are more (a non-zero `survivors`), they are spread over the sky and outrun the light', () => {
+    const more = undertimeEvents({ ...p, survivors: 16 }, () => ({ lo: 0, hi: 0, az: 0, strength: 0 }));
+    const spentOnFront = more.events.filter((e) => e.birth > starts.wave - p.waveBuild).length;
+    expect(more.rests.length).toBeGreaterThan(5);
+    expect(more.rests.length).toBeLessThanOrEqual(16);
+    expect(more.rests.length * 50).toBeLessThan(spentOnFront);
+    const dirs = more.rests.map((s) => {
       const v = sub(s.rest, eyeW);
       return v.map((x) => x / len(v)) as Vec3;
     });
@@ -238,14 +243,9 @@ describe('Undertime survivors', () => {
     dirs.forEach((a, i) => dirs.forEach((c, j) => {
       if (i < j) closest = Math.min(closest, Math.acos(Math.min(1, dot(a, c))));
     }));
-    // no two within ~6° of each other
     expect(closest).toBeGreaterThan((6 * Math.PI) / 180);
-    // and above the dome's spring line
     for (const d of dirs) expect(dot(d, b.axis)).toBeGreaterThan(0);
-  });
-
-  it('each comes to rest after the front has passed where it rests: it outran the light', () => {
-    for (const s of act.rests) {
+    for (const s of more.rests) {
       const cut = starts.wave + waveTimeAt(frontFracCpu(sub(s.rest, eyeW), b.front), p.waveStall) * p.wave;
       expect(s.at).toBeGreaterThan(cut - 0.3);
       expect(s.at).toBeLessThan(starts.wave + p.wave + 1);

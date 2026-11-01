@@ -53,7 +53,7 @@ export interface UndertimeState {
   build: number;
   /** rad, the most the front pulls the field toward itself right now (the lensing; 0 outside the build and wave) */
   lens: number;
-  /** 0..1 the front's CREST: its light at its broadest, while it stalls over the audience (rises, holds, falls) */
+  /** 0..1 the front's CREST: its light at its broadest, as it crosses over the audience (rises, holds, falls) */
   crest: number;
   /** 0..1 how bright the front itself burns: moderate as it rises from the horizon, full by the time it reaches
    * the focus zone and over the audience */
@@ -95,14 +95,17 @@ export function plateau(x: number, ramp: number): number {
 }
 
 /**
- * THE WAVE'S PACE: the front's angle from the dome front (over π) at wave progress k. It rolls in slowly from the
- * front horizon, rushes up the front sky, STALLS over the audience — its speed dipping by `stall` around the zenith —
- * then rushes away and settles behind them (the 2026-10-30 story note: the climax is the front itself, held over
- * the audience, not a separate light; the stall is where time collapses). Built as the integral of a speed profile,
- * sin(πk)^1.3 (eased at both ends) times a dip of depth `stall` and width 0.12 at k = ½, tabulated once per stall.
- * (Until then it was smoothstep(k): fastest exactly over the audience.)
+ * THE WAVE'S PACE: the front's angle from the dome front (over π) at wave progress k. It rolls in from the front
+ * horizon, ACCELERATES up the front sky into the zenith — fastest right over the audience — then releases and settles
+ * behind them. Built as the integral of a speed profile, sin(πk)^1.3 (eased at both ends, its peak at k = ½, the
+ * zenith), times an optional dip of depth `stall` and width 0.12 at k = ½, tabulated once per stall.
+ * (Until then it was smoothstep(k): fastest exactly over the audience. The 2026-10-30 story note then asked for the
+ * front HELD over the audience, a stall of 0.72: its peak speed came at ~52° up and it had slowed to 38 % of it by
+ * the zenith. The 2026-11-01 note: "it kind of loses its swoosh a bit in the end before reaching the top" — so no
+ * stall by default: the speed rises all the way up, 70 % of its peak in the focus zone, all of it at the zenith, the
+ * same 41.5 s there and the same peak of ~44°/s. `waveStall` can still bring a hold back.)
  */
-export const WAVE_STALL = 0.72;
+export const WAVE_STALL = 0;
 const SWEEP_N = 1024;
 let sweepFor = NaN;
 let sweepTab = new Float64Array(SWEEP_N + 1);
@@ -167,7 +170,7 @@ export function heroPassTime(p: DriftParams): number {
  *   LENS      the front pulls the field toward its own line as it passes (waveFx.ts waveWarp): a little during the
  *             build (the field leans toward where the front will come from), most as it crosses over the
  *             audience, nothing once it has gone. Rad of the largest displacement.
- *   CREST     while the front stalls over the audience (waveSweep) its light broadens into a band and HOLDS —
+ *   CREST     as the front rushes up over the audience (waveSweep) its light broadens into a band and HOLDS —
  *             a held light, not a flash (a flash reads as a cut, a hold as an event the audience is inside), and
  *             it belongs to the front: nothing lights up anywhere else (the 2026-10-30 story note: a separate
  *             dome-wide light flashed up mid-climb and relit the spent dome behind the front). Its shape is the
@@ -183,10 +186,12 @@ export function waveEnvelope(t: number, p: DriftParams): { build: number; lens: 
   const rise = clamp01((t - (starts.wave - B)) / B) ** 1.6;
   // in the wave: holds while the front climbs, gone as it settles behind the audience
   const build = rise * (1 - smooth((k - 0.55) / 0.4));
-  // THE CREST, on the front's own position: up as it climbs past 54° (frac 0.3), held while it stalls over the
-  // audience, down as it goes on past ~105°
+  // THE CREST, on the front's own position: up as it climbs out of the focus zone (from 36°, frac 0.2, full by 72°),
+  // held at full over the top, down as it goes on past ~108°. (From 54° to 76° while the front stalled: without the
+  // stall it crosses the top in ~1 s, so the crest comes up earlier to carry its light all the way into the zenith;
+  // the 2026-11-01 note, the swoosh lost "before reaching the top")
   const f = t > starts.wave ? waveSweep(k, p.waveStall) : 0;
-  const crest = smooth((f - 0.3) / 0.12) * (1 - smooth((f - 0.58) / 0.14));
+  const crest = smooth((f - 0.2) / 0.2) * (1 - smooth((f - 0.6) / 0.15));
   const pass = t > starts.wave && t < starts.wave + L ? Math.sin(Math.PI * k) ** 0.6 : 0;
   const lens = ((p.waveLens * Math.PI) / 180) * Math.max(0.35 * build, pass * (0.45 + 0.55 * crest));
   // (eased in over the wave's first 0.3 s and out over its last 0.7 s: nothing on the dome steps)

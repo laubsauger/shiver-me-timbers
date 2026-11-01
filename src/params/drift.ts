@@ -73,16 +73,18 @@ export interface DriftParams {
    * 0..0.9, how hard the front STALLS over the audience (the held climax: the 2026-10-30 story note — the separate
    * dome-wide "glowing network" flashed up while the front was still climbing and lit the spent region behind it
    * again). The sweep's speed dips by this fraction as the front crosses the zenith, so it rushes up from the
-   * horizon, hangs over the audience in its brightest light, and rushes away.
+   * horizon, hangs over the audience in its brightest light, and rushes away. 0 by default since the 2026-11-01 note
+   * ("it kind of loses its swoosh a bit in the end before reaching the top"): the front accelerates into the zenith.
    */
   waveStall: number;
-  /** linear radiance of the front's CREST: the broad band of light, textured as a caustic web, it carries while it
-   * stalls overhead (ahead of its line mostly; behind it the dome is spent) */
+  /** linear radiance of the front's CREST: the broad band of light, textured as a caustic web, it carries as it
+   * crosses overhead (ahead of its line mostly; behind it the dome is spent) */
   crestRadiance: number;
   /** s, e-fold of the afterglow: what the front froze (the field's last instant) cooling white → amber → ember */
   afterglow: number;
-  /** how many grains the front leaves behind besides the hero grain (survivors.ts): the one-in-a-billion, visibly
-   * few. Reload-scoped */
+  /** how many grains the front leaves behind besides the hero grain (survivors.ts). 0: the hero grain alone is the
+   * one in a billion (the 2026-11-01 note: "I liked this better when it really was just one that remained"; 16 in
+   * the 2026-10-30 story pass). Reload-scoped */
   survivors: number;
   /** "a few more shades" (the 2026-10-30 review): each family's range, either side of its base colour.
    * Matter runs deep ember ← amber → pale gold; antimatter cyan ← azure → violet-magenta (direction.md's cooling
@@ -224,11 +226,12 @@ export const driftParams: DriftParams = registerParams(
     waveLens: 6,
     waveLensWidth: 14,
     frontRadiance: 7,
-    waveStall: 0.72,
+    // (0.72 from the 2026-10-30 story note to the 2026-11-01 one: the stall over the top lost the front's swoosh)
+    waveStall: 0,
     crestRadiance: 1.1,
     // (0.9 s in the first rounds: the frozen field burned on behind the front; the region it passes stays spent)
     afterglow: 0.35,
-    survivors: 16,
+    survivors: 0,
     matterDeep: 0xff6224,
     matterPale: 0xffe2a0,
     antiCyan: 0x52dcff,

@@ -16,6 +16,7 @@ import * as THREE from 'three/webgpu';
 import { Fn, PI, abs, attribute, clamp, cos, exp, float, hash, instanceIndex, length, max, min, mix, sin, smoothstep, step, uv, vec3, vec4 } from 'three/tsl';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { billboardMesh, eyeFacing } from './billboard';
+import { glowWindow } from './glow';
 import { rng } from './web';
 import type { WebKnot } from './webVolume';
 
@@ -185,24 +186,38 @@ export function createStars(U: GrainUniforms, knots: WebKnot[]): THREE.Instanced
  */
 export function createHeroGrain(U: GrainUniforms): THREE.InstancedMesh {
   const dist = U.pivot.sub(U.eye).length();
-  const breath = sin(U.time.mul(PI.mul(2 * 0.2))).mul(0.1).add(1);
+  // a gentle PULSE, ~4 s: the core breathes a little, its glow more (the 2026-11-01 note: the one that remained "maybe
+  // a bit too faint" — it is alone on the dome now, survivors.ts, so it has to hold the eye on its own)
+  const pulse = sin(U.time.mul(PI.mul(2 * 0.24))).mul(0.5).add(0.5);
+  const breath = pulse.mul(0.16).add(0.92);
+  const swell = pulse.mul(0.5).add(0.75);
   // a core of about half a degree, whatever its distance
   const wanted = min(U.size.mul(1.6).mul(U.scale), dist.mul(0.009));
   const f = floored(wanted, dist, U);
   // it keeps a little more presence than a plain grain while receding: the eye follows it into the web
-  const grain = U.heroGrain.mul(max(f.coverage, min(float(1), U.scale.mul(40)).mul(0.25))).mul(breath);
+  const grain = U.heroGrain.mul(max(f.coverage, min(float(1), U.scale.mul(40)).mul(0.25)));
   // it is the LAST star to light, above the signature: first light, the remainder and the last star are one place
   const ignite = smoothstep(0.88, 0.96, U.stars);
   const material = additive('undertime-hero-grain');
-  // big enough quad for the star it becomes
-  const size = max(f.size.mul(3), dist.mul(STAR_HALF * 2 * 1.4).mul(ignite));
+  // the quad: seven times the grain, room for its glow (three until 2026-11-01), or the star it becomes
+  const GLOW = 7;
+  const size = max(f.size.mul(GLOW), dist.mul(STAR_HALF * 2 * 1.4).mul(ignite));
   const px = U.pixelAngle.mul(dist).div(size.mul(0.5));
   material.positionNode = eyeFacing(U.pivot, size.mul(step(0.0005, grain.add(ignite))));
   material.colorNode = Fn(() => {
     const p = uv().sub(0.5).mul(2);
     const r = length(p);
-    const disc = exp(r.mul(3).pow(2).negate()).mul(1.6).add(exp(r.mul(9).pow(2).negate()).mul(3));
-    const g = U.warm.mul(U.radiance).mul(grain).mul(disc);
+    // the grain's own light in units of its glow's reach (the quad's half-width while the grain sets it), so the star's
+    // larger quad never stretches it
+    const k = size.div(f.size.mul(GLOW));
+    const g2 = r.mul(k);
+    // a hot point (never under ~1.2 px, what it gains in width given back in brightness), the warm disc it sat in
+    // before (1/e at ~0.25°), and a soft halo out to ~1.8°, windowed to nothing at the quad's edge (glow.ts)
+    const rc = max(float(0.05), px.mul(k).mul(1.2));
+    const point = exp(g2.div(rc).pow(2).negate()).mul(float(0.05).div(rc).pow(2)).mul(4);
+    const disc = exp(g2.div(0.14).pow(2).negate()).mul(1.6);
+    const halo = exp(g2.div(0.45).pow(2).negate()).mul(0.28).mul(glowWindow(g2.mul(g2)));
+    const g = U.warm.mul(U.radiance).mul(grain).mul(point.add(disc).mul(breath).add(halo.mul(swell))).mul(1.5);
     const s = mix(U.star, vec3(1, 0.95, 0.88), 0.5).mul(U.starRadiance).mul(ignite).mul(starLight(r, p.x, p.y, px)).mul(0.08);
     return vec4(g.add(s), 1);
   })();

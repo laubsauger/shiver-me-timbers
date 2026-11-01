@@ -6,9 +6,11 @@
  * and, seconds later in the dark, a grain simply appeared. Now the front LEAVES them, and the audience sees it do so:
  * as it sweeps, nearly everything it touches turns to light and is spent (waveFx.ts spent), but here and there a
  * matter bead it catches does not find its partner — it runs on out of the front's light, curls down as it loses its
- * energy, and comes to rest: a warm grain on a dark dome. A few of them across the sky (`survivors`, 16), and one in
- * front and up, where the first light was: the HERO GRAIN (direction.md: "one near pair gets away … its matter track
- * keeps going — the only moving line on the dome — and curls down onto that spot").
+ * energy, and comes to rest: a warm grain on a dark dome. A few of them across the sky (`survivors`, 16 in the
+ * 2026-10-30 story pass), and one in front and up, where the first light was: the HERO GRAIN (direction.md: "one near
+ * pair gets away … its matter track keeps going — the only moving line on the dome — and curls down onto that spot").
+ * Since the 2026-11-01 note ("I liked this better when it really was just one that remained") `survivors` is 0: the
+ * hero's run and its grain are all the front leaves.
  *
  * Each survivor's run is a product track of its own family (productModel.ts SURVIVOR: drawn by products.ts, exempt
  * from the front's freezing and spending); its grain, once it rests, is drawn here. In the remain beat the others dim
@@ -85,7 +87,7 @@ export function pickSurvivors(events: readonly PairEvent[], p: DriftParams, coun
   // farthest-point picking on the sphere of directions: an even scatter, not a clump
   const picked: typeof cands = [];
   const pool = [...cands];
-  if (pool.length) picked.push(...pool.splice(Math.floor(r() * pool.length), 1));
+  if (pool.length && count > 0) picked.push(...pool.splice(Math.floor(r() * pool.length), 1));
   // (and never two within 8° of each other or of the hero grain: fewer, rather than a pair that reads as one blot)
   const apart = Math.cos((8 * Math.PI) / 180);
   while (picked.length < count && pool.length) {

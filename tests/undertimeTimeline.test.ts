@@ -133,28 +133,25 @@ describe('Undertime light wave envelope', () => {
     for (let t = t0; t < starts.wave; t += 0.1) expect(undertimeState(t + 0.1, p).build).toBeGreaterThanOrEqual(undertimeState(t, p).build);
   });
 
-  it('the front STALLS over the audience, and its crest holds while it does (the climax is the front itself)', () => {
-    // the front's angular speed (frac/s) over the audience against its fastest
+  it('the front ACCELERATES into the zenith and its crest is full there (the swoosh carries over the top)', () => {
+    // (the 2026-11-01 note: "it kind of loses its swoosh a bit in the end before reaching the top" — the stall of the
+    // 2026-10-30 story pass had it at 38 % of its peak speed by the zenith)
     const speed = (t: number): number => (undertimeState(t + 0.01, p).wave - undertimeState(t - 0.01, p).wave) / 0.02;
-    const over = starts.wave + waveTimeAt(0.5, p.waveStall) * p.wave;
+    const at = (frac: number): number => starts.wave + waveTimeAt(frac, p.waveStall) * p.wave;
+    const over = at(0.5);
     let fastest = 0;
     for (let t = starts.wave + 0.05; t < starts.wave + p.wave - 0.05; t += 0.02) fastest = Math.max(fastest, speed(t));
-    expect(speed(over)).toBeLessThan(0.5 * fastest);
-    // and still moving: a stall, not a stop (a front that stops reads as a wall)
-    expect(speed(over)).toBeGreaterThan(0.15 * fastest);
+    expect(speed(over)).toBeGreaterThan(0.97 * fastest);
+    // never slowing on the way up: from the focus zone (frac 0.15, ~27° up) to the top its speed only rises
+    for (let f = 0.15; f < 0.49; f += 0.02) expect(speed(at(f + 0.02))).toBeGreaterThan(speed(at(f)));
+    // and it releases after: settling behind the audience well under its peak
+    expect(speed(at(0.9))).toBeLessThan(0.6 * fastest);
+    // the crest is full over the top, coming up while the front climbs and held through the zenith
+    expect(undertimeState(over, p).crest).toBeGreaterThan(0.99);
+    expect(undertimeState(at(0.3), p).crest).toBeGreaterThan(0.2);
     let held = 0;
-    let first = Infinity;
-    let last = -Infinity;
-    for (let t = starts.wave; t < starts.wave + p.wave; t += 0.01) {
-      if (undertimeState(t, p).crest > 0.95) {
-        held += 0.01;
-        first = Math.min(first, t);
-        last = Math.max(last, t);
-      }
-    }
-    expect(held).toBeGreaterThan(1);
-    expect(first).toBeLessThan(over);
-    expect(last).toBeGreaterThan(over);
+    for (let t = starts.wave; t < starts.wave + p.wave; t += 0.01) if (undertimeState(t, p).crest > 0.95) held += 0.01;
+    expect(held).toBeGreaterThan(0.6);
   });
 
   it('it is all over before the remainder: darkness first, the one grain singled out in it', () => {
@@ -172,7 +169,7 @@ describe('Undertime light wave envelope', () => {
       if (l > peak) [peak, peakT] = [l, t];
     }
     expect(peak).toBeGreaterThan(0.95 * max);
-    // while it stalls over the audience
+    // as it crosses over the audience
     expect(undertimeState(peakT, p).crest).toBeGreaterThan(0.9);
   });
 
