@@ -19,12 +19,19 @@
  *             passes ~18 m (11 radii) off its line — growing out of the flow ahead, then sweeping up over the audience
  *             at ~6°/s as the dive slows (~93–97 s) — with a smaller spiral beside it, and two small irregulars just in front of ours
  *
+ * MOST ARE MODELLED (the 2026-11-01 note: "a lot of the galaxies now look quite cheaply pasted in there, like bad
+ * cutouts"): the members of the knots' groups and the filament's galaxies, the Local Group's two spirals and most knot
+ * galaxies are drawn by galaxyFace as ours is (tile −1, galaxies.ts MODELLED GALAXIES), each with arms, pitch, phase
+ * and noise of its own, ellipticals among them; a photo is kept only for PHOTO_SHARE of the knots' own galaxies, from
+ * the tiles that hold up (PHOTO_KEEP) — the edge-on dust lanes the model cannot draw, and clean spirals — and for the
+ * two small irregulars by ours.
+ *
  * Every galaxy keeps clear of the dive's line by several of its own radii (one crossing the eye would be a blur
  * filling the dome), and of ours. Seeded: every lane renders the same sky.
  */
 import { rng } from '../undertime/web';
 import type { WebKnot } from '../undertime/webVolume';
-import type { GalaxyAtlas, GalaxySpec } from './galaxies';
+import { GALAXY_TYPE, type GalaxyAtlas, type GalaxySpec, type GalaxyVariant } from './galaxies';
 import { diveWorld, type WebFrame } from './webDive';
 import type { Vec3 } from '../../cine/domeMaster';
 
@@ -51,6 +58,18 @@ const M31_ALONG = 7.5;
 const M31_OFF = 11;
 /** ours' radii the two small irregulars (the Magellanic Clouds' role) lie in front of ours along the approach */
 const SAT_ALONG = 3.5;
+/**
+ * The atlas tiles that hold up as galaxies in the web (looked at 2026-11-01, galaxy-atlas.jpg): clean face-on spirals
+ * (1, 10, 11, 13), the two edge-on discs with dust lanes (3, 7), a clean interacting pair (24), the soft irregular
+ * (21). The rest carry foreground stars of our own galaxy, a hard elliptical mask with a stretched plateau (the
+ * ellipticals, the Sombrero) or a cut-out bar, and read as pasted cards; the model draws those kinds instead.
+ */
+const PHOTO_KEEP = new Set([1, 3, 7, 10, 11, 13, 21, 24]);
+/** the share of the knots' own galaxies drawn from those photos (the rest, and every other galaxy, modelled) */
+const PHOTO_SHARE = 0.3;
+/** deg, the most a modelled elliptical's plane leans from facing the dive (a planar model squashes as it tilts: an
+ * elliptical is a ball, its outline at most ~E4 from here) */
+const ELLIPTICAL_LEAN = 50;
 
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a: Vec3, b: Vec3, k = 1): Vec3 => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
@@ -94,8 +113,10 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
   const byKind = (kinds: string[]): number[] => atlas.filter((g) => kinds.includes(g.kind)).map((g) => g.tile);
   const discs = byKind(['spiral', 'barred']);
   const others = byKind(['edge', 'inclined', 'irregular', 'interacting']);
-  const ellipticals = byKind(['elliptical']);
-  const irregulars = byKind(['irregular']);
+  const irregulars0 = byKind(['irregular']);
+  const keep = (pool: number[]): number[] => (pool.some((t) => PHOTO_KEEP.has(t)) ? pool.filter((t) => PHOTO_KEEP.has(t)) : pool);
+  const irregulars = keep(irregulars0);
+  const photos = keep([...discs, ...others]);
   // each tile used in turn from a shuffled deck, so no two neighbours are the same galaxy
   const decks = new Map<number[], number[]>();
   const draw = (pool: number[]): number => {
@@ -116,14 +137,79 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
     return len(sub(p, add(a, ab, t)));
   };
   const out: GalaxySpec[] = [ours];
+  // A MODELLED GALAXY'S LOOK (tile −1; galaxies.ts VARIETY, the 2026-11-01 note: "we still want variance, and not all
+  // galaxies to look the same and use the same colours"). MODEL draws a disc galaxy of a seeded kind — grand-design
+  // (2 open arms) 24 %, flocculent (5–7 tight, broken arms) 16 %, barred 20 %, lenticular 12 %, irregular 12 %,
+  // edge-on with a dust lane 16 % — ELLIPTICAL an elliptical, EARLY one or a lenticular (the dense knots' cores:
+  // morphology–density), GRAND and FLOCCULENT those kinds (the Local Group's two spirals). Each also draws its
+  // bulge-to-disc ratio, dust, disc colour (old yellow-white to young blue, with its bulge: big bulges old) and HII
+  // knots or not. Ellipticals' and lenticulars' planes lean at most ELLIPTICAL_LEAN from facing the dive (a planar
+  // model squashes as it tilts; a ball does not); an edge-on is a billboard, its roll random.
+  const MODEL = -1;
+  const ELLIPTICAL = -2;
+  const EARLY = -3;
+  const GRAND = -4;
+  const FLOCCULENT = -5;
+  type Look = Pick<GalaxySpec, 'arms' | 'wind' | 'phase' | 'seed' | 'elliptical'> & { variant: GalaxyVariant; normal?: Vec3; planar: boolean };
+  const facing = (): Vec3 => {
+    const lean = Math.cos((ELLIPTICAL_LEAN * Math.PI) / 180);
+    const z = lean + (1 - lean) * r();
+    const t = inPlane(f.approach, r);
+    const k = Math.sqrt(1 - z * z);
+    return norm([-f.approach[0] * z + t[0] * k, -f.approach[1] * z + t[1] * k, -f.approach[2] * z + t[2] * k]);
+  };
+  const pitch = (lo: number, hi: number): number => 1 / Math.tan(((lo + (hi - lo) * r()) * Math.PI) / 180);
+  const modelLook = (code: number): Look => {
+    let kind = code;
+    if (code === EARLY) kind = r() < 0.6 ? ELLIPTICAL : 2;
+    let type: GalaxyVariant['type'] = GALAXY_TYPE.spiral;
+    let arms = 2;
+    let wind = pitch(16, 30);
+    if (kind === ELLIPTICAL) type = GALAXY_TYPE.elliptical;
+    else if (kind === 2) type = GALAXY_TYPE.lenticular;
+    else if (kind === GRAND) arms = 2;
+    else if (kind === FLOCCULENT) [arms, wind] = [5 + Math.floor(r() * 3), pitch(10, 16)];
+    else {
+      const k = r();
+      if (k < 0.24) arms = 2;
+      else if (k < 0.4) [arms, wind] = [5 + Math.floor(r() * 3), pitch(10, 16)];
+      else if (k < 0.6) [type, arms, wind] = [GALAXY_TYPE.barred, 2, pitch(14, 26)];
+      else if (k < 0.72) type = GALAXY_TYPE.lenticular;
+      else if (k < 0.84) [type, arms, wind] = [GALAXY_TYPE.irregular, 1 + Math.floor(r() * 2), pitch(25, 40)];
+      else type = GALAXY_TYPE.edgeOn;
+    }
+    const early = type === GALAXY_TYPE.elliptical || type === GALAXY_TYPE.lenticular;
+    // bulge-to-disc first; the disc's age follows it (a big bulge, an old disc), with scatter
+    const bulge = type === GALAXY_TYPE.irregular ? -0.8 : early ? 0.3 + r() * 1.2 : -0.6 + r() * 1.8;
+    const hue = type === GALAXY_TYPE.irregular ? 0.6 + 0.4 * r() : early ? -0.6 - 0.4 * r() : Math.max(-1, Math.min(1, 0.55 - bulge * 0.5 + (r() - 0.5) * 0.7));
+    const variant: GalaxyVariant = {
+      type,
+      bulge,
+      dust: type === GALAXY_TYPE.elliptical ? 0 : early ? r() * 0.8 : 0.3 + r() * 1.5,
+      hue,
+      knots: !early && (type === GALAXY_TYPE.irregular || hue > 0.1 ? r() < 0.85 : r() < 0.35),
+    };
+    return {
+      arms,
+      wind,
+      phase: r() * Math.PI * 2,
+      seed: 1 + r() * 97,
+      elliptical: type === GALAXY_TYPE.elliptical ? 1 : 0,
+      variant,
+      normal: early ? facing() : undefined,
+      planar: type !== GALAXY_TYPE.edgeOn,
+    };
+  };
   const place = (centre: Vec3, radius: number, tile: number, brightness: number, appear: number, flare: number, normal?: Vec3): boolean => {
     if (len(sub(centre, ours.centre)) < ours.radius * CLEAR_OURS + radius || offLine(centre) < radius * CLEAR_RADII) return false;
-    const n = normal ?? randomUnit(r);
+    const look: Partial<Look> & Pick<GalaxySpec, 'arms' | 'wind' | 'phase' | 'seed' | 'elliptical'> = tile < 0 ? modelLook(tile) : { arms: 2, wind: 1, phase: 0, seed: 0, elliptical: 0 };
+    const n = normal ?? look.normal ?? randomUnit(r);
     out.push({
       centre, normal: n, xAxis: inPlane(n, r), radius,
-      arms: 2, wind: 1, phase: 0, seed: 0, elliptical: 0,
+      arms: look.arms, wind: look.wind, phase: look.phase, seed: look.seed, elliptical: look.elliptical,
       appear, brightness, flare,
-      tile, planar: atlas.find((g) => g.tile === tile)?.planar ?? false, roll: r() * Math.PI * 2,
+      variant: look.variant,
+      tile: tile < 0 ? -1 : tile, planar: look.planar ?? atlas.find((g) => g.tile === tile)?.planar ?? false, roll: r() * Math.PI * 2,
     });
     return true;
   };
@@ -137,15 +223,16 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
     const dense = k.density > 12;
     const radius = size * (0.35 + 1.3 * Math.pow(r(), 3)) * (dense ? 1.5 : 1);
     const roll = r();
-    place(at, radius, draw(roll < 0.5 ? discs : roll < 0.7 && !dense ? others : ellipticals), 0.7 + r() * 0.5, r(), 1);
+    const own = r() < PHOTO_SHARE ? draw(photos) : roll < 0.6 || (roll < 0.75 && !dense) ? MODEL : EARLY;
+    place(at, radius, own, 0.7 + r() * 0.5, r(), 1);
     const members = Math.max(1, Math.round((k.density - KNOT_FLOOR) * MEMBERS_PER));
     const spread = MEMBER_SPREAD * f.box * Math.min(1.6, Math.sqrt(k.density / 10));
     for (let m = 0; m < members; m++) {
       // packed toward the centre: the ellipticals inside, the spirals in the outskirts (morphology–density)
       const g = Math.abs(gauss());
       const p = add(at, randomUnit(r), g * spread);
-      const pool = g < 0.9 && dense ? ellipticals : r() < 0.65 ? discs : others;
-      place(p, size * (0.12 + 0.55 * Math.pow(r(), 2.5)), draw(pool), 0.45 + r() * 0.45, r(), 0);
+      const kind = g < 0.9 && dense ? EARLY : r() < 0.12 ? ELLIPTICAL : MODEL;
+      place(p, size * (0.12 + 0.55 * Math.pow(r(), 2.5)), kind, 0.45 + r() * 0.45, r(), 0);
     }
   }
   // ---------------------------------------------------------------- the filament down which the dive runs
@@ -164,7 +251,7 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
     const off = len(sub(w, [f.dive[0] * along, f.dive[1] * along, f.dive[2] * along]));
     if (off > CONE_R0 + CONE_SLOPE * Math.max(0, L - along)) continue;
     const roll = r();
-    place(diveWorld(f, q, mid), size * (0.1 + 0.5 * Math.pow(r(), 3)), draw(roll < 0.6 ? discs : roll < 0.85 ? others : ellipticals), 0.4 + 0.5 * r(), r(), 0);
+    place(diveWorld(f, q, mid), size * (0.1 + 0.5 * Math.pow(r(), 3)), roll < 0.85 ? MODEL : ELLIPTICAL, 0.4 + 0.5 * r(), r(), 0);
   }
   // ---------------------------------------------------------------- the Local Group
   const R = ours.radius;
@@ -172,11 +259,11 @@ export function diveGalaxies(input: DiveGalaxyInput, atlas: GalaxyAtlas['galaxie
   const m31 = add(add(f.sun, f.approach, -M31_ALONG * R), up, M31_OFF * R);
   // inclined ~65° to the line of sight as it first shows (Andromeda's own is 77°: a long ellipse), a planar spiral
   const m31n = norm(add(f.approach, up, 1.8));
-  place(m31, M31_RADIUS * R, draw(discs), 1, 0.35, 1, m31n);
+  place(m31, M31_RADIUS * R, GRAND, 1, 0.35, 1, m31n);
   // a smaller spiral beside it (M33's role), and two small irregulars by ours (the Magellanic Clouds' role), off the
   // side of ours away from the line
   const side = norm([f.approach[1] * up[2] - f.approach[2] * up[1], f.approach[2] * up[0] - f.approach[0] * up[2], f.approach[0] * up[1] - f.approach[1] * up[0]]);
-  place(add(add(m31, side, 4.5 * R), f.approach, -2 * R), 0.45 * R, draw(discs), 0.8, 0.42, 1);
+  place(add(add(m31, side, 4.5 * R), f.approach, -2 * R), 0.45 * R, FLOCCULENT, 0.8, 0.42, 1);
   // ON THE NEAR SIDE of ours (SAT_ALONG radii back toward the eye), so the approach carries them out of the frame by
   // parallax: beside ours as it is recognised (~88–92 s), out past 50° from it by ~96 s and passing the eye before
   // the zoom. They were 2.2 radii BEYOND ours: from the eye they then kept ~2 of ours' own angular radii off its edge

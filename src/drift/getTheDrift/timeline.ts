@@ -151,24 +151,31 @@ function journey(ts: number[], speeds: number[], weight: (t: number) => number =
 
 /**
  * THE DIVE'S PACE (webDive.ts), as (fraction of its span, e-folds per second) keys: the speed it ADDS to the approach
- * over its span, from `diveLead` s before the act to the galaxies beat's end, scaled to add `diveEfolds` in all (at
- * 3 e-folds the keys are near their own scale: a peak of ~0.27). Slow under Undertime's first stars and its
- * signature, so the hero grain still lights above the text (~82.5 s); fastest a little past halfway (~88 s), where
- * the approach's own pace is still ~0.04 — together ~0.31 e-folds/s, under the 0.35 cap; and back to nothing at
- * `ours`, where the approach's own 0.12 carries on: from there the journey is the very curve it was without the dive
- * (the 2026-10-30 review: "a better sense of speed when zooming in … more dynamic"). Accelerate, then decelerate as
- * our galaxy is recognised — the breath before "this whole zoom in".
+ * over its span, from `diveLead` s before the act (69 s) to the galaxies beat's end (99 s), scaled to add `diveEfolds`
+ * in all (at 3 e-folds the keys are near their own scale: a peak of ~0.25). It begins under Undertime's pull-back as
+ * that eases out (~0.04 by 71 s) and is already a slow push by the pull-back's rest (~0.065 at 74 s), so the one
+ * move turns into the other without a stop (in the web the eye flies webDive.ts's TURN until the act; the dive's
+ * pace before it sets where on the line the turn lands and how fast it runs on) (the 2026-11-01 note: "zoom all the way out, then stagnate a
+ * bit, and then zoom all the way back in … more continuous"; it began at 74 s from rest and crept under 0.04 until
+ * 80 s); still slow under Undertime's first stars and its signature (~0.1 at 82.5 s, where the hero grain lights above
+ * the text); fastest a little past halfway (~88.5 s), where the approach's own pace is still ~0.04 — together
+ * ~0.3 e-folds/s, under the 0.35 cap; and back to nothing at `ours`, where the approach's own 0.12 carries on: from
+ * there the journey is the very curve it was without the dive (the 2026-10-30 review: "a better sense of speed when
+ * zooming in … more dynamic"). Accelerate, then decelerate as our galaxy is recognised — the breath before "this
+ * whole zoom in".
  */
 const DIVE_KEYS: ReadonlyArray<readonly [number, number]> = [
   [0, 0],
-  [0.12, 0.012],
-  [0.24, 0.04],
-  [0.36, 0.12],
-  [0.48, 0.24],
-  [0.58, 0.27],
-  [0.68, 0.24],
-  [0.8, 0.14],
-  [0.92, 0.04],
+  [0.067, 0.04],
+  [0.133, 0.06],
+  [0.233, 0.075],
+  [0.333, 0.085],
+  [0.433, 0.11],
+  [0.533, 0.2],
+  [0.65, 0.26],
+  [0.733, 0.23],
+  [0.833, 0.13],
+  [0.933, 0.04],
   [1, 0],
 ];
 

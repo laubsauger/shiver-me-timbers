@@ -61,8 +61,9 @@ export interface GetTheDriftParams {
   /**
    * THE DIVE INTO THE WEB (webDive.ts; the 2026-10-30 review: "fly into it … realise the vastness of this filament
    * network, then have the galaxies pop in in the distance, then OUR galaxy, and then start this whole zoom in"):
-   * s before the act's start the dive begins (where Undertime's pull-back and its turn come to rest: its gather
-   * beat + 1 s), and the e-folds of distance it adds to the approach before the galaxies beat ends — the approach
+   * s before the act's start the dive begins (69 s: under Undertime's pull-back as it eases out, so the one move
+   * hands over to the other without a stop — the 2026-11-01 note, "zoom all the way out, then stagnate a bit, and
+   * then zoom all the way back in"; it began at 74 s, from rest, where the pull-back had come to rest), and the e-folds of distance it adds to the approach before the galaxies beat ends — the approach
    * then starts e^diveEfolds times further out, among the filaments, and is the same curve as before from `ours` on
    */
   diveLead: number;
@@ -125,7 +126,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     bandLean: 20,
     centreEl: 14,
     sunRadius: 0.55,
-    diveLead: 7,
+    diveLead: 12,
     diveEfolds: 3,
     driftKeep: 0.72,
     insideKeep: 6e-3,

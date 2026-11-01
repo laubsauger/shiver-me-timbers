@@ -275,6 +275,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       milky.update({
         volume: s.volume * (1 - 0.4 * glare) * night, local: s.local * (1 - 0.55 * glare) * night, sunStar: s.sunStar * (1 - handover),
         radiance: p.volumeRadiance, pixelAngle, eye,
+        // (the glow's unresolved stars as we come inside the disk: milkyWay.ts starGrain)
+        grain: s.local,
         occluder: { centre, radius: s.earth > 0 ? EARTH_RADIUS * 1.003 : 0 },
         skyTurn,
       });

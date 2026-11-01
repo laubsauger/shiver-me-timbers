@@ -81,16 +81,18 @@ const smoothIntegral = (x: number): number => {
 const lerp = (a: number, b: number, k: number): number => a + (b - a) * k;
 
 /**
- * 0..1 position under a TRAPEZOID velocity: smooth ramps of `ramp` (fraction of the beat) at each end and a
- * constant rate between. For the zoom this is the log of scale, so the pull-back's optic flow is constant
- * through the middle and its peak rate is as low as the beat allows (smoothstep would peak at 1.5×).
+ * 0..1 position under a TRAPEZOID velocity: smooth ramps of `ramp` (fraction of the beat) at the start and
+ * `rampOut` (the same unless given) at the end, and a constant rate between. For the zoom this is the log of
+ * scale, so the pull-back's optic flow is constant through the middle and its peak rate is as low as the beat
+ * allows (smoothstep would peak at 1.5×).
  */
-export function plateau(x: number, ramp: number): number {
+export function plateau(x: number, ramp: number, rampOut = ramp): number {
   const k = clamp01(x);
   const r = Math.min(0.5, Math.max(1e-6, ramp));
-  const area = 1 - r;
+  const q = Math.min(0.5, Math.max(1e-6, rampOut));
+  const area = 1 - (r + q) / 2;
   if (k < r) return (r * smoothIntegral(k / r)) / area;
-  if (k > 1 - r) return 1 - (r * smoothIntegral((1 - k) / r)) / area;
+  if (k > 1 - q) return 1 - (q * smoothIntegral((1 - k) / q)) / area;
   return (r / 2 + (k - r)) / area;
 }
 
@@ -146,6 +148,10 @@ export function waveTimeAt(frac: number, stall = WAVE_STALL): number {
 export function sweepInverseTable(n: number, stall: number): Float32Array {
   return Float32Array.from({ length: n }, (_, i) => waveTimeAt(i / (n - 1), stall));
 }
+
+/** s the pull-back eases out over at the zoom's end (its middle rate 0.33 e-folds/s at the default 18 s: under the
+ * 0.35 cap) */
+export const ZOOM = { easeOut: 5 };
 
 /** s from the front reaching the hero grain's spot to the hero survivor coming to rest on it (survivors.ts) */
 export const HERO_RUN = 2.1;
@@ -262,8 +268,12 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
   // themselves later and slower
   const heroGrain = smooth((t - (heroPassTime(p) + HERO_RUN * 0.85)) / 0.8);
   const grains = smooth((rem - 0.35) / 0.55);
-  // pull-back: eased in and out over ~3 s, constant through the middle (comfort: tests hold the peak rate)
-  const scale = Math.pow(10, -p.zoomDecades * plateau(zoom, 3 / Math.max(6, p.zoom)));
+  // pull-back: eased in over ~3 s, constant through the middle (comfort: tests hold the peak rate), eased out over
+  // ZOOM_EASE_OUT s — long, so it hands over to the dive into the web, which begins under it, as one move (the
+  // 2026-11-01 note: "we zoom all the way out, then stagnate a bit, and then zoom all the way back in … adjust the
+  // movements so it feels more continuous"; it eased out over 3 s, to a dead stop at 73 s)
+  const zl = Math.max(6, p.zoom);
+  const scale = Math.pow(10, -p.zoomDecades * plateau(zoom, 3 / zl, Math.min(ZOOM.easeOut, zl / 2) / zl));
   const env = waveEnvelope(t, p);
   return {
     beat,
@@ -337,8 +347,9 @@ export function eyePath(t: number, p: DriftParams): Vec3 {
 /** s after the gather beat starts that the pull-back's turn comes to rest (the zoom itself eased out at its start) */
 const WEB_TURN_END = 1;
 
-/** show s the pull-back (zoom and turn) comes to rest, where Get the Drift's dive into the web begins (its
- * `diveLead` is set to meet it: tests/webDive.test.ts) */
+/** show s the pull-back (zoom and turn) comes to rest; Get the Drift's dive into the web has begun under it, 5 s
+ * before (its `diveLead`), and the eye turns from one into the other on one curve, one way (getTheDrift/webDive.ts
+ * THE TURN; tests/webDive.test.ts) */
 export function webTurnEnd(p: DriftParams): number {
   return beatStarts(p).starts.gather + WEB_TURN_END;
 }

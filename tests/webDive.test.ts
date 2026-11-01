@@ -1,8 +1,11 @@
 /**
  * The dive into the cosmic web (src/drift/getTheDrift/webDive.ts): one curve through the web's box from Undertime's
  * pull-back, through the dive, into Get the Drift's approach. What has to hold for a dome audience:
- *   - the eye's place in the web never jumps and its speed never jerks — at the pull-back's rest (where the dive
- *     begins), at the act's hand-over (where the box changes size and the eye changes worlds) and at `ours` (where
+ *   - the eye never stops between the pull-back and the dive: the dive begins under the pull-back's ease-out and the
+ *     two hand over on an arc (the 2026-11-01 note: "zoom all the way out, then stagnate a bit, and then zoom all the
+ *     way back in"), and the dive's line is still met exactly by the act;
+ *   - the eye's place in the web never jumps and its speed never jerks — through the pull-back's hand-over to the
+ *     dive, at the act's hand-over (where the box changes size and the eye changes worlds) and at `ours` (where
  *     the dive hands its pace to the approach) — or the whole web on the dome would lurch at once;
  *   - the box's change of size at the act is invisible: every point of the web (the hero grain, a knot, our galaxy's
  *     Sun point) is seen in the same direction from either world;
@@ -36,11 +39,53 @@ const eyeAt = (t: number): Vec3 => (t < actStart ? eyePath(t, p) : arrivalEye(t 
 const placeAt = (t: number) => webPlace(t, eyeAt(t), f, p);
 
 describe('the web dive', () => {
-  it('starts where the pull-back comes to rest, and Get the Drift is timed to meet it', () => {
-    expect(f.diveStart).toBe(webTurnEnd(p));
+  it('turns from the pull-back into the dive on one curve: one way, under 20°/s, never stopping', () => {
+    expect(f.pullEnd).toBe(webTurnEnd(p));
     expect(actStart - p2.diveLead).toBeCloseTo(f.diveStart, 9);
-    // at rest there: the pull-back has eased out and the dive eases in
-    expect(len(placeAt(f.diveStart).vel)).toBeLessThan(1e-3);
+    // (the 2026-11-01 notes: the pull-back eased to rest and the dive began from rest — "zoom all the way out, then
+    // stagnate a bit, and then zoom all the way back in"; added together the eye's direction of travel flipped round
+    // ~430°/s at ~0.01 e-folds/s; a sideways S to soften it "swerves left and right twice". Wanted: one decided move.)
+    // The plane the turn lies in: the pull-back's direction and the dive's
+    const axis = (() => {
+      const u = sub(f.start, hero);
+      const c: Vec3 = [f.dive[1] * u[2] - f.dive[2] * u[1], f.dive[2] * u[0] - f.dive[0] * u[2], f.dive[0] * u[1] - f.dive[1] * u[0]];
+      return c.map((x) => x / len(c)) as Vec3;
+    })();
+    const h = 1 / 30;
+    let slowest = Infinity;
+    let fastestTurn = 0;
+    let sign = 0;
+    let flips = 0;
+    let prev: Vec3 | null = null;
+    for (let t = 60; t < 100; t += h) {
+      const pl = placeAt(t);
+      // the eye's speed against its distance from the nearer of the hero knot (the pull-back's pivot) and our galaxy's
+      // Sun point (the dive's goal): e-folds/s, what the optic flow of the web round it reads as
+      const near = Math.min(len(wrap(sub(pl.eyePat, hero))), len(wrap(sub(pl.eyePat, f.target))));
+      if (t < 95) slowest = Math.min(slowest, len(pl.vel) / near);
+      const dir = pl.vel.map((x) => x / len(pl.vel)) as Vec3;
+      if (prev) {
+        const rate = (Math.acos(Math.min(1, dot(prev, dir))) * 180) / Math.PI / h;
+        if (t > 64) fastestTurn = Math.max(fastestTurn, rate);
+        // the sense of the turn about the plane's normal, wherever it is turning perceptibly (over 1°/s: the pull-back's
+        // own slow turn of its line, 14° over 55–74 s, runs the other way at ≤0.6°/s until the curve takes over)
+        const cr: Vec3 = [prev[1] * dir[2] - prev[2] * dir[1], prev[2] * dir[0] - prev[0] * dir[2], prev[0] * dir[1] - prev[1] * dir[0]];
+        if (t > 65 && rate > 1) {
+          const sg = Math.sign(dot(cr, axis));
+          if (sign !== 0 && sg !== sign) flips++;
+          sign = sg;
+        }
+      }
+      prev = dir;
+    }
+    // the travel direction turns at most ~20°/s (it was ~430), one way only, and the eye never stops (it was ~0 at 74 s)
+    expect(fastestTurn).toBeLessThan(20.5);
+    expect(flips).toBe(0);
+    expect(slowest).toBeGreaterThan(0.03);
+    // and by the act the turn is over: the eye is on the dive's line (the frame's filament), at the line's own pace
+    const at = placeAt(actStart - 1e-3);
+    const onLine = sub(at.eyePat, f.target);
+    expect(len(sub(onLine, f.dive.map((x) => x * dot(onLine, f.dive)) as Vec3))).toBeLessThan(1e-6);
   });
 
   it('sits the box in the world by a rotation, the pull-back and the dive along their world directions', () => {
@@ -52,7 +97,7 @@ describe('the web dive', () => {
     // and the frame the search picked the filament in is the frame the show uses (the params still fit it)
     expect(angleDeg(f.dive, WEB_DIVE)).toBeLessThan(0.5);
     // the pull-back's own world direction where it rests is the pattern one the filament was searched from
-    expect(angleDeg(toWorld(R, WEB_PULL), webFlight(f.diveStart, p).offset)).toBeLessThan(1e-6);
+    expect(angleDeg(toWorld(R, WEB_PULL), webFlight(f.pullEnd, p).offset)).toBeLessThan(1e-6);
   });
 
   it('never jumps or jerks through the web, 55–123 s at 30 fps (pull-back, rest, dive, the act, the approach)', () => {
@@ -71,12 +116,13 @@ describe('the web dive', () => {
       // dome. (Against the speed itself it reads large where the pull-back eases to rest at 73 s, by design.)
       const kick = len(sub(now.vel, prev.vel)) / h;
       worstKick = Math.max(worstKick, kick);
-      if (t > f.diveStart - 0.5) diveKick = Math.max(diveKick, kick);
+      if (t > f.pullEnd) diveKick = Math.max(diveKick, kick);
       prev = now;
     }
     expect(worst).toBeLessThan(1.2);
-    // (the pull-back's own ease to rest peaks at ~0.039 box/s² at ~72 s, the dive's at under 0.01; the dive's speed
-    // stepping at 81 s would read ~0.5)
+    // (the hand-over, the pull-back easing off under the dive and the arc, peaks at ~0.026 box/s² at ~71 s — the
+    // pull-back alone easing to rest peaked at 0.039 — and the dive after it at under 0.015; the dive's speed stepping at
+    // 81 s would read ~0.5)
     expect(worstKick).toBeLessThan(0.05);
     expect(diveKick).toBeLessThan(0.015);
   });

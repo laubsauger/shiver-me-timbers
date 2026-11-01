@@ -30,9 +30,11 @@
  * eye's place in the box stays continuous at every hand-over by construction (webPlace), filament or not.
  *
  * WHERE THE EYE IS IN THE WEB (webPlace), one curve over three regimes, continuous in place and in speed:
- *   until webTurnEnd   Undertime's pull-back (webFlight): the world scales about the hero grain; the eye still
- *   until the act      the dive in Undertime's world: the eye still, the box 19 m, the eye's place in it moving down
- *                      the line (at rest at first: the dive starts as the pull-back has come to rest)
+ *   until ~67.6 s      Undertime's pull-back (webFlight): the world scales about the hero grain; the eye still
+ *   until the act      THE TURN (below): one curve from the pull-back's direction into the dive's, one way, ≤20°/s,
+ *                      in Undertime's world (the eye still, the box 19 m once the pull-back rests), landing on the
+ *                      dive's line at the act (the 2026-11-01 notes; until then the pull-back eased to rest at 73–74 s
+ *                      and the dive began from rest there)
  *   from the act       Get the Drift's world: the eye flies the approach (arrivalEye), the box is `box` m
  * At the act the box's size jumps (19 m → ~900 m) and the eye's world position with it (to the approach line, ~280 m
  * from our galaxy's Sun point — which stays near the world's origin, so the planet and the landing keep their float
@@ -45,7 +47,7 @@
  */
 import type { DriftParams } from '../../params/drift';
 import type { GetTheDriftParams } from '../../params/getTheDrift';
-import { beatStarts as undertimeBeats, webFlight, webTurnEnd } from '../undertime/timeline';
+import { beatStarts as undertimeBeats, plateau, webFlight, webTurnEnd } from '../undertime/timeline';
 import { arrivalState, domeDir } from './timeline';
 import type { Vec3 } from '../../cine/domeMaster';
 
@@ -73,8 +75,9 @@ export interface WebFrame {
   /** Get the Drift's world: our galaxy's Sun point (where `target` is) and the unit approach direction */
   sun: Vec3;
   approach: Vec3;
-  /** show s: the dive starts (the pull-back at rest), Get the Drift starts */
+  /** show s: the dive starts (under the pull-back's ease-out), the pull-back comes to rest, Get the Drift starts */
   diveStart: number;
+  pullEnd: number;
   actStart: number;
   /** the act's own params (the approach's pace, `webPlace`) */
   p2: GetTheDriftParams;
@@ -120,8 +123,9 @@ function frameRotation(a: Vec3, b: Vec3, u: Vec3, d: Vec3): Mat3 {
  * point in Get the Drift's world (timeline.ts ourGalaxy).
  */
 export function webFrame(p: DriftParams, p2: GetTheDriftParams, heroKnot: Vec3, sun: Vec3): WebFrame {
-  const diveStart = webTurnEnd(p);
-  const end = webFlight(diveStart, p);
+  const pullEnd = webTurnEnd(p);
+  const end = webFlight(pullEnd, p);
+  const actStart = undertimeBeats(p).total - p2.overlap;
   const approach = domeDir(p2.approachEl, p2.approachAz, p.domeTilt);
   const R = frameRotation(WEB_PULL, WEB_DIVE, norm(end.offset), approach);
   const start = lin(heroKnot, toPattern(R, end.offset), 1);
@@ -135,8 +139,9 @@ export function webFrame(p: DriftParams, p2: GetTheDriftParams, heroKnot: Vec3, 
     box: (p2.ourDistance * Math.exp(p2.diveEfolds)) / DIVE_L,
     sun: [...sun] as Vec3,
     approach,
-    diveStart,
-    actStart: undertimeBeats(p).total - p2.overlap,
+    diveStart: actStart - p2.diveLead,
+    pullEnd,
+    actStart,
     p2,
   };
 }
@@ -158,13 +163,125 @@ function diveLeft(t: number, f: WebFrame): number {
 /** s the velocity is differenced over */
 const H = 1 / 120;
 
-function placeAt(t: number, f: WebFrame, p: DriftParams, eye: Vec3 | null): { eyePat: Vec3; box: number } {
-  if (t < f.diveStart) {
-    const fl = webFlight(t, p);
-    return { eyePat: lin(f.hero, toPattern(f.R, fl.offset), 1), box: fl.box };
+/** the pull-back's place in the box (pattern), at rest from pullEnd on (at `start`) */
+function pullAt(t: number, f: WebFrame, p: DriftParams): Vec3 {
+  return lin(f.hero, toPattern(f.R, webFlight(Math.min(t, f.pullEnd), p).offset), 1);
+}
+
+/** the dive's line (pattern) at show time t */
+const lineAt = (t: number, f: WebFrame): Vec3 => lin(f.target, f.dive, -diveLeft(t, f));
+
+/**
+ * THE TURN (the 2026-11-01 notes: "we zoom all the way out, then stagnate a bit, and then zoom all the way back in";
+ * then, of a first fix that added a sideways S to the hand-over, "the motion through the cluster is now too undecided
+ * and swerves left and right twice"). The pull-back runs out along the line from the hero knot and the dive runs back
+ * in 160° from it: added, or one after the other, the eye's direction of travel flips round in under a second at
+ * ~0.01 e-folds/s (~430°/s at its fastest) — the stop. So the eye flies ONE CURVE between them: it leaves the
+ * pull-back TURN_EASE s before the turn begins (its speed easing down to the turn's), then turns from the pull-back's
+ * direction to the dive's about a single axis, one way only (a slerp of the two), until the act (81 s) — its rate a
+ * plateau, eased in and out over TURN_RAMP of the turn, ~20°/s at most over the ~11.4 s it takes — at a steady
+ * speed (~0.006 box/s, ≥0.03 e-folds/s of the nearer of the hero knot and the Sun point), its speed easing into the dive's over the last
+ * 2·TURN_EASE s; at the act it is ON the dive's line with the line's place, direction and speed: straight down the
+ * filament from there, the frame and the act's hand-over as they were. Two numbers are solved so it lands exactly
+ * there (Newton, on a table integrated once per frame): when the turn begins (~69.6 s) and its speed. What lies out
+ * of the turn's plane (the pull-back's own slow turn of its line) is taken up along the curve, ~0.0002 box. Off the
+ * pull-back's line the eye no longer keeps its distance from the hero knot: the hero grain comes in from ~5.8 m to
+ * ~3.4 m (Undertime's world) over the turn, and the web's scale goes on changing about the eye, which is invisible.
+ */
+const TURN_RAMP = 0.3;
+const TURN_EASE = 2;
+
+interface Turn {
+  t0: number;
+  t1: number;
+  /** pattern positions every TURN_DT s from t0 */
+  pos: Vec3[];
+  /** 0..1 the fraction of the curve's length flown at each of them */
+  along: number[];
+  /** pattern offset taken up over the curve, eased in and out over its length flown (so it tilts the direction of
+   * travel by a tenth of a degree at most, at a few hundredths of a degree per second) */
+  rest: Vec3;
+  /** the solved turn start (s) and speed (box units/s) */
+  ts: number;
+  speed: number;
+}
+const TURN_DT = 1 / 120;
+const turns = new WeakMap<WebFrame, Turn>();
+const smooth01 = (x: number): number => {
+  const k = Math.min(1, Math.max(0, x));
+  return k * k * (3 - 2 * k);
+};
+
+function turnFor(f: WebFrame, p: DriftParams): Turn {
+  const hit = turns.get(f);
+  if (hit) return hit;
+  const t1 = f.actStart;
+  const h = 1 / 240;
+  const vPull = (t: number): Vec3 => lin(pullAt(t + h, f, p), pullAt(t - h, f, p), -1).map((x) => x / (2 * h)) as Vec3;
+  const sp = (v: Vec3): number => Math.hypot(v[0], v[1], v[2]);
+  const vLine = (t: number): number => (t < f.diveStart ? 0 : (diveLeft(t - h, f) - diveLeft(t + h, f)) / (2 * h));
+  const d = f.dive;
+  const fly = (ts: number, sc: number): { pos: Vec3[]; run: number[]; t0: number; e2: Vec3 } => {
+    const t0 = ts - TURN_EASE;
+    const a0 = norm(vPull(t0));
+    const omega = Math.acos(Math.max(-1, Math.min(1, dot(a0, d))));
+    const so = Math.sin(omega) || 1;
+    const n = Math.round((t1 - t0) / TURN_DT);
+    const dt = (t1 - t0) / n;
+    let cur = pullAt(t0, f, p);
+    const pos: Vec3[] = [cur];
+    const run = [0];
+    for (let i = 0; i < n; i++) {
+      const t = t0 + (i + 0.5) * dt;
+      const into = smooth01((t - t0) / TURN_EASE);
+      const out = smooth01((t - (t1 - 2 * TURN_EASE)) / (2 * TURN_EASE));
+      const s = (1 - out) * ((1 - into) * sp(vPull(t)) + into * sc) + out * vLine(t);
+      const phi = omega * plateau((t - ts) / (t1 - ts), TURN_RAMP);
+      const dir = lin(a0.map((c) => (c * Math.sin(omega - phi)) / so) as Vec3, d, Math.sin(phi) / so);
+      cur = lin(cur, dir, s * dt);
+      pos.push(cur);
+      run.push(run[i] + s * dt);
+    }
+    return { pos, run, t0, e2: norm(lin(a0, d, -dot(a0, d))) };
+  };
+  const goal = lineAt(t1, f);
+  const miss = (r: { pos: Vec3[]; e2: Vec3 }): [number, number] => {
+    const e = lin(goal, r.pos[r.pos.length - 1], -1);
+    return [dot(e, d), dot(e, r.e2)];
+  };
+  let ts = t1 - 12;
+  let sc = 0.015;
+  for (let it = 0; it < 40; it++) {
+    const m = miss(fly(ts, sc));
+    if (Math.hypot(m[0], m[1]) < 1e-8) break;
+    const dT = 1e-3;
+    const dS = 1e-5;
+    const mT = miss(fly(ts + dT, sc));
+    const mS = miss(fly(ts, sc + dS));
+    const J = [(mT[0] - m[0]) / dT, (mS[0] - m[0]) / dS, (mT[1] - m[1]) / dT, (mS[1] - m[1]) / dS];
+    const det = J[0] * J[3] - J[1] * J[2];
+    const stepT = (J[3] * m[0] - J[1] * m[1]) / det;
+    const stepS = (J[0] * m[1] - J[2] * m[0]) / det;
+    ts -= Math.max(-1, Math.min(1, stepT));
+    sc = Math.max(0.002, sc - Math.max(-0.005, Math.min(0.005, stepS)));
   }
+  const r = fly(ts, sc);
+  const total = r.run[r.run.length - 1] || 1;
+  const turn: Turn = { t0: r.t0, t1, pos: r.pos, along: r.run.map((x) => x / total), rest: lin(goal, r.pos[r.pos.length - 1], -1), ts, speed: sc };
+  turns.set(f, turn);
+  return turn;
+}
+
+function placeAt(t: number, f: WebFrame, p: DriftParams, eye: Vec3 | null): { eyePat: Vec3; box: number } {
+  const tr = turnFor(f, p);
+  if (t < tr.t0) return { eyePat: pullAt(t, f, p), box: webFlight(t, p).box };
   if (t < f.actStart || !eye) {
-    return { eyePat: lin(f.target, f.dive, -diveLeft(t, f)), box: t < f.actStart ? webFlight(t, p).box : f.box };
+    if (t >= tr.t1) return { eyePat: lineAt(t, f), box: f.box };
+    const x = (t - tr.t0) / ((tr.t1 - tr.t0) / (tr.pos.length - 1));
+    const i = Math.min(tr.pos.length - 2, Math.floor(x));
+    const at = lin(tr.pos[i], lin(tr.pos[i + 1], tr.pos[i], -1), x - i);
+    const along = tr.along[i] + (tr.along[i + 1] - tr.along[i]) * (x - i);
+    return { eyePat: lin(at, tr.rest, along * along * along * (along * (along * 6 - 15) + 10)), box: webFlight(t, p).box };
   }
   return { eyePat: lin(f.target, toPattern(f.R, lin(eye, f.sun, -1)), 1 / f.box), box: f.box };
 }
