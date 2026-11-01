@@ -7,7 +7,7 @@
  * (a jump there is a cut, a jolt is "stop and go"); and within a beat the Sun moves only slowly ("real time").
  */
 import { describe, expect, it } from 'vitest';
-import { BEATS, C1_FOLLOW, SAILING, airAt, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, speedAt, type RaftPose } from '../src/drift/wandering/beats';
+import { BEATS, C1_FOLLOW, SAILING, airAt, beatSky, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, speedAt, type RaftPose } from '../src/drift/wandering/beats';
 
 const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
@@ -18,6 +18,33 @@ const beach = { x: -39310, z: 150 };
 const deg = (a: number[], b: number[]): number => (Math.acos(Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])) * 180) / Math.PI;
 
 describe('the beats after the landing', () => {
+  it('thins the clouds after sunset, not in the golden hour', () => {
+    // (the 2026-11-01 review: the small dusk and night clouds read as "painted" smudges; the sunset's lit cumulus stay)
+    const el = (name: (typeof BEATS)[number]['name'], t: number): number => (Math.asin(beatSun(name, t, c1End)[1]) * 180) / Math.PI;
+    for (const name of ['c2', 'c3'] as const) {
+      const b = BEATS.find((x) => x.name === name)!;
+      for (let t = starts[name]; t < starts[name] + b.length; t += 0.5) {
+        if (el(name, t) < 0.5) continue;
+        expect(beatSky(name, t, c1End), `${name} at ${t - starts[name]} s`).toEqual({ cover: b.cover, cirrus: b.cirrus, presence: 1 });
+      }
+    }
+    // the night: fewer (cover) and fainter (presence) than the beat's own
+    const c4 = BEATS.find((x) => x.name === 'c4')!;
+    const night = beatSky('c4', starts.c4 + 40, c1End);
+    expect(night.cover).toBeLessThan(c4.cover * 0.7);
+    expect(night.presence).toBeLessThan(0.7);
+    const w6 = BEATS.find((x) => x.name === 'w6')!;
+    expect(beatSky('w6', starts.w6 + 20, c1End).cover).toBeLessThan(w6.cover * 0.7);
+    // and thinned smoothly through c4's fall into night (no step from frame to frame)
+    let was = beatSky('c4', starts.c4, c1End);
+    for (let t = starts.c4; t < starts.c4 + 30; t += 1 / 30) {
+      const now = beatSky('c4', t, c1End);
+      expect(Math.abs(now.cover - was.cover)).toBeLessThan(0.0025); // (a smooth ease: with DUSK_CLOUDS.cover 0.4 the steepest frame is ~0.002)
+      expect(Math.abs(now.presence - was.presence)).toBeLessThan(0.01);
+      was = now;
+    }
+  });
+
   it('moves the Sun on without a jump wherever a beat follows another without a dissolve', () => {
     // (a beat's own Sun starting where the last one's stood: two degrees off it, the Sun jumped across the sky in
     // the cut — the v9 review, just before the dolphin)

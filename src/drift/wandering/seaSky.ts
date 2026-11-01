@@ -74,8 +74,29 @@ const ADAPT_MAX = 14;
  * adaptation (the night sky stays as dark as it was) */
 const NIGHT_LIGHT: Rgb = [0.009, 0.011, 0.016];
 
+/** THE TWILIGHT HELD DARK (the 2026-11-01 review: the dusk "still dusky … too bright"). The power law alone opened
+ * the eye as fast as the light fell: 2.0× with the Sun on the horizon, 3.5× at −3°, 5.7× at −6°, 13× at −9°, so
+ * the deep-blue sky after sunset stayed nearly as bright on the screen as the sunset's and the lit things (the raft,
+ * the sea under the night light) sat AT their night level all through the twilight — even a bump over it at −9°,
+ * where the curve met its cap (the lit surfaces' level, exposure × (sky + NIGHT_LIGHT), measured: 0.133 at −7°,
+ * 0.173 at −9°, 0.153 at night). Through the twilight the eye now opens only part of that, at most TWILIGHT_HOLD
+ * of it (in log: the lift times HOLD^w, w a smooth bump in log-luminance): eased in from the Sun on the horizon
+ * (TWILIGHT_IN[0], unchanged above it — the golden hour) to full by −6° (TWILIGHT_IN[1]; no faster, or the hold
+ * outran the power law's opening and the exposure fell back as the light fell), and given back from −7°
+ * (TWILIGHT_OUT[0]) to the full night's ADAPT_MAX by −15° (TWILIGHT_OUT[1]), where the sky has gone black and the
+ * Milky Way, the beacons and the lanterns come up to the night they had. The cost: the lit surfaces dip under
+ * their night level through the deep twilight (to ~0.5×) and come back up as the stars come out — one slow rise
+ * over ~8° of Sun, with the dark, not a pump. Luminances: skyIrradiance at the sea, the Sun at 0°, −6°, −7°, −15° */
+const TWILIGHT_HOLD = 0.52;
+const TWILIGHT_IN: [number, number] = [0.097, 0.0124];
+const TWILIGHT_OUT: [number, number] = [0.0084, 1.3e-8];
+
 /** the exposure the eye opens to under a sky of this irradiance (luminance, linear) */
-export const adaptation = (lum: number): number => Math.min(ADAPT_MAX, Math.pow(ADAPT_REF / Math.max(lum, 1e-9), ADAPT));
+export const adaptation = (lum: number): number => {
+  const x = Math.log(Math.max(lum, 1e-30));
+  const w = smooth(Math.log(TWILIGHT_IN[0]), Math.log(TWILIGHT_IN[1]), x) * (1 - smooth(Math.log(TWILIGHT_OUT[0]), Math.log(TWILIGHT_OUT[1]), x));
+  return Math.min(ADAPT_MAX, Math.pow(ADAPT_REF / Math.max(lum, 1e-9), ADAPT)) * Math.pow(TWILIGHT_HOLD, w);
+};
 
 type Rgb = [number, number, number];
 const smooth = (a: number, b: number, x: number): number => {

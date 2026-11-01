@@ -973,7 +973,7 @@ export function createSea(
     const formed = d ? d.clouds : 1;
     const beatClouds = b ? beatSky(b.name, t, c1End) : undefined;
     cu.coverage.value = beatClouds ? beatClouds.cover : CLOUD_COVER * (0.4 + 0.6 * formed);
-    cu.presence.value = formed;
+    cu.presence.value = beatClouds ? formed * beatClouds.presence : formed;
     cu.cirrusCover.value = beatClouds ? beatClouds.cirrus : CIRRUS_COVER * formed;
     if (sailing && t < followStart + LAPSE[1]) {
       // c1's sky turns into c2's through the time-lapse, across the beats' boundary (c2's own sky only once it is

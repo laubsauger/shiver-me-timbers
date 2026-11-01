@@ -8,7 +8,7 @@
  */
 import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
-import { adaptation, radianceCpu, sunlightCpu } from '../src/drift/wandering/seaSky';
+import { adaptation, radianceCpu, skyIrradiance, sunlightCpu } from '../src/drift/wandering/seaSky';
 import { EARTH_R } from '../src/drift/getTheDrift/atmosphere';
 
 const r0 = EARTH_R + 3e-6; // 3 m above the sea, in Mm
@@ -56,7 +56,36 @@ describe('the sea sky', () => {
   it('opens the eye as the light falls, only so far', () => {
     expect(adaptation(0.4)).toBeCloseTo(1, 6);
     expect(adaptation(0.04)).toBeGreaterThan(adaptation(0.4));
-    expect(adaptation(1e-6)).toBe(adaptation(1e-9));
+    expect(adaptation(1e-9)).toBe(adaptation(1e-12));
     expect(adaptation(1e-9)).toBeLessThanOrEqual(14);
+  });
+
+  it('holds the twilight dark, the golden hour and the full night as they were', () => {
+    // (the 2026-11-01 review: the dusk "still dusky … too bright" — the eye opened as fast as the light fell, 3.5× at
+    // −3°, 13× at −9°). E: the sky's light on the sea, as seaSky.update takes it
+    const E = (el: number): number => lum(skyIrradiance(EARTH_R, sunAt(el)));
+    const old = (l: number): number => Math.min(14, Math.sqrt(0.4 / Math.max(l, 1e-9)));
+    // the golden hour and the day: the eye as it was
+    for (const el of [30, 5, 1, 0.2]) expect(adaptation(E(el))).toBeCloseTo(old(E(el)), 6);
+    // the twilight: well under the old lift (a darker sky, sooner): ~0.7× of it at −3°, ~0.5× through the deep blue
+    for (const [el, k] of [[-3, 0.75], [-6, 0.6], [-9, 0.6]]) expect(adaptation(E(el)), `at ${el}°`).toBeLessThan(old(E(el)) * k);
+    // the full night: the eye open as far as it was (the Milky Way, the beacons, the lanterns read as they did)
+    for (const el of [-16, -18, -20]) expect(adaptation(E(el))).toBeCloseTo(14, 6);
+    // and the eye only ever opens as the Sun goes down (no pumping): the exposure never falls while the light does,
+    // and the lit surfaces' level (exposure × (sky + the night light)) has one low, never a bump over the night's
+    const night = 14 * 0.0109;
+    let last = 0;
+    let rising = false;
+    let lastB = Infinity;
+    for (let el = 2; el >= -20; el -= 0.25) {
+      const e = adaptation(E(el));
+      expect(e, `at ${el}°`).toBeGreaterThanOrEqual(last - 1e-9);
+      last = e;
+      const B = e * (E(el) + 0.0109);
+      expect(B, `at ${el}°`).toBeLessThan(night * 1.5 + 0.1);
+      if (rising) expect(B, `at ${el}°`).toBeGreaterThan(lastB * 0.97);
+      else if (B > lastB * 1.03) rising = true;
+      lastB = B;
+    }
   });
 });
