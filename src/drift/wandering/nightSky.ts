@@ -128,6 +128,8 @@ export function bakeNightSky(renderer: THREE.WebGPURenderer, front: THREE.Vector
     sunStar: 0,
     radiance: p.volumeRadiance,
     pixelAngle: Math.PI / 2 / size,
+    // (the band's unresolved stars, baked: milkyWay.ts starGrain)
+    grain: 1,
     eye: sun,
     occluder: { centre: new THREE.Vector3(), radius: 0 },
     skyTurn: new THREE.Matrix3(),

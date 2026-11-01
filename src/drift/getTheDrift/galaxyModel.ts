@@ -111,7 +111,9 @@ export function galaxyFace(p: V2, g: GalaxyLook): { light: V3; tau: F } {
  * layer through the mid-plane, its density varied only ±60% by one noise: seen from inside the layer, the depth
  * along any ray is the layer's column over sin(latitude), so every longitude drew the same dark stripe of the same
  * width. Now the layer is only the ENVELOPE, and inside it the dust is a domain-warped fractal of four octaves
- * (~0.09 down to ~0.006 radii), thresholded so that it breaks into clouds with clear gaps between them, and ridged at
+ * (~0.045 down to ~0.004 radii; they were twice that, ~0.09 to ~0.006, and from the Sun the band showed one big
+ * dark wedge and a few wisps where ESO's panorama, eso0932a, shows hundreds of small knots, threads and blotches: the
+ * coordinator's side-by-side, 2026-11-01), thresholded so that it breaks into clouds with clear gaps between them, and ridged at
  * its finest octave into filaments along the clouds' edges. From the Sun the near clouds (a few hundredths of a
  * radius off) are what shape the Rift: tens of degrees across, they lie over the band as separate dark shapes, bays
  * and branches; the far ones, a degree and under, mottle the bright clouds behind them. The envelope's mid-plane
@@ -132,29 +134,33 @@ function dust(x: V3, r: F, g: GalaxyLook, h: number): F {
   const corr = mx_noise_float(vec3(x.xy.mul(18), g.seed.add(9.4)));
   const zz = x.z.sub(corr.mul(0.008));
   const hd = corr.mul(0.35).add(1).mul(h * 0.45);
-  const env = sech2(zz.div(hd)).add(sech2(zz.div(hd.mul(4))).mul(0.5)).mul(exp(r.div(0.32).negate()));
+  const env = sech2(zz.div(hd)).add(sech2(zz.div(hd.mul(4))).mul(0.5)).mul(exp(r.div(0.32).negate())).mul(smoothstep(0.05, 0.25, r).mul(0.8).add(0.2));
+  // (the last factor thins the dust inside ~0.2 radii to a fifth: the core was buried under it, where ESO's core is
+  // bright and compact with the dust cutting through it — the coordinator's review, 2026-11-01)
   If(env.greaterThan(0.002), () => {
     // clouds flattened 2.2× along the plane, the space they sit in warped by a slower noise (bays and hooks, not
     // round blobs)
     const p = x.mul(vec3(1, 1, 2.2)).add(g.seed.add(5.3));
-    const w = mx_noise_float(p.mul(5).add(13.1));
-    const q = p.add(vec3(w, w.mul(-0.7), w.mul(0.4)).mul(0.07));
-    const n1 = mx_noise_float(q.mul(11));
-    const n2 = mx_noise_float(q.mul(27).add(n1.mul(0.8)));
-    const n3 = mx_noise_float(q.mul(66).add(n2.mul(0.8)));
-    const n4 = mx_noise_float(q.mul(160).add(n3.mul(0.8)));
-    const fbm = n1.mul(0.5).add(n2.mul(0.3)).add(n3.mul(0.17)).add(n4.mul(0.09));
+    const w = mx_noise_float(p.mul(9).add(13.1));
+    const q = p.add(vec3(w, w.mul(-0.7), w.mul(0.4)).mul(0.04));
+    const n1 = mx_noise_float(q.mul(22));
+    const n2 = mx_noise_float(q.mul(50).add(n1.mul(0.8)));
+    const n3 = mx_noise_float(q.mul(110).add(n2.mul(0.8)));
+    const n4 = mx_noise_float(q.mul(240).add(n3.mul(0.8)));
+    // (the fine octaves weigh more, 0.24 and 0.15 (were 0.17 and 0.09), and the filaments 1.4 (was 0.9): more small
+    // knots and threads along the band 20–60° from the centre, tuned per scale, not by more dust overall)
+    const fbm = n1.mul(0.45).add(n2.mul(0.3)).add(n3.mul(0.24)).add(n4.mul(0.15));
     // clouds with clear sky between them: about a third of the layer holds dust, a few percent of it is solid (fbm
     // spans about ±0.5; at −0.08 → 0.28 two thirds of it held dust and every ray along the plane met enough of it to go
     // black, the stripe again)
-    const clouds = smoothstep(0.06, 0.3, fbm);
+    const clouds = smoothstep(0.03, 0.27, fbm);
     // WINDOWS: regions ~0.2 radii across where the dust thins out altogether. With the clouds alone a ray along the
     // plane toward the core still met a dozen of them and every longitude of the Rift stayed black; through a window
     // the bright inner disk shows (the Scutum star cloud is one), and the Rift breaks into lengths
-    const windows = smoothstep(-0.3, 0.15, mx_noise_float(x.mul(4.5).add(g.seed.add(31.3))));
+    const windows = smoothstep(-0.3, 0.15, mx_noise_float(x.mul(7).add(g.seed.add(31.3))));
     // filaments: the finest octave's zero crossings, strongest along the clouds' edges
     const ridge = pow(float(1).sub(abs(n4)), float(8)).mul(smoothstep(-0.06, 0.12, fbm)).mul(float(1).sub(clouds.mul(0.6)));
-    kappa.assign(env.mul(clouds.add(ridge.mul(0.9))).mul(windows.mul(0.9).add(0.1)));
+    kappa.assign(env.mul(clouds.add(ridge.mul(1.4))).mul(windows.mul(0.9).add(0.1)));
   });
   return kappa;
 }
@@ -164,9 +170,24 @@ export function galaxyVolume(x: V3, g: GalaxyLook): { emit: V3; kappa: F } {
   const r = x.xy.length();
   const theta = atan(x.y, x.x);
   const h = 0.02;
-  // the bulge: bright, compact, a little flattened (a bar seen end-on from the Sun)
-  const bulge = exp(vec3(x.x, x.y, x.z.mul(1.6)).length().div(0.055).negate()).mul(3.5);
-  const disk = exp(r.div(0.26).negate()).mul(sech2(x.z.div(h)));
+  // the bulge: bright, compact, a little flattened (a bar seen end-on from the Sun). (0.04 and 14, was 0.055 and 3.5, and less flattened, 1.3 (was 1.6), so it shows above and below the lane;
+  // the disk's scale length 0.32, was 0.26; the thick disk 2.2 h, was 3.2: against eso0932a, 2026-11-01, the band
+  // must be "narrower and flatter: a bright, compact core bulge, thinning toward the ends", and ours was a wide soft
+  // wedge that faded out ±60° from the centre. The pink knots at 0.4 of the face's: from inside they tinted the band
+  // lilac, where the real one is grey-white)
+  // THE BAND ACROSS THE WHOLE SKY (the user, 2026-11-01, with a wide dark-site photo: "the Milky Way looks a bit
+  // compressed. The real-world stuff I see stretches more across the sky, instead of being one big blob and then not
+  // a whole lot going on"). Measured on an all-sky equirect against eso0932a, the band's brightness ±8° about the plane
+  // in 15° bins of longitude, centre = 1: ESO falls slowly, ~0.5–0.8 at ±30–90° and ~0.4 toward the anticentre; ours
+  // fell to 0.2–0.3 past ±90° and the core was a round blob. So the bulge is smaller and flatter (×10, z × 1.8; it
+  // was ×14, z × 1.3), the light about the core is a flat inner disk or BAR (exp(−r / 0.14), 1.6 h thick) that draws
+  // the bright section out along the band ~60–80° long, the disk's scale length is 0.5 radii (was 0.32: from the Sun
+  // at 0.55 the far side of the band stays lit) and its big star clouds reach the outer disk (`inner` to 0.9 radii,
+  // was 0.5), the thick disk wider and fainter (0.4, ×0.1; was 0.22, ×0.16). After: 0.4–0.5 toward the anticentre,
+  // 0.8–1.1 at ±15–75° (brighter there than ESO, for the drama the user allows), the band horizon to zenith at sea
+  const bulge = exp(vec3(x.x, x.y, x.z.mul(1.8)).length().div(0.04).negate()).mul(10);
+  const bar = exp(r.div(0.14).negate()).mul(sech2(x.z.div(h * 1.6))).mul(1.8);
+  const disk = exp(r.div(0.5).negate()).mul(sech2(x.z.div(h)));
   const wander = armWander(x.xy, g);
   const arm = armWave(r, theta, g, 0, 4, wander).mul(smoothstep(0.06, 0.18, r));
   const clumps = mx_noise_float(x.mul(vec3(14, 14, 40)).add(g.seed)).mul(0.5).add(0.5);
@@ -179,19 +200,22 @@ export function galaxyVolume(x: V3, g: GalaxyLook): { emit: V3; kappa: F } {
   const big = smoothstep(0.5, 0.8, mx_noise_float(x.mul(vec3(7, 7, 20)).add(g.seed.add(21.7))).mul(0.5).add(0.5));
   const lumps = mx_noise_float(x.mul(vec3(30, 30, 75)).add(g.seed.add(2.9))).mul(0.5).add(0.5);
   const grain = pow(mx_noise_float(x.mul(vec3(70, 70, 160)).add(g.seed.add(11.1))).mul(0.5).add(0.5), float(3));
-  const inner = smoothstep(0.5, 0.15, r);
-  const clouds = big.mul(inner.mul(2.5).add(1)).add(0.3).mul(lumps.mul(lumps).mul(2.6).add(0.2)).mul(grain.mul(2.6).add(0.25));
+  const inner = smoothstep(0.9, 0.1, r);
+  const clouds = big.mul(inner.mul(1.5).add(1)).add(0.3).mul(lumps.mul(lumps).mul(2.6).add(0.2)).mul(grain.mul(2.6).add(0.25));
   // the thick disk: old stars ~3× the thin disk's height, what gives the band its width toward the core (patchy too:
   // the core region is the brightest of the band, and lumpy)
-  const thick = exp(r.div(0.22).negate()).mul(sech2(x.z.div(h * 3.2))).mul(0.16);
+  const thick = exp(r.div(0.4).negate()).mul(sech2(x.z.div(h * 2.2))).mul(0.1);
   const emit = DISK.mul(disk.mul(0.35).mul(clouds))
     .add(mix(DISK, BULGE, 0.5).mul(thick).mul(clouds.mul(0.85).add(0.15)))
     .add(ARMS.mul(disk.mul(arm).mul(clumps.mul(0.8).add(0.4))))
-    .add(KNOTS.mul(disk.mul(knots)))
+    .add(KNOTS.mul(disk.mul(knots).mul(0.4)))
+    .add(mix(DISK, BULGE, 0.6).mul(bar).mul(clouds.mul(0.7).add(0.3)))
     .add(BULGE.mul(bulge).mul(lumps.mul(0.6).add(0.7)))
     .mul(25);
   // the dust: the clouds above, gathered toward each arm's inner edge (the lanes a far view of the disc shows)
   const lane = armWave(r, theta, g, -0.9, 6, wander).mul(smoothstep(0.08, 0.2, r));
-  const kappa = dust(x, r, g, h).mul(lane.mul(1.5).add(0.5)).mul(320);
+  // (420, was 320: smaller clouds cover less of a ray, and the band needs as much dark in it as before; at 600 the core
+  // went under)
+  const kappa = dust(x, r, g, h).mul(lane.mul(1.5).add(0.5)).mul(420);
   return { emit, kappa: max(kappa, 0) };
 }

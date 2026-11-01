@@ -24,7 +24,9 @@ import {
   cameraPosition,
   exp,
   float,
+  floor,
   fract,
+  hash,
   instanceIndex,
   length,
   max,
@@ -36,6 +38,7 @@ import {
   smoothstep,
   sqrt,
   step,
+  uint,
   uniform,
   uv,
   vec3,
@@ -58,6 +61,9 @@ export interface MilkyWay {
     sunStar: number;
     radiance: number;
     pixelAngle: number;
+    /** 0..1 how much of the glow is drawn as its unresolved stars (`starGrain`): 1 from inside the disk, 0 from
+     * outside it, where the disc moves over the sky and grain fixed on the sky would slide over it */
+    grain: number;
     eye: THREE.Vector3;
     /** a planet in front of the sky (Earth): what lies behind it is hidden; radius 0 = none */
     occluder: { centre: THREE.Vector3; radius: number };
@@ -141,6 +147,63 @@ export function starTemp(i: number): number {
 export const starTint = (temp: THREE.Node<'float'>): V3 =>
   mix(mix(vec3(1, 0.72, 0.5), vec3(1, 0.95, 0.88), smoothstep(0, 0.55, temp)), vec3(0.72, 0.82, 1), smoothstep(0.75, 1, temp)) as V3;
 
+/**
+ * THE BAND IS MADE OF STARS (the coordinator's side-by-side with ESO's all-sky panorama, eso0932a, 2026-11-01: "the
+ * real band is MADE OF STARS: millions of faint unresolved stars, a fine grain throughout. Ours is a smooth glow with
+ * stars sprinkled over it"). The march integrates the stars past the near ones as a smooth light; here a share of
+ * that light is handed back to points: per octave, one star a cell on a grid fixed on the sky (rad across: GRAIN_CELLS),
+ * each GRAIN_SHARE of the light in it, its brightness from a steep power law (many faint, a few bright), drawn as a
+ * Gaussian ~0.55 px wide so it is a point at every resolution. Returns the factor (rgb, mean 1) the glow is multiplied
+ * by: the light is only moved into the points, never added, so the band's brightness and colour do not change.
+ *
+ * An octave whose cells are under ~2.6 px is FADED back into the smooth light (`on`), not drawn: a grid of stars finer
+ * than the pixels would alias into sparkle and moiré, and the light of stars a pixel cannot resolve IS a smooth glow.
+ * So a 4K master (and the night bake at 2048 a face, ~0.044° a texel) shows the two coarser octaves, a 1280 preview the
+ * coarsest, and the fine grain grows in with resolution as it does in a photograph.
+ *
+ * The stars sit in a shell one cell thick around the unit sphere of directions (a 3D grid, so no face seams), a cell's
+ * star counted where it lies within half a cell of the sphere: on average one star a cell² of sky. The eight cells
+ * around the point hold every star within half a cell of it, which at the widths drawn (≤ 0.22 cell) is all of each.
+ */
+// (rad; 0.0045 and 0.0022 with shares 0.2 and 0.25 at first: the coordinator's review of the sea at 455 s, 2026-11-01,
+// "reads as sand or noise: the grain is too strong and too coarse" — a glow with a fine stellar texture, not sandpaper)
+const GRAIN_CELLS = [0.0032, 0.0018];
+const GRAIN_SHARE = [0.07, 0.1];
+function starGrain(d: V3, pixel: THREE.Node<'float'>): V3 {
+  const sum = vec3(0).toVar();
+  const share = float(0).toVar();
+  GRAIN_CELLS.forEach((c, octave) => {
+    const on = smoothstep(1.4, 2.6, float(c).div(pixel)).mul(GRAIN_SHARE[octave]);
+    If(on.greaterThan(0), () => {
+      const p = d.mul(1 / c);
+      const radius = p.length();
+      const sc = pixel.mul(0.55 / c);
+      const k = float(1).div(sc.mul(sc));
+      const base = floor(p.sub(0.5));
+      const g = vec3(0).toVar();
+      for (let n = 0; n < 8; n++) {
+        const cell = base.add(vec3(n & 1, (n >> 1) & 1, (n >> 2) & 1));
+        const seed = uint(cell.x.add(8192))
+          .mul(73856093)
+          .bitXor(uint(cell.y.add(8192)).mul(19349663))
+          .bitXor(uint(cell.z.add(8192)).mul(83492791))
+          .add(octave * 7919);
+        const s = cell.add(vec3(hash(seed), hash(seed.add(1)), hash(seed.add(2))));
+        const along = s.dot(d);
+        const off = s.sub(d.mul(along));
+        const inShell = step(abs(along.sub(radius)), 0.5);
+        // brightness ∝ h⁴ (mean 1/5): most of them faint, one in ~20 over three times the mean
+        const b = hash(seed.add(3)).pow(4).mul(5);
+        const tint = starTint(hash(seed.add(4)));
+        g.addAssign(tint.div(tint.dot(vec3(0.2126, 0.7152, 0.0722))).mul(b.mul(inShell).mul(exp(off.dot(off).mul(k).negate()))));
+      }
+      sum.addAssign(g.mul(k.div(Math.PI)).mul(on));
+      share.addAssign(on);
+    });
+  });
+  return sum.add(float(1).sub(share)) as V3;
+}
+
 export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
   const L = OUR_LOOK;
   const u = {
@@ -154,6 +217,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
     sunStar: uniform(0),
     radiance: uniform(1),
     pixelAngle: uniform(0.0015),
+    grain: uniform(0),
     sun: uniform(new THREE.Vector3(...g.sun)),
     occCentre: uniform(new THREE.Vector3()),
     occRadius: uniform(0),
@@ -210,8 +274,10 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
         // of sky), and evenly spaced samples, ~0.03 radii apart along the plane, stepped right over it; now the first
         // ones are ~0.007 apart, the last ~0.05, out where the far side of the disk is faint behind the dust anyway
         const len = t1.sub(t0);
-        const jitter = fract(screenCoordinate.x.mul(0.06711056).add(screenCoordinate.y.mul(0.00583715))).mul(52.9829189);
-        const j = fract(jitter);
+        // (white noise per pixel: it was interleaved gradient noise, fract(52.98·fract(0.067x + 0.0058y)), whose
+        // values run in diagonal lines; resampled from the night bake's cube onto a view, the march's grain read as a
+        // faint diagonal hatch — the coordinator's 1:1 crops, 2026-11-01)
+        const j = hash(uint(screenCoordinate.x).add(uint(screenCoordinate.y).mul(8191)));
         Loop(steps, ({ i }) => {
           const u0 = float(i).add(j).div(steps);
           const tt = t0.add(len.mul(u0.mul(0.25).add(u0.mul(u0).mul(0.75))));
@@ -223,14 +289,18 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
           // the diffuse light is the DISTANT stars: the near ones are drawn as points (below), so the glow of
           // the first ~0.05 radii around the eye is left out — or the whole sky would be a milky wash
           const near = smoothstep(0.03, 0.1, tt);
+          // and the dust of the first ~0.02 radii: a cloud there spans tens of degrees and laid one dark wedge over the
+          // core (the side-by-side with eso0932a, 2026-11-01); the Rift's bays and knots are the clouds past it
+          const nearDust = smoothstep(0.008, 0.035, tt);
           light.addAssign(s.emit.mul(T).mul(ds).mul(near).mul(keep));
           // dust dims blue more than red: the rift's edges brown, the band behind it warm (references:
           // milky-way — never a blue-purple band)
-          T.mulAssign(exp(REDDEN.mul(s.kappa.mul(ds)).negate()));
+          T.mulAssign(exp(REDDEN.mul(s.kappa.mul(ds).mul(nearDust)).negate()));
         });
       });
     });
-    return vec4(light.mul(u.radiance).mul(u.volume).mul(clear(dWorld)), 1);
+    const grained = light.mul(mix(vec3(1), starGrain(dl, u.pixelAngle as unknown as THREE.Node<'float'>), u.grain));
+    return vec4(grained.mul(u.radiance).mul(u.volume).mul(clear(dWorld)), 1);
   })();
   material.name = 'drift-milky-way';
   const sky = new THREE.Mesh(new THREE.SphereGeometry(400, 96, 48), material);
@@ -311,6 +381,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
       u.occRadius.value = o.occluder.radius;
       u.radiance.value = o.radiance;
       u.pixelAngle.value = o.pixelAngle;
+      u.grain.value = o.grain;
       u.skyToWorld.value.copy(o.skyTurn);
       u.worldToSky.value.copy(o.skyTurn).transpose();
       sky.position.copy(o.eye);
