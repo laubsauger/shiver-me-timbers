@@ -19,6 +19,7 @@ import * as THREE from 'three/webgpu';
 import { cameraPosition, fwidth, positionWorld } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
+import { footprint, seated } from './seat';
 
 type Kind = 'roots' | 'root' | 'branches' | 'bark' | 'shrub' | 'tuft' | 'log' | 'pole';
 const FILES: Record<Kind, string> = {
@@ -33,6 +34,11 @@ const FILES: Record<Kind, string> = {
 };
 /** m each kind is sunk into the ground, as a share of its own height (roots half buried, a log settled in the sand) */
 const SINK: Record<Kind, number> = { roots: 0.45, root: 0.4, branches: 0.15, bark: 0.2, shrub: 0.05, tuft: 0.05, log: 0.25, pole: 0.3 };
+/** the living kinds, seated by their own stems (seat.ts): shrub_02 and shrub_03 are each four plants side by side, and
+ * a row (up to 5 m long) turned to the slope at its middle left its end plants over the coppice mounds (the
+ * 2026-11-01 note: plants "floating on the sand"). Each plant now stands on its own ground, its foot SINK of the
+ * file's height under the lowest point beneath it */
+const SEATED: Partial<Record<Kind, true>> = { shrub: true, tuft: true };
 /**
  * m: how thin the pieces of the small kinds are (a twig, a flake of bark, a leaf of a tuft) — where one would come
  * out under THIN_PX of a pixel across it is not drawn (the 2026-10-29 beach review at 600–610 s, "insanely nervous":
@@ -149,6 +155,8 @@ export function createGroundDebris(o: {
         });
         for (const part of parts) {
           const geo = part.geometry.clone().applyMatrix4(part.matrixWorld);
+          const foot = SEATED[k] ? footprint([geo]) : null;
+          const own = foot ? mats.map((x, i) => seated(foot, x, o.ground, SINK[k] * tall * at[k][i][3])) : mats;
           const src = part.material as THREE.MeshStandardMaterial;
           const thin = THIN[k];
           const m = thin ? thinOf(src, thin) : src.clone();
@@ -159,7 +167,7 @@ export function createGroundDebris(o: {
           // (the scans' ARM maps carry their ambient occlusion: wired if the file did not)
           if (!m.aoMap && m.roughnessMap) m.aoMap = m.roughnessMap;
           const inst = new THREE.InstancedMesh(geo, m, mats.length);
-          mats.forEach((x, i) => inst.setMatrixAt(i, x));
+          own.forEach((x, i) => inst.setMatrixAt(i, x));
           inst.instanceMatrix.needsUpdate = true;
           inst.computeBoundingSphere();
           inst.castShadow = true;

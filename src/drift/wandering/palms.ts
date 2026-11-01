@@ -18,6 +18,7 @@ import { atan, attribute, cameraPosition, diffuseColor, float, length, normalWor
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
 import { fbm2Cpu } from '../../terrain/noiseCpu';
+import { footprint, seatDrop } from './seat';
 
 type Kind = 'dense' | 'coconut' | 'bent' | 'fan';
 const FILES: Record<Kind, string> = {
@@ -107,6 +108,8 @@ const DEAD_SHARE = 0.08;
 /** the fronds' bias toward a coconut's yellow-green, and a browned crown's (multipliers on the maps' colour) */
 const FROND_BIAS: [number, number, number] = [1.06, 1.02, 0.86];
 const FROND_DEAD: [number, number, number] = [1.35, 0.95, 0.55];
+/** m: a palm's trunk foot under the lowest ground beneath it (seat.ts; was 0.15 under the ground at its box's middle) */
+const PALM_SINK = 0.1;
 
 /** an island to scatter palms through: its land's box (world m), its ground, and m inland of its shore */
 export interface PalmIsland {
@@ -295,6 +298,10 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
         part.fronds = mats.every((mat) => mat.alphaTest > 0 || mat.transparent);
         parts.push(part);
       });
+      // SEATED (seat.ts; the 2026-11-01 note, plants "floating on the sand"): the trunk's foot, not the box's middle,
+      // PALM_SINK under the lowest ground beneath it — a curved palm's trunk stands up to ~2 m off its box's middle,
+      // where the beach's 1:11 face is ~0.2 m higher or lower than under the middle
+      const stems = footprint(parts.filter((p) => !p.fronds).map((p) => p.geometry));
       // the beach's palms, and those through the island (no shadows: PALMS THROUGH THE ISLAND)
       for (const [set, name, shadows] of [[mine, kind, true], [theirs, `${kind}-inland`, false]] as const) {
         if (!set.length) continue;
@@ -309,7 +316,8 @@ export function createPalms(beach: { x: number; z: number }, ground: (x: number,
             .setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.dir ?? 0)
             .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), s.lean))
             .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), s.turn - (s.dir ?? 0)));
-          const foot = new THREE.Vector3(x, ground(x, z) - 0.15, z);
+          const foot = new THREE.Vector3(x, ground(x, z), z);
+          foot.y += seatDrop(stems, new THREE.Matrix4().compose(foot, q, new THREE.Vector3(k, k, k)), ground, PALM_SINK);
           feet.set([foot.x, foot.y, foot.z, s.h], i * 4);
           crowns.set(new THREE.Vector3(0, s.h * (s.kind === 'fan' ? 0.75 : 0.92), 0).applyQuaternion(q).add(foot).toArray(), i * 3);
           return new THREE.Matrix4().compose(foot, q, new THREE.Vector3(k, k, k));

@@ -23,6 +23,7 @@ import { LITTER_RES } from './beachMaterial';
 import { graded } from './coast';
 // (the high island's air: the light 7 km of marine air scatters in front of it, as its radio towers have it)
 import { farAir } from './farAir';
+import { footprint, seated, specimens } from './seat';
 import { rng } from '../undertime/web';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -510,6 +511,10 @@ const NEAR = 55;
 const TREE_WIDE: [number, number] = [0.9, 1.5];
 const TREE_TALL: [number, number] = [0.8, 1.08];
 const LEAN = 0.1;
+/** m: how far under the ground beneath its footprint a tree's and a shrub's stems stand (seat.ts: the lowest point
+ * under them, less this). It was 0.25 m under the ground at the box's middle, which on a mound or with the lean left
+ * the scrub's end plants up to ~0.8 m over the sand (the 2026-11-01 note: "feel like floating on the sand") */
+const SEAT_SINK = { tree: 0.12, shrub: 0.05 };
 const TREE_HUE = 0.12;
 const TREE_VALUE = 0.15;
 const SCAEVOLA: [number, number, number] = [1.12, 0.95, 1.18];
@@ -889,7 +894,7 @@ function edgeTrees(
         const x = Math.sin(t.u * n + n * 0.37) * 43758.5453;
         return x - Math.floor(x);
       };
-      const mats = spots.map((t) => {
+      const base = spots.map((t) => {
         const h = kind.height[0] + (kind.height[1] - kind.height[0]) * t.u;
         const sc = h / tall;
         const sx = sc * (TREE_WIDE[0] + (TREE_WIDE[1] - TREE_WIDE[0]) * v(t, 17.3));
@@ -899,9 +904,20 @@ function edgeTrees(
         tilt.setFromAxisAngle(ax, LEAN * (2 * v(t, 59.1) - 1));
         q.premultiply(tilt);
         const foot = new THREE.Vector3(-(box.min.x + box.max.x) / 2 * sx, -box.min.y * sy, -(box.min.z + box.max.z) / 2 * sx).applyQuaternion(q);
-        const y = isl.heightAt(t.x, t.z) - 0.25;
-        return new THREE.Matrix4().compose(new THREE.Vector3(t.x, y, t.z).add(foot), q, new THREE.Vector3(sx, sy, sx));
+        return new THREE.Matrix4().compose(new THREE.Vector3(t.x, isl.heightAt(t.x, t.z), t.z).add(foot), q, new THREE.Vector3(sx, sy, sx));
       });
+      // SEATED (seat.ts): each plant of the file — the Pachira's four, side by side; a tree's one — dropped until its
+      // stems' foot is SEAT_SINK under the ground beneath every point of it, each instance on its own ground
+      const isLeaf = (p: THREE.Mesh): boolean => /leaves/.test((p.material as THREE.Material).name);
+      const groupOf = specimens(parts.map((p) => p.name));
+      const matsOf = new Map<string, THREE.Matrix4[]>();
+      for (const sp of new Set(groupOf)) {
+        const mine = parts.filter((_, i) => groupOf[i] === sp);
+        const stems = mine.filter((p) => !isLeaf(p));
+        const foot = footprint((stems.length ? stems : mine).map((p) => p.geometry.clone().applyMatrix4(p.matrixWorld)));
+        matsOf.set(sp, base.map((m) => seated(foot, m, isl.heightAt, tree ? SEAT_SINK.tree : SEAT_SINK.shrub)));
+      }
+      const mats = base;
       entry.mats = mats;
       entry.tints = spots.map((t) => {
         const hue = TREE_HUE * (2 * v(t, 31.7) - 1);
@@ -909,7 +925,6 @@ function edgeTrees(
         const c = new THREE.Color(value * (1 + hue), value, value * (1 - 1.4 * hue));
         return tree ? c : c.multiply(new THREE.Color(...SCAEVOLA));
       });
-      const isLeaf = (p: THREE.Mesh): boolean => /leaves/.test((p.material as THREE.Material).name);
       // (each leaf mesh its own crown — a tree's leaves are one, the Pachira file four plants side by side, one
       // crown round all four lit them as the far side of a ball — and the bark its nearest leaves')
       const leafParts = parts.filter(isLeaf);
@@ -989,7 +1004,10 @@ function edgeTrees(
         const inst = new THREE.InstancedMesh(geo, m, mats.length);
         inst.userData.crown = crown;
         inst.userData.leaf = leaf;
-        mats.forEach((x, i) => {
+        // (its own plant's seated matrices: setEye moves them between near and far)
+        const own = matsOf.get(groupOf[parts.indexOf(part)])!;
+        inst.userData.mats = own;
+        own.forEach((x, i) => {
           inst.setMatrixAt(i, x);
           putCrown(inst, i, x, entry.tints[i]);
         });
@@ -1018,8 +1036,9 @@ function edgeTrees(
         const near = Math.hypot(t.x - eye.x, t.z - eye.z) < NEAR;
         const slot = near ? n : f;
         for (const m of near ? e.near : e.far) {
-          m.setMatrixAt(slot, e.mats[i]);
-          putCrown(m, slot, e.mats[i], e.tints[i]);
+          const own = (m.userData.mats as THREE.Matrix4[])[i];
+          m.setMatrixAt(slot, own);
+          putCrown(m, slot, own, e.tints[i]);
         }
         if (near) n++;
         else f++;
