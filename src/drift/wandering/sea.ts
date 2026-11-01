@@ -1174,14 +1174,20 @@ export function createSea(
       // bias (set to keep the contact shadows) was a fraction of that at a 9–14° morning Sun — its own shadow map
       // shadowed it, in patches that moved with the map. So the depth bias is that drop (×1.5) and the normal bias a
       // texel and a half: at a high Sun a few cm, so the contact shadows stay; at a low one what acne needs, no more
+      // (capped at 0.2 m: at the w3–w5 Sun of 1–6° the full drop reached 0.6 m and erased the contact shadow of
+      // anything smaller — every pebble and shell on the beach). Until 2026-11-01; now:
       {
         const texelM = (2 * skyParams.shadowExtent) / skyParams.shadowMapSize;
         const tanEl = Math.max(Math.tan(Math.asin(Math.min(1, Math.max(0.087, sun.y)))), 0.087);
-        // (capped at 0.2 m: at the w3–w5 Sun of 1–6° the full drop reached 0.6 m and erased the contact shadow of
-        // anything smaller — every pebble and shell on the beach)
-        const depthM = Math.min(0.2, (1.5 * texelM) / tanEl);
-        skyParams.shadowBias = -depthM / SHADOW_DEPTH_RANGE;
-        skyParams.shadowNormalBias = 1.5 * texelM;
+        // THE RECEIVER'S PLANE (the 2026-11-01 review: "the stern tiller shadow is too far away" — that bias, 15.8 cm
+        // along the light + 3.3 cm along the normal at 568 s, left the first 15–30 cm of every contact shadow lit):
+        // the film's filter now compares each texel against the receiver's own plane (filmShadowFilter.ts), so the
+        // constant bias only covers the curvature of a log or a sagging sail across the ±3-texel window and the map's
+        // quantisation (and the facets' bend off the mesh's smooth normal): a third of a texel's drop, at most 3 cm,
+        // and half a texel along the normal
+        const planeM = Math.min(0.03, (0.3 * texelM) / tanEl);
+        skyParams.shadowBias = -planeM / SHADOW_DEPTH_RANGE;
+        skyParams.shadowNormalBias = 0.5 * texelM;
       }
       sky.setShadowFocus(eye.position.x, 0, eye.position.z);
       sky.update(hour);

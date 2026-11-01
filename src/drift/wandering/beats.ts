@@ -242,15 +242,34 @@ export function airAt(t: number, starts: Record<BeatName, number>): number {
   return 1 - 0.7 * smooth((t - starts.c3 - 26) / 18);
 }
 
+/** m/s the raft makes with its sail struck: through c4's night and on through w1's dark, carried along with the water */
+const NIGHT_WAY = 0.2;
+/** s into w1 it gathers way, from NIGHT_WAY to COAST_DRIFT, once the sail is set (SAIL_HOIST, 19–29 s): the way
+ * lags the hoist and comes on over longer, as in c1's follow (sea.ts HOIST, WAY) */
+const W1_WAY: [number, number] = [23, 37];
+
 /** m/s the raft makes through the water: sailing on a light air, slower as the wind dies at last light, all but
- * still through the night; along the coast, then easing to anchor in w2 */
+ * still through the night with the sail struck, on through the change to the coast in the dark; under way again as
+ * the sail is set at dawn, along the coast, then easing to anchor in w2.
+ * (It went from the night's 0.2 straight to 1.0 m/s at w1 − 10 s, and along the coast the eye ran at 1 m/s from
+ * w1's first frame, sail struck — "moves along the coast with its sail struck", the 2026-11-01 review: one eased run
+ * now, the same speed in both worlds across the dissolve) */
 export function speedAt(t: number, starts: Record<BeatName, number>): number {
-  if (t < starts.w1 - 10) {
-    const c3 = smooth((t - starts.c3) / 12);
-    const c4 = smooth((t - starts.c4 + 4) / 8);
-    return 1.2 + (0.6 - 1.2) * c3 + (0.2 - 0.6) * c4;
-  }
-  return 1.0 * (1 - smooth((t - starts.w2) / 22));
+  const c3 = smooth((t - starts.c3) / 12);
+  const c4 = smooth((t - starts.c4 + 4) / 8);
+  const way = smooth((t - starts.w1 - W1_WAY[0]) / (W1_WAY[1] - W1_WAY[0]));
+  const v = 1.2 + (0.6 - 1.2) * c3 + (NIGHT_WAY - 0.6) * c4 + (COAST_DRIFT - NIGHT_WAY) * way;
+  return v * (1 - smooth((t - starts.w2) / 22));
+}
+
+/** m along the coast the raft has come by sea time t (from w1's start, any origin: only differences are used) — the
+ * integral of speedAt before w2, in closed form (∫ smooth = u³ − u⁴/2 over its ramp), so coastEye stays cheap and
+ * exact for the wake's replay, which asks it four times a step */
+function coastRun(t: number, starts: Record<BeatName, number>): number {
+  const len = W1_WAY[1] - W1_WAY[0];
+  const u = (t - starts.w1 - W1_WAY[0]) / len;
+  const ramp = u <= 0 ? 0 : u < 1 ? u * u * u - (u * u * u * u) / 2 : 0.5 + (u - 1);
+  return NIGHT_WAY * (t - starts.w1) + (COAST_DRIFT - NIGHT_WAY) * len * ramp;
 }
 
 /** m the raft has come since `from` (sea s): the integral of its speed, in 0.05 s steps */
@@ -325,7 +344,7 @@ const COAST_KEYS: Array<{ beat: BeatName; at: number; along: number; off: number
   { beat: 'w5', at: 35, along: -8, off: -4 },
   { beat: 'w6', at: 60, along: -40, off: 6 },
 ];
-/** m/s the raft and the eye sail along the coast in w1 */
+/** m/s the raft and the eye sail along the coast in w1 once the sail is set (and w2 leaves at): speedAt */
 const COAST_DRIFT = 1.0;
 /** s into w2 the eye steps off the raft (the raft's run in ends) */
 export const STEP_OFF = 30;
@@ -344,7 +363,8 @@ export function coastEye(t: number, c1End: number, beach: { x: number; z: number
   let along: number;
   let off: number;
   if (t <= w2) {
-    along = COAST_KEYS[0].along - COAST_DRIFT * (w2 - t);
+    // (drifting with the sail struck through the dark, under way at COAST_DRIFT by w2: speedAt's run)
+    along = COAST_KEYS[0].along - (coastRun(w2, starts) - coastRun(t, starts));
     off = COAST_KEYS[0].off;
   } else {
     along = COAST_KEYS[COAST_KEYS.length - 1].along;

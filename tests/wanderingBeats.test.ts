@@ -7,7 +7,7 @@
  * (a jump there is a cut, a jolt is "stop and go"); and within a beat the Sun moves only slowly ("real time").
  */
 import { describe, expect, it } from 'vitest';
-import { BEATS, C1_FOLLOW, SAILING, airAt, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, type RaftPose } from '../src/drift/wandering/beats';
+import { BEATS, C1_FOLLOW, SAILING, airAt, beatStarts, beatSun, beatsAt, coastEye, coastLook, landfall, raftPose, sailsAt, speedAt, type RaftPose } from '../src/drift/wandering/beats';
 
 const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
@@ -147,6 +147,31 @@ describe('the beats after the landing', () => {
     // ashore by w3 (the field and the flock are seen from the beach), and still out at sea through w1
     expect(coastEye(starts.w1 + 10, c1End, beach).ashore).toBe(0);
     expect(coastEye(starts.w3, c1End, beach).ashore).toBe(1);
+  });
+
+  it('drifts along the coast with its sail struck through the dark, and gathers way only once it is set at dawn', () => {
+    // (the eye ran along the coast at 1 m/s from w1's first frame while the sail stood struck, and the raft's way
+    // through the water stepped from the night's 0.2 to 1 m/s at w1 − 10 s — the 2026-11-01 review: the motion must
+    // follow the sail: slow with it struck, under way as it is set, eased, never a jump)
+    const h = 0.05;
+    const along = (t: number): number => {
+      const a = coastEye(t - h / 2, c1End, beach);
+      const b = coastEye(t + h / 2, c1End, beach);
+      return Math.hypot(b.x - a.x, b.z - a.z) / h;
+    };
+    for (let t = starts.w1 - 5; t < starts.w2; t += 0.25) {
+      const sail = sailsAt('w1', t, c1End);
+      // struck (or barely drawing): a drift, no faster than the night's way
+      if (sail < 0.5) expect(along(t), `${(t - starts.w1).toFixed(2)} s into w1, sail ${sail.toFixed(2)}`).toBeLessThan(0.3);
+      // the eye on the coast moves as the raft makes way (the wake is laid by the same speed)
+      expect(Math.abs(along(t) - speedAt(t, starts)), `${(t - starts.w1).toFixed(2)} s into w1`).toBeLessThan(0.02);
+    }
+    // under way by w2, at the speed the landfall leaves at
+    expect(along(starts.w2 - 0.1)).toBeGreaterThan(0.95);
+    // the way through the water, the open sea's and the coast's alike, changes without a step from the night to w2
+    let step = 0;
+    for (let t = starts.c4; t < starts.w2; t += h) step = Math.max(step, Math.abs(speedAt(t + h, starts) - speedAt(t, starts)));
+    expect(step).toBeLessThan(0.01);
   });
 
   it('runs the raft in to the beach bow first, at a sailing pace, clear of the eye, and leaves it aground', () => {

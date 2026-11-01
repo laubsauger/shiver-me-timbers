@@ -520,8 +520,10 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, opt:
   // (the tile at another shift, on its own sequence of frame offsets: a second interleaved-gradient pattern beat
   // against the first in fine diagonal stripes, white noise stayed speckle through eight sub-frames)
   const jitterL = opt.light ? fract(blueNoise(1).add(fract(opt.light.jitter.mul(1.618034).add(0.5)))) : blueNoise(1);
-  // the fine march toward the Sun: steps doubling from 40 m, each sampled at a jittered point in it; the volume
-  // from its end
+  // the fine march toward the Sun: steps doubling from 40 m, each sampled at a jittered point in it, the cloud's
+  // surface blurred over the step's own length (as the light volume's steps are, BODY_M) — the volume from its end.
+  // (Sharp, a step 640 m or 1.3 km long either hit a billow's edge or missed it, a different way pixel to pixel with
+  // the jitter: the golden-hour grain at ~400 s, the 2026-11-01 note. It costs nothing: the same samples)
   const near: [number, number][] = [];
   let reach = 0;
   for (let k = 0, step = 40; k < quality.lightSteps; k++, step *= 2) {
@@ -542,7 +544,7 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, opt:
       If(rho.greaterThan(0.002), () => {
         // the cloud between here and the Sun: the billows near, the volume beyond
         const od = float(0).toVar();
-        for (const [at, step] of near) od.addAssign(f.density(p.add(U.sun.mul(jitterL.mul(step).add(at))), false).mul(step));
+        for (const [at, step] of near) od.addAssign(f.density(p.add(U.sun.mul(jitterL.mul(step).add(at))), false, step).mul(step));
         const h = f.alt(p).toVar();
         const odNear = od.toVar();
         if (opt.light) {

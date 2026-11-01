@@ -684,8 +684,11 @@ export function createProps(): Props {
           caseMesh.rotateX(-0.25 * hop(1, 0, 0.3));
         }
       }
-      // the radio: its dial glows from c4 on (with the static's flicker), dark again by day
-      const radio = smooth((t - starts.c4 + 2) / 4) * (1 - smooth((t - starts.w1 + 3) / 6));
+      // the radio: its dial glows from c4 on (with the static's flicker), through the night and the change to the coast
+      // in the dark, and goes out with the morning: as the Sun nears the horizon, ~22–32 s into w1 (beats.ts w1 `rise`:
+      // first light ~19 s, the Sun up ~32 s). It went out over w1's first 3 s, before the dawn — "the radio goes dark
+      // at w1's start", the 2026-11-01 review
+      const radio = smooth((t - starts.c4 + 2) / 4) * (1 - smooth((t - starts.w1 - 22) / 10));
       dialGlow.value = radio * (0.85 + 0.15 * Math.sin(t * 7.3) * Math.sin(t * 2.1)) * 6;
       radioLight.intensity = (dialGlow.value / 6) * 0.08;
 

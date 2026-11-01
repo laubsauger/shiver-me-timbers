@@ -39,7 +39,7 @@
  * water, or lying still where it was stranded.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, attribute, cameraPosition, cameraViewMatrix, exp, float, mix, normalize, output, positionLocal, positionWorld, screenUV, sin, smoothstep, uniform, vec2, vec3, vec4, vertexStage, viewportTexture } from 'three/tsl';
+import { Fn, attribute, cameraPosition, cameraViewMatrix, exp, float, fwidth, mix, normalize, output, positionLocal, positionWorld, screenUV, sin, smoothstep, uniform, vec2, vec3, vec4, vertexStage, viewportTexture } from 'three/tsl';
 import type { ShoreUniforms } from '../../terrain/shoreRunup';
 import { cellular2, fbm2, hash2 } from '../../terrain/noise';
 import { coordFilter } from '../../ship/bandLimit';
@@ -48,6 +48,7 @@ import { oceanSurfaceParams } from '../../params/oceanSurface';
 import { causticsParams } from '../../params/caustics';
 import { terrainParams } from '../../params/terrain';
 import type { ReflectionShadeInput } from '../../reflection/reflectionShading';
+import { reflectionSkyVisibilityNode } from '../../ocean/surfaceFiltering';
 import { SWASH, SWASH_CALM, SWASH_LAYOUT, swashField, swashFromSea, swashIn, swashRowWidth, swashSeaGone, swashUV } from './swashSim';
 import { texture } from 'three/tsl';
 
@@ -162,6 +163,7 @@ const seaWater = {
   skyDesat: live(0.5, () => oceanSurfaceParams.skylightDesaturation),
   scatter: live(new THREE.Vector2(0.22, 1.5), () => new THREE.Vector2(oceanSurfaceParams.sunScatterStrength, oceanSurfaceParams.sunScatterPower)),
   reflStrength: live(1, () => oceanSurfaceParams.reflectionStrength),
+  grazingSat: live(new THREE.Vector3(0.15, 0.46, 500), () => new THREE.Vector3(oceanSurfaceParams.grazingSaturation, oceanSurfaceParams.grazingSaturationFar, oceanSurfaceParams.grazingSaturationFullDist)),
   transFloor: live(0.45, () => oceanSurfaceParams.transmissionFloor),
   pigFloor: live(new THREE.Vector2(0.14, 1), () => new THREE.Vector2(oceanSurfaceParams.pigmentFloorChroma, oceanSurfaceParams.pigmentFloorStrength)),
   shoreFade: live(0.5, () => oceanSurfaceParams.shoreFadeThickness),
@@ -593,6 +595,13 @@ export function createShoreline(o: {
     return c.mul(a).mul(smoothstep(0.5, 0.25, footprint.mul(k))) as V3;
   };
   const rippleS = octave(1.1, 0.2, 3.3, 0.3).add(octave(2.9, 0.3, 1.7, 0.4)).add(octave(7.3, 0.5, 6.2)).add(octave(17, 0.55, 8.4)).add(octave(37, 0.5, 2.8)).mul(rough) as V3;
+  // (the slope those octaves left out where a pixel cannot hold them — the sea's `unresolvedVar`: its share of the
+  // ~0.12 rms, by each octave's amplitude², for the mirror's horizon below)
+  const OCT = [[1.1, 0.2], [2.9, 0.3], [7.3, 0.5], [17, 0.55], [37, 0.5]];
+  const octW = OCT.reduce((a, [, w]) => a + w * w, 0);
+  const unresolvedS = OCT.reduce<F>((acc, [k, w]) => acc.add(float(1).sub(smoothstep(0.5, 0.25, footprint.mul(k))).mul((w * w) / octW)) as F, float(0) as F)
+    .mul(rough.mul(rough))
+    .mul(0.12 * 0.12) as F;
   // (its slope held to an unbroken swell's, 0.15: a bore in the sim is a first-order shock, its face 2–3 cells, ~45°,
   // steeper than any water face that is not white — drawn so, it mirrored one patch of high sky as a smooth band the
   // length of the beach, pale or dark with the sky's height, the tower agent's beach_650 still, 2026-10-29. Its
@@ -614,9 +623,34 @@ export function createShoreline(o: {
   const peak = Math.max(hue.r, hue.g, hue.b, 1e-3);
   const tint = vec3(hue.r / peak, hue.g / peak, hue.b / peak) as V3;
   const camDist = positionWorld.sub(cameraPosition).length() as F;
+  // · the body: the deep pigment pulled to the shallow one by the depth, lit by the sky's light and the key's, with
+  //   the key's light the body scatters back (the sea's waterCol, lightWrap, bodyScatter; the clouds' shadow on the
+  //   key's share). A crest's thin water lit through from behind and below lifts it (the turquoise of a lagoon wave's
+  //   face)
+  const shallowF = smoothstep(seaWater.shallowFull as unknown as F, float(0), hS) as F;
+  const pigment = mix(seaWater.deep as unknown as V3, seaWater.shallow as unknown as V3, (seaWater.shallowMix as unknown as F).mul(shallowF)) as V3;
+  const haze = seaLight.haze as unknown as V3;
+  const skylight = mix(haze, vec3(haze.dot(vec3(0.2126, 0.7152, 0.0722))), (seaWater.skyDesat as unknown as F).clamp(0, 1)) as V3;
+  const ndlS = nNew.dot(normalize(seaLight.dir as unknown as V3)).max(0) as F;
+  const keyS = (seaLight.sun as unknown as V3).mul(cloudV) as V3;
+  const scatterU = seaWater.scatter as unknown as V2;
+  const crestLift = smoothstep(0.03, 0.14, steepS).mul(smoothstep(0.6, 0.08, hS)).mul(0.9) as F;
+  const bodyS = pigment
+    .mul(skylight.mul(seaWater.lightFloor as unknown as F).add(keyS.mul(ndlS.mul(seaWater.lightGain as unknown as F))))
+    .add((seaWater.sss as unknown as V3).mul(keyS).mul(ndlS.pow(scatterU.y.max(0.05)).mul(scatterU.x)))
+    .mul(crestLift.add(1)) as V3;
+  // (the sky pulled toward the body's hue as the sea pulls it: by ITS hump with distance, live, and toward its lit
+  // body's hue, not the shallow pigment's — and a mirrored ray that dips below the horizon sees water, the body,
+  // where the sky dome runs its pale horizon on under it (the sea's skyVisibility). The swash's ripples tip a share
+  // of a grazing view's rays down: drawn as sky, the near-shore water read paler than the open sea beside it at the
+  // beach's low views, with a soft line where they met — the 2026-11-01 note, 640–700 s)
+  const gsU = seaWater.grazingSat as unknown as V3;
+  const grazSat = mix(gsU.x, gsU.y, smoothstep(float(0), gsU.z.max(1), camDist)) as F;
+  const bodyHue = bodyS.div(bodyS.x.max(bodyS.y).max(bodyS.z).max(1e-3)) as V3;
+  const skyVis = reflectionSkyVisibilityNode(refl.y, fwidth(refl.y), unresolvedS) as unknown as F;
   const reflected = Fn(() => {
     const sky = o.skyDome(refl);
-    const skyCol = mix(sky, sky.mul(tint), oceanSurfaceParams.grazingSaturation) as V3;
+    const skyCol = mix(bodyS, mix(sky, sky.mul(bodyHue), grazSat), skyVis) as V3;
     return o.reflection
       ? o.reflection.shade({ skyColor: skyCol, normalWorld: nNew, viewDirection: viewDir, chop: float(0), camDist, surfacePosition: positionWorld, footprint })
       : skyCol;
@@ -663,22 +697,6 @@ export function createShoreline(o: {
   const seaComp = (() => {
   const pathS = hS.div(float(1).sub(float(1).sub(cosI.mul(cosI)).div(1.333 * 1.333)).sqrt()).add(hS) as F;
   const trans = exp((seaWater.absorption as unknown as V3).mul(pathS).negate()) as V3;
-  // · the body: the deep pigment pulled to the shallow one by the depth, lit by the sky's light and the key's, with
-  //   the key's light the body scatters back (the sea's waterCol, lightWrap, bodyScatter; the clouds' shadow on the
-  //   key's share). A crest's thin water lit through from behind and below lifts it (the turquoise of a lagoon wave's
-  //   face)
-  const shallowF = smoothstep(seaWater.shallowFull as unknown as F, float(0), hS) as F;
-  const pigment = mix(seaWater.deep as unknown as V3, seaWater.shallow as unknown as V3, (seaWater.shallowMix as unknown as F).mul(shallowF)) as V3;
-  const haze = seaLight.haze as unknown as V3;
-  const skylight = mix(haze, vec3(haze.dot(vec3(0.2126, 0.7152, 0.0722))), (seaWater.skyDesat as unknown as F).clamp(0, 1)) as V3;
-  const ndlS = nNew.dot(normalize(seaLight.dir as unknown as V3)).max(0) as F;
-  const keyS = (seaLight.sun as unknown as V3).mul(cloudV) as V3;
-  const scatterU = seaWater.scatter as unknown as V2;
-  const crestLift = smoothstep(0.03, 0.14, steepS).mul(smoothstep(0.6, 0.08, hS)).mul(0.9) as F;
-  const bodyS = pigment
-    .mul(skylight.mul(seaWater.lightFloor as unknown as F).add(keyS.mul(ndlS.mul(seaWater.lightGain as unknown as F))))
-    .add((seaWater.sss as unknown as V3).mul(keyS).mul(ndlS.pow(scatterU.y.max(0.05)).mul(scatterU.x)))
-    .mul(crestLift.add(1)) as V3;
   // · behind it the scene as it stands (the sand, the floor), copied as the sea copies it (a half-float target: the
   //   film's faces are drawn into one, and a copy in the canvas's format fails every frame — surfaceMaterial §V24)
   const behindNode = viewportTexture(screenUV, null, sceneBehind);
