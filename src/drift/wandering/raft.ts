@@ -91,11 +91,17 @@ const FORE_GUARA_DEPTH = 0.8;
 const PLAIN = typeof location !== 'undefined' && new URLSearchParams(location.search).has('raftplain');
 /** the least drop the sails are set to (0..1 of the cloth's drop): struck, but not degenerate (see `update`) */
 const SAIL_STRUCK = 0.01;
+/** the furled roll lashed to its yard (pieceGeometrySail.ts `furlLash`), packed to this share of the game's bundle
+ * radius: the main's ~0.2 m thick, about the yard's own girth and a half, against the game's half-metre swags (the
+ * 2026-11-01 review of the struck sail at 590 s: a bare yard, then balloons on a string) */
+const FILM_FURL_PACK = 0.6;
 /** `far`: a raft seen only on the horizon (its lanterns carry no point lights: raftLanterns.ts) */
 export function createRaft(heightAt: (x: number, z: number, t: number) => number, o: { far?: boolean } = {}): RaftProp {
   // (read into each sail's shape as the blueprint is built)
   raftParams.sailWindRef = FILM_SAIL_WIND_REF;
   const blueprint = buildRaftBlueprint();
+  // the film's furl: the roll snug on its yard, lashed every arm's length (read as each sail's geometry is built)
+  for (const def of blueprint) if (def.sailStates && def.shape) def.shape.furlLash = FILM_FURL_PACK;
   const deckField = buildRaftDeckField(blueprint);
   // the deck material reads the active deck water at construction (raft/raftScene.ts): bound, never stepped
   setActiveDeckWater(createDeckWater({ source: deckField }));

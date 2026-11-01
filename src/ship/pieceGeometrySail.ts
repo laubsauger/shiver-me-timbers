@@ -231,12 +231,16 @@ function gatheredBunt(
   drop: number,
   baseRadius: number,
   seed: number,
+  fit?: FurlLash,
 ): THREE.BufferGeometry {
   const d = shipDetailParams;
-  const bays = Math.max(1, Math.round(d.sailBuntBays));
+  const bays = fit ? fit.bays : Math.max(1, Math.round(d.sailBuntBays));
   const gaskets = gasketStations(width, bays, seed);
-  const swell = Math.max(1, d.sailBuntSwell);
-  const sagMax = Math.max(0, d.sailBuntSag) * baseRadius;
+  const swell = fit ? fit.swell : Math.max(1, d.sailBuntSwell);
+  const sagMax = (fit ? fit.sag : Math.max(0, d.sailBuntSag)) * baseRadius;
+  const deep = fit ? fit.deep : 0.55;
+  const cy = fit ? fit.cy : 0;
+  const cz = fit ? fit.cz : 0;
   const jitter = Math.max(0, shipDetailParams.irregularity);
 
   const crease = Math.max(0, shipDetailParams.sailBuntCrease);
@@ -283,8 +287,8 @@ function gatheredBunt(
         const swellK = 1 + crease * fold;
         // the section is deeper than it is thick: the weight of the canvas
         // pulls the swag down into a hanging fold, it does not stay round
-        const ry = r * (1 + 0.55 * gather) * swellK;
-        positions.push(x, -sag + Math.cos(a) * ry, Math.sin(a) * r * swellK);
+        const ry = r * (1 + deep * gather) * swellK;
+        positions.push(x, cy - sag + Math.cos(a) * ry, cz + Math.sin(a) * r * swellK);
         uvs.push((x / Math.max(0.01, width)) + 0.5, k / RING);
         // BAKED OCCLUSION (see the header block on CREASE_LOBE). Three
         // independent closings, multiplied because they occlude independently:
@@ -445,13 +449,99 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB, shape?: Record
   }
   const panel = withSailShape(geo, 1, width, drop);
   bendHeadToYard(panel, bend);
+  const lash = (shape?.furlLash ?? 0) > 0 ? furlLash(width, bend, shape?.furlLash ?? 0, baseRadius) : undefined;
   return mergeNonIndexed([
     panel,
     ...reefPoints(width, drop),
     ...yardRobands(width, drop, bend),
-    gatheredBunt(width, drop, baseRadius, seed),
-    ...gaskets(width, drop, baseRadius, seed),
+    gatheredBunt(width, drop, lash ? baseRadius * lash.scale : baseRadius, seed, lash),
+    ...(lash ? lashings(width, drop, baseRadius * lash.scale, bend, lash, seed) : gaskets(width, drop, baseRadius, seed)),
   ]);
+}
+
+/**
+ * THE ROLL LASHED TO ITS YARD — opt-in (`shape.furlLash`, the film's raft only: drift/wandering/raft.ts; the game's
+ * bundle is untouched). The 2026-11-01 review of the furled raft at 590 s (out/drift/raft_review4/rig/furl_diag):
+ * after the struck sail was made to draw again (raft.ts SAIL_STRUCK), the bundle came back as the game's: three
+ * swags ~0.75 m deep and half a metre thick hung a hand in FRONT of the main yard, which they hid — balloons on a
+ * string, not canvas furled on a spar. A raft's cotton sail stowed on its yard is a sausage about as thick as the
+ * yard and a half, snug against the spar's front and under it, cinched every arm's length by a lashing that goes
+ * round the spar AND the roll, two or three turns side by side. So, when opted in:
+ *   - the roll's section is `scale` of the law's (furlBundleRadius) and swells less between the lashings (`swell`,
+ *     `sag`, `deep` against the game's 2.1, 1.15, 0.55);
+ *   - its axis sits against the yard's front-underside (`cz`, `cy`: just inside touching, so no light shows
+ *     between), not under the old head line in the air;
+ *   - `shape.furlLash` itself is that share of the law's radius (the film's: raft.ts FILM_FURL_PACK);
+ *   - its bays are an arm's length (`BAY`), and at each station `TURNS` turns of a lashing round spar and roll.
+ * The shader scales the roll's section about the head line as the sail is set (sailClothNodes `buntLocal`), so it
+ * slides those few cm toward the head line as it thins — at full furl, where it is seen whole, it is here.
+ */
+interface FurlLash {
+  bays: number;
+  swell: number;
+  sag: number;
+  deep: number;
+  /** m: the roll's axis in the sail piece's frame */
+  cy: number;
+  cz: number;
+  /** the share of the law's radius the roll is packed to */
+  scale: number;
+}
+
+/** m: a lashing every arm's length along the yard */
+const BAY = 0.75;
+/** turns of each lashing, and its cord's radius (m: a 12 mm line) */
+const TURNS = 3;
+const LASH_R = 0.006;
+/** rad below the yard's forward horizontal where the roll's axis lies */
+const ROLL_BELOW = (30 * Math.PI) / 180;
+
+function furlLash(width: number, b: YardBend, scale: number, baseRadius: number): FurlLash {
+  // the roll's axis out from the yard's by the two radii, a little inside touching (the waist's 0.62, less 15%)
+  const d = b.yardR + 0.62 * baseRadius * scale * 0.85;
+  return {
+    bays: Math.max(2, Math.round(width / BAY)),
+    swell: 1.3,
+    sag: 0.25,
+    deep: 0.2,
+    cy: b.axisY - d * Math.sin(ROLL_BELOW),
+    cz: b.axisZ + d * Math.cos(ROLL_BELOW),
+    scale,
+  };
+}
+
+/** at every station TURNS turns of a lashing round the yard and the roll's waist together: a stadium about both
+ * axes, side by side along the yard, each a little skewed as a hand passes it. Bunt-class: it thins with the roll */
+function lashings(width: number, drop: number, baseRadius: number, b: YardBend, f: FurlLash, seed: number): THREE.BufferGeometry[] {
+  const out: THREE.BufferGeometry[] = [];
+  const waist = baseRadius * 0.62;
+  const my = (b.axisY + f.cy) / 2;
+  const dy = f.cy - b.axisY;
+  const dz = f.cz - b.axisZ;
+  const len = Math.hypot(dy, dz) || 1;
+  for (const x of gasketStations(width, f.bays, seed)) {
+    for (let k = 0; k < TURNS; k++) {
+      const skew = vjitter(0.06, seed, x, k);
+      const pts: THREE.Vector3[] = [];
+      // a stadium, not an ellipse: half round the yard's far side, half round the roll's, so the turns lie on both
+      // (an ellipse about the two stood off the spar's top as hoops: its ends are sharper than either body)
+      const arc = (cy: number, cz: number, r: number, from: number): void => {
+        for (let i = 0; i <= 8; i++) {
+          const a = from + (i / 8) * Math.PI;
+          const ca = Math.cos(a) * r;
+          const sa = Math.sin(a) * r;
+          const y = cy + (dy / len) * ca - (dz / len) * sa;
+          const z = cz + (dz / len) * ca + (dy / len) * sa;
+          pts.push(new THREE.Vector3(x + (k - (TURNS - 1) / 2) * LASH_R * 2.3 + skew * (y - my), y, z));
+        }
+      };
+      arc(b.axisY, b.axisZ, b.yardR + LASH_R, Math.PI / 2);
+      arc(f.cy, f.cz, waist + LASH_R, -Math.PI / 2);
+      const ring = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 32, LASH_R, 5, true);
+      out.push(withSailShape(ring, 0, width, drop, 1, new Array(ring.attributes.position.count).fill(AO_GASKET)));
+    }
+  }
+  return out;
 }
 
 /**

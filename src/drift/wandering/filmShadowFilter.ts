@@ -42,18 +42,39 @@
  * at 604 s unchanged, nowhere more than 4 levels in 8 bits. Ashore nothing within 12 m of its caster changes at all:
  * its true penumbra is narrower than the contact filter's 2.5 texels (5.5 cm) already.
  *
- * Cost per receiving fragment: 16 compare samples (as before) + 17 depth loads for the search, + 36 loads where a
+ * Cost per receiving fragment: 16 compare samples (36 depth loads since the receiver's plane, below) + 17 depth loads for the search, + 36 loads where a
  * caster farther up the light than the contact radius resolves (6 m at sea, 12 m ashore: 2.5 texels / tan 0.265°)
  * shades it. Every frame a pure function of the map: no noise, no history.
+ *
+ * THE RECEIVER'S OWN PLANE (the 2026-11-01 review: "the stern tiller shadow is too far away"). A tap off to the side
+ * of the receiver reads the map where the receiver's own surface is nearer to or farther from the Sun than the
+ * receiver: on level deck under the morning's 12° Sun, 10.5 cm per 2.2 cm texel. Compared against the receiver's one
+ * depth, the taps toward the Sun found the receiver's own surface and shadowed it (the 2026-10-29 acne), and the cure
+ * was a constant bias as big as that drop (sea.ts: 15.8 cm along the light + 3.3 cm along the normal at 568 s) —
+ * which also let the first 15–30 cm of every contact shadow go lit, the stern block's and the tiller's among them.
+ * So every texel is now compared against the receiver's PLANE at that texel: the plane through the receiver
+ * square to the mesh's own geometric normal, turned into the light camera's frame (exact on a flat face; on a
+ * curved one off by the facets' bend, which the constant bias covers with the map's quantisation: sea.ts). The
+ * contact grid is therefore no longer 16 hardware-compared bilinear taps (a bilinear compare uses one reference for
+ * its 2 × 2 texels, up to a texel and a half apart: the very error the plane removes) but the texels themselves, a
+ * 6 × 6 window of point reads each compared against its own plane depth, tent-weighted by its distance from the
+ * receiver: as smooth as before (the weights move continuously with the receiver), the same width (±3 texels).
+ * (Tried first: the plane from the screen derivatives of the shadow coordinate, exact on every triangle — but a
+ * 2 × 2 pixel quad straddling two triangles or a silhouette gets neither's plane, and on the cabin's woven walls and
+ * the low-poly crew those quads came out as a stipple of lit and dark pixels through every shadow; dropping such
+ * quads back to the old constant bias lit them, 26 cm toward the Sun, inside a man's shadow on the wall behind him.)
  */
-import { Fn, If, float, ivec2, mix, reference, renderGroup, select, smoothstep, step, texture, textureLoad, vec2 } from 'three/tsl';
+import { Fn, If, float, ivec2, mix, normalWorldGeometry, reference, renderGroup, select, smoothstep, step, textureLoad, vec2, vec4 } from 'three/tsl';
 import { SUN_ANG } from '../getTheDrift/atmosphere';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union (ShadowNode's filter contract)
 type TslNode = any;
 
-/** the contact grid's taps on each axis, and their offsets (−1.5 … 1.5) */
-const TAPS = 4;
+/** texels: the contact filter's tent half-width about the receiver (the texel window is twice this a side) */
+const CONTACT_R = 3;
+/** m of depth along the light per m across the map: the steepest receiver plane taken as it is (level ground under a
+ * 1° Sun is 57); a surface within ~1° of edge-on to the Sun, which N·L leaves unlit anyway, is held at this */
+const SLOPE_MAX = 60;
 /** the Sun's angular radius (rad: the disc the sky draws, atmosphere.ts) as the tangent a penumbra grows by */
 const SUN_TAN = Math.tan(SUN_ANG);
 /** m: the search's rings about the receiver, four taps each, every other one turned 45° (eight bearings between two
@@ -82,30 +103,10 @@ export const filmShadowFilter = Fn(({ depthTexture, shadowCoord, shadow, depthLa
   // (held in vars up here: an expression first built inside the wide grid's branch is declared there, and read
   // outside it from a variable out of scope — the nightSky.ts trap)
   const z = float(shadowCoord.z).toVar();
-  const compare = (uv: TslNode): TslNode => {
-    let depth = texture(depthTexture, uv);
-    if (depthTexture.isArrayTexture) depth = depth.depth(depthLayer);
-    return depth.compare(z);
-  };
   // (the map size and the contact radius are fixed for the film's light while a frame renders: read as constants at
-  // build; the radius in texels spread over the grid's span)
+  // build)
   const size = shadow.mapSize.x;
-  const texel = 1 / size;
   const rMin = Math.max(shadow.radius, 1);
-  const step0 = (rMin * texel) / ((TAPS - 1) / 2);
-  let sum: TslNode = float(0);
-  let wsum = 0;
-  for (let j = 0; j < TAPS; j++) {
-    for (let i = 0; i < TAPS; i++) {
-      const ox = i - (TAPS - 1) / 2;
-      const oy = j - (TAPS - 1) / 2;
-      // tent weights: the centre counts most, the edge of the kernel fades in
-      const w = (TAPS / 2 + 0.5 - Math.abs(ox)) * (TAPS / 2 + 0.5 - Math.abs(oy));
-      sum = sum.add(compare(shadowCoord.xy.add(vec2(ox * step0, oy * step0))).mul(w));
-      wsum += w;
-    }
-  }
-  const contact = sum.div(wsum).toVar();
 
   // the light camera's scale, live (its extent is per world, sea.ts SHADOW_EXTENT): m per texel, m per unit of depth
   const cam = (name: string): TslNode => (reference(name, 'float', shadow.camera) as TslNode).setGroup(renderGroup);
@@ -119,11 +120,44 @@ export const filmShadowFilter = Fn(({ depthTexture, shadowCoord, shadow, depthLa
     return d;
   };
 
+  // THE RECEIVER'S PLANE, from the mesh's own (interpolated, geometric: no normal map) normal turned into the light
+  // camera's frame: n·dp = 0 there gives the depth's slope across the map, dd = (nx·W du − ny·H dv) / (nz·D) per uv
+  // (W, H the camera's extent, D its depth range; v runs down the map, ShadowNode's flip), per texel / size. The
+  // same plane whichever way the normal faces. Steeper than SLOPE_MAX (a surface the Sun all but grazes, N·L ≈ 0)
+  // it is held at that.
+  const view = (reference('matrixWorldInverse', 'mat4', shadow.camera) as TslNode).setGroup(renderGroup);
+  const n = view.mul(vec4(normalWorldGeometry, 0)).xyz.toVar();
+  const nz = select(n.z.lessThan(0), float(-1), float(1)).mul(n.z.abs().max(1e-4));
+  const plane = vec2(n.x.mul(cam('right').sub(cam('left'))), n.y.negate().mul(cam('top').sub(cam('bottom')))).div(nz.mul(depthM)).div(size).toVar();
+  // (as m along the light per m across, against SLOPE_MAX)
+  const steep = plane.length().mul(depthM).div(texelM).toVar();
+  const slope = plane.mul(float(SLOPE_MAX).div(steep.max(SLOPE_MAX))).toVar();
+  /** the receiver's own depth `o` texels away, on its plane */
+  const zAt = (o: TslNode): TslNode => z.add(slope.dot(o));
+
+  // THE CONTACT FILTER: every texel within CONTACT_R of the receiver, compared against the plane's depth at it (lit
+  // where the receiver is no farther from the light than what the map holds: the compare sampler's less-equal)
+  const p = at.sub(0.5).toVar(); // texel-centre coordinates: texel i's centre at i
+  const base = p.floor().sub(CONTACT_R - 1).toVar();
+  let sum: TslNode = float(0);
+  let wsum: TslNode = float(0);
+  for (let j = 0; j < 2 * CONTACT_R; j++) {
+    for (let i = 0; i < 2 * CONTACT_R; i++) {
+      const d = base.add(vec2(i, j)).sub(p);
+      // tent weights: the centre counts most, the edge of the window fades in as the receiver moves
+      const w = float(CONTACT_R).sub(d.x.abs()).max(0).mul(float(CONTACT_R).sub(d.y.abs()).max(0));
+      sum = sum.add(step(zAt(d), load(d)).mul(w));
+      wsum = wsum.add(w);
+    }
+  }
+  const contact = sum.div(wsum.max(1e-6)).toVar();
+
   // THE BLOCKER SEARCH: how many taps hold a caster within reach, and the sum of their inverse distances (1/m)
   const found = float(0).toVar();
   const inverse = float(0).toVar();
   const tap = (ox: number, oy: number): void => {
-    const toSun = z.sub(load(vec2(ox, oy).div(texelM))).mul(depthM);
+    const o = vec2(ox, oy).div(texelM);
+    const toSun = zAt(o).sub(load(o)).mul(depthM);
     const counts = step(Math.max(Math.hypot(ox, oy) / (CONE * SUN_TAN), SELF), toSun);
     found.addAssign(counts);
     inverse.addAssign(counts.div(toSun.max(SELF)));
@@ -153,7 +187,8 @@ export const filmShadowFilter = Fn(({ depthTexture, shadowCoord, shadow, depthLa
         const w = (WIDE / 2 + 0.5 - Math.abs(ox)) * (WIDE / 2 + 0.5 - Math.abs(oy));
         // lit where the receiver is no farther from the light than what the map holds (the compare sampler's
         // less-equal, as a point read)
-        lit = lit.add(step(z, load(vec2(ox, oy).mul(spacing))).mul(w));
+        const o = vec2(ox, oy).mul(spacing);
+        lit = lit.add(step(zAt(o), load(o)).mul(w));
         ws += w;
       }
     }
