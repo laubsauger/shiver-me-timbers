@@ -30,7 +30,6 @@ import { getTheDriftParams } from '../../params/getTheDrift';
 import { driftParams } from '../../params/drift';
 import { ourGalaxy } from '../getTheDrift/timeline';
 import { STAR_PEAK, STAR_SIGMA, createMilkyWay, localStarFlux, localStars, starTemp, starTint } from '../getTheDrift/milkyWay';
-import { OUR_LOOK } from '../getTheDrift/galaxies';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -118,10 +117,9 @@ function starMap(g: ReturnType<typeof ourGalaxy>): THREE.DataTexture {
 export function bakeNightSky(renderer: THREE.WebGPURenderer, front: THREE.Vector3, up: THREE.Vector3, size = 2048): NightSky {
   const p = getTheDriftParams;
   const g = ourGalaxy(p, [0, 0, 0], driftParams.domeTilt);
-  // (the night over the sea keeps the galaxy as it was baked before 2026-11-01: 13° arms, no wander. Act 2 opened our
-  // galaxy's arms to 18° and let them wander to stop the inclined disc reading as rings at ~100 s, but the user liked
-  // this night sky as it was, and seen from inside the disc the rings never showed)
-  const milky = createMilkyWay(g, p.marchSteps, { look: { ...OUR_LOOK, wind: 1 / Math.tan((13 * Math.PI) / 180) }, wander: 0 });
+  // (Act 2's galaxy as it is, the one model: until 2026-11-01 the night kept its own 13°, wander-free arms, and the
+  // user asked for "the SAME model used throughout the film")
+  const milky = createMilkyWay(g, p.marchSteps);
   const sun = new THREE.Vector3(...g.sun);
   milky.update({
     volume: 1,

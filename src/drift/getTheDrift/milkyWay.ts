@@ -67,8 +67,10 @@ export interface MilkyWay {
   dispose(): void;
 }
 
-/** dust extinction per channel relative to green (interstellar reddening: ~1/λ) */
-const REDDEN = vec3(0.72, 1, 1.38);
+/** dust extinction per channel relative to green (interstellar reddening: ~1/λ). Softer than the ~1/λ it was, 0.72, 1,
+ * 1.38, which browned every edge of the Rift and turned the band behind it orange (the user, 2026-11-01: "far less
+ * orange and brown than now") */
+const REDDEN = vec3(0.85, 1, 1.18);
 /**
  * How far the march reaches above and below the plane, and from the centre (radii) — where the samples go — and the
  * share of each, from its edge inward, over which the light is TAPERED to nothing before the march stops.
@@ -139,8 +141,8 @@ export function starTemp(i: number): number {
 export const starTint = (temp: THREE.Node<'float'>): V3 =>
   mix(mix(vec3(1, 0.72, 0.5), vec3(1, 0.95, 0.88), smoothstep(0, 0.55, temp)), vec3(0.72, 0.82, 1), smoothstep(0.75, 1, temp)) as V3;
 
-export function createMilkyWay(g: OurGalaxy, steps: number, opts: { look?: typeof OUR_LOOK; wander?: number } = {}): MilkyWay {
-  const L = opts.look ?? OUR_LOOK;
+export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
+  const L = OUR_LOOK;
   const u = {
     centre: uniform(new THREE.Vector3(...g.centre)),
     X: uniform(new THREE.Vector3(...g.xAxis)),
@@ -167,7 +169,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number, opts: { look?: typeo
     const m2 = oc.dot(oc).sub(b.mul(b));
     return float(1).sub(step(m2, u.occRadius.mul(u.occRadius)).mul(step(0, b)));
   };
-  const look = { arms: float(L.arms), wind: float(L.wind), phase: float(L.phase), seed: float(L.seed), elliptical: float(0), wander: float(opts.wander ?? 1) };
+  const look = { arms: float(L.arms), wind: float(L.wind), phase: float(L.phase), seed: float(L.seed), elliptical: float(0) };
 
   // ------------------------------------------------------------------ the volume
   const material = new THREE.MeshBasicNodeMaterial();
@@ -203,11 +205,17 @@ export function createMilkyWay(g: OurGalaxy, steps: number, opts: { look?: typeo
       t0.assign(mix(max(t0, min(ta, tb)), mix(t1, t0, inside), flat));
       t1.assign(mix(min(t1, max(ta, tb)), mix(t0, t1, inside), flat));
       If(t1.greaterThan(t0), () => {
-        const ds = t1.sub(t0).div(steps);
+        // the samples crowd toward the eye: at u = (i + j) / steps along the ray, t = t0 + len·(¼u + ¾u²). From inside
+        // the disk the NEAR dust shapes the Rift (galaxyModel.ts `dust`: a cloud 0.01 radii across, 0.05 off, is 11°
+        // of sky), and evenly spaced samples, ~0.03 radii apart along the plane, stepped right over it; now the first
+        // ones are ~0.007 apart, the last ~0.05, out where the far side of the disk is faint behind the dust anyway
+        const len = t1.sub(t0);
         const jitter = fract(screenCoordinate.x.mul(0.06711056).add(screenCoordinate.y.mul(0.00583715))).mul(52.9829189);
         const j = fract(jitter);
         Loop(steps, ({ i }) => {
-          const tt = t0.add(float(i).add(j).mul(ds));
+          const u0 = float(i).add(j).div(steps);
+          const tt = t0.add(len.mul(u0.mul(0.25).add(u0.mul(u0).mul(0.75))));
+          const ds = len.mul(u0.mul(1.5).add(0.25)).div(steps);
           const x = o.add(dl.mul(tt));
           const s = galaxyVolume(x, look);
           // (nothing left at the march's own bounds to cut: TAPER above)
