@@ -211,13 +211,19 @@ export function createHeroGrain(U: GrainUniforms): THREE.InstancedMesh {
     // larger quad never stretches it
     const k = size.div(f.size.mul(GLOW));
     const g2 = r.mul(k);
-    // a hot point (never under ~1.2 px, what it gains in width given back in brightness), the warm disc it sat in
-    // before (1/e at ~0.25°), and a soft halo out to ~1.8°, windowed to nothing at the quad's edge (glow.ts)
-    const rc = max(float(0.05), px.mul(k).mul(1.2));
-    const point = exp(g2.div(rc).pow(2).negate()).mul(float(0.05).div(rc).pow(2)).mul(4);
-    const disc = exp(g2.div(0.14).pow(2).negate()).mul(1.6);
-    const halo = exp(g2.div(0.45).pow(2).negate()).mul(0.28).mul(glowWindow(g2.mul(g2)));
-    const g = U.warm.mul(U.radiance).mul(grain).mul(point.add(disc).mul(breath).add(halo.mul(swell))).mul(1.5);
+    // A POINT OF LIGHT, NOT A BALL (the user, 2026-11-01, on the grain over "For every billion lost": "this looks
+    // horrendous. What's up with those things being so blobby?"). It was a hot point in a warm DISC (1/e at ~0.25°,
+    // radiance ~6) in a halo (~0.5°, ~1.6): both far over the tone map's shoulder, so each became a flat plateau with a
+    // rim — a ~50 px ball at 1280. Now a point-spread function: a Moffat core (1 + (r/α)²)^−2.5, α 1.6 pixels of the
+    // view being drawn (pixelAngle: the same few pixels at 2K, 4K or a 16:9 cut, its energy the same light), so only
+    // ~2 px of it pass white; a faint wide skirt under it (peak 0.1 and 0.025 — under the shoulder: no plateau, no
+    // edge) windowed to zero at the quad's edge (glow.ts); the grade's bloom adds the rest.
+    const rc = max(float(0.004), px.mul(k).mul(1.6));
+    const x2 = g2.div(rc).pow(2);
+    // (× radiance, particleRadiance 2.4 at the defaults and the hand-over's fade: peaks 14, skirts 0.1 and 0.025)
+    const point = float(1).add(x2).pow(-2.5).mul(5.8);
+    const skirt = exp(g2.div(0.12).pow(2).negate()).mul(0.042).add(exp(g2.div(0.4).pow(2).negate()).mul(0.0104)).mul(glowWindow(g2.mul(g2)));
+    const g = U.warm.mul(U.radiance).mul(grain).mul(point.mul(breath).add(skirt.mul(swell)));
     const s = mix(U.star, vec3(1, 0.95, 0.88), 0.5).mul(U.starRadiance).mul(ignite).mul(starLight(r, p.x, p.y, px)).mul(0.08);
     return vec4(g.add(s), 1);
   })();

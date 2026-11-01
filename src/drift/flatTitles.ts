@@ -36,7 +36,7 @@
  * clip.mjs), so its uv is the overlay's uv and the text is drawn into the middle 9/16 of the canvas.
  */
 import * as THREE from 'three/webgpu';
-import { LINE_PITCH, phrasePlacement, type CrawlLayout, type CrawlPhrase } from './undertime/crawl';
+import { LINE_PITCH, PEN, bodyPen, drawPen, glyphInk, inkGlyph, phrasePlacement, type CrawlLayout, type CrawlPhrase, type PenAt } from './undertime/crawl';
 import { InkWord } from './titleInk';
 
 /** the 16:9 frame's height as a fraction of the square frame it is cut from */
@@ -80,6 +80,9 @@ export interface FlatLine {
   signature: boolean;
   /** 0..1, how much of it is written (the signature draws on: titleInk.ts) */
   ink: number;
+  /** the body's pen (undertime/crawl.ts bodyPen): s since its phrase began, this line's place in it, and the phrase's
+   * lines (null for the signature) */
+  pen: { since: number; line: number; lines: string[] } | null;
 }
 
 /**
@@ -99,7 +102,7 @@ export function flatTitleLines(t: number, phrases: readonly CrawlPhrase[], L: Cr
       const y = top + j * em * LINE_PITCH;
       const lo = FLAT_SAFE + em / 2;
       const hi = 1 - FLAT_SAFE - em / 2;
-      out.push({ text, y: Math.min(hi, Math.max(lo, y)), em, alpha: at.alpha, signature: !!p.signature, ink: at.ink });
+      out.push({ text, y: Math.min(hi, Math.max(lo, y)), em, alpha: at.alpha, signature: !!p.signature, ink: at.ink, pen: p.signature ? null : { since: t - p.at, line: j, lines: p.lines } });
     });
   }
   return out;
@@ -138,6 +141,9 @@ export class FlatTitles {
     const h = size * FLAT_BAND;
     const top = (size - h) / 2;
     const radius = FLAT_ARC * size;
+    /** where fraction f of each body line is on the canvas, by line index, for the pen; and the pen's phrase */
+    const where: Array<(f: number) => [number, number]> = [];
+    let penLine: FlatLine | null = null;
     for (const line of lines) {
       if (line.signature) {
         // written on in its own canvas (fill, halo, the light on the pen), set centred on the line
@@ -173,10 +179,9 @@ export class FlatTitles {
         px *= (FLAT_WIDTH * size) / w;
         width();
       }
-      ctx.fillStyle = `rgba(236,239,246,${0.92 * line.alpha})`;
-      // the dome's dark halo behind every glyph (crawl.ts): the letterforms keep their edge over whatever is behind
-      ctx.shadowColor = `rgba(0,0,0,${0.85 * line.alpha})`;
-      ctx.shadowBlur = px * 0.5;
+      // written by the survivor's light, glyph by glyph (undertime/crawl.ts bodyPen; the dome's dark halo behind every
+      // glyph, crawl.ts inkGlyph)
+      const ink = line.pen ? bodyPen(line.pen.since, line.pen.lines) : null;
       // glyph by glyph along the arc (THE ARC): each at its advance in the whole line (the prefix's width: the face's
       // kerning and the tracking included), centred on the line, turned to the arc at its middle
       const glyphs = Array.from(line.text);
@@ -188,14 +193,36 @@ export class FlatTitles {
         const gw = ctx.measureText(g).width - tracking * px;
         if (g.trim() === '') continue;
         const at = arcPoint(x0 + gw / 2 - total / 2, size / 2, top + line.y * h, radius);
+        const r = ink && line.pen ? glyphInk(line.pen.since, ink.starts[line.pen.line], ink.durs[line.pen.line], x0 / total, (x0 + gw) / total) : { alpha: 1, warm: 0 };
+        if (r.alpha <= 0.002) continue;
         ctx.save();
         ctx.translate(at.x, at.y);
         ctx.rotate(at.angle);
-        ctx.fillText(g, 0, 0);
+        inkGlyph(ctx, g, px, line.alpha * r.alpha, r.warm);
         ctx.restore();
+      }
+      if (line.pen) {
+        const y = top + line.y * h;
+        where[line.pen.line] = (f: number): [number, number] => {
+          const at = arcPoint((f - 0.5) * total, size / 2, y, radius);
+          return [at.x, at.y];
+        };
+        penLine = line;
       }
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // the pen's light: it comes down from above the text (the act's one place, the grain's spot — PEN.spotEl on the
+    // dome, as many ems above the first line here as there), writes, and goes back up
+    if (penLine?.pen) {
+      const ink = bodyPen(penLine.pen.since, penLine.pen.lines);
+      const first = lines.find((l) => l.pen && l.pen.lines === penLine?.pen?.lines);
+      if (ink.pen && first && where[0]) {
+        const emPx = first.em * h;
+        const spotY = Math.max(top + FLAT_SAFE * h, top + first.y * h - ((PEN.spotEl - L.elTop) / (L.size * 180)) * emPx);
+        const pos = (a: PenAt): [number, number] => (a.line < 0 || !where[a.line] ? [size / 2, spotY] : where[a.line](a.f));
+        drawPen(ctx, pos(ink.pen.from), pos(ink.pen.to), ink.pen.k, ink.pen.glow * first.alpha);
+      }
+    }
     this.texture.needsUpdate = true;
   }
 }

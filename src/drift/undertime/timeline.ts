@@ -23,6 +23,7 @@
 import type { DriftParams } from '../../params/drift';
 import { domeBasis, type Vec3 } from '../../cine/domeMaster';
 import { frontFracCpu } from './front';
+import { strongestHit } from './audioCues';
 
 export const BEATS = ['first', 'arise', 'cool', 'wave', 'remain', 'zoom', 'gather'] as const;
 export type Beat = (typeof BEATS)[number] | 'end';
@@ -156,12 +157,39 @@ export const ZOOM = { easeOut: 5 };
 /** s from the front reaching the hero grain's spot to the hero survivor coming to rest on it (survivors.ts) */
 export const HERO_RUN = 2.1;
 
+/**
+ * THE FRONT ON THE MUSIC (audioCues.ts; the 2026-11-01 brief: "the wave's start on a swell, its crest at the zenith on
+ * the biggest peak"). The wave beat stays where it is (38–45 s: the soundtrack is locked to it); inside it the front
+ * starts with the beat — where the build peaks, and where the score's swell into the wave begins (38.2–39.5 s: an
+ * onset at 38.24, the 1 s tide up 7.6 dB by 39.45) — and its LENGTH is set so it crosses the zenith (waveSweep's
+ * k = ½) on the strongest hit it can reach: between 0.78 of the beat's half (the front at most 1.28× its old pace) and
+ * the half itself (it never runs past the beat). With the current mix that is the hit at 41.09 s (flux 0.55: the
+ * strongest of the pulse train the score runs through the wave), 0.41 s before the old 41.5 s: a 6.18 s front, its
+ * peak ~50°/s overhead (44 before). No hit in the window: the old timing.
+ *
+ * Everything that times the front reads this, never `starts.wave` and `p.wave` (the CPU's cuts in field.ts, the GPU's
+ * frontTime, the scripted survivor, the envelope below).
+ */
+export function waveFront(p: DriftParams): { start: number; length: number; zenith: number } {
+  const { starts } = beatStarts(p);
+  const half = Math.max(0.5, p.wave) / 2;
+  const hit = strongestHit(starts.wave + 0.78 * half, starts.wave + half, 0.3);
+  const zenith = hit ? hit.t : starts.wave + half;
+  return { start: starts.wave, length: 2 * (zenith - starts.wave), zenith };
+}
+
+/** act s the front reaches world direction `d` from the eye (front.ts's ragged edge, waveFront's timing) */
+export function frontReach(d: Vec3, p: DriftParams): number {
+  const F = waveFront(p);
+  return F.start + waveTimeAt(frontFracCpu(d, domeBasis(p.domeTilt).front), p.waveStall) * F.length;
+}
+
 /** act s the front passes the hero grain's spot */
 export function heroPassTime(p: DriftParams): number {
   const { starts } = beatStarts(p);
   const e = eyePath(starts.wave, p);
   const g = heroGrainPosition(p);
-  return starts.wave + waveTimeAt(frontFracCpu([g[0] - e[0], g[1] - e[1], g[2] - e[2]], domeBasis(p.domeTilt).front), p.waveStall) * p.wave;
+  return frontReach([g[0] - e[0], g[1] - e[1], g[2] - e[2]], p);
 }
 
 /**
@@ -184,8 +212,9 @@ export function heroPassTime(p: DriftParams): number {
  */
 export function waveEnvelope(t: number, p: DriftParams): { build: number; lens: number; crest: number; frontGain: number } {
   const { starts } = beatStarts(p);
-  const L = Math.max(1e-6, p.wave);
-  const k = clamp01((t - starts.wave) / L);
+  const F = waveFront(p);
+  const L = Math.max(1e-6, F.length);
+  const k = clamp01((t - F.start) / L);
   const B = Math.max(1e-6, p.waveBuild);
   // (x^1.6: at x^2.4 the first half of the build was all but empty, and the intensifying the 2026-10-30 story note
   // asks for — "collisions intensifying" — only began 2.5 s before the front)
@@ -196,9 +225,9 @@ export function waveEnvelope(t: number, p: DriftParams): { build: number; lens: 
   // held at full over the top, down as it goes on past ~108°. (From 54° to 76° while the front stalled: without the
   // stall it crosses the top in ~1 s, so the crest comes up earlier to carry its light all the way into the zenith;
   // the 2026-11-01 note, the swoosh lost "before reaching the top")
-  const f = t > starts.wave ? waveSweep(k, p.waveStall) : 0;
+  const f = t > F.start ? waveSweep(k, p.waveStall) : 0;
   const crest = smooth((f - 0.2) / 0.2) * (1 - smooth((f - 0.6) / 0.15));
-  const pass = t > starts.wave && t < starts.wave + L ? Math.sin(Math.PI * k) ** 0.6 : 0;
+  const pass = t > F.start && t < F.start + L ? Math.sin(Math.PI * k) ** 0.6 : 0;
   const lens = ((p.waveLens * Math.PI) / 180) * Math.max(0.35 * build, pass * (0.45 + 0.55 * crest));
   // (eased in over the wave's first 0.3 s and out over its last 0.7 s: nothing on the dome steps)
   const frontGain = smooth(k / 0.04) * (0.4 + 0.6 * smooth(k / 0.3)) * (1 - smooth((k - 0.9) / 0.1));
@@ -275,6 +304,7 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
   const zl = Math.max(6, p.zoom);
   const scale = Math.pow(10, -p.zoomDecades * plateau(zoom, 3 / zl, Math.min(ZOOM.easeOut, zl / 2) / zl));
   const env = waveEnvelope(t, p);
+  const front = waveFront(p);
   return {
     beat,
     u,
@@ -283,10 +313,10 @@ export function undertimeState(t: number, p: DriftParams): UndertimeState {
     pairDensity,
     flashGain,
     glow,
-    waveClock0: fieldClock(starts.wave, p),
+    waveClock0: fieldClock(front.start, p),
     waveRate: p.slowRate,
-    waveLength: Math.max(1e-6, p.wave),
-    wave: waveSweep(wave, p.waveStall),
+    waveLength: Math.max(1e-6, front.length),
+    wave: waveSweep(clamp01((t - front.start) / Math.max(1e-6, front.length)), p.waveStall),
     ...env,
     heroGrain,
     grains,
@@ -405,4 +435,31 @@ export function webFlight(t: number, p: DriftParams): WebFlight {
     // one blur of gas (a grey wash), so the gas comes up as the eye clears the halo
     presence: smooth((reach - 0.012) / 0.04),
   };
+}
+
+/**
+ * ACT 1'S GRADE (the 2026-11-01 brief: "deep blacks, a limited palette, bright highlights that bloom, no grey haze;
+ * Act 1-specific"): [saturation, contrast] for the dome capture's post-tone-map grade (cine/domeCapture.ts setGrade:
+ * saturation about the luminance; contrast a power about mid grey up to its knee, the shoulder above untouched, so
+ * highlights keep their roll-off and their bloom). AgX alone is flat — its toe lifts the low end, and the bloom's and
+ * the front's faint wide light came out as a brown-grey film over the black (the 2026-11-01 layer check at 41 s: with
+ * every particle layer hidden a brown wash still filled the spent sky). A power of 1.3 takes a tone-mapped 0.05 to
+ * 0.034 and 0.02 to 0.011 — the film goes to black — while 0.18 stays 0.18 and the shoulder is the same. Saturation
+ * 1.08: the act's two families, amber and cyan-violet, a little richer against that black.
+ * Full through the light wave and the remainder (to the zoom); eased back to none across the zoom, whose web of faint
+ * gas must not be crushed, so Act 2 begins on its own grade (1, 1) exactly.
+ * Returns [saturation, contrast, bloom ×].
+ */
+export function undertimeGrade(t: number, p: DriftParams): [number, number, number] {
+  const { starts } = beatStarts(p);
+  const k = 1 - smooth((t - starts.zoom) / Math.max(1e-6, p.zoom));
+  // THE BLOOM (the third value, × bloomStrength): 1.3× through the field — its flashes and hot beads are the act's
+  // highlights, and they should bloom — but 0.4× while the light wave's front is up: a band of light ~3° wide at a
+  // radiance of 7–10 across the whole dome fed the bloom's mip chain until it lay as a brown-grey wash ~25° deep over
+  // the spent sky behind the line (the 2026-11-01 check at 41 s: black with the bloom off, brown with it on, the crest
+  // off either way). Eased in and out over the front's first and last ~0.6 s, so the bloom never steps.
+  const F = waveFront(p);
+  const wave = smooth((t - F.start + 0.6) / 1.2) * (1 - smooth((t - F.start - F.length + 0.6) / 1.2));
+  const bloom = (1 + 0.3 * k) * (1 - 0.7 * wave);
+  return [1 + 0.08 * k, 1 + 0.3 * k, k > 0 ? bloom : 1];
 }

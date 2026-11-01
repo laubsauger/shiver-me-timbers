@@ -13,7 +13,7 @@
  */
 import type { DriftParams } from '../../params/drift';
 import { domeBasis, type Vec3 } from '../../cine/domeMaster';
-import { beatStarts, eyePath, heroGrainPosition, waveTimeAt } from './timeline';
+import { beatStarts, eyePath, heroGrainPosition, waveFront, waveTimeAt } from './timeline';
 import { spiralEndCpu, type PairCpu } from './pairModel';
 
 export interface ScriptedPair extends PairCpu {
@@ -77,6 +77,7 @@ export function survivorPair(p: DriftParams): ScriptedPair {
   const vertex = sub(g, end);
   const birth = starts.wave - SURVIVOR_LEAD;
   // its antimatter goes when the front's light passes the vertex
-  const cut = starts.wave + waveTimeAt(waveFracCpu(sub(vertex, eye), p.domeTilt)) * p.wave;
+  const W = waveFront(p);
+  const cut = W.start + waveTimeAt(waveFracCpu(sub(vertex, eye), p.domeTilt)) * W.length;
   return { ...base, vertex, birth, tEnd: 1e4, tEndAnti: Math.max(0.3, cut - birth) };
 }

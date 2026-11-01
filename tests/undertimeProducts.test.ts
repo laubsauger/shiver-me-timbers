@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { driftParams } from '../src/params/drift';
-import { HERO_RUN, beatStarts, eyePath, heroGrainPosition, heroPassTime, undertimeState, waveTimeAt } from '../src/drift/undertime/timeline';
+import { HERO_RUN, beatStarts, eyePath, frontReach, heroGrainPosition, heroPassTime, undertimeState } from '../src/drift/undertime/timeline';
 import { SURVIVOR } from '../src/drift/undertime/productModel';
 import { PHOTON_SPEED, endPoint, generatePairs, loopPoint, meetingPoint, type PairEvent } from '../src/drift/undertime/events';
 import { MATTER, generateProducts, jet, trackPoint, trackTangent, type ProductTrack } from '../src/drift/undertime/productModel';
@@ -144,9 +144,11 @@ describe('Undertime act events and the light wave', () => {
   const act = undertimeEvents(p, () => ({ lo: 0, hi: 0, az: 0, strength: 0 }));
   const b = domeBasis(p.domeTilt);
   const eyeW = eyePath(starts.wave, p);
-  const cut = (at: Vec3): number => starts.wave + waveTimeAt(frontFracCpu(sub(at, eyeW), b.front), p.waveStall) * p.wave;
-  // the front's own events are born ON it (a hair before it reaches them); everything else must be born ahead of it
-  const onFront = (e: PairEvent): boolean => e.birth >= starts.wave && Math.abs(e.birth + 0.05 - cut(e.vertex)) < 0.1;
+  // (the front's own timing, on the score: timeline.ts waveFront)
+  const cut = (at: Vec3): number => frontReach(sub(at, eyeW), p);
+  // the front's own events are born just AHEAD of it and annihilate on its line (field.ts frontEvents: 80 % of their
+  // life before it reaches them); everything else must be born ahead of it and be gone by then
+  const onFront = (e: PairEvent): boolean => e.birth >= starts.wave - 1 && Math.abs(e.birth + 0.8 * e.loop - cut(e.vertex)) < 0.1;
 
   it('nothing is born behind the front, and nothing it catches lives on past it', () => {
     for (const e of act.events) {
@@ -246,7 +248,7 @@ describe('Undertime survivors', () => {
     expect(closest).toBeGreaterThan((6 * Math.PI) / 180);
     for (const d of dirs) expect(dot(d, b.axis)).toBeGreaterThan(0);
     for (const s of more.rests) {
-      const cut = starts.wave + waveTimeAt(frontFracCpu(sub(s.rest, eyeW), b.front), p.waveStall) * p.wave;
+      const cut = frontReach(sub(s.rest, eyeW), p);
       expect(s.at).toBeGreaterThan(cut - 0.3);
       expect(s.at).toBeLessThan(starts.wave + p.wave + 1);
     }

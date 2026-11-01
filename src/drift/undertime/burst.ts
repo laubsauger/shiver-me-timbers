@@ -84,7 +84,7 @@ export function createBursts(events: readonly Pick<PairEvent, 'birth' | 'burst' 
   const width = max(px.mul(1.5), mix(float(0.02), R.mul(2.2), isBall));
   const length = max(width, mix(speed.mul(0.06).mul(alongLen).add(0.02), R.mul(2.2), isBall));
   // (spent behind the front: waveFx.ts)
-  const alpha = mix(sparkA, ballA, isBall).mul(U.fx ? spent(frontTime(vertex, U.fx), U.fx, 0.3) : float(1));
+  const alpha = mix(sparkA, ballA, isBall).mul(U.fx ? spent(frontTime(vertex, U.fx), U.fx, 0.15) : float(1));
   const corner = attribute<'vec3'>('position', 'vec3');
   const noise = noiseTexture();
   const material = new THREE.NodeMaterial();

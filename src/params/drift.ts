@@ -240,9 +240,11 @@ export const driftParams: DriftParams = registerParams(
     productCool: 0x5fe8d2,
     // (the 1:1 sweep of 2026-10-30, four profiles at 1920: the core a further 10 % thinner and the halo's light 0.8 —
     // between the first default and the leanest — read "a smidge" thinner inside and out without going wiry)
-    glowCore: 0.9,
-    glowHalo: 1,
-    glowHaloGain: 0.8,
+    // (0.9 / 1 / 0.8 until the 2026-11-01 note on the tracks: "thinner and crisper, with less halo (the same 'glow too
+    // thick' complaint)": the core a further 15 % thinner, the halo 20 % narrower at a little over half its light)
+    glowCore: 0.75,
+    glowHalo: 0.8,
+    glowHaloGain: 0.45,
     grammar: 1,
     pairSlots: 2600,
     trackSegments: 40,

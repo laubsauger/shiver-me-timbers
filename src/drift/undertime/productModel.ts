@@ -299,7 +299,9 @@ export function generateProducts(events: readonly PairEvent[], seed: number, o: 
     // DELTA RAYS: tight amber curls off the side of a fast pair's tracks, as each bead passes
     if (e.energy > 0.55 && !e.braid) {
       for (const q of [1, -1]) {
-        const count = Math.floor(r() * (1 + 3.2 * (e.energy - 0.55) / 0.45));
+        // (fewer, wider and flat: tight helices of 5–18 cm, seen side-on from 10 m, drew a fine sawtooth on the tracks
+        // near their vertices — the 2026-11-01 note, "JAGGED SAW-TOOTH … an artefact")
+        const count = Math.floor(r() * (1 + 1.6 * (e.energy - 0.55) / 0.45));
         for (let k = 0; k < count; k++) {
           const u = 0.08 + 0.6 * r();
           if (u >= e.end) continue;
@@ -307,7 +309,7 @@ export function generateProducts(events: readonly PairEvent[], seed: number, o: 
           const tan = norm(sub(loopPoint(e, q, u + 0.002), loopPoint(e, q, u - 0.002)));
           const side = norm(cross(n, tan));
           const d = norm(add(scale(tan, 0.35), side, r() < 0.5 ? 1 : -1));
-          const R0 = 0.05 + 0.13 * r();
+          const R0 = 0.14 + 0.2 * r();
           const curl = 0.28 + 0.3 * r();
           tracks.push({
             t0: e.birth + u * e.loop,
@@ -318,7 +320,8 @@ export function generateProducts(events: readonly PairEvent[], seed: number, o: 
             radius: R0,
             curl,
             turn: -Math.log(0.08) / curl,
-            pitch: (r() - 0.5) * 0.3,
+            // (flat: a pitched curl seen side-on is the sawtooth; the draw is kept so the sequence after it is unchanged)
+            pitch: 0 * r(),
             q: 1,
             family: MATTER,
             shade: 0.4 + 0.5 * r(),

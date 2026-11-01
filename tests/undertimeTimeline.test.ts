@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { driftParams } from '../src/params/drift';
-import { BEATS, HERO_RUN, beatStarts, eyePath, fieldClock, heroPassTime, undertimeState, waveSweep, waveTimeAt } from '../src/drift/undertime/timeline';
+import { BEATS, HERO_RUN, beatStarts, eyePath, fieldClock, heroPassTime, undertimeState, waveFront, waveSweep, waveTimeAt } from '../src/drift/undertime/timeline';
 import { phraseHold } from '../src/drift/undertime/crawl';
 import { undertimeCrawl } from '../src/drift/undertime/crawlText';
 
@@ -137,7 +137,9 @@ describe('Undertime light wave envelope', () => {
     // (the 2026-11-01 note: "it kind of loses its swoosh a bit in the end before reaching the top" — the stall of the
     // 2026-10-30 story pass had it at 38 % of its peak speed by the zenith)
     const speed = (t: number): number => (undertimeState(t + 0.01, p).wave - undertimeState(t - 0.01, p).wave) / 0.02;
-    const at = (frac: number): number => starts.wave + waveTimeAt(frac, p.waveStall) * p.wave;
+    // (the front's own timing: its length set so it crosses the zenith on the score's hit, timeline.ts waveFront)
+    const W = waveFront(p);
+    const at = (frac: number): number => W.start + waveTimeAt(frac, p.waveStall) * W.length;
     const over = at(0.5);
     let fastest = 0;
     for (let t = starts.wave + 0.05; t < starts.wave + p.wave - 0.05; t += 0.02) fastest = Math.max(fastest, speed(t));

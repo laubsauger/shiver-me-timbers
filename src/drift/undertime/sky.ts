@@ -28,7 +28,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { Fn, PI, abs, acos, cameraPosition, exp, float, mix, mx_noise_float, mx_noise_vec3, mx_worley_noise_vec2, normalize, positionWorld, smoothstep, sqrt, step, uniform, vec3, vec4 } from 'three/tsl';
-import { frontFrac } from './waveFx';
+import { frontFrac, shimmer } from './waveFx';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -81,7 +81,11 @@ export function createUndertimeSky(): UndertimeSky {
   material.depthTest = false;
   material.blending = THREE.AdditiveBlending;
   material.colorNode = Fn(() => {
-    const d = normalize(positionWorld.sub(cameraPosition));
+    const d0 = normalize(positionWorld.sub(cameraPosition));
+    // THE HEAT SHIMMER (waveFx.ts shimmer; the 2026-11-01 brief): near the front's line the sky's light is bent by
+    // the same small, fast jitter the field's points are, so the line itself ripples like air over a hot road
+    const x0 = frontFrac(d0, { front: u.waveFront as unknown as V3 }).sub(u.wave).mul(PI);
+    const d = normalize(d0.add(shimmer(d0, x0, { time: u.time, sweep: u.wave })));
 
     /**
      * The ring a shell of light (centre C, radius rho) draws on the sky, of world width w: bright where the
@@ -142,16 +146,24 @@ export function createUndertimeSky(): UndertimeSky {
     // (each side's exponent clamped to its own side: an exp that overflows on the other side times a 0 is a NaN)
     const xa = x.max(0);
     const xb = x.min(0);
-    const leadGlow = exp(xa.div(0.028).negate()).mul(0.3).add(exp(xa.div(0.12).negate()).mul(0.05)).mul(ahead);
+    // THE LEADING EDGE (the 2026-11-01 brief: "the leading edge is the brightest"): a hot rim just ahead of the core,
+    // ~0.8° out, where the swept-up field rides (waveFx.ts PILE) — so the light peaks at the line and its front lip,
+    // and only falls away behind it
+    const xr = xa.sub(0.012).div(0.007);
+    const rim = exp(xr.mul(xr).negate()).mul(veins.mul(0.6).add(0.5)).mul(0.7);
+    // (0.028 rad at 0.3 until 2026-11-01: with the rim in front of it, a white band ~3° deep that fed the bloom a wash)
+    const leadGlow = exp(xa.div(0.018).negate()).mul(0.22).add(exp(xa.div(0.12).negate()).mul(0.02)).mul(ahead);
     const behind = float(1).sub(ahead);
     // (tight: behind the front the dome is the field's afterglow on black — a broad wake, and a residue fill under it,
     // browned the whole dome behind the line, 2026-10-30 second look; only its streamers trail further)
-    const wake = exp(xb.div(0.03)).mul(0.4).mul(veins.mul(0.9).add(0.35))
-      .add(exp(xb.div(0.07)).mul(veins.mul(0.18)))
+    // (and narrower again on 2026-11-01, "real darkness and quiet left behind": the wake 0.4 → 0.22 and its
+    // streamers 0.18 → 0.05 and 4° → 1.7° deep (at 0.05 rad they drew vertical brown streaks 10° down the spent sky), the residue gone; the darkness starts a few degrees behind the line)
+    const wake = exp(xb.div(0.022)).mul(0.22).mul(veins.mul(0.9).add(0.35))
+      .add(exp(xb.div(0.03)).mul(veins.mul(0.05)))
       .mul(behind);
-    const residue = exp(xb.div(0.25)).mul(0.004).mul(behind);
+    const residue = float(0);
     const wakeColour = mix(trailC, light, exp(xb.div(0.04)));
-    const lineLight = light.mul(core).add(lead.mul(leadGlow)).add(wakeColour.mul(wake)).add(ember.mul(residue));
+    const lineLight = light.mul(core.add(rim.mul(ahead))).add(lead.mul(leadGlow)).add(wakeColour.mul(wake)).add(ember.mul(residue));
     const presence = smoothstep(0, 0.02, u.wave).mul(smoothstep(1, 0.95, u.wave));
     // half as bright once well past the zenith (nobody looks there; its light greys the front)
     const backDim = float(1).sub(smoothstep(1.75, 2.4, theta).mul(0.5));
@@ -188,7 +200,9 @@ export function createUndertimeSky(): UndertimeSky {
     const fine = exp(e2.div(0.03).negate()).add(exp(e2.div(0.1).negate()).mul(0.12)).mul(0.3);
     const web = lines.add(fine);
     // the band: up to ~20° ahead of the line at the crest, ~5° behind it
-    const wAhead = u.crest.mul(0.32).add(0.04);
+    // (0.32 until 2026-11-01: a band 20° deep, its fill under the bloom, toned into a brown haze over the whole focus
+    // zone at the crest — the brief's "no grey haze"; the line must stay the brightest thing)
+    const wAhead = u.crest.mul(0.2).add(0.04);
     const wBehind = u.crest.mul(0.04).add(0.02);
     const xA = xa.div(wAhead);
     const xB = xb.div(wBehind);
@@ -200,7 +214,7 @@ export function createUndertimeSky(): UndertimeSky {
     const tone = mix(mix(light, trailC, float(0.06)), mix(light, lead, float(0.2)), ahead).mul(vec3(0.97, 0.99, 1.08));
     // (the web as the TEXTURE of the front's light, not a pattern of its own: at 2.4× over a 0.35 fill it read as a
     // network flashing up — the very thing the 2026-10-30 story note asked to be cut — so the band's own light leads)
-    const crestLight = tone.mul(band.mul(web.mul(0.9).add(0.7).add(rays.mul(0.4)))).mul(presence).mul(backDim).mul(u.crest).mul(u.crestRadiance);
+    const crestLight = tone.mul(band.mul(web.mul(0.9).add(0.3).add(rays.mul(0.4)))).mul(presence).mul(backDim).mul(u.crest).mul(u.crestRadiance);
 
     return vec4(shells.add(front).add(build).add(crestLight), 1);
   })();

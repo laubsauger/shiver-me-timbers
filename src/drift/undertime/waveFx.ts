@@ -21,7 +21,7 @@
  * The front's position for a direction is front.ts's (the CPU kills pairs on the same edge).
  */
 import * as THREE from 'three/webgpu';
-import { PI, acos, exp, float, int, ivec2, mix, normalize, sin, smoothstep, textureLoad, vec3 } from 'three/tsl';
+import { PI, acos, exp, float, int, ivec2, mix, mx_noise_vec3, normalize, sin, smoothstep, textureLoad, vec3 } from 'three/tsl';
 import { RAG, RAG_AMP, RAG_DIRS, RAG_K, RAG_PHASE } from './front';
 
 type F = THREE.Node<'float'>;
@@ -86,27 +86,67 @@ export function frontTime(pos: V3, U: WaveFxUniforms): F {
  */
 export function spent(tFront: F, U: Pick<WaveFxUniforms, 'time'>, grace = 0.3): F {
   // (e-fold 0.2 s: at 0.3 the thousand flashes just behind the line still glittered a band ~1.5 s deep — 50° of dome
-  // once the front speeds away after its stall)
-  return exp(U.time.sub(tFront).sub(grace).max(0).div(0.2).negate());
+  // once the front speeds away after its stall. 0.12 s, and the callers' graces halved, on 2026-11-01: the brief's
+  // "real darkness and quiet left behind" — at 0.2 a field of white flashes still filled the 30° behind the line at
+  // 41 s; the front's own events now die ON the line, field.ts frontEvents, so there is nothing to play out)
+  // …and then OUT: an e-fold alone never reaches black, and these are HDR lights (a flash at 14, a bead at a few) —
+  // 3 % of a flash a second behind the line still bloomed into a white dot (the layer-by-layer check at 41 s,
+  // 2026-11-01: every trail, sprite and head was still there 0.5–1 s behind the line). Zero by grace + 0.35 s.
+  const since = U.time.sub(tFront).sub(grace);
+  return exp(since.max(0).div(0.1).negate()).mul(smoothstep(0.35, 0.15, since));
 }
 
 /**
  * The world position `pos` as the front's pull displaces it (see SPACE above). Off (exactly `pos`) when lens is 0.
+ *
+ * THE SNOWPLOW (the 2026-11-01 brief: "particles ahead of the front get pushed and compressed and ignite; the leading
+ * edge is the brightest"). Until then the pull was x → x − a·x·e^(−|x|/w): both sides folded symmetrically onto the
+ * line itself, and the front read as a lens passing over the field. Now every point within a width of the line is
+ * drawn toward a layer `PILE` just AHEAD of it: x → x + s·(PILE − x)·e^(−|x|/w). Ahead, the field crowds toward the
+ * oncoming front (compressed: the map's slope at the line is s·PILE/w, ~1/12 at the defaults); what the line has
+ * reached is not left behind at once but CARRIED, piled into that thin layer riding just in front of the light, and
+ * released a width later. Those carried points are the ones the front has just passed — the ones its heat lights
+ * white (dust.ts sheet, afterglow below) — so the leading edge is made of the field's own matter, swept up and
+ * burning. Behind them, nothing: they are released into the spent dome (`spent`), dark within 0.2 s.
+ * `s` is lens/(width/e), so `waveLens` keeps its meaning (the largest displacement, a width from the line); the old
+ * symmetric fold is this with PILE = 0.
+ *
+ * THE SHIMMER (the same brief: "a subtle heat-shimmer refraction warp at the front"): within ~3° of the line every
+ * direction is jittered by a small, fast-moving noise — ~0.12° at most, churning at ~5 Hz — as the air over a hot road
+ * bends what is behind it. Pure in act time (the noise's phase is `time`), so any frame renders on its own. The sky
+ * bends its own light by the same jitter (`shimmer`), so the front's line ripples with what it passes.
  */
+/** rad, how far ahead of the line the swept-up layer rides */
+const PILE = 0.014;
+/** rad, the shimmer's half-width either side of the line, and its largest jitter */
+const SHIMMER_W = 0.05;
+const SHIMMER_A = 0.0021;
+
+/** the heat shimmer's angular jitter (a vector square to `d`, rad) for unit direction d, `x` rad from the line */
+export function shimmer(d: V3, x: F, U: Pick<WaveFxUniforms, 'time' | 'sweep'>): V3 {
+  const xs = x.div(SHIMMER_W);
+  const on = exp(xs.mul(xs).negate()).mul(smoothstep(0.01, 0.04, U.sweep)).mul(smoothstep(1, 0.9, U.sweep));
+  const n = mx_noise_vec3(d.mul(38).add(vec3(U.time.mul(4.7), U.time.mul(-3.9), U.time.mul(5.3))));
+  const t = n.sub(d.mul(n.dot(d)));
+  return t.mul(on.mul(SHIMMER_A));
+}
+
 export function waveWarp(pos: V3, U: WaveFxUniforms): V3 {
   const v = pos.sub(U.eye);
   const r = v.length().max(1e-4);
   const d = v.div(r);
   // rad ahead of the front (> 0) or behind it (< 0)
   const x = frontFrac(d, U).sub(U.sweep).mul(PI);
-  // the gain that makes `lens` the largest displacement (x·e^(−|x|/w) peaks at w/e)
-  const a = U.lens.mul(Math.E).div(U.width.max(1e-3));
-  const turn = a.mul(x).mul(exp(x.abs().div(U.width.max(1e-3)).negate())).negate();
-  // rotate d about front × d by `turn` (positive turns away from the front); k × d = d·cosθ − front
+  const w = U.width.max(1e-3);
+  // the strength that makes `lens` the largest displacement of the old fold (x·e^(−|x|/w) peaks at w/e)
+  const s = U.lens.mul(Math.E).div(w).min(1.2);
+  // positive turns away from the front's origin (onward, the way it travels)
+  const turn = s.mul(float(PILE).sub(x)).mul(exp(x.abs().div(w).negate()));
+  // rotate d about front × d by `turn`; k × d = d·cosθ − front
   const away = d.mul(d.dot(U.front)).sub(U.front);
   const awayN = away.div(away.length().max(1e-4));
   const d2 = d.mul(turn.cos()).add(awayN.mul(turn.sin()));
-  return U.eye.add(d2.mul(r));
+  return U.eye.add(normalize(d2.add(shimmer(d2, x, U))).mul(r));
 }
 
 /**
@@ -116,11 +156,17 @@ export function waveWarp(pos: V3, U: WaveFxUniforms): V3 {
  */
 export function afterglow(since: F, U: Pick<WaveFxUniforms, 'afterglow'>): { gain: F; heat: F; on: F } {
   const s = since.max(0);
-  const on = smoothstep(0, 0.03, since);
+  // IGNITION AHEAD (the 2026-11-01 brief: "particles ahead of the front … ignite"): in the last ~0.15 s before the
+  // front reaches it a light heats — brighter, whiter — so the line is preceded by a rim of the field catching fire
+  // rather than met cold. (it hands over to the flash on the line over its first 0.03 s: no step)
+  const pre = exp(since.min(0).div(0.12));
+  const lit = smoothstep(0, 0.03, since);
+  const on = lit.max(pre);
   // (a flash ON the line as the front's light goes through, then only down: the first rounds flared to 3× and burned
   // for seconds behind the line, which read as the spent dome lighting up again)
-  const gain = mix(float(1), float(1).add(exp(s.div(0.08).negate()).mul(0.6)).mul(exp(s.div(U.afterglow).negate())), on);
-  const heat = exp(s.div(U.afterglow.mul(0.55)).negate()).mul(on);
+  const after = float(1).add(exp(s.div(0.08).negate()).mul(0.6)).mul(exp(s.div(U.afterglow).negate()));
+  const gain = mix(pre.mul(0.9).add(1), after, lit);
+  const heat = mix(pre.mul(0.85), exp(s.div(U.afterglow.mul(0.55)).negate()), lit);
   return { gain, heat, on };
 }
 

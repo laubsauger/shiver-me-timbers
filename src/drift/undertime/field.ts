@@ -10,7 +10,8 @@
 import * as THREE from 'three/webgpu';
 import { float, int, ivec2, textureLoad, uniform } from 'three/tsl';
 import type { DriftParams } from '../../params/drift';
-import { beatStarts, eyePath, fieldClock, heroGrainPosition, sweepInverseTable, undertimeState, waveEnvelope, waveTimeAt, webFlight, type UndertimeState } from './timeline';
+import { beatStarts, eyePath, fieldClock, frontReach, heroGrainPosition, sweepInverseTable, undertimeState, waveEnvelope, waveFront, waveTimeAt, webFlight, type UndertimeState } from './timeline';
+import { hitsIn, levelAt, strongestHit } from './audioCues';
 import { heroSlot, pairSlot, trackPositionCpu, type PairUniforms } from './pairModel';
 import { HERO_TRACK_END, heroPair, survivorPair } from './scripted';
 import { frontFracCpu } from './front';
@@ -21,10 +22,12 @@ import { createFlashes, type FlashUniforms } from './flashes';
 import { createUndertimeSky } from './sky';
 import { createWaveSparks } from './wave';
 import { createGrains, createHeroGrain, createStars, type GrainUniforms } from './grains';
-import { eventLights, generatePairs, type PairEvent } from './events';
+import { endPoint, eventLights, generatePairs, meetingPoint, type PairEvent } from './events';
+import { RING_ENERGY, createShocks, type Shock } from './shocks';
 import { createLoopSprites, createLoopTrails } from './loops';
 import { createMist, type Mist } from './mist';
 import { DUST_LIGHTS, createDust } from './dust';
+import { createDepthLayers } from './depth';
 import { createBursts, type Burst } from './burst';
 import { generateProducts, jet, type Blast, type ProductTrack } from './productModel';
 import { createProducts, type ProductMeshes } from './products';
@@ -114,6 +117,8 @@ export interface ActEvents {
   blasts: Blast[];
   /** where the survivors come to rest, and when (survivors.ts) */
   rests: SurvivorRest[];
+  /** the strong annihilations' rings and afterglows (shocks.ts) */
+  shocks: Shock[];
 }
 
 /**
@@ -153,18 +158,30 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
   const axisLeaned = rot(axis, vd, (30 * Math.PI) / 180);
   const acrossLeaned = rot(across, vd, (30 * Math.PI) / 180);
   const heroAxis = rot(axisLeaned, acrossLeaned, (55 * Math.PI) / 180);
+  // THE FIRST LIGHT'S ANNIHILATION ON THE SCORE'S FIRST HIT (audioCues.ts; the 2026-11-01 brief, "big collisions on
+  // hits"): the hero loop closed 3.8 s after its birth, at 5.2 s; the score's first big hit is at 4.97 s (+17.8 dB, the
+  // low band full), so the loop takes as long as it takes to meet there — any hit within 0.8 s of the old moment
+  const heroHit = strongestHit(p.heroBirth + 3.0, p.heroBirth + 4.6, 0.5);
   const hero: PairEvent = {
-    birth: p.heroBirth, loop: 3.8, vertex: g, axis: heroAxis, across: acrossLeaned, open: 0.42, radius: 4.5, energy: 1, gamma: acrossLeaned,
-    spiral: 0, drift: 0, arc: 2 * Math.PI - 0.84, meets: 1, burst: 3.2, end: 1,
+    birth: p.heroBirth, loop: heroHit ? heroHit.t - p.heroBirth : 3.8, vertex: g, axis: heroAxis, across: acrossLeaned, open: 0.42, radius: 4.5, energy: 1, gamma: acrossLeaned,
+    // (burst 3.2 m until 2026-11-01: at 1.5 s the first thing on the dome was a white puff a fifth of the frame wide —
+    // the same "blobby" note as the grains; the creation is the photons meeting and the V, the fireball only its spark)
+    spiral: 0, drift: 0, arc: 2 * Math.PI - 0.84, meets: 1, burst: 1.1, end: 1,
   };
-  const PEAK = 70;
+  // (PEAK × 1.15: the score's swells lift the rate by up to 15 % over its old peak, below)
+  const PEAK = 70 * 1.15;
   const D = Math.PI / 180;
+  // THE DENSITY ON THE SCORE (audioCues.ts; the 2026-11-01 brief: "an arc of density over the act: sparse/quiet, then
+  // a flurry, then the climax at the wave"): the arc is the beats' (a few, then the boil, then the calm), and inside it
+  // the births breathe with the music's level — 0.7× in its troughs, 1.15× on its swells — so the flurries come with
+  // the score's own (the swell into 16 s, the one into 26 s) instead of on a smooth ramp beside it
+  const breathe = (t: number): number => 0.7 + 0.45 * levelAt(t);
   const rate = (t: number): number => {
     if (t < starts.arise) return 0;
     const ar = Math.min(1, (t - starts.arise) / Math.max(1e-6, p.arise));
-    if (t < starts.cool) return PEAK * ar ** 2.2;
+    if (t < starts.cool) return 70 * ar ** 2.2 * breathe(t);
     const c = Math.min(1, (t - starts.cool) / Math.max(1e-6, p.cool));
-    return PEAK * (1 - (1 - 0.05) * (1 - (1 - c) ** 6));
+    return 70 * (1 - (1 - 0.05) * (1 - (1 - c) ** 6)) * breathe(t);
   };
   // not born in (or about to be in) the text's sky
   const clearOfText = (birth: number, at: readonly number[]): boolean => {
@@ -198,6 +215,25 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
   ).filter((e) => clearOfText(e.birth, e.vertex));
   // time slows as it cools: a loop born then lasts longer
   for (const e of field) e.loop /= Math.max(0.3, undertimeState(e.birth, p).clockRate);
+  // SPIRALS, NOT NEON RINGS (the user, 2026-11-01, on a frame of the tracks: "perfect, uniform, thick neon circles";
+  // and the same frame read as one event "cloned" three times — every LOOP is the same figure, two mirrored arcs of a
+  // circle closing on the axis, at any size and distance). Real tracks in a field spiral in as they lose energy. Three
+  // in four of the field's loops (generatePairs' shape mix is shared with Act 3's field, wandering/props.ts, so Act 1
+  // reshapes its own here) become SPIRALS that tighten inward — each its own decay and number of turns — and every pair's size
+  // spreads wider (0.6–1.4× its draw), so no two figures read as copies.
+  const shape = rng(8383);
+  for (const e of [...field]) {
+    const a = shape();
+    const k = shape();
+    const z = shape();
+    e.radius *= 0.6 + 0.8 * z;
+    // (three in four: at one in two the remaining loop pairs still sat side by side as twins, the 2026-11-01 clip at 10 s)
+    if (e.braid || e.drift !== 0 || e.spiral !== 0 || a > 0.75) continue;
+    e.spiral = 0.08 + 0.2 * k;
+    e.arc = Math.PI * (2.4 + 2.4 * shape());
+    e.meets = 0;
+    e.loop *= 1.2;
+  }
   // THE BUILD: births low in front where the front will rise (centred ~23° up the dome, 12 m out), quick and hot,
   // their loops shortening as the tension rises — the field accelerating into the collapse
   const rise = (t: number): number => waveEnvelope(t, p).build;
@@ -233,12 +269,12 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
   // THE WAVE (U3): the front reaches a pair's direction at waveStart + frac·wave (front.ts: the same ragged edge the
   // GPU freezes trails on). A pair alive then ends where it is (both beads annihilate on the front); nothing is born
   // behind the front.
-  const cutAt = (at: readonly number[]): number =>
-    starts.wave + waveTimeAt(frontFracCpu([at[0] - eyeW[0], at[1] - eyeW[1], at[2] - eyeW[2]], b.front), p.waveStall) * p.wave;
+  const cutAt = (at: readonly number[]): number => frontReach([at[0] - eyeW[0], at[1] - eyeW[1], at[2] - eyeW[2]], p);
   const cutPairs = (list: PairEvent[]): PairEvent[] =>
     list.filter((e) => {
       const cut = cutAt(e.vertex);
-      if (e.birth >= cut) return false;
+      // (born in the last 2 % of its life before the front: not born — its `end` floor of 0.02 would outlive the line)
+      if (e.birth + 0.02 * e.loop >= cut) return false;
       if (e.birth + e.loop > cut) e.end = Math.max(0.02, (cut - e.birth) / e.loop);
       return true;
     });
@@ -249,12 +285,26 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
       if (T.t0 + T.life > cut) T.end = Math.max(0.02, (cut - T.t0) / T.life);
       return true;
     });
-  const kept = cutPairs([...field, ...build]);
+  const hits = hitCollisions(p, b, clearOfText);
+  const kept = cutPairs([...field, ...build, ...hits]);
+  // the strong annihilations that happen (not cut by the front: those die in its light): a ring and an afterglow each
+  // (shocks.ts); the score's hits and their chains the strongest and widest
+  const fromHit = new Set(hits);
+  // (a spiral annihilates at each bead's end: a ring at each, each half as strong)
+  const shocks: Shock[] = kept
+    .filter((e) => e.end >= 1 && (e.energy >= RING_ENERGY || fromHit.has(e)))
+    .flatMap((e) => (e.meets ? [meetingPoint(e)] : [endPoint(e, 1), endPoint(e, -1)]).map((pos) => ({
+      t0: e.birth + e.loop,
+      pos,
+      strength: (fromHit.has(e) ? 1.3 : 0.5 + (e.energy - RING_ENERGY)) * (e.meets ? 1 : 0.6),
+      radius: fromHit.has(e) ? 1.2 + e.radius * 0.4 : 0.6 + 2.5 * (e.energy - RING_ENERGY),
+    })));
   // THE SURVIVORS (survivors.ts): a few of the pairs the front catches leave their matter bead running on, out of the
   // light, to rest as a grain — the one in a billion; and the hero's onto the hero grain. Never where the remain
   // beat's text will be (it says what they are)
   const textThen = starts.remain + 3.5;
-  const survivors = pickSurvivors(kept, p, Math.round(p.survivors), (at) => clearOfText(textThen, at));
+  // (seed 6770: with the 2026-11-01 field the default seed picked two whose rests came to 5.5° apart; only `survivors` > 0 sees it)
+  const survivors = pickSurvivors(kept, p, Math.round(p.survivors), (at) => clearOfText(textThen, at), 6770);
   // JETS: now and then a collision is a fast particle hitting the medium, a fan of tracks out of one vertex
   // (productModel.ts jet): about one for every sixteen pairs in the boil, more of them low in front in the build
   const jr = rng(6262);
@@ -298,11 +348,94 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
     blasts: [hero, ...kept, ...conversions, ...front.events, ...fieldProducts.blasts, ...frontProducts.blasts, ...jetBlasts, ...front.blasts]
       .filter((x) => x.burst > 0),
     rests: survivors.rests,
+    shocks,
   };
 }
 
-function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }): { events: PairEvent[]; tracks: ProductTrack[]; blasts: Blast[] } {
+/**
+ * BIG COLLISIONS ON THE SCORE'S HITS (audioCues.ts; the 2026-11-01 brief: "big collisions on hits"). For every hit of
+ * the score from the arising to the wave (hit ≥ 0.55: a dozen, 12.3–37.7 s), one big, slow pair whose two loops MEET —
+ * its annihilation — exactly on the hit. Every other one sits in the focus zone (ahead, 20–40° up: the place every seat
+ * is looking), the rest out on the sides and overhead, so the hits also land around the whole dome. Their loops lean
+ * toward the audience (seen in depth, as the hero's are) and run 2.6–3.4 s: slower than the field's, the eye can follow
+ * one from its birth to the hit. Never in the text's sky; a hit whose places are all taken by the text gets none.
+ */
+function hitCollisions(p: DriftParams, b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }, clear: (t: number, at: readonly number[]) => boolean): PairEvent[] {
   const { starts } = beatStarts(p);
+  const r = rng(7373);
+  const out: PairEvent[] = [];
+  const D = Math.PI / 180;
+  const hits = hitsIn(starts.arise + 2, starts.wave - 0.4, 0.55);
+  hits.forEach((h, i) => {
+    // (slower than the field's: the brief's "a few slower hero collisions in the focus zone")
+    const loop = 3.2 + 1 * r();
+    const birth = h.t - loop;
+    const eye = eyePath(birth, p);
+    const focus = i % 2 === 0;
+    // a few tries at a place clear of the text, then none
+    for (let k = 0; k < 6; k++) {
+      const az = (focus ? (r() - 0.5) * 50 : (r() < 0.5 ? -1 : 1) * (50 + 70 * r())) * D;
+      const el = (focus ? 22 + 16 * r() : 25 + 50 * r()) * D;
+      const dist = 9 + 5 * r();
+      const dir = [0, 1, 2].map((j) => Math.cos(el) * (Math.cos(az) * b.front[j] + Math.sin(az) * b.right[j]) + Math.sin(el) * b.axis[j]) as [number, number, number];
+      const vertex = dir.map((x, j) => eye[j] + x * dist) as [number, number, number];
+      if (!clear(birth, vertex) || !clear(h.t, vertex)) continue;
+      // the loop plane's normal: toward the eye, leaned off it by up to ~35°
+      const lean = [r() - 0.5, r() - 0.5, r() - 0.5];
+      const nrm = dir.map((x, j) => -x + 0.7 * lean[j]);
+      const nl = Math.hypot(...nrm);
+      const n = nrm.map((x) => x / nl) as [number, number, number];
+      const t0 = [r() - 0.5, r() - 0.5, r() - 0.5];
+      const td = t0[0] * n[0] + t0[1] * n[1] + t0[2] * n[2];
+      const ax = t0.map((x, j) => x - n[j] * td);
+      const al = Math.hypot(...ax) || 1;
+      const axis = ax.map((x) => x / al) as [number, number, number];
+      const across = [n[1] * axis[2] - n[2] * axis[1], n[2] * axis[0] - n[0] * axis[2], n[0] * axis[1] - n[1] * axis[0]] as [number, number, number];
+      const open = 0.25 + 0.3 * r();
+      // SPIRALLING IN (the 2026-11-01 note: "perfect, uniform, thick neon circles … real tracks spiral"): each bead
+      // tightens inward, 1.4–2 turns, and annihilates at its own end — two flashes on the hit, not one meeting
+      // (wide ranges — size, decay, turns, opening — so two hits seen together never read as one figure twice)
+      const decay = 0.05 + 0.16 * r();
+      const hero: PairEvent = {
+        birth, loop, vertex, axis, across, open,
+        radius: (1.1 + 2.1 * r()) * (focus ? 1 : 1.3),
+        energy: 0.75 + 0.25 * h.hit,
+        gamma: across, spiral: decay, drift: 0, arc: Math.PI * (2.4 + 2.4 * r()), meets: 0,
+        // (a modest fireball: at 0.9–1.7 m it was an orange puff over the loops, the 2026-11-01 first look)
+        burst: 0.45 + 0.35 * h.hit, end: 1,
+      };
+      out.push(hero);
+      // A CHAIN REACTION, now and then (the brief: "occasional chain reactions"): the annihilation's two gamma rays
+      // convert a couple of metres out into new, smaller pairs, which meet and annihilate in their turn — the hit
+      // echoing outward. Every third hit; one generation (two would crowd the focus zone)
+      if (i % 3 === 1) {
+        const meet = endPoint(hero, 1);
+        for (const sgn of [1, -1]) {
+          const reach = 1.8 + r();
+          const v2 = [0, 1, 2].map((j) => meet[j] + across[j] * sgn * reach) as [number, number, number];
+          const b2 = h.t + reach / 12 + 0.1 * r();
+          if (!clear(b2, v2)) continue;
+          const o2 = 0.3 + 0.2 * r();
+          const ax2 = [r() - 0.5, r() - 0.5, r() - 0.5];
+          const al2 = Math.hypot(...ax2) || 1;
+          const a2 = ax2.map((x) => x / al2) as [number, number, number];
+          const c2 = [a2[1] * across[2] - a2[2] * across[1], a2[2] * across[0] - a2[0] * across[2], a2[0] * across[1] - a2[1] * across[0]];
+          const cl = Math.hypot(...c2) || 1;
+          out.push({
+            birth: b2, loop: 1.3 + 0.6 * r(), vertex: v2, axis: a2, across: c2.map((x) => x / cl) as [number, number, number], open: o2,
+            radius: 0.6 + 0.4 * r(), energy: 0.62 + 0.1 * r(), gamma: a2, spiral: 0, drift: 0, arc: 2 * Math.PI - 2 * o2, meets: 1,
+            burst: 0.25, end: 1,
+          });
+        }
+      }
+      break;
+    }
+  });
+  return out;
+}
+
+function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }): { events: PairEvent[]; tracks: ProductTrack[]; blasts: Blast[] } {
+  const W = waveFront(p);
   const r = rng(9090);
   const out: PairEvent[] = [];
   const tracks: ProductTrack[] = [];
@@ -326,7 +459,7 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
     const d = [0, 1, 2].map((j) => Math.cos(theta) * b.front[j] + Math.sin(theta) * (Math.cos(phi) * b.right[j] + Math.sin(phi) * b.axis[j])) as [number, number, number];
     if (d[0] * b.axis[0] + d[1] * b.axis[1] + d[2] * b.axis[2] < -0.12) continue; // below the spring line
     // born as the front's ragged edge reaches it (front.ts), a hair before
-    const t = starts.wave + waveTimeAt(Math.min(1, Math.max(0, frontFracCpu(d, b.front) + (r() - 0.5) * 0.012)), p.waveStall) * p.wave;
+    const t = W.start + waveTimeAt(Math.min(1, Math.max(0, frontFracCpu(d, b.front) + (r() - 0.5) * 0.012)), p.waveStall) * W.length;
     const dist = 6 + r() * 18;
     const vertex: [number, number, number] = [eyeW[0] + d[0] * dist, eyeW[1] + d[1] * dist, eyeW[2] + d[2] * dist];
     // now and then the front's event is a jet: a fan thrown out of the line
@@ -347,10 +480,14 @@ function frontEvents(p: DriftParams, eyeW: [number, number, number], b: { axis: 
     const spiralish = shape < 0.38;
     const braided = !spiralish && shape < 0.52;
     const hot = r() < 0.04 + 0.07 * climax;
+    // BORN AHEAD, DYING ON THE LINE (the 2026-11-01 brief: "particles ahead of the front … ignite … real darkness
+    // left behind"): each is created as the front's heat comes near — 80 % of its short life before the line reaches
+    // it — and annihilates just as the line goes through (a hair after). Born on the line, they played out behind it,
+    // and a band of white flashes ~30° deep followed the front over the dome
+    const loop = (0.18 + r() * 0.24) * (braided ? 1.6 : 1);
     out.push({
-      birth: t - 0.05,
-      // short lives: the activity hugs the front line, the afterglow follows right behind it
-      loop: (0.18 + r() * 0.24) * (braided ? 1.6 : 1),
+      birth: t - 0.8 * loop,
+      loop,
       vertex,
       axis,
       across,
@@ -596,6 +733,7 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   let loopSprites: THREE.InstancedMesh | null = null;
   let loopTrails: THREE.InstancedMesh | null = null;
   let bursts: Burst | null = null;
+  let shocks: { mesh: THREE.InstancedMesh; dispose(): void } | null = null;
   let products: ProductMeshes | null = null;
   let survivorGrains: THREE.InstancedMesh | null = null;
   const survivorU = { focus: uniform(0), radiance: uniform(1) };
@@ -621,11 +759,20 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
   };
   // (110 000 motes until the light wave lit them as a sheet; more where it pays: the front's depth is made of them)
   const dust = p.grammar ? createDust(180000, dustU) : null;
+  // the near and far depth layers around that medium (depth.ts; the 2026-11-01 brief, "three particle depth layers")
+  const depthU = { near: uniform(0), far: uniform(0), nearRadiance: uniform(0.05), farRadiance: uniform(0.06) };
+  const depth = p.grammar
+    ? createDepthLayers(420, 24000, {
+      time: u.actTime, pixelAngle: u.pixelAngle, eye: v3(u.eye), near: depthU.near, far: depthU.far,
+      nearRadiance: depthU.nearRadiance, farRadiance: depthU.farRadiance, matter, anti, pocket: pair, fx,
+    })
+    : null;
 
   const group = new THREE.Group();
   group.name = 'undertime-field';
   // the sky keeps only its wave in the event grammar (its first-light shells belong to the old hero)
   if (dust) group.add(sky.mesh, dust.mesh, webVolume, webParticles, grains, stars, heroGrain);
+  if (depth) group.add(depth.far, depth.near);
   else group.add(sky.mesh, tracks, flashes, nearTracks, nearFlashes, heroTracks, heroFlashes, survTracks, survFlashes, sparks, grains, stars, heroGrain);
 
   const vx = (a: [number, number, number]): THREE.Vector3 => new THREE.Vector3(...a);
@@ -638,7 +785,8 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
         mist = createMist(events, mistU, true);
         loopTrails = createLoopTrails(events, loopU);
         loopSprites = createLoopSprites(events, loopU);
-        bursts = createBursts(act.blasts, { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1), fx });
+        // (the field's fireballs at 0.6 of their size: the 2026-11-01 notes on blobs — orange puffs over the tracks)
+        bursts = createBursts(act.blasts.map((x) => ({ birth: x.birth, burst: x.burst * 0.6, energy: x.energy, vertex: x.vertex })), { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1), fx });
         products = createProducts(act.tracks, {
           time: u.actTime, pixelAngle: u.pixelAngle, matter, anti, light, rose: v3(shadeU.rose), teal: v3(shadeU.teal), shades,
           radiance: uniform(3), fog: loopU.fog, pocket: pair, eye: v3(u.eye), fx, profile: profileU,
@@ -647,7 +795,8 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
           time: u.actTime, eye: v3(u.eye), pixelAngle: u.pixelAngle, pivot: v3(u.pivot), scale: u.scale, focus: survivorU.focus,
           warm: v3(u.warm), radiance: survivorU.radiance,
         });
-        group.add(loopTrails, products.trails, mist.mesh, loopSprites, products.heads, bursts.mesh, survivorGrains);
+        shocks = createShocks(act.shocks, { time: u.actTime, pixelAngle: u.pixelAngle, radiance: uniform(1), fx });
+        group.add(loopTrails, products.trails, mist.mesh, loopSprites, products.heads, bursts.mesh, survivorGrains, shocks.mesh);
       }
       if (dust) {
         // the plasma: dense and dark in the cold open, glowing with the boil, thinning to clear as it cools
@@ -657,6 +806,18 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
         const density = 0.9 * thin * (1 - Math.min(1, Math.max(0, (t - st.wave) / Math.max(1e-6, p.wave))));
         const lights = eventLights(events, t, [eye.x, eye.y, eye.z], DUST_LIGHTS);
         dust.setLights(lights);
+        depth?.setLights(lights);
+        // the depth layers' arc (depth.ts): none in the cold open's black; up with the arising; a little less as it
+        // cools; held through the build (the field is thick with it as the front comes); gone with the wave (its front
+        // spends them, waveFx.ts) and nothing after it
+        const on = (x: number): number => {
+          const k = Math.min(1, Math.max(0, x));
+          return k * k * (3 - 2 * k);
+        };
+        const endW = st.wave + p.wave;
+        const arc = on((t - st.arise) / 4) * (1 - 0.35 * on((t - st.cool) / 6)) * (1 - on((t - endW) / 0.5));
+        depthU.near.value = arc * (1 + 0.3 * state.build);
+        depthU.far.value = on((t - st.arise + 1) / 6) * (1 - 0.25 * on((t - st.cool) / 6)) * (1 - on((t - endW) / 0.5));
         // the dust thins as the field fills (with many lights it would light everywhere: a grey wash)
         const waving = Math.min(1, Math.max(0, (t - st.wave) / 0.5)) * (1 - Math.min(1, Math.max(0, (t - st.wave - p.wave) / 0.5)));
         // …and the light wave brings it back: the medium is what the front lights as a sheet and what visibly folds
@@ -692,8 +853,9 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
       u.tiltClock1.value = fieldClock(starts.cool + p.cool, p);
       u.eye.value.copy(eye);
       u.waveClock0.value = state.waveClock0;
-      u.waveStart.value = starts.wave;
-      u.waveAct.value = Math.max(1e-3, p.wave);
+      const W = waveFront(p);
+      u.waveStart.value = W.start;
+      u.waveAct.value = Math.max(1e-3, W.length);
       u.sparkRadiance.value = p.sparkRadiance;
       u.waveRate.value = state.waveRate;
       u.waveLength.value = state.waveLength;
@@ -835,8 +997,10 @@ export function createUndertimeField(p: DriftParams, web: WebData, pocketAt: (t:
     dispose() {
       sky.dispose();
       dust?.dispose();
+      depth?.dispose();
       mist?.dispose();
       bursts?.dispose();
+      shocks?.dispose();
       products?.dispose();
       if (survivorGrains) {
         survivorGrains.geometry.dispose();

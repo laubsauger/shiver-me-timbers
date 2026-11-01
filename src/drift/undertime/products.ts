@@ -15,7 +15,7 @@
  * WebGPU's 8 vertex buffers: position + the strip's coordinate + the instance matrix + the five records below.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, attribute, cameraPosition, cos, exp, float, instanceIndex, max, min, mix, normalize, sin, smoothstep, sqrt, step, uv, vec3, vec4 } from 'three/tsl';
+import { attribute, cameraPosition, cos, exp, float, Fn, instanceIndex, max, min, mix, normalize, sin, smoothstep, sqrt, step, uv, varying, vec3, vec4 } from 'three/tsl';
 import { ANTI, LIGHT, MATTER, ROSE, SURVIVOR, TEAL, type ProductTrack } from './productModel';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import type { Shades } from './loops';
@@ -191,7 +191,7 @@ export function createProducts(tracks: readonly ProductTrack[], U: ProductUnifor
   // a survivor is the exception to both: it is born on the front, runs on and comes to rest (survivors.ts)
   const isSurvivor = step(SURVIVOR - 0.5, T.family).mul(step(T.family, SURVIVOR + 0.5));
   const tFreeze = tFront ? step(T.t0.add(0.05), tFront).mul(float(1).sub(isSurvivor)).greaterThan(0.5).select(max(tFront, tEnd), float(1e6)) : null;
-  const left = tFront ? mix(spent(tFront, fx as WaveFxUniforms, 0.35), float(1), isSurvivor) : float(1);
+  const left = tFront ? mix(spent(tFront, fx as WaveFxUniforms, 0.18), float(1), isSurvivor) : float(1);
   const now = tFreeze ? min(U.time, tFreeze) : U.time;
   const glowOf = fx && tFreeze ? afterglow(U.time.sub(tFreeze), fx) : null;
   const head = ease(U.time.sub(T.t0).div(T.life).min(T.uEnd));
@@ -227,10 +227,19 @@ export function createProducts(tracks: readonly ProductTrack[], U: ProductUnifor
   const rested = float(1).sub(isSurvivor.mul(smoothstep(tEnd.add(1), tEnd.add(2.5), U.time)));
   const lasting = passedGeo.mul(coverage).mul(pocketKeep).mul(exp(age.div(tau.mul(2.5)).negate())).mul(glowOf ? glowOf.gain : float(1)).mul(left).mul(rested);
   const trailMat = additive('undertime-product-trails');
+  // the across-coordinate, carried projectively (the note in the colour below)
+  const wDrawn = drawn.mul(step(0.0005, lasting)).max(1e-6);
+  const sideW = varying(side.mul(wDrawn));
+  const wV = varying(wDrawn);
+  const sideC = sideW.div(wV);
   trailMat.positionNode = pos.add(acrossView.mul(side.mul(drawn).mul(step(0.0005, lasting))));
+  // (side ACROSS THE RIBBON, interpolated projectively: side·width and width are carried separately and divided per
+  // fragment. Carried as is, `side` is interpolated affinely over each triangle, and where the width changes between
+  // a quad's two ends — the tapers at a track's start and end, a kink, a vertex collapsed behind the head — the core
+  // line (side = 0) ran along each quad's diagonal: the fine sawtooth at tracks' ends, the 2026-11-01 note)
   trailMat.colorNode = Fn(() => {
     const kg = 2.5 * 1.35 ** 2;
-    const { core, halo: glow } = ribbonGlow(side, spread, U.profile, { sigmaCore: Math.sqrt(0.02 / 1.35 ** 2 / 2), sigmaHalo: Math.sqrt(1 / (2 * kg)) });
+    const { core, halo: glow } = ribbonGlow(sideC, spread, U.profile, { sigmaCore: Math.sqrt(0.02 / 1.35 ** 2 / 2), sigmaHalo: Math.sqrt(1 / (2 * kg)) });
     // break-up along the track: bubbles, not a wire (scaled to its length, not to the strip)
     const along = S.mul(T.radius.mul(T.turn).max(0.5)).div(0.22).add(float(instanceIndex).mul(2.7));
     const noise = sin(along).mul(0.5).add(sin(along.mul(2.7).add(1.1)).mul(0.3)).mul(0.5).add(0.5);
@@ -267,7 +276,7 @@ export function createProducts(tracks: readonly ProductTrack[], U: ProductUnifor
   const since = hAge.sub(H.life).add(float(1).sub(step(0.999, H.uEnd)).mul(1e4));
   const flashA = step(0, since).mul(exp(since.div(0.1).negate())).mul(H.flash);
   const isSurvivorH = step(SURVIVOR - 0.5, H.family).mul(step(H.family, SURVIVOR + 0.5));
-  const leftH = fx ? mix(spent(frontTime(placed, fx), fx, 0.35), float(1), isSurvivorH) : float(1);
+  const leftH = fx ? mix(spent(frontTime(placed, fx), fx, 0.18), float(1), isSurvivorH) : float(1);
   const alphaH = mix(beadA, flashA, kind).mul(float(1).sub(pocketMask(centre.sub(U.eye), U.pocket).mul(0.8))).mul(leftH);
   const dirH = trackTangent(H, f);
   const hToEye = cameraPosition.sub(centre);

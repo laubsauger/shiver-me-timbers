@@ -5,7 +5,7 @@
  * which settles and holds.
  */
 import { describe, expect, it } from 'vitest';
-import { LINE_PITCH, phraseHold, phrasePlacement, type CrawlLayout } from '../src/drift/undertime/crawl';
+import { LINE_PITCH, bodyPen, glyphInk, phraseHold, phrasePlacement, type CrawlLayout } from '../src/drift/undertime/crawl';
 import { undertimeCrawl } from '../src/drift/undertime/crawlText';
 import { driftParams } from '../src/params/drift';
 import { beatStarts } from '../src/drift/undertime/timeline';
@@ -69,6 +69,30 @@ describe('Undertime text', () => {
     for (const ph of phrases) {
       const at = phrasePlacement(ph.at + 1, ph, L)!;
       expect(at.size * 180 * 0.5).toBeGreaterThanOrEqual(2.5);
+    }
+  });
+
+  it('is written by the survivor\'s light, and whole while there is still most of the hold to read it in', () => {
+    // (the 2026-11-01 brief: "the one surviving grain's light writes the copy … the text must stay readable") — the
+    // pen comes down from the act's one place, writes line by line, goes back; every glyph is up by 0.9 s (the fade-in)
+    // + half the hold, so the writing never eats the reading time
+    for (const ph of phrases.filter((x) => !x.signature)) {
+      const ink = bodyPen(0, ph.lines);
+      expect(bodyPen(0.01, ph.lines).pen!.from.line).toBe(-1);
+      const whole = 0.9 + phraseHold(ph) / 2;
+      ph.lines.forEach((_, j) => expect(glyphInk(whole, ink.starts[j], ink.durs[j], 0.95, 1).alpha).toBeCloseTo(1, 6));
+      // line by line, left to right: the second line starts after the first is written
+      for (let j = 1; j < ph.lines.length; j++) expect(ink.starts[j]).toBeGreaterThan(ink.starts[j - 1] + ink.durs[j - 1]);
+      let f = -1;
+      for (let s = ink.starts[0]; s < ink.starts[0] + ink.durs[0]; s += 0.02) {
+        const pen = bodyPen(s, ph.lines).pen!;
+        expect(pen.to.f).toBeGreaterThanOrEqual(f);
+        f = pen.to.f;
+      }
+      // and it goes back to the spot and out
+      const end = ink.starts[ph.lines.length - 1] + ink.durs[ph.lines.length - 1];
+      expect(bodyPen(end + 0.3, ph.lines).pen!.to.line).toBe(-1);
+      expect(bodyPen(end + 1, ph.lines).pen).toBeNull();
     }
   });
 });

@@ -23,7 +23,7 @@ import { GameLoop } from './core/loop';
 import { bootReady } from './core/bootSplash';
 import { DomeCapture, type DomeLook } from './cine/domeCapture';
 import { driftParams } from './params/drift';
-import { beatStarts, eyePath, undertimeState } from './drift/undertime/timeline';
+import { beatStarts, eyePath, undertimeGrade, undertimeState } from './drift/undertime/timeline';
 import { loadWebData } from './drift/undertime/webVolume';
 import { getTheDriftParams } from './params/getTheDrift';
 import { createArrival } from './drift/getTheDrift/act';
@@ -258,6 +258,8 @@ async function boot(): Promise<void> {
   let seaT = 0;
   let endFade = 1;
   let actExposure = 1;
+  /** × the bloom's strength: Act 1's own (undertime/timeline.ts undertimeGrade), 1 elsewhere */
+  let actBloom = 1;
   let actNear = 0.05;
   const prepare = (at: number): ReturnType<typeof undertimeState> => {
     const state = undertimeState(at, p);
@@ -271,6 +273,7 @@ async function boot(): Promise<void> {
     endFade = seaTest ? 1 : e * e * (3 - 2 * e);
     if (seaK >= 1) {
       dome.setGrade(...SEA_GRADE);
+      actBloom = 1;
       titleOn = at >= endTitle[0].at;
       if (titleOn) {
         // (low in front, under the Rose: at crawlHoldEl, 30°, its lowest beam — the coast towers' lamps' chord, 25–29°
@@ -289,7 +292,10 @@ async function boot(): Promise<void> {
     const g = Math.min(1, Math.max(0, (t2 - landingFrom) / (arrival.seaFrom - landingFrom)));
     const look = g * g * (3 - 2 * g);
     actExposure = 1 + (seaAdapt - 1) * look;
-    dome.setGrade(1 + (SEA_GRADE[0] - 1) * look, 1 + (SEA_GRADE[1] - 1) * look);
+    // (Act 1's own grade on top, gone by the end of its zoom: undertime/timeline.ts undertimeGrade)
+    const g1 = undertimeGrade(at, p);
+    actBloom = g1[2];
+    dome.setGrade((1 + (SEA_GRADE[0] - 1) * look) * g1[0], (1 + (SEA_GRADE[1] - 1) * look) * g1[1]);
     eye.quaternion.identity();
     act2 = t2 >= 0 ? arrival.update(t2, eye.position, eye.quaternion) : null;
     if (sea.descentSky) {
@@ -334,7 +340,7 @@ async function boot(): Promise<void> {
   /** how the master is presented (`exposure` on top of the show's) */
   const look = (exposure: number): DomeLook => ({
     exposure: p.exposure * exposure,
-    bloomStrength: p.bloomStrength,
+    bloomStrength: p.bloomStrength * actBloom,
     bloomRadius: p.bloomRadius,
     bloomThreshold: p.bloomThreshold,
     overlayRadiance: seaK >= 1 && !titleOn ? 0 : p.crawlRadiance,

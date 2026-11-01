@@ -13,30 +13,7 @@
  * Depth: what is far is seen through the plasma, dimmed by its optical depth (`fog`).
  */
 import * as THREE from 'three/webgpu';
-import {
-  Fn,
-  PI,
-  attribute,
-  cameraPosition,
-  clamp,
-  cos,
-  exp,
-  float,
-  hash,
-  instanceIndex,
-  max,
-  min,
-  mix,
-  normalize,
-  pow,
-  sin,
-  sqrt,
-  smoothstep,
-  step,
-  uv,
-  vec3,
-  vec4,
-} from 'three/tsl';
+import { attribute, cameraPosition, clamp, cos, exp, float, Fn, hash, instanceIndex, max, min, mix, normalize, PI, pow, sin, smoothstep, sqrt, step, uv, varying, vec3, vec4 } from 'three/tsl';
 import { packedSpiral, type PairEvent } from './events';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { afterglow, afterglowColour, frontTime, spent, waveWarp, type WaveFxUniforms } from './waveFx';
@@ -347,7 +324,10 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
   // (over ±1.5 segments: a narrower span let the cap step from vertex to vertex, a pixel of serration on the bend)
   const Sm = S.clamp(0.012, 0.988);
   const seen = G ? screenBend(arcPoint(P, q, Sm.sub(0.012)), arcPoint(P, q, Sm), arcPoint(P, q, Sm.add(0.012))) : float(1e6);
-  const wide = float(0.09).add(age.mul(0.05)).mul(P.energy.mul(0.5).add(0.7)).mul(1.35).mul(spread).min(bendR.mul(G ? 0.4 : 0.33)).min(seen.mul(0.45));
+  // (Act 1, with the profile: 0.065 m, not 0.09, and narrowing a third along the path as the bead loses energy — the
+  // 2026-11-01 note: "thinner and crisper … line weight and brightness vary along the track")
+  const base = G ? float(0.065).mul(float(1).sub(S.mul(0.35))) : float(0.09);
+  const wide = base.add(age.mul(0.05)).mul(P.energy.mul(0.5).add(0.7)).mul(1.35).mul(spread).min(bendR.mul(G ? 0.4 : 0.33)).min(seen.mul(0.45));
   // and its two ENDS taper to a point over ~1.5 glow widths (the same QA sweep; this was the wedge it showed): a trail
   // began at its vertex — and a cut one ended — on a straight edge square across its width, unseen on a fresh thin
   // trail, a hard line 10–15° long on a broad diffused one a few metres off
@@ -360,17 +340,26 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
   const pocketKeep = float(1).sub(pocketMask(pos.sub(U.eye), U.pocket).mul(0.85));
   const alpha = passed.mul(coverage).mul(pocketKeep).mul(taper);
   // what the front has passed is spent (waveFx.ts spent): every trail there is gone within about a second
-  const left = tFront ? spent(tFront, U.fx as WaveFxUniforms, 0.35) : float(1);
+  const left = tFront ? spent(tFront, U.fx as WaveFxUniforms, 0.18) : float(1);
   const lasting = passedGeo.mul(coverage).mul(pocketKeep).mul(exp(age.div(2.5).negate())).mul(glowOf ? glowOf.gain : float(1)).mul(left);
+  // the across-coordinate, carried projectively (the note in the colour below)
+  const wDrawn = drawn.mul(step(0.0005, lasting)).max(1e-6);
+  const sideW = varying(side.mul(wDrawn));
+  const wV = varying(wDrawn);
+  const sideC = sideW.div(wV);
   const material = additive('undertime-loop-trails');
   material.positionNode = pos.add(acrossView.mul(side.mul(drawn).mul(step(0.0005, lasting))));
   material.colorNode = Fn(() => {
-    let core: F = exp(side.mul(side).div(0.02 / 1.35 ** 2).negate());
+    // (side ACROSS THE RIBBON, interpolated projectively: side·width and width are carried separately and divided per
+    // fragment. Carried as is, `side` is interpolated affinely over each triangle, and where the width changes between
+    // a quad's two ends — the tapers at a track's start and end, a kink, a vertex collapsed behind the head — the core
+    // line (side = 0) ran along each quad's diagonal: the fine sawtooth at tracks' ends, the 2026-11-01 note)
+    let core: F = exp(sideC.mul(sideC).div(0.02 / 1.35 ** 2).negate());
     // a gaussian that comes down to exactly zero at the ribbon's edge (same width as before the widening)
     const kg = 2.5 * 1.35 ** 2;
-    let glow: F = exp(side.mul(side).mul(kg).negate()).sub(Math.exp(-kg)).div(1 - Math.exp(-kg)).max(0);
+    let glow: F = exp(sideC.mul(sideC).mul(kg).negate()).sub(Math.exp(-kg)).div(1 - Math.exp(-kg)).max(0);
     // Act 1: the core-and-halo profile, the same core's and halo's light, the halo windowed to zero (glow.ts)
-    if (G) ({ core, halo: glow } = ribbonGlow(side, spread, G, { sigmaCore: Math.sqrt(0.02 / 1.35 ** 2 / 2), sigmaHalo: Math.sqrt(1 / (2 * kg)) }));
+    if (G) ({ core, halo: glow } = ribbonGlow(sideC, spread, G, { sigmaCore: Math.sqrt(0.02 / 1.35 ** 2 / 2), sigmaHalo: Math.sqrt(1 / (2 * kg)) }));
     // the energy fades and, as it does, the trail breaks up into fragments before it is gone
     // a smooth, LATE dissolve: the loop reads whole for a second, then thins out unevenly along its length
     const arcLen = P.radius.mul(P.arc);
@@ -386,6 +375,8 @@ export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms):
     const coreC = mix(tint, vec3(1, 0.97, 0.92), hot.mul(0.8)).mul(core).mul(exp(age.div(tau).negate())).mul(5);
     const glowC = tint.mul(glow).mul(exp(age.div(tau.mul(2)).negate())).mul(0.35);
     let c: V3 = coreC.add(glowC).mul(breakup);
+    // Act 1: brightest leaving the vertex, fading along the path as the bead loses its energy (the same note)
+    if (G) c = c.mul(float(1).sub(S.mul(0.5)));
     // the afterglow: the frozen light flares as the front's heat goes through it, then cools white → ember
     if (glowOf) c = afterglowColour(c, glowOf.heat, glowOf.on).mul(glowOf.gain);
     return vec4(c.mul(U.trailRadiance).mul(P.energy).mul(alpha).mul(left).mul(exp(U.fog.mul(dist).negate())), 1);
@@ -448,7 +439,7 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   // (the light wave's pull, waveFx.ts: everything is drawn where the front puts it)
   const centre = U.fx ? waveWarp(placed, U.fx) : placed;
   // (spent behind the front: waveFx.ts)
-  const leftS = U.fx ? spent(frontTime(placed, U.fx), U.fx, 0.35) : float(1);
+  const leftS = U.fx ? spent(frontTime(placed, U.fx), U.fx, 0.18) : float(1);
   const alpha = photonA.mul(isPhoton).add(burstA.mul(isBurst)).add(beadA.mul(isBead)).add(flashA.mul(isFlash)).add(gammaA.mul(isGamma))
     .mul(float(1).sub(pocketMask(centre.sub(U.eye), U.pocket).mul(0.8))).mul(leftS);
   const lightDir = P.across.mul(sgn.negate()).mul(isPhoton).add(beadDir.mul(isBead)).add(P.gamma.mul(sgn).mul(isGamma)).add(P.axis.mul(isBurst.add(isFlash)));

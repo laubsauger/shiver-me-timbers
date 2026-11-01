@@ -101,7 +101,9 @@ export function createDust(count: number, U: DustUniforms): Dust {
     // (squared by hand: WGSL's pow of a negative base is undefined, and x is signed)
     const xs = x.div(0.03);
     const sheet = exp(xs.mul(xs).negate());
-    const lead = exp(x.max(0).div(0.05).negate()).mul(step(0, x)).mul(0.22);
+    // (and a hot lip right ahead of the line, the 2026-11-01 brief's "particles ahead of the front … ignite": the
+    // motes the front is about to reach catch fire ~1° before it, and the swept-up layer, waveFx.ts PILE, rides there)
+    const lead = exp(x.max(0).div(0.05).negate()).mul(0.22).add(exp(x.max(0).div(0.016).negate()).mul(0.7)).mul(step(0, x));
     const trail = exp(x.min(0).div(0.08)).mul(step(x, 0)).mul(0.25);
     // a mote's own glint: each catches the sheet a little differently (orientation, size), so it sparkles
     const glint = hash(i.mul(8.13)).pow(2).mul(1.6).add(0.2);
@@ -128,7 +130,7 @@ export function createDust(count: number, U: DustUniforms): Dust {
   // extra motes were a brown snow over the build and a haze behind the front (2026-10-30 second look)
   const presentWave = U.front ? smoothstep(h, h.add(0.08), U.front.density) : float(0);
   // (what the front has passed is spent: its motes take no more of the events' light, waveFx.ts)
-  const left = U.front ? spent(frontTime(placed, U.front.fx), U.front.fx, 0.3) : float(1);
+  const left = U.front ? spent(frontTime(placed, U.front.fx), U.front.fx, 0.15) : float(1);
   const lit = events.mul(present).mul(left).add(wave.mul(presentWave.max(present)));
   const size = float(0.035).mul(hash(i.mul(6.7)).mul(1.5).add(0.5));
   const drawn = max(size, U.pixelAngle.mul(1.3).mul(dist));
