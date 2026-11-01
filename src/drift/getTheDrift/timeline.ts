@@ -172,8 +172,14 @@ const DIVE_KEYS: ReadonlyArray<readonly [number, number]> = [
   [1, 0],
 ];
 
-const journeys = new Map<string, { galaxy: (t: number) => number; earth: (t: number) => number; dive: (t: number) => number }>();
-function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; earth: (t: number) => number; dive: (t: number) => number } {
+interface Journeys {
+  galaxy: (t: number) => number;
+  earth: (t: number) => number;
+  dive: (t: number) => number;
+  glide: (t: number) => number;
+}
+const journeys = new Map<string, Journeys>();
+function journeysFor(p: GetTheDriftParams): Journeys {
   const key = JSON.stringify(p);
   const hit = journeys.get(key);
   if (hit) return hit;
@@ -220,10 +226,18 @@ function journeysFor(p: GetTheDriftParams): { galaxy: (t: number) => number; ear
     const dScale = p.diveEfolds / d0(p.galaxies);
     dive = (t: number): number => p.diveEfolds - d0(t) * dScale;
   }
+  // THE GLIDE'S EXTRA GROUND (GLIDE_KEYS): km of ground it has still to add at time t (all of it before, 0 after)
+  const gk = GLIDE_KEYS.map(([b, s, v]) => [starts[b] + s, v] as const);
+  const g1 = journey(
+    gk.map(([s]) => s),
+    gk.map(([, v]) => v),
+  );
+  const glideAll = g1(gk[gk.length - 1][0]);
   const made = {
     galaxy: (t: number): number => -g0(t) * gScale,
     earth: (t: number): number => far * Math.exp(-(before(t) * s1 + after(t) * s2)),
     dive,
+    glide: (t: number): number => glideAll - g1(t),
   };
   journeys.clear();
   journeys.set(key, made);
@@ -525,6 +539,53 @@ export function orbitLook(t: number, p: GetTheDriftParams): number {
   const from = starts.earth + ARRIVED * p.earthApproach - ORBIT_LOOK_LEAD;
   const flood = smooth((t - starts.flood) / Math.max(1e-6, 0.6 * (p.flood + p.drift2)));
   return ((p.orbitLook * Math.PI) / 180) * smooth((t - from) / ORBIT_LOOK_S) * (1 - flood);
+}
+
+/**
+ * THE GLIDE'S EXTRA GROUND (glideSpin), as [beat, s from its start, km/s of ground] keys: from the dawn's end through
+ * the lights and the overshoot into the flood. Why (the 2026-11-01 review: "the Earth fly-over after nightfall is a
+ * bit too slow; the whole Earth glide, first half, is a bit too dragged out"): with the eye's height falling only
+ * ~0.012–0.015 e-folds a second there (the altitude journey's slow sink, earthAltitude), the ground under the eye
+ * crawled by at 16–23 km/s from ~204 s to ~236 s of the show (a flow of 0.027: the ground streaming by at under 3% of
+ * the height a second), a third of the dawn's ~80 km/s before it and of the flood's ~50 after. These add ~30 km/s
+ * there, eased in as the dawn's own slide (the limb's dawnSink) runs out and eased out by 248 s, so the ground streams
+ * at ~45–50 km/s (a flow of ~0.07) from the dawn into the flood, one pace that never stalls. Not by the altitude
+ * journey: a faster sink there would change the planet's placement at the Sun's set (sunDay's tSet) and so the Sun's
+ * whole day down to the raft's morning, and its scale to Drift-2's height (journeysFor) moves the descent; this turns
+ * only the planet's map under its light, so the placement, the Sun, the descent's track and the sea are untouched.
+ */
+const GLIDE_KEYS: ReadonlyArray<readonly [(typeof BEATS)[number], number, number]> = [
+  ['timewave', 12, 0],
+  ['timewave', 16, 14],
+  ['timewave', 20, 26],
+  ['lights', 11, 30],
+  ['overshoot', 3, 32],
+  ['overshoot', 7, 29.5],
+  ['flood', -1, 23],
+  ['flood', 3, 12.5],
+  ['flood', 7, 0],
+];
+
+/**
+ * rad the planet's map (its land, lights, clouds, water: the geo frame, act.ts) is turned BACK about glideAxis at act
+ * time t: −(the extra ground still to come) / R, rising to 0 by the glide's last key and 0 from there on. As it turns
+ * forward to 0 the ground streams under the eye faster, the same way the descent streams it (an orbit's motion:
+ * the ground moves under a light that stays). The planet's place, its Sun and the stars do not move with it (the
+ * sky's wheel keeps the map's own north at rest, act.ts). Pure in t.
+ */
+export function glideSpin(t: number, p: GetTheDriftParams): number {
+  return -journeysFor(p).glide(t) / (EARTH_RADIUS * 1000);
+}
+
+/** unit, world: the axis glideSpin turns the planet's map about — the one the approach's placement carries the eye
+ * over the ground about through the lights (the dome's left–right axis: the planet's centre stays on the front
+ * meridian), signed so a forward turn streams the ground the way the descent does */
+export function glideAxis(p: GetTheDriftParams, tiltDeg: number): Vec3 {
+  const t = beatStarts(p).starts.lights;
+  const n = (s: number): Vec3 => earthPlace0(s, p, tiltDeg).centreDir.map((x) => -x) as Vec3;
+  const a = n(t - 0.5);
+  const b = n(t + 0.5);
+  return norm(cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], n(t)));
 }
 
 /** where the planet is (centre direction, distance) at act time t — everything but the Sun: the approach's placement,

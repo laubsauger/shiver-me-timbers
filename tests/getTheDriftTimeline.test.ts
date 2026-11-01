@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { ARRIVED, DEBRIS_SPIN, EYE_AT, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, orbitLook, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
+import { ARRIVED, DEBRIS_SPIN, EYE_AT, LANDED, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, glideAxis, glideSpin, landingTrack, landingTurn, orbitLook, ourGalaxy, ramped } from '../src/drift/getTheDrift/timeline';
 import type { Vec3 } from '../src/cine/domeMaster';
 
 const p = { ...getTheDriftParams };
@@ -234,6 +234,43 @@ describe('Get the Drift arrival', () => {
     expect(fastest).toBeLessThan(1);
     expect(downAgain).toBeLessThan(1e-3);
     expect(turn(total).angleTo(level)).toBeLessThan(1e-6);
+  });
+
+  it('glides over the night lights at a pace, never stalling, then hands the descent over untouched', () => {
+    // The 2026-11-01 review: "the Earth fly-over after nightfall is a bit too slow; the whole Earth glide, first half,
+    // is a bit too dragged out". The placement alone streamed the ground by at a flow of ~0.027 (16–23 km/s at
+    // ~600–800 km up) from the dawn's end into the flood; the map's glide turn (glideSpin) adds to it. Measured as the
+    // eye's point on the map (the planet's place and the map's turn together, as act.ts draws them): the flow stays
+    // over 0.05 from the dawn's end into the flood, the ground never runs back, the planet turns under the eye no
+    // faster than the dome's ~1°/s, and from the flood on the turn is over (the descent's track is the planet's place
+    // alone: the hand-over at TRACK_LEAD and the sea are as they were).
+    const R = 6.371;
+    const axis = new THREE.Vector3(...glideAxis(p, tilt));
+    /** unit, the eye's point on the map (planet axes) */
+    const onMap = (t: number): THREE.Vector3 => {
+      const n = new THREE.Vector3(...earthPose(t, p, tilt).centreDir).negate();
+      return n.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(axis, -glideSpin(t, p)));
+    };
+    const h = 0.1;
+    const end = starts.flood + 7;
+    let slowest = Infinity;
+    let fastestTurn = 0;
+    let back = Infinity;
+    const way = onMap(end).sub(onMap(starts.timewave + 12)).normalize();
+    for (let t = starts.timewave + 16; t < end + 4; t += h) {
+      const a = onMap(t);
+      const v = onMap(t + h).sub(a).divideScalar(h);
+      slowest = Math.min(slowest, (v.length() * R) / (earthPose(t, p, tilt).distance - R));
+      fastestTurn = Math.max(fastestTurn, (v.length() * 180) / Math.PI);
+      back = Math.min(back, v.normalize().dot(way));
+    }
+    expect(slowest).toBeGreaterThan(0.05);
+    expect(fastestTurn).toBeLessThan(1);
+    expect(back).toBeGreaterThan(0.9);
+    // over by the flood, and only ever turning forward
+    expect(Math.abs(glideSpin(end, p))).toBe(0);
+    expect(Math.abs(glideSpin(total, p))).toBe(0);
+    for (let t = starts.earth; t < end; t += 0.5) expect(glideSpin(t + 0.5, p)).toBeGreaterThanOrEqual(glideSpin(t, p));
   });
 
   describe('Earth', () => {

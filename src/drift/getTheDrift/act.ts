@@ -8,7 +8,7 @@ import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import type { Vec3 } from '../../cine/domeMaster';
-import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn, ourGalaxy, type ArrivalState } from './timeline';
+import { EARTH_RADIUS, arrivalEye, arrivalState, beatStarts, domeDir, earthPose, gatherFrame, glideAxis, glideSpin, landingTrack, landingTurn, ourGalaxy, type ArrivalState } from './timeline';
 import type { SeaDrive } from '../wandering/sea';
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
@@ -146,6 +146,11 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   const geoNorth = front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h));
   const geo = geoFrameAt(p.gatherLat, p.gatherLon, up, geoNorth);
   earth.setGeo(geo);
+  // THE GLIDE (timeline.ts glideSpin): through the lights the map is turned back a little about glideAxis and turns
+  // forward to `geo` by the flood, so the ground streams under the eye faster than the placement alone carries it
+  const spinAxis = new THREE.Vector3(...glideAxis(p, tiltDeg));
+  const spinTurn = new THREE.Quaternion();
+  const geoNow = { north: geo.north.clone(), zero: geo.zero.clone(), east: geo.east.clone() };
   // over Earth the sky wheels slowly about the planet's axis (a time-lapse, as in orbital footage): it eases
   // in from the Earth beat's start to SKY_TURN rad/s; the planet stays put
   const turnStart = starts.earth;
@@ -200,7 +205,13 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       // the others near ours on the sky go out, as far round it as its own disc has grown
       u.focus.value = smoothstep01((t - starts.ours + FOCUS_LEAD) / FOCUS_S);
       u.oursAngle.value = Math.atan(g.radius / Math.max(1e-6, Math.hypot(eye.x - g.centre[0], eye.y - g.centre[1], eye.z - g.centre[2])));
+      // (about the map's own north at rest: the glide turns the map, not the sky)
       skyTurn.setFromMatrix4(turn4.makeRotationAxis(geo.north, turnAt(t)));
+      spinTurn.setFromAxisAngle(spinAxis, glideSpin(t, p));
+      geoNow.north.copy(geo.north).applyQuaternion(spinTurn);
+      geoNow.zero.copy(geo.zero).applyQuaternion(spinTurn);
+      geoNow.east.copy(geo.east).applyQuaternion(spinTurn);
+      earth.setGeo(geoNow);
       u.skyTurn.value.copy(skyTurn);
       // Earth: the planet comes to the eye (earthPose); its Sun takes over from the Milky Way's Sun star over
       // a few seconds (a quick swap reads as a flash). As the sunlit planet grows the sky steps back — the

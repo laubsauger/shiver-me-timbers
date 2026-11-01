@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { getTheDriftParams } from '../src/params/getTheDrift';
-import { beatStarts, domeDir, earthPose, gatherFrame, landingTrack, landingTurn } from '../src/drift/getTheDrift/timeline';
+import { beatStarts, domeDir, earthPose, gatherFrame, glideAxis, glideSpin, landingTrack, landingTurn } from '../src/drift/getTheDrift/timeline';
 import { INSET, NEAR, geoFrameAt } from '../src/drift/getTheDrift/earthMaps';
 
 const p = { ...getTheDriftParams };
@@ -29,8 +29,12 @@ function groundViews(t0: number, t1: number, dt: number, visit: (v: { t: number;
   front.addScaledVector(up, -front.dot(up)).normalize();
   const rgt = new THREE.Vector3().crossVectors(front, up);
   const h = (p.heading * Math.PI) / 180;
-  const G = geoFrameAt(p.gatherLat, p.gatherLon, up, front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h)));
+  const G0 = geoFrameAt(p.gatherLat, p.gatherLon, up, front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h)));
+  // (the map turned by the glide through the lights, as act.ts turns it)
+  const axis = new THREE.Vector3(...glideAxis(p, tilt));
   for (let t = t0; t <= t1; t += dt) {
+    const spin = new THREE.Quaternion().setFromAxisAngle(axis, glideSpin(t, p));
+    const G = { north: G0.north.clone().applyQuaternion(spin), zero: G0.zero.clone().applyQuaternion(spin), east: G0.east.clone().applyQuaternion(spin) };
     const pose = earthPose(t, p, tilt);
     const c = new THREE.Vector3(...pose.centreDir).multiplyScalar(pose.distance);
     const lt = landingTurn(t, p, tilt);
