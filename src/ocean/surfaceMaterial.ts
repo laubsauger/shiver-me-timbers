@@ -399,6 +399,8 @@ export function buildOceanSurfaceMaterial(
   const uPigFloor = uniform(
     new THREE.Vector2(sp.pigmentFloorChroma, sp.pigmentFloorStrength),
   );
+  /** §V.56 the floor held to the transmitted share, 0..1 (params pigmentFloorFresnel; 0 in the game) */
+  const uPigFresnel = uniform(sp.pigmentFloorFresnel);
   const uLightFloor = uniform(sp.lightFloor);
   const uSkylightDesat = uniform(sp.skylightDesaturation);
   const uScatter = uniform(new THREE.Vector2(sp.sunScatterStrength, sp.sunScatterPower));
@@ -2245,7 +2247,14 @@ export function buildOceanSurfaceMaterial(
       // warm, low-chroma horizon haze (a legitimately lit atmosphere, not a
       // grey wash) and repaints the whole band in the water's hue.
       .mul(waterness)
-      .mul(float(1).sub(foamAmount.clamp(0, 1)));
+      .mul(float(1).sub(foamAmount.clamp(0, 1)))
+      // (params pigmentFloorFresnel: the body's hue comes back only in the share of the light that came THROUGH the
+      // surface, 1 − reflWeight. At 0, the game's, this is × 1 exactly. The film's coast at dusk: the grazing
+      // far field, ~90% reflected warm-grey sky, nudged toward neutral by the grazingSaturation hump's share of the
+      // body's blue, fell under the floor's chroma and was repainted in the body's ultramarine at 2.6× its value —
+      // a bright saturated blue band along the horizon, 696–710 s, the 2026-11-01 beach-dusk review. Water seen
+      // that grazing is the sky's mirror and the haze, not its pigment)
+      .mul(mix(float(1), float(1).sub(reflWeight), uPigFresnel.clamp(0, 1)));
     // (params shoreFadeEdge: the water's hue thins at the shore with its body; built only where the shore fade is)
     const pigNeed = sp.shoreFadeThickness > 0 ? pigBase.mul(shoreBody) : pigBase;
     const tintLum = bodyTint.dot(vec3(0.2126, 0.7152, 0.0722)).max(1e-4);
@@ -2963,6 +2972,7 @@ export function buildOceanSurfaceMaterial(
       sp.pigmentFloorChroma,
       sp.pigmentFloorStrength,
     );
+    uPigFresnel.value = sp.pigmentFloorFresnel;
     uSparkleStrength.value = sp.sparkleStrength;
     uSparkleScale.value = sp.sparkleScale;
     uSparklePower.value = sp.sparklePower;

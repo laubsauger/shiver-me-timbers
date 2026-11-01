@@ -122,6 +122,8 @@ export function pigmentFloor(
    * is allowed to read white; HAZE is allowed to read as haze. Without the
    * second gate this term fires on the warm, low-chroma horizon band — a
    * legitimately lit atmosphere, not a grey wash — and repaints it turquoise.
+   * (× mix(1, 1 − reflWeight, pigmentFloorFresnel) too: 0 in the game, so × 1;
+   * the film's coast holds the floor to the light through the surface)
    */
   strength = 1,
 ): Rgb {

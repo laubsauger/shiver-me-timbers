@@ -513,6 +513,15 @@ export const oceanSurfaceParams = registerParams(
     pigmentFloorChroma: 0.14,
     pigmentFloorStrength: 1.0,
     /**
+     * 0..1: how far the floor is held to the light that came THROUGH the surface, (1 − Fresnel weight). The floor
+     * restores the BODY's hue, and the body is seen only in that share; at a grazing view (Schlick → 1) the pixel is
+     * the sky's mirror and there is no pigment in it to restore. 0 (the game): the floor as it always was, × 1
+     * exactly. The film's coast takes 1 (src/drift/wandering/sea.ts SEA_COLOUR): at dusk its grazing far field — warm
+     * grey sky, nudged neutral by `grazingSaturationFar` — fell under the floor and came out a saturated blue band
+     * along the horizon (the 2026-11-01 beach-dusk review, 696–710 s).
+     */
+    pigmentFloorFresnel: 0,
+    /**
      * Sun-elevation gate (sunDir.y) for every sun-driven water term. Below
      * `low` there is no direct sun at all; above `high` the terms are at full
      * strength. Keep `high` LOW — a horizon-kissing sunset is the money shot
@@ -1058,6 +1067,7 @@ export const oceanSurfaceParams = registerParams(
     grazingSaturationFullDist: { min: 20, max: 4000, step: 10 },
     pigmentFloorChroma: { min: 0, max: 0.6, step: 0.01 },
     pigmentFloorStrength: { min: 0, max: 1, step: 0.01 },
+    pigmentFloorFresnel: { min: 0, max: 1, step: 0.01 },
     sssPower: { min: 0.5, max: 8, step: 0.1 },
     sssChoppyScale: { min: 0, max: 3, step: 0.05 },
     sssSkylightFloor: { min: 0, max: 1, step: 0.01 },

@@ -657,11 +657,21 @@ export function createShoreline(o: {
   // from ~3 mm), and a sheet of a few mm is the glossy mirror a real backwash is, the sand faint through it. With
   // distance each octave still goes only by the pixel's footprint, smoothly: no region of the beach switches its
   // detail off (the same day's note on the wide view along it: "a sharp change halfway up … suddenly very smooth")
+  // RESOLVED, OR GONE (the same note, 2026-11-01, the walkers' view at 705 s: the speckle stayed with the octaves laid
+  // flat in thin water and the sim's slope taken off it — the backwash there is centimetres deep, and switching the
+  // layer's terms one by one on the farm it went only with these octaves off). Each octave is an fbm2 of two, the
+  // inner one at twice its frequency, and it was kept whole down to a quarter of its wavelength a pixel: its inner
+  // octave at two pixels a wave, the sampling limit. Under the dusk sky, whose light falls steeply from the horizon's
+  // glow up to the dark blue a few degrees over it, each such facet mirrored one or the other: olive-gold flecks on
+  // dark, the pixel's own grid beating against the ripples. Now each octave is whole only while a wavelength spans
+  // ten pixels or more (its inner one five) and gone by four; what it loses is the mirror's roughness
+  // (`unresolvedS`, the same window), so the sky in it softens instead of breaking into flecks
+  const OCT_BAND: [number, number] = [0.25, 0.1];
   const octave = (k: number, a: number, seed: number, along = 1): V3 => {
     const q = xzP.mul(vec2(k, k * along)) as V2;
     const c = vec3(fbm2(q.add(vec2(seed, 0.4)), 2).sub(0.5), 0, fbm2(q.add(vec2(4.1, seed)), 2).sub(0.5)) as V3;
     const deepEnough = smoothstep(0.1 / k, 0.4 / k, hS) as F;
-    return c.mul(a).mul(smoothstep(0.5, 0.25, footprint.mul(k))).mul(deepEnough) as V3;
+    return c.mul(a).mul(smoothstep(OCT_BAND[0], OCT_BAND[1], footprint.mul(k))).mul(deepEnough) as V3;
   };
   const rippleS = octave(1.1, 0.2, 3.3, 0.3).add(octave(2.9, 0.3, 1.7, 0.4)).add(octave(7.3, 0.5, 6.2)).add(octave(17, 0.55, 8.4)).add(octave(37, 0.5, 2.8)).mul(rough) as V3;
   // (the slope those octaves left out where a pixel cannot hold them — the sea's `unresolvedVar`: its share of the
@@ -669,7 +679,7 @@ export function createShoreline(o: {
   const OCT = [[1.1, 0.2], [2.9, 0.3], [7.3, 0.5], [17, 0.55], [37, 0.5]];
   const octW = OCT.reduce((a, [, w]) => a + w * w, 0);
   // (what the footprint took out of an octave, not what the depth did: a flat film has no slope left)
-  const unresolvedS = OCT.reduce<F>((acc, [k, w]) => acc.add(float(1).sub(smoothstep(0.5, 0.25, footprint.mul(k))).mul(smoothstep(0.1 / k, 0.4 / k, hS)).mul((w * w) / octW)) as F, float(0) as F)
+  const unresolvedS = OCT.reduce<F>((acc, [k, w]) => acc.add(float(1).sub(smoothstep(OCT_BAND[0], OCT_BAND[1], footprint.mul(k))).mul(smoothstep(0.1 / k, 0.4 / k, hS)).mul((w * w) / octW)) as F, float(0) as F)
     .mul(rough.mul(rough))
     .mul(0.12 * 0.12) as F;
   // (its slope held to an unbroken swell's, 0.15: a bore in the sim is a first-order shock, its face 2–3 cells, ~45°,

@@ -306,15 +306,19 @@ const FILM_FRONDS = { frondColorDark: 0x2e4f2a, frondColorLight: 0x6a8a45 };
  * is the lagoon's, over sand (the shallows tint) — its deep water teal-blue (§12.1: #40737e far, a deep channel
  * #6b9bc0, §12.3).
  */
-const SEA_COLOUR: Record<'open' | 'coast', { deepColor: string; sssColor: string; sssMaxMix: number; contactFoamStrength: number }> = {
+const SEA_COLOUR: Record<'open' | 'coast', { deepColor: string; sssColor: string; sssMaxMix: number; contactFoamStrength: number; pigmentFloorFresnel: number }> = {
   // (the crests' light dimmer and capped lower on the open sea: facing a low Sun the lobe covers the whole sea
   // toward it, and in a bright blue it read as electric patches — the first try, #2f8fbf at the game's 0.45)
   // (and the thin line of bubbles where the water meets the logs and the debris, drawn white now (FILM_WAKE_WHITE),
   // so faint: at 0.7 it was a glowing grey band round every log — the user, 2026-10-29; the white is the slaps',
   // hullContact.ts)
-  open: { deepColor: '#14253a', sssColor: '#24708c', sssMaxMix: 0.25, contactFoamStrength: 0.04 }, // (0.2 drew a grey-green outline round every log end at 365 s, the 2026-10-30 triage)
+  open: { deepColor: '#14253a', sssColor: '#24708c', sssMaxMix: 0.25, contactFoamStrength: 0.04, pigmentFloorFresnel: 0 }, // (0.2 drew a grey-green outline round every log end at 365 s, the 2026-10-30 triage)
   // (and on the coast, the water's own foam where it meets the sand, the lip under the swash's lace)
-  coast: { deepColor: '#0a3550', sssColor: '#36b5c2', sssMaxMix: 0.45, contactFoamStrength: 0.2 },
+  // (and its pigment floor held to the light through the surface, params pigmentFloorFresnel: at dusk the grazing far
+  // water, the sky's mirror, was repainted in the body's blue — a bright saturated band along the horizon left of the
+  // high island, 696–710 s, the 2026-11-01 beach-dusk review; found by switching the water's terms one by one: the
+  // floor and the grazingSaturation hump together, neither alone, the coast's sss and shallows tint not at all)
+  coast: { deepColor: '#0a3550', sssColor: '#36b5c2', sssMaxMix: 0.45, contactFoamStrength: 0.2, pigmentFloorFresnel: 1 },
 };
 /** m: the sun shadow map's half-reach (its 8192² texels then 1.1 cm at sea, 2.2 cm on the coast): at sea only the
  * raft and the debris round it cast anything worth a shadow; on the coast the palms' and the forest's long shadows
