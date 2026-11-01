@@ -594,6 +594,11 @@ export function createSea(
   oceanSurfaceParams.wakeAeration = 0.6;
   oceanSurfaceParams.wakeAerationColor = '#86cfc4';
   oceanSurfaceParams.wakeSmoothLong = 0.7;
+  // (the film's eye never goes under: no underside on the sea's back faces, which from the air are only the far
+  // waves' lee past the grazing ray — drawn in the underside's teal ceiling they were the cyan dots and dashes along
+  // the night horizon, the 2026-11-01 review of c4: "looks a bit wonky"; found by hiding the scene's parts one at a
+  // time, every colour and foam term of the top surface ruled out)
+  oceanSurfaceParams.undersideShading = false;
   const raftWater = createHullContact(raftLogsInPlan());
   const flowFoam = createFlowFoam({ hull: raftWater });
   flowFoam.setSpeedScale(raftWakeParams.speedScale);

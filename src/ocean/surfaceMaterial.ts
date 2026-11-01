@@ -2799,7 +2799,11 @@ export function buildOceanSurfaceMaterial(
     under.assign(mix(under, uFoam.mul(0.9), foamAmount.mul(0.6)));
     if (boatLight) under.addAssign(boatLight); // §T.209: the LEDs from below, through the same surface
 
-    return frontFacing.select(col, under);
+    // (params undersideShading false — a world whose eye never dives, The Drift: a back face seen from the air is the
+    // lee of a far wave past the grazing ray, and drew the ceiling's teal at the horizon, unhazed and lit by the light
+    // floor — cyan dots along the night sea, the 2026-11-01 review. The normal above is the analytic up-facing one, so
+    // `col` is the top's own shading there. The default keeps the select, so the game's graph is as it was)
+    return sp.undersideShading ? frontFacing.select(col, under) : col;
   })();
 
   // MeshBasicNodeMaterial: scene lights bypassed — colorNode owns lighting

@@ -1014,6 +1014,14 @@ export const oceanSurfaceParams = registerParams(
     underWindowBrightness: 1.0,
     /** softness of the Snell window edge (cos units) */
     underWindowSoftness: 0.12,
+    /**
+     * The underside branch above (Snell's window, the ceiling) on the sheet's BACK faces (build-time). True: the game,
+     * whose eye dives. False: back faces take the top's own shading — for a world whose eye never goes under. Seen from
+     * the air, a back face is only ever the lee of a far wave turned past the grazing view ray, a few texels at the
+     * horizon, and the underside drew each one in the ceiling colour, lit by `lightFloor` and never hazed: at night,
+     * cyan dots and dashes scattered along the far sea (The Drift's c4, the 2026-11-01 review: "looks a bit wonky")
+     */
+    undersideShading: true,
   },
   {
     gridSegments: { min: 64, max: 1024, step: 64 },
