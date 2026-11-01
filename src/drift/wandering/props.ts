@@ -29,7 +29,7 @@ import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
-import { DOLPHIN_SPAN, FLIP_RELEASE, caseOnDeck, createDolphin, flipThrow } from './dolphin';
+import { CASE_FROM, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, caseAfloat, caseOnDeck, createDolphin, flipThrow } from './dolphin';
 import { createHardCase } from './hardCase';
 import { dolphinPose } from './dolphin';
 import { CREW, createCrewFigure, createCrewWalker, strideLength } from './crew';
@@ -249,6 +249,8 @@ export interface PropsState {
   /** where the eye is on the coast at sea time t (w6's field gathers over it as it rises) */
   coastEyeAt: (t: number) => THREE.Vector3;
   ground: (x: number, z: number) => number;
+  /** the sea's height (m) at a world x, z now: what the floating case rides (sea.ts heightAt) */
+  water?: (x: number, z: number) => number;
   /** the network's stations that stand on the coast and their lamps (coast.ts): the Rose answers from them in w6 */
   towers?: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare?(f: number): void }>;
 }
@@ -269,8 +271,9 @@ export interface Props {
   setPixelAngle(rad: number): void;
 }
 
-/** the case's throw: m it rises over the higher of the snout and the deck (up against the afterglow), m/s² */
-const CASE_LOB = 1.0;
+/** the case's throw: m it rises over the higher of the snout and the deck — over the horizon, against the afterglow
+ * (1.0 m: it stayed under the horizon line, in the glitter, and read as a dark dot; 2026-11-01) — and m/s² */
+const CASE_LOB = 1.5;
 /** m it skids on along the deck once it lands */
 const CASE_SKID = 0.35;
 const G_CASE = 9.81;
@@ -765,12 +768,49 @@ export function createProps(): Props {
         dolphin.set(d);
       }
 
-      // THE CASE: flicked from the dolphin's snout as it rises in the flip, on the way it was going, and down on
+      // THE CASE: afloat in the debris from far out, drifting down on the raft as it sails (dolphin.ts caseAfloat), nosed
+      // by the dolphin, lifted on its snout as it comes up under it, flicked off it on the way it was going, and down on
       // the fore-deck it was thrown at (dolphin.ts CASE_ON_DECK): a ballistic lob from the snout, CASE_LOB m over the
-      // higher end, landing on whatever is on the deck there (found from above in the raft's own frame); then aboard
+      // higher end, landing on whatever is on the deck there (found from above in the raft's own frame); then aboard.
+      // (It had appeared out of nowhere at the flip, flying; afloat first, the audience has seen it before the dolphin
+      // finds it — the 2026-11-01 review: "make it easier to understand what's happening")
       const cf = c3 - FLIP_RELEASE;
-      caseMesh.visible = world !== 'test' && aboard && cf > 0;
-      if (caseMesh.visible) {
+      const afloat = world === 'open' && c3 > CASE_FROM && cf <= 0;
+      caseMesh.visible = world !== 'test' && ((aboard && cf > 0) || afloat);
+      if (afloat) {
+        const toWorld = (x: number, z: number): THREE.Vector3 =>
+          new THREE.Vector3(x, 0, -z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, 0, s.eye.z));
+        const [ax, az] = caseAfloat(c3);
+        const at = toWorld(ax, az);
+        // riding the swell: on the water's height there, tilted with its slope (0.4 m across), a third of its 0.22 m
+        // out of the water; it comes up out of the swell over its first 3 s, ~60 m out
+        const h = (x: number, z: number): number => (s.water ? s.water(x, z) : 0);
+        const y = h(at.x, at.z);
+        const sx = (h(at.x + 0.3, at.z) - h(at.x - 0.3, at.z)) / 0.6;
+        const sz = (h(at.x, at.z + 0.3) - h(at.x, at.z - 0.3)) / 0.6;
+        const rise = Math.min(1, Math.max(0, (c3 - CASE_FROM) / 3));
+        caseMesh.position.set(at.x, y + 0.04 - 0.4 * (1 - rise * rise * (3 - 2 * rise)), at.z);
+        // turning slowly as it drifts; and the nose rocks it (a damped sway about the axis across the push)
+        const push = c3 - NOSE_AT;
+        const rock = push > 0 ? 0.45 * Math.exp(-push / 0.7) * Math.sin(push * 6.5) : 0;
+        caseMesh.rotation.set(Math.atan(sz) + rock, s.yaw + 0.6 + 0.04 * c3, -Math.atan(sx), 'YXZ');
+        // UP ON THE SNOUT from just before the dolphin leaves the water to the release: eased from the water onto its
+        // beak (dolphin.ts flipThrow's own reach, 1.3 m), a little above it, nose-up with the head
+        const lift = c3 - (FLIP_AT_T - 0.3);
+        if (lift > 0) {
+          const d = dolphinPose(c3);
+          const beak = toWorld(d.x + Math.sin(d.heading) * 1.3 * Math.cos(d.pitch), d.z + Math.cos(d.heading) * 1.3 * Math.cos(d.pitch));
+          beak.y = d.y + 1.3 * Math.sin(d.pitch);
+          const k = Math.min(1, lift / 0.3);
+          const w = k * k * (3 - 2 * k);
+          caseMesh.position.lerp(beak.setY(Math.max(beak.y, caseMesh.position.y)), w);
+          // (and turned onto the throw's heading, as its flight below starts: no turn at the release)
+          const th = flipThrow();
+          const onThrow = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, s.yaw - Math.atan2(th.dir[0], th.dir[1]), 0, 'YXZ'));
+          caseMesh.quaternion.slerp(onThrow, w);
+        }
+      }
+      if (caseMesh.visible && !afloat) {
         raft.updateMatrixWorld(true);
         const throwAt = flipThrow();
         const toWorld = (x: number, y: number, z: number): THREE.Vector3 =>

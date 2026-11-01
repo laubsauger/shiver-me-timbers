@@ -23,7 +23,7 @@ import { LITTER_RES } from './beachMaterial';
 import { graded } from './coast';
 // (the high island's air: the light 7 km of marine air scatters in front of it, as its radio towers have it)
 import { farAir } from './farAir';
-import { footprint, seated, specimens } from './seat';
+import { contactOf, footprint, seated, specimens } from './seat';
 import { rng } from '../undertime/web';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -361,6 +361,9 @@ export interface Forest {
   readonly ready: Promise<void>;
   /** the edge's trees' and shrubs' feet (x, z, the litter's radius m) */
   readonly feet: Array<[number, number, number]>;
+  /** each seated plant of the edge where it meets the ground (seat.ts contactOf: x, z, its footprint's radius m, its
+   * height m), for its contact shade (contactMask) — filled as the scans load: read it after `ready` */
+  readonly contact: Array<[number, number, number, number]>;
   /** per frame: where the eye is (which edge trees are drawn from their full scans) */
   setEye(eye: THREE.Vector3): void;
   /** the Sun (world, unit, toward it) and its light (the key light's colour × intensity): the light through the
@@ -814,9 +817,10 @@ function edgeTrees(
   base: string,
   loads: Promise<unknown>[],
   sun: THREE.UniformNode<'vec3', THREE.Vector3>,
-): { group: THREE.Group; feet: Array<[number, number, number]>; setEye: (eye: THREE.Vector3) => void } {
+): { group: THREE.Group; feet: Array<[number, number, number]>; contact: Array<[number, number, number, number]>; setEye: (eye: THREE.Vector3) => void } {
   const group = new THREE.Group();
   group.name = 'forest-edge';
+  const contact: Array<[number, number, number, number]> = [];
   const loader = new GLTFLoader();
   const r = rng(5521);
   /** world x, z of a point `inland` m in from our shore at world z (inland grows 1:1 with x on the lagoon side) */
@@ -915,7 +919,14 @@ function edgeTrees(
         const mine = parts.filter((_, i) => groupOf[i] === sp);
         const stems = mine.filter((p) => !isLeaf(p));
         const foot = footprint((stems.length ? stems : mine).map((p) => p.geometry.clone().applyMatrix4(p.matrixWorld)));
-        matsOf.set(sp, base.map((m) => seated(foot, m, isl.heightAt, tree ? SEAT_SINK.tree : SEAT_SINK.shrub)));
+        const own = base.map((m) => seated(foot, m, isl.heightAt, tree ? SEAT_SINK.tree : SEAT_SINK.shrub));
+        matsOf.set(sp, own);
+        // (once a plant: from the far build, which every kind has)
+        if (which === 'far') {
+          const b = new THREE.Box3();
+          for (const p of mine) b.expandByObject(p);
+          own.forEach((m) => contact.push(contactOf(foot, m, b.max.y - b.min.y)));
+        }
       }
       const mats = base;
       entry.mats = mats;
@@ -1058,7 +1069,7 @@ function edgeTrees(
       }
     }
   };
-  return { group, feet, setEye };
+  return { group, feet, contact, setEye };
 }
 
 /**
@@ -1106,6 +1117,67 @@ export function litterMask(isl: ForestIsland, feet: Array<[number, number, numbe
 }
 
 /**
+ * THE CONTACT SHADE at every seated plant's foot (the user, 2026-11-01: "a slightly darker patch at the footing of
+ * these trees would only be natural"): where a stem meets the ground the ground sees less of the sky — the plant
+ * itself and the litter round it hide it — so it is a little darker in every light, most where the sky is all the
+ * light (in the shade, at dusk). Baked once with the litter (the litter mask's second channel, beachMaterial.ts
+ * setLitter: the terrain's ambient occlusion, which the Sun's direct light does not see), one soft Gaussian a plant,
+ * so never a ring: `contact` is each plant's foot (seat.ts contactOf: x, z, its footprint's radius m, its height m).
+ *
+ *   radius     CONTACT_R[0] of the footprint's radius + CONTACT_R[1] of the height (m): ~0.5 m at a 2.6 m Pachira,
+ *              ~2.5 m at a 12 m tree, ~0.15 m at a tuft
+ *   strength   CONTACT_S over the height (share of the sky hidden at the middle), up to the full at 10 m. (At 0.12 m
+ *              a metre and 0.3–0.45 it did not show at all at 604 s, where the low Sun is most of the light on the
+ *              sand, and darkened the sand by the Pachira's foot ~15% at 690 s, after sunset)
+ *   along the slope  stretched downhill-uphill by 1 + CONTACT_SLOPE × the slope (rise per m), up to 1.5×
+ *
+ * The mask's texels are half a metre: a patch narrower than CONTACT_MIN of a texel is drawn that wide and as much
+ * fainter (its sum kept), or a tuft's would come and go with where its foot falls between texels.
+ */
+const CONTACT_R: [number, number] = [0.5, 0.16];
+const CONTACT_S: [number, number] = [0.4, 0.55];
+const CONTACT_SLOPE = 1.2;
+const CONTACT_MIN = 0.6;
+/** m: the least radius of a plant's patch from a metre tall up (a shrub's litter and root zone is 1.2–1.5 m across;
+ * below a metre, that × its height). At ~0.45 m a Pachira's patch fell between the mask's half-metre texels and the
+ * blur ate its core: 2–5% darker by its foot in the sunlit 604 and 645 s stills */
+const CONTACT_R_MIN = 0.65;
+export function contactMask(ground: (x: number, z: number) => number, contact: Array<[number, number, number, number]>, origin: [number, number], size: number): Uint8Array {
+  const n = LITTER_RES;
+  const cell = size / n;
+  const w = new Float32Array(n * n);
+  for (const [fx, fz, r, h] of contact) {
+    const want = Math.max(CONTACT_R[0] * r + CONTACT_R[1] * h, CONTACT_R_MIN * Math.min(1, h));
+    const R = Math.max(want, CONTACT_MIN * cell);
+    const S = (CONTACT_S[0] + (CONTACT_S[1] - CONTACT_S[0]) * Math.min(1, h / 10)) * (want / R) ** 2;
+    // the ground's fall at the foot: the patch's long axis along it
+    const gx = (ground(fx + 0.5, fz) - ground(fx - 0.5, fz)) / 1;
+    const gz = (ground(fx, fz + 0.5) - ground(fx, fz - 0.5)) / 1;
+    const slope = Math.hypot(gx, gz);
+    const ux = slope > 1e-6 ? gx / slope : 1;
+    const uz = slope > 1e-6 ? gz / slope : 0;
+    const f = Math.min(1.5, 1 + CONTACT_SLOPE * slope);
+    const ci = (fx - origin[0]) / cell - 0.5;
+    const cj = (fz - origin[1]) / cell - 0.5;
+    const k = Math.ceil((3 * R * f) / cell);
+    for (let j = Math.max(0, Math.floor(cj - k)); j <= Math.min(n - 1, Math.ceil(cj + k)); j++) {
+      for (let i = Math.max(0, Math.floor(ci - k)); i <= Math.min(n - 1, Math.ceil(ci + k)); i++) {
+        const dx = (i - ci) * cell;
+        const dz = (j - cj) * cell;
+        const a = (dx * ux + dz * uz) / f;
+        const b = -dx * uz + dz * ux;
+        const v = S * Math.exp(-(a * a + b * b) / (R * R));
+        const idx = j * n + i;
+        w[idx] = 1 - (1 - w[idx]) * (1 - v);
+      }
+    }
+  }
+  const out = new Uint8Array(n * n);
+  for (let i = 0; i < n * n; i++) out[i] = Math.round(255 * Math.min(1, w[i]));
+  return out;
+}
+
+/**
  * The trees on `islands` (coast.ts). The first is ours: fine cells and leaf cards where the eye passes (`walk`:
  * the world box along the beach the eye sees the forest's edge from at close range).
  */
@@ -1134,6 +1206,7 @@ export function createForest(
   const lightU = shellMat.userData.light as THREE.UniformNode<'color', THREE.Color>;
   const loads: Promise<unknown>[] = [];
   const feet: Array<[number, number, number]> = [];
+  let contact: Array<[number, number, number, number]> = [];
   const eyeSetters: Array<(eye: THREE.Vector3) => void> = [];
   islands.forEach((isl, n) => {
     const ours = n === 0;
@@ -1155,6 +1228,8 @@ export function createForest(
       group.add(deadTrees(isl, walk, base, loads, aerial));
       group.add(edge.group);
       feet.push(...edge.feet);
+      // (the same array, filled as the scans load)
+      contact = edge.contact;
       eyeSetters.push(edge.setEye);
       const leaves = leafCards(geo, walk, sunU, lightU, base, loads);
       aerial(leaves.material as THREE.Material);
@@ -1165,6 +1240,7 @@ export function createForest(
     group,
     ready: Promise.all(loads).then(() => undefined),
     feet,
+    contact,
     setEye(eye) {
       for (const f of eyeSetters) f(eye);
     },

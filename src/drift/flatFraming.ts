@@ -21,6 +21,14 @@
  *                                                    onto the spiral until 2026-10-31): the two never add up
  *   260–629   the spiral, the landing, Part C,       pitch 0: the spiral centred (s_0285–0300), the horizon mid-frame,
  *             the coast, the beach                   the raft and the coast on it
+ *   377–393   c3 the dolphin                       10° left toward the Sun before the dolphin comes, held through it:
+ *                                                    its whole play is on the water left of the raft's sail, 12–40° left
+ *                                                    (wandering/dolphin.ts, the stage), and the case lands on the bow 16°
+ *                                                    left — straight ahead the frame's left edge (30°) cut the Sun's road
+ *                                                    and the circle, and the sail and the cabin filled its right half
+ *                                                    (the 2026-11-01 review: "We need a better view of the dolphin").
+ *                                                    The dome's own view does not turn. Back over c4 + 8 → + 24, as the
+ *                                                    night falls and before the beams
  *   484–548   w1 the coast                           8° right: the raft holds its place right of the front all through
  *                                                    w1, and straight ahead cut its cabin and sail at the frame's right
  *                                                    edge for 50 s (s_0495–0535); right, the cabin comes in and the
@@ -100,6 +108,9 @@ export const FLAT_MOVES: readonly FlatMove[] = [
   // +30, up30_0190–0205) through the cities filling the frame (+15 at ~230: limb at the top third, s/up30_0225–0245)
   // to straight down onto the flood; over by Drift-2's own look-down (starts 4 s before drift2)
   { beat: 'lights', at: -9, dur: 60, to: { pitch: 0 } },
+  // c3: 10° left, toward the Sun, as c2 ends, and held through the dolphin; back as c4's night comes on (header)
+  { beat: 'c3', at: -8, dur: 16, to: { yaw: 10 } },
+  { beat: 'c4', at: 8, dur: 16, to: { yaw: 0 } },
   // w1: 8° right across the dissolve from c4, and back as w2 begins (header)
   { beat: 'w1', at: -6, dur: 16, to: { yaw: -8 } },
   { beat: 'w2', at: -8, dur: 16, to: { yaw: 0 } },

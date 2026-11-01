@@ -16,6 +16,8 @@ import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { oursHeight } from '../src/drift/wandering/coast';
 import { footprint, seated, specimens } from '../src/drift/wandering/seat';
+import { contactMask } from '../src/drift/wandering/forest';
+import { LITTER_RES } from '../src/drift/wandering/beachMaterial';
 
 /** our island's ground in world space with the beach at the origin (coast.ts oursAt) */
 const ground = (x: number, z: number): number => oursHeight(-z, -x);
@@ -81,6 +83,43 @@ describe('seating a plant on the ground', () => {
     }
     // (the note's floating: the old placement left some end plant well over the sand)
     expect(floated).toBeGreaterThan(0.3);
+  });
+
+  // THE CONTACT SHADE (forest.ts contactMask; the user, 2026-11-01: "a slightly darker patch at the footing of these
+  // trees would only be natural"): it must read as a soft darkening, never a ring or a stamp, and follow the plant
+  it('shades each foot softly, wider and stronger under a taller plant, stretched along the slope', () => {
+    // (the coast's own mask: 520 m over LITTER_RES texels, half a metre each — sea.ts)
+    const size = 520;
+    const cell = size / LITTER_RES;
+    const at = (m: Uint8Array, x: number, z: number): number => m[Math.floor(z / cell) * LITTER_RES + Math.floor(x / cell)] / 255;
+    const flat = (): number => 0;
+    const shrub = contactMask(flat, [[20, 20, 0.2, 2.6]], [0, 0], size);
+    const tree = contactMask(flat, [[40, 40, 2, 12]], [0, 0], size);
+    // subtle: little over half the sky hidden at the middle at most, and some at all
+    expect(at(shrub, 20, 20)).toBeGreaterThan(0.15);
+    expect(at(tree, 40, 40)).toBeLessThanOrEqual(0.56);
+    expect(at(tree, 40, 40)).toBeGreaterThan(at(shrub, 20, 20));
+    // soft: falling off monotonically from the foot, never rising again (no ring), gone by a few radii
+    for (const [m, c, far] of [[shrub, 20, 2], [tree, 40, 8]] as const) {
+      let was = Infinity;
+      for (let d = 0; d < far; d += cell) {
+        const v = at(m, c + d, c);
+        expect(v).toBeLessThanOrEqual(was + 1 / 255);
+        was = v;
+      }
+      expect(at(m, c + far, c)).toBeLessThan(0.02);
+    }
+    // the tree's patch is wider than the shrub's
+    expect(at(tree, 41.5, 40)).toBeGreaterThan(at(shrub, 21.5, 20));
+    // on a slope rising along x, longer along x than across it
+    const slope = contactMask((x) => 0.3 * x, [[20, 20, 0.5, 8]], [0, 0], size);
+    expect(at(slope, 21.5, 20)).toBeGreaterThan(at(slope, 20, 21.5) + 0.02);
+    // a tuft narrower than the texels: drawn wider and fainter, not lost or a full-strength stamp
+    const tuft = contactMask(flat, [[30.1, 30.3, 0.05, 0.2]], [0, 0], size);
+    expect(at(tuft, 30.1, 30.3)).toBeGreaterThan(0.01);
+    expect(at(tuft, 30.1, 30.3)).toBeLessThan(0.2);
+    // a shrub's patch at least its litter and root zone (~1.3 m across): its core not lost between the texels
+    expect(at(shrub, 20.6, 20)).toBeGreaterThan(0.15);
   });
 
   it('groups a sheet\'s meshes by their trailing letter, and a single scan as one plant', () => {

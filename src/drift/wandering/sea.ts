@@ -61,7 +61,7 @@ import { createSplashes } from './splash';
 import { createBeachTerrain } from './beachMaterial';
 import { createScannedRocks } from './scannedRocks';
 import { createFilmCoast, type FilmCoast } from './coast';
-import { createForest, createForestGround, litterMask, type Forest } from './forest';
+import { contactMask, createForest, createForestGround, litterMask, type Forest } from './forest';
 import { bindSwashToSea, createShoreline, swashLight } from './shoreline';
 import { createSwashSim, swashSeaGone, type SwashSim } from './swashSim';
 import { filmShadowFilter } from './filmShadowFilter';
@@ -208,6 +208,11 @@ const RAFT_BERTH = 7.5;
 const THINGS_AT_REST: Array<[number, number]> = [[9, -4], [12, 3], [16, -9], [21, 7], [26, -2]];
 const THINGS_LANE_EVERY = 6;
 const THINGS_LANE_OFF = 11;
+/** s before c3 from which the lane is left without things (they lie ahead of the raft, and in c3 it sails on onto
+ * those it was due to pass): the dolphin's sea holds only the debris mat's wood and the blue case */
+const THINGS_CLEAR_BEFORE_C3 = 20;
+/** s into c4 the lane stays clear: those due just after c3 lay ahead in view at its end (the table at 427 s) */
+const THINGS_CLEAR_AFTER_C3 = 20;
 
 /** what Act 2 hands the sea each frame (metres: x east, y above the mean sea, z north of the field's centre) */
 export interface SeaDrive {
@@ -552,11 +557,13 @@ export function createSea(
     coast.group.add(drowned.under);
     afloat.add(drowned.above);
   }
+  let contactShade: Promise<void> | undefined;
   if (forest && coast) {
     // the leaf litter under the forest's edge and round every foot along the walk (forest.ts litterMask): the
     // edge's trees and shrubs, and the palms' fronds and husks
     const feet = [...forest.feet, ...palmFeet(beach).map(([x, z]): [number, number, number] => [x, z, 3])];
-    beachTerrain.setLitter(litterMask(coast.islands[0], feet, [beach.x - 10, beach.z - 280], 520), [beach.x - 10, beach.z - 280], 520);
+    const litter = litterMask(coast.islands[0], feet, [beach.x - 10, beach.z - 280], 520);
+    beachTerrain.setLitter(litter, [beach.x - 10, beach.z - 280], 520);
     // and the things lying there (groundDebris.ts): roots, branches, bark and low plants at every foot, driftwood
     // on the strand line (where the beach first stands 1.4 m over the sea: the berm, the highest tides' reach)
     const strand = (z: number): number => {
@@ -571,6 +578,13 @@ export function createSea(
     };
     groundDebris = createGroundDebris({ feet: forest.feet, palms: palmFeet(beach), ground, strand, along: [beach.z - 260, beach.z + 220] });
     afloat.add(groundDebris.group);
+    // and THE CONTACT SHADE at every seated plant's foot (forest.ts contactMask; the palms' is their trunk's
+    // occluder, palms.ts), once the scans are in and the plants seated on their stems (seat.ts)
+    const edge = forest;
+    const lying = groundDebris;
+    contactShade = Promise.all([edge.ready, lying.ready]).then(() =>
+      beachTerrain.setLitter(litter, [beach.x - 10, beach.z - 280], 520, contactMask(ground, [...edge.contact, ...lying.contact], [beach.x - 10, beach.z - 280], 520)),
+    );
     // and the beach's small things (beachDressing.ts): coral pebbles and rubble, shells, the wrack line
     beachDressing = createBeachDressing({ ground, beach, inland: coast.islands[0].inland, palms: palmFeet(beach), cloudSun: seaSky.cloudSun });
     land.group.add(beachDressing.group);
@@ -594,11 +608,6 @@ export function createSea(
   oceanSurfaceParams.wakeAeration = 0.6;
   oceanSurfaceParams.wakeAerationColor = '#86cfc4';
   oceanSurfaceParams.wakeSmoothLong = 0.7;
-  // (the film's eye never goes under: no underside on the sea's back faces, which from the air are only the far
-  // waves' lee past the grazing ray — drawn in the underside's teal ceiling they were the cyan dots and dashes along
-  // the night horizon, the 2026-11-01 review of c4: "looks a bit wonky"; found by hiding the scene's parts one at a
-  // time, every colour and foam term of the top surface ruled out)
-  oceanSurfaceParams.undersideShading = false;
   const raftWater = createHullContact(raftLogsInPlan());
   const flowFoam = createFlowFoam({ hull: raftWater });
   flowFoam.setSpeedScale(raftWakeParams.speedScale);
@@ -653,6 +662,11 @@ export function createSea(
     const s = seaAt(t);
     return s.sea.heightAt(x, z, s.t);
   };
+  // the sea at the eye, so the surface draws its underside only for an eye under the water — the film's never is, so
+  // a far wave's back face seen from the air takes the top's shading (the cyan dots along the night horizon, the
+  // 2026-11-01 review of c4: "looks a bit wonky"). The instant t is one the rafts already ask for (raft.ts SAMPLES,
+  // centred), so it costs the pool no new sea.
+  surface.setWaterHeightAt(heightAt);
   // a raft floats on the sea, or rests on the sand once aground (w2)
   const floating = (x: number, z: number, t: number): number => Math.max(heightAt(x, z, t), ground(x, z) + ON_SAND);
   // the raft, off the Sun's bearing from where the eye comes to rest, its bow turned off the eye's heading
@@ -773,6 +787,10 @@ export function createSea(
     }
     lane.forEach((q, i) => {
       if (i % THINGS_LANE_EVERY !== 3 || i + 1 >= lane.length) return;
+      // (none along the dolphin's stretch, c3 and the run up to it: the upturned table's white legs stood up beside the
+      // dolphin and took the eye from it — the user, 2026-11-01, "a weird object in the water close to the dolphin …
+      // looks a bit out of place". The blue case is the one made thing near it: dolphin.ts)
+      if (followStart + i > beats.starts.c3 - THINGS_CLEAR_BEFORE_C3 && followStart + i < beats.starts.c4 + THINGS_CLEAR_AFTER_C3) return;
       const dx = lane[i + 1].x - q.x;
       const dz = lane[i + 1].z - q.z;
       const l = Math.hypot(dx, dz) || 1;
@@ -1027,7 +1045,7 @@ export function createSea(
     get exposure() {
       return seaSky.exposure;
     },
-    ready: Promise.all([ready, debris?.ready, nearDebris?.ready, things?.ready, cloudData.ready, beachTerrain.ready, scannedRocks?.ready, forest?.ready, coast?.ready, props?.ready, groundDebris?.ready, beachDressing?.ready, plants?.ready, palms?.ready, drowned?.ready, powerLine?.ready, raft.ready]).then(() => undefined),
+    ready: Promise.all([ready, debris?.ready, nearDebris?.ready, things?.ready, cloudData.ready, beachTerrain.ready, scannedRocks?.ready, forest?.ready, coast?.ready, props?.ready, groundDebris?.ready, contactShade, beachDressing?.ready, plants?.ready, palms?.ready, drowned?.ready, powerLine?.ready, raft.ready]).then(() => undefined),
     passes(t) {
       return o.drive ? beatsAt(t, c1End).map((p) => ({ beat: p.name, weight: p.weight })) : [{ beat: 'c1', weight: 1 }];
     },
@@ -1147,8 +1165,10 @@ export function createSea(
       if (debris) debris.visible = world === 'flood' || world === 'open';
       if (powerLine) powerLine.group.visible = world === 'flood' || world === 'open';
       // (c2–c4 only, coming up out of the haze from c2's start: switched on with the follow they popped in at 335 s, in
-      // the sea's first shot — "suddenly we see a second raft in the distance", the 2026-10-31 review — farRafts.ts)
-      const farIn = sailing ? farRaftsIn(t, beats.starts.c2) : 0;
+      // the sea's first shot — "suddenly we see a second raft in the distance", the 2026-10-31 review — farRafts.ts.
+      // Then c4 only, coming up with the night as their lanterns light: at the sunset the smaller craft in the distance
+      // was "slightly confusing … maybe we just leave other rafts out in this shot around sunset", the 2026-11-01 review)
+      const farIn = sailing ? farRaftsIn(t, beats.starts.c4) : 0;
       const farOn = farIn > 0;
       farLook.fade.value = farIn;
       for (const r of farRafts) r.group.visible = r.lantern.mesh.visible = farOn;
@@ -1277,6 +1297,8 @@ export function createSea(
           fieldEye,
           coastEyeAt,
           ground,
+          // (the floating case rides the swell: the sea's own height, as the raft's)
+          water: (x, z) => heightAt(x, z, t),
           towers: coast?.towers,
         });
       }

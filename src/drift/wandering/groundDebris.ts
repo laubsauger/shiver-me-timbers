@@ -19,7 +19,7 @@ import * as THREE from 'three/webgpu';
 import { cameraPosition, fwidth, positionWorld } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { rng } from '../undertime/web';
-import { footprint, seated } from './seat';
+import { contactOf, footprint, seated } from './seat';
 
 type Kind = 'roots' | 'root' | 'branches' | 'bark' | 'shrub' | 'tuft' | 'log' | 'pole';
 const FILES: Record<Kind, string> = {
@@ -73,6 +73,9 @@ function thinOf(src: THREE.MeshStandardMaterial, thin: number): THREE.MeshStanda
 export interface GroundDebris {
   readonly group: THREE.Group;
   readonly ready: Promise<void>;
+  /** each seated low plant where it meets the ground (seat.ts contactOf), for its contact shade (forest.ts
+   * contactMask) — filled as the scans load: read it after `ready` */
+  readonly contact: Array<[number, number, number, number]>;
 }
 
 export function createGroundDebris(o: {
@@ -87,6 +90,7 @@ export function createGroundDebris(o: {
   const base = o.base ?? `${import.meta.env.BASE_URL}drift/pbr/`;
   const group = new THREE.Group();
   group.name = 'drift-ground-debris';
+  const contact: Array<[number, number, number, number]> = [];
   const r = rng(7311);
   /** placements per kind: x, z, yaw, scale */
   const at: Record<Kind, Array<[number, number, number, number]>> = { roots: [], root: [], branches: [], bark: [], shrub: [], tuft: [], log: [], pole: [] };
@@ -157,6 +161,10 @@ export function createGroundDebris(o: {
           const geo = part.geometry.clone().applyMatrix4(part.matrixWorld);
           const foot = SEATED[k] ? footprint([geo]) : null;
           const own = foot ? mats.map((x, i) => seated(foot, x, o.ground, SINK[k] * tall * at[k][i][3])) : mats;
+          if (foot) {
+            geo.computeBoundingBox();
+            for (const x of own) contact.push(contactOf(foot, x, geo.boundingBox!.max.y - geo.boundingBox!.min.y));
+          }
           const src = part.material as THREE.MeshStandardMaterial;
           const thin = THIN[k];
           const m = thin ? thinOf(src, thin) : src.clone();
@@ -177,5 +185,5 @@ export function createGroundDebris(o: {
         }
       }),
   ).then(() => undefined);
-  return { group, ready };
+  return { group, ready, contact };
 }

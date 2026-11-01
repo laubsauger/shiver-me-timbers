@@ -6,7 +6,7 @@
  * comes up only where the choreography says, and is out of sight between.
  */
 import { describe, expect, it } from 'vitest';
-import { C3_RAFT, CASE_ON_DECK, DOLPHIN_SPAN, FLIP_RELEASE, SURFACINGS, caseOnDeck, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
+import { C3_RAFT, CASE_FROM, CASE_ON_DECK, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, SURFACINGS, caseAfloat, caseOnDeck, dolphinPose, dolphinSplashes, flipThrow } from '../src/drift/wandering/dolphin';
 import { C1_FOLLOW, beatStarts, raftPose, type RaftPose } from '../src/drift/wandering/beats';
 
 /** eye frame (x right, z ahead) → c3's raft: (across, along) m from its centre, along toward its bow */
@@ -23,13 +23,13 @@ const G = 9.81;
 const h = 1 / 240;
 
 describe('the dolphin in c3', () => {
-  it('travels at a dolphin pace between surfacings, slowing only for the flip', () => {
-    const flipAt = SURFACINGS.find((s) => s[3] === 'flip')![0];
+  it('travels at a dolphin pace between surfacings, slowing only at the case, from the nose to the flip', () => {
     for (let t = DOLPHIN_SPAN[0] + 1; t < DOLPHIN_SPAN[1] - 1; t += 0.05) {
       const v = dolphinPose(t).speed;
       expect(v).toBeLessThan(7.5);
-      // (bottlenose cruising is 3–6 m/s; the stand-in's 1.3 m/s read as a float, not a swimmer)
-      if (Math.abs(t - flipAt) > 3) expect(v).toBeGreaterThan(2);
+      // (bottlenose cruising is 3–6 m/s; the stand-in's 1.3 m/s read as a float, not a swimmer. Idling with the case,
+      // nosing it and coming up under it, it is slow on purpose: the 2026-11-01 choreography)
+      if (t < NOSE_AT - 0.5 || t > FLIP_AT_T + 3) expect(v, `t = ${t.toFixed(2)}`).toBeGreaterThan(2);
     }
   });
 
@@ -95,8 +95,14 @@ describe('the dolphin in c3', () => {
     const { spot, dir } = caseOnDeck();
     expect(spot[0]).toBeCloseTo(CASE_ON_DECK.across, 6);
     expect(spot[1]).toBeCloseTo(CASE_ON_DECK.along, 6);
-    // thrown in across the side facing the eye (+x), not from the far side through the cabin
-    expect(dir[0]).toBeLessThan(0);
+    // thrown in over the bow, toward the stern: from beyond the bow's tip (6.85 m), its whole line ahead of the mast
+    // (1.2 m), the sail and the cabin behind it (thrown through them from the far side, the case landed out of sight:
+    // the v9 review), and onto the deck in front of us
+    expect(dir[1]).toBeLessThan(0);
+    const th = flipThrow();
+    const [, alongFrom] = c3RaftLocal([th.from[0], th.from[2]]);
+    expect(alongFrom).toBeGreaterThan(6.85);
+    expect(spot[1]).toBeGreaterThan(1.2 + 2.5);
   });
 
   it('lays the choreography about the raft where beats.ts puts it in c3', () => {
@@ -140,11 +146,69 @@ describe('the dolphin in c3', () => {
     expect(turned).toBeGreaterThan(30);
   });
 
-  it('throws no spout at the rolls: only leaps splash', () => {
+  it('throws no spout at the rolls: only leaps and the flip throw spray; a roll only rings the water', () => {
+    // (a blow drawn as a column read as a whale's spout: the v9 review. A roll's back breaking the water leaves a small
+    // ring of foam, and the nose pushes a little water up at the case: the 2026-11-01 notes)
     const rolls = SURFACINGS.filter((s) => s[3] === 'roll').map((s) => s[0]);
+    const near = (t: number): boolean => rolls.some((r) => Math.abs(r - t) < 0.5);
     for (const sp of dolphinSplashes()) {
-      expect(sp.blow).toBe(false);
-      expect(rolls.some((r) => Math.abs(r - sp.at) < 0.01)).toBe(false);
+      expect(sp.kind).not.toBe('blow');
+      if (sp.kind === 'spray' && near(sp.at)) expect(Math.abs(sp.at - NOSE_AT)).toBeLessThan(0.01);
+    }
+    // every leap and the flip: spray and a ring going out and coming in, drips between
+    for (const [at, , , kind] of SURFACINGS) {
+      if (kind !== 'leap' && kind !== 'flip') continue;
+      const mine = dolphinSplashes().filter((sp) => sp.at >= at - 0.01 && sp.at < at + 2);
+      expect(mine.filter((sp) => sp.kind === 'spray').length).toBeGreaterThanOrEqual(2);
+      expect(mine.filter((sp) => sp.kind === 'ring').length).toBeGreaterThanOrEqual(2);
+      expect(mine.some((sp) => sp.kind === 'drip')).toBe(true);
+    }
+  });
+
+  it('plays on the stage left of the sail, in the Sun\'s light, where the dome and the 16:9 frame see it', () => {
+    // (the 2026-11-01 review: "We need a better view of the dolphin". It had come up 31–103° left, under the dome's rim
+    // or behind our shoulder, and never in the 16:9 frame. From the eye: the Sun 22° left, its glitter road ~16–28° left,
+    // the sail and the cabin from 11° left to the right. A point shows on the 15°-tilted dome while its drop below the
+    // eye (2.3 m) is under its distance ahead × tan 15°)
+    const sun = -22;
+    for (const [at, , , kind, h = 0] of SURFACINGS) {
+      if (kind === 'swim' || at > FLIP_AT_T + 1) continue;
+      const top = kind === 'roll' ? at : at + Math.sqrt(2 * G * h) / G;
+      const p = dolphinPose(top);
+      const bearing = (Math.atan2(p.x, p.z) * 180) / Math.PI;
+      expect(bearing, `${kind} at ${at}`).toBeLessThan(-12);
+      expect(bearing, `${kind} at ${at}`).toBeGreaterThan(-40);
+      expect(2.3 - (p.y + 0.3), `${kind} at ${at}: under the dome's rim`).toBeLessThan(p.z * Math.tan((15 * Math.PI) / 180) - 0.5);
+      // the leaps and the flip against the Sun's light: within 10° of its bearing
+      if (kind !== 'roll') expect(Math.abs(bearing - sun), `${kind} at ${at}`).toBeLessThan(10);
+    }
+  });
+
+  it('finds the case afloat, noses it and comes up under it: the case is where the beak is, and clear of the raft', () => {
+    // (the case had come out of nowhere at the flip; now it floats there from far out, drifting down on the raft as it
+    // sails, the 2026-11-01 choreography)
+    const beak = (t: number): [number, number] => {
+      const p = dolphinPose(t);
+      return [p.x + Math.sin(p.heading) * 1.3 * Math.cos(p.pitch), p.z + Math.cos(p.heading) * 1.3 * Math.cos(p.pitch)];
+    };
+    const at = caseAfloat(NOSE_AT - 1e-3);
+    const b = beak(NOSE_AT);
+    expect(Math.hypot(at[0] - b[0], at[1] - b[1])).toBeLessThan(0.4);
+    // at the nose the head is at the water, not a metre under it
+    expect(dolphinPose(NOSE_AT).y).toBeGreaterThan(-0.3);
+    const f = caseAfloat(FLIP_AT_T);
+    const p = dolphinPose(FLIP_AT_T);
+    expect(Math.hypot(f[0] - p.x, f[1] - p.z)).toBeLessThan(0.6);
+    // afloat it never runs into the raft (13.7 m long, the bow's tip at 6.85 m; 9 logs ≈ 5.4 m across)
+    for (let t = 14; t <= FLIP_AT_T; t += 0.1) {
+      const [across, along] = c3RaftLocal(caseAfloat(t));
+      expect(Math.abs(along) > 6.85 + 0.6 || Math.abs(across) > 2.7 + 0.4, `t = ${t.toFixed(1)}`).toBe(true);
+    }
+    // and it drifts as the water does, smoothly: never faster than the raft's way plus the nose's push
+    for (let t = CASE_FROM; t < FLIP_AT_T; t += 0.05) {
+      const a = caseAfloat(t);
+      const c = caseAfloat(t + 0.05);
+      expect(Math.hypot(c[0] - a[0], c[1] - a[1]) / 0.05, `t = ${t.toFixed(2)}`).toBeLessThan(3);
     }
   });
 });

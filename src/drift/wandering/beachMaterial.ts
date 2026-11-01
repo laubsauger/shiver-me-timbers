@@ -76,8 +76,9 @@ export interface BeachTerrain {
   /** what hides the sky from the ground: (x, z) m, radius m, strength 0..1 — a palm's crown, a trunk's foot */
   setOccluders(list: Array<[number, number, number, number]>): void;
   /** where leaf litter lies on the ground (forest.ts litterMask): LITTER_RES² weights 0..255 over the square from
-   * `origin` (world x, z) `size` m on a side */
-  setLitter(mask: Uint8Array, origin: [number, number], size: number): void;
+   * `origin` (world x, z) `size` m on a side; and `contact`, the same square's contact shade at the plants' feet
+   * (forest.ts contactMask: the share of the sky hidden, 0..255), none if left out */
+  setLitter(mask: Uint8Array, origin: [number, number], size: number, contact?: Uint8Array): void;
 }
 
 /** texels a side of the litter mask */
@@ -177,15 +178,17 @@ export function createBeachTerrain(
   // straight up"): a mask laid by forest.ts (setLitter), empty until then. Half-float red, the seabed's own format,
   // unmipped (a smooth field of half-metre texels). setLitter hands each sampling node a NEW texture: rewriting
   // the first one's data and flagging it never reached the GPU here — the litter read zero everywhere.
+  // Its green, THE CONTACT SHADE at the plants' feet (forest.ts contactMask): one texture, two channels, no binding
+  // more.
   const litterOf = (data: Uint16Array): THREE.DataTexture => {
-    const t = new THREE.DataTexture(data, LITTER_RES, LITTER_RES, THREE.RedFormat, THREE.HalfFloatType);
+    const t = new THREE.DataTexture(data, LITTER_RES, LITTER_RES, THREE.RGFormat, THREE.HalfFloatType);
     t.minFilter = THREE.LinearFilter;
     t.magFilter = THREE.LinearFilter;
     t.generateMipmaps = false;
     t.needsUpdate = true;
     return t;
   };
-  let litterTex = litterOf(new Uint16Array(LITTER_RES * LITTER_RES));
+  let litterTex = litterOf(new Uint16Array(LITTER_RES * LITTER_RES * 2));
   const litterNodes: Array<{ value: THREE.Texture }> = [];
   const litterAt = uniform(new THREE.Vector2(0, 0));
   const litterInv = uniform(1);
@@ -289,9 +292,19 @@ export function createBeachTerrain(
       // 2026-10-30 note: "real drying is uneven")
       const wetLeft = leftMarks.z as F;
       const wetSim = wetLeft.sub(float(1).sub(wetLeft).mul((fbm2(pP.mul(2.5).add(vec2(6.6, 3.2)), 3) as F).sub(0.5).mul(0.8))).clamp(0, 1) as F;
-      const damp = float(1).sub(smoothstep(-0.02, wetTop, rise)).max(mix(swE.wet, wetSim, simIn)) as F;
+      // THE LAST HIGH RUN-UPS' REACH (the user, 2026-11-01, of the beach at dusk: "way too sharp all the way through, no
+      // layers"): the graded band faded out smoothly to wetTop, and from the walk's eye, at this grazing, those 6 m of
+      // fading face squeezed into a few pixels — no band, only the water's edge. A real beach's damp sand has an edge
+      // of its own, where the highest run-ups of the last hour stopped: damp below, pale dry sand above, the line
+      // scalloped by the swash's cusps (horns every ~18 m along it, ±0.4 m across) and frayed where it dries. So: the
+      // grade holds at under half-wet (0.45) up to that line, and gives out over ~0.3 m of face across it
+      const cusp = sin(pP.y.mul((2 * Math.PI) / 18).add(fbm2(pP.mul(0.05).add(vec2(1.7, 4.2)), 2).mul(5))).abs().sub(0.64).mul(0.07) as F;
+      const fray = fbm2(pP.mul(1.4).add(vec2(8.3, 2.6)), 2).sub(0.5).mul(0.05).add(fbm2(pP.mul(4.7).add(vec2(0.9, 6.1)), 2).sub(0.5).mul(0.02)) as F;
+      const reachTop = wetTop.add(cusp).add(fray) as F;
+      const graded = mix(float(1), float(0.45), smoothstep(-0.02, reachTop.mul(0.9), rise)).mul(float(1).sub(smoothstep(reachTop.sub(0.03), reachTop, rise))) as F;
+      const damp = graded.max(mix(swE.wet, wetSim, simIn)) as F;
       const wetA = SAND_WET.mul(mix(float(1), wet.albedo.dot(LUM).div(0.54), 0.5)) as V3;
-      const margin = float(1).sub(smoothstep(wetTop, wetTop.add(0.5), rise)).mul(0.1) as F;
+      const margin = float(1).sub(smoothstep(reachTop, reachTop.add(0.5), rise)).mul(0.1) as F;
       // sand: dry above the wet band, wet in it, foam where the swash is. UNDER WATER it is the lagoon's white coral
       // sand, neutral grey-beige (§12.4: #9a9888 under 20–50 cm); the water's own absorption turns it turquoise
       // (only under a quarter metre of water and more, and darker than it was: a pale grey-beige from 5 cm down painted
@@ -421,21 +434,32 @@ export function createBeachTerrain(
       const rockN = vec3(0, tx.y, tx.x).mul(wx).add(vec3(ty.x, 0, ty.y).mul(wy)).add(vec3(tz.x, tz.y, 0).mul(wz)).add(N).normalize() as V3;
       const rockAO = bx.z.mul(wx).add(by.z.mul(wy)).add(bz.z.mul(wz)) as F;
 
-      const albedo = mix(linear(rockA4.rgb as V3).mul(rockAO), groundA.mul(groundAO), groundW);
+      // THE CONTACT SHADE's colour (the 2026-11-01 note: in sunlight too — the ground at a plant's foot is darker
+      // itself, its litter, damper soil and root shade): the same patch takes the ground a touch darker and browner,
+      // ~15–20% in luminance at its core (green 0.4–0.55, forest.ts contactMask; a Pachira's half-metre patch on the
+      // half-metre texels comes out nearer 0.3: at 0.26–0.36 a channel it showed 1–3% at 604 and 645 s), blue a little
+      // more than red
+      const footA = vec3(1).sub(vec3(0.34, 0.38, 0.46).mul(litterNode.g)) as V3;
+      const albedo = mix(linear(rockA4.rgb as V3).mul(rockAO), groundA.mul(groundAO).mul(footA), groundW);
       const roughness = mix(rockA4.a, groundR, groundW);
       const nWorld = mix(rockN, groundN, groundW).normalize();
       const normal = cameraViewMatrix.mul(vec4(nWorld, 0)).xyz.normalize();
       // (no painted glitter on scanned sand)
-      return { albedo, roughness, normal, emissiveGate: float(0), ao: skyOcclusion };
+      // (the contact shade is the sky hidden too: the indirect light's, the Sun's direct light untouched)
+      return { albedo, roughness, normal, emissiveGate: float(0), ao: skyOcclusion.mul(litterNode.g.oneMinus()) };
     },
   };
   return {
     hooks,
     ready: Promise.all(loads).then(() => undefined),
-    setLitter(mask, origin, size) {
+    setLitter(mask, origin, size, contact) {
       if (mask.length !== LITTER_RES * LITTER_RES) throw new Error(`beach: litter mask of ${mask.length}, not ${LITTER_RES}²`);
-      const half = new Uint16Array(mask.length);
-      for (let i = 0; i < mask.length; i++) half[i] = THREE.DataUtils.toHalfFloat(mask[i] / 255);
+      if (contact && contact.length !== mask.length) throw new Error(`beach: contact mask of ${contact.length}, not ${LITTER_RES}²`);
+      const half = new Uint16Array(mask.length * 2);
+      for (let i = 0; i < mask.length; i++) {
+        half[i * 2] = THREE.DataUtils.toHalfFloat(mask[i] / 255);
+        half[i * 2 + 1] = THREE.DataUtils.toHalfFloat((contact?.[i] ?? 0) / 255);
+      }
       const was = litterTex;
       litterTex = litterOf(half);
       for (const node of litterNodes) node.value = litterTex;

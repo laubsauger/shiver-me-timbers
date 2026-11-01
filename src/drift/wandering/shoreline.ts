@@ -77,6 +77,12 @@ const ROLL_LIP = 0.03;
 const FOAM = 0.8;
 /** the most radiance (linear) the layer gives back: a Sun glint on the sheet, not a firefly (see THE SHEET) */
 const SHEET_MAX = 2.5;
+/** m: the sim sheet's edge feathered across the shore over ± this, its least and most (THE SHEET'S EDGE, FEATHERED) */
+const FEATHER: [number, number] = [0.3, 2];
+/** WET SAND'S SHEEN (see there): the share of the water's mirror the sand keeps where the film has just left it
+ * (glazed), where it is still saturated from the swash, and at the water table along the still waterline; m of rise
+ * over the still water that last band reaches */
+const SHEEN = { glazed: 1, wet: 0.7, table: 0.6, tableRise: 0.12 } as const;
 
 // THE SWASH (see the header)
 /** m/s² */
@@ -527,8 +533,31 @@ export function createShoreline(o: {
   const etaAt = (q: V2): F => (texture(swashField.water, q) as unknown as THREE.Node<'vec4'>).x as F;
   const gEta = vec2(etaAt(suv.add(du)).sub(etaAt(suv.sub(du))), etaAt(suv.add(dv)).sub(etaAt(suv.sub(dv)))).div(2 * SWASH.cell) as V2;
   const hS = wS.y as F;
-  // (water from ~1.5 mm: the backwash's last film below that sinks in as the sand's glaze, beachMaterial.ts)
-  const waterS = smoothstep(0.0012, 0.004, hS) as F;
+  // THE SHEET'S EDGE, FEATHERED (the user, 2026-11-01, of the beach at dusk, ~690 s: "the shoreline beach wash and
+  // all that still looks weak in this segment. It's way too sharp all the way through, no layers"). The sheet was
+  // drawn from ~1.5 mm of water, whole by 4 mm — and the sim's run-up tip is a shock two or three 10 cm cells wide, so
+  // its water went from nothing to its full mirror within ~15 cm: one crisp line, and from the walk's 10–60 m, where
+  // a pixel spans 0.2–1.5 m across the shore at this grazing, a hard step between the sky in the water and the dark
+  // sand. A real run-up's last metre is a film thinning to nothing, its edge lacy and wandering. So: the sheet's
+  // cover is the mean of five taps across the shore over ±FEATHER m — at least 0.3 m, and two and a half pixels'
+  // footprint beyond that, so it is as soft in the wide shots as at the eye's feet — each tap's threshold wandering
+  // over 0.3–5 mm (the film's own unevenness: grains, bubbles, the last drops at the tip)
+  const featherK = footprint.mul(2.5).clamp(FEATHER[0], FEATHER[1]) as F;
+  const TAPS = [-1, -1 / 3, 1 / 3, 1];
+  const tapW = TAPS.map((d) => texture(swashField.water, simUV(xz.add(vec2(featherK.mul(d), 0)) as V2)) as unknown as THREE.Node<'vec4'>);
+  const tapM = TAPS.map((d) => texture(swashField.marks, simUV(xz.add(vec2(featherK.mul(d), 0)) as V2)) as unknown as THREE.Node<'vec4'>);
+  const edgeThr = mix(float(0.0008), float(0.0032), fbm2(xzP.mul(3.1).add(vec2(2.7, 5.2)), 2)) as F;
+  const sheetOf = (h: F): F => smoothstep(edgeThr.mul(0.4), edgeThr.mul(1.6), h) as F;
+  const sheetC = sheetOf(hS);
+  const sheets = tapW.map((w) => sheetOf(w.y as F));
+  const waterS = sheets.reduce<F>((a, s) => a.add(s) as F, sheetC).div(5) as F;
+  // (the water's run where it is: landward, the uprush; seaward, the backwash — m/s across the shore, over the taps)
+  const uRun = tapW.reduce<F>((a, w, k) => a.add((w.z as F).mul(sheets[k])) as F, (wS.z as F).mul(sheetC)).div(waterS.mul(5).max(1e-3)) as F;
+  // (the foam the sim carries, and what it stranded, over the same taps once a pixel spans more than a few cm: a line
+  // of foam a cell or two wide, point-sampled, aliased into broken dashes or went out — the mean keeps its cover)
+  const farTaps = smoothstep(0.08, 0.4, footprint) as F;
+  const foamMean = tapM.reduce<F>((a, m) => a.add(m.x as F) as F, mS.x as F).div(5) as F;
+  const strandMean = tapM.reduce<F>((a, m) => a.add(m.y as F) as F, mS.y as F).div(5) as F;
   // (a glassy film where it is thin; rippled where it is deep and running)
   // (and everywhere the sea's own small chop over the swell's slope — a smooth slope mirrored one darker band of sky
   // along each crest, the v2 clips — a glassy film only where it is a few mm thin)
@@ -545,14 +574,19 @@ export function createShoreline(o: {
   const wPh = ph0.fract().sub(0.5).abs().mul(2) as F;
   // (its holes never closing: the dense foam behind a bore drawn solid lay along the water as one smooth pale band,
   // the tower agent's beach_650 still, 2026-10-29)
-  const foamDS = mS.x.clamp(0, 0.75) as F;
+  const foamDS = mix(mS.x as F, foamMean, farTaps).clamp(0, 0.75) as F;
   // (drawn out across the shore, 1.8× its width: the foam a bore leaves smears into streaks behind it as it runs up
   // and back, the 2026-10-30 note)
   const smear = (q: V2): V2 => vec2(q.x.mul(0.55), q.y) as V2;
-  const laceS = mix(laceAt(smear(flowAt(ph0).add(warp) as V2), foamDS), laceAt(smear(flowAt(ph1).add(warp).add(vec2(5.3, 2.1)) as V2), foamDS), wPh) as F;
+  // (none in the sim's outer metres, as it makes none there: the sea takes over beyond them, SWASH_CALM — and the line
+  // the white water begins at wandering 0–6 m further in, in lobes ~25 m and ~7 m long along the shore. Fixed at
+  // SWASH_CALM, a row of the grid's cells from its seaward edge, every bore's white began on one straight line, oblique
+  // to the run-up's own front: "too much of a sharp-angled wave: a very sharp triangle", the user of the walkers' view
+  // at ~700 s, 2026-11-01 — a long, straight-sided wedge of foam into the beach)
+  const calmWander = fbm2(vec2(xzP.y.mul(0.04), 0.3), 2).mul(4.5).add(fbm2(vec2(xzP.y.mul(0.15), 1.7), 2).mul(1.5)).sub(1.5).clamp(0, 6) as F;
+  const calmS = smoothstep(SWASH_CALM[0], SWASH_CALM[1] + 2, swashFromSea(xz).sub(calmWander)) as F;
+  const laceS = mix(laceAt(smear(flowAt(ph0).add(warp) as V2), foamDS.mul(calmS) as F), laceAt(smear(flowAt(ph1).add(warp).add(vec2(5.3, 2.1)) as V2), foamDS.mul(calmS) as F), wPh) as F;
   const steepS = gEta.length() as F;
-  // (none in the sim's outer metres, as it makes none there: the sea takes over beyond them, SWASH_CALM)
-  const calmS = smoothstep(SWASH_CALM[0], SWASH_CALM[1], swashFromSea(xz)) as F;
   // (the breaking face white and aerated where it is steep, in sections: a front breaks here and runs on unbroken
   // there, sections metres long that hold as it comes in (stretched across the shore). Whole and with the dense foam
   // behind it, it was a pale band as long as the beach)
@@ -573,8 +607,27 @@ export function createShoreline(o: {
   const riseAhead = etaAt(suv.sub(vec2(ROLL_AHEAD / (SWASH.nx * SWASH.cell), 0)) as V2).sub(wS.x) as F;
   const lipM = smoothstep(0.04, 0.12, riseAhead.add(roll.sub(0.5).mul(0.06))).mul(float(1).sub(faceS)).mul(calmS).mul(sections).mul(smoothstep(0.004, 0.02, hS)) as F;
   const lipS = laceAt(xzP.add(warp).mul(1.8).add(vec2(9.4, 2.6)) as V2, lipM.mul(0.6) as F, lipM.mul(0.85) as F, lipM) as F;
-  const strandS = laceAt(xzP.add(warp).mul(2.5).add(vec2(3.7, 11.3)) as V2, mS.y.mul(0.5) as F, mS.y.mul(0.9).clamp(0, 0.65) as F, mS.y.sqrt().mul(0.6) as F) as F;
-  const foamS = frontS.max(laceS).max(strandS).max(lipS) as F;
+  const strandD = mix(mS.y as F, strandMean, farTaps) as F;
+  const strandS = laceAt(xzP.add(warp).mul(2.5).add(vec2(3.7, 11.3)) as V2, strandD.mul(0.5) as F, strandD.mul(0.9).clamp(0, 0.65) as F, strandD.sqrt().mul(0.6) as F) as F;
+  // THE RUN-UP'S LEADING EDGE, a lace (the same note: "no layers"): a swash front is a froth of air and water — its
+  // last decimetres a lacy white line with bubbles in it, broken in places, where the clear sheet behind it begins.
+  // On the feathered edge (its outer part: the sheet a share of the pixel's cover), whitest while the water is still
+  // running up, a third of it as it stalls and drains (the bubbles it leaves). Its width is the feather's, so it holds
+  // as a line of a pixel or two in the wide shots rather than going out
+  const edgeBand = smoothstep(0.04, 0.35, waterS).mul(smoothstep(0.92, 0.5, waterS)) as F;
+  const frontD = edgeBand.mul(mix(float(0.3), float(1), smoothstep(0.05, 0.5, uRun))) as F;
+  const frontLace = laceAt(xzP.add(warp).mul(1.4).add(vec2(4.6, 8.1)) as V2, frontD.mul(0.8) as F, frontD.mul(1.1).clamp(0, 0.9) as F, frontD) as F;
+  // THE BACKWASH'S STREAKS: draining water a centimetre or two thin, running back fast, draws the bubbles and the
+  // foam it carries into streaks down the face — ~2 m long across the shore, ~12 cm apart along it — carried with
+  // it as the lace is; their mean once a pixel cannot hold them. (Straight, everywhere and at 0.5 they drew a ladder
+  // of regular white rungs across the backwash from the air, the first stills of this at 744 s: wandering ±0.25 m
+  // along the shore, ~9 cm apart, sparse, in groups, and faint)
+  const streakQ = (q: V2): V2 => vec2(q.x.mul(0.6), q.y.add(fbm2(q.mul(0.7).add(vec2(2.2, 6.6)), 2).sub(0.5).mul(0.5)).mul(11)) as V2;
+  const streakAt = (q: V2): F => smoothstep(0.6, 0.75, fbm2(streakQ(q).add(vec2(3.9, 7.7)), 2)) as F;
+  const streakRaw = mix(streakAt(flowAt(ph0)), streakAt(flowAt(ph1).add(vec2(1.7, 4.3)) as V2), wPh) as F;
+  const streakGroups = smoothstep(0.45, 0.65, fbm2(xzP.mul(0.5).add(vec2(5.8, 0.3)), 2)) as F;
+  const streaks = mix(streakRaw, float(0.1), unresolved(streakQ(xzP))).mul(streakGroups).mul(smoothstep(-0.08, -0.45, wS.z as F)).mul(smoothstep(0.025, 0.004, hS)).mul(sheetC).mul(0.3) as F;
+  const foamS = frontS.max(laceS).max(strandS).max(lipS).max(frontLace).max(streaks) as F;
 
   // THE SURFACE: the lens's slope over the sand's (the sand's own rise gradient from the grid's normal), rippled
   const nG = attribute('normal', 'vec3') as V3;
@@ -684,7 +737,10 @@ export function createShoreline(o: {
   const glitter = float(0.3).add(lit.mul(spot).mul(0.7 / 0.07)) as F;
   // (under a cloud's shadow the Sun is gone from its mirror too: the ray to it crosses the same cloud)
   const reflectedG = reflected.mul(mix(float(1), glitter.mul(cloudV), toSun)) as V3;
-  const waterEv = fresnel.mul(water0).mul(float(1).sub(overSea)).mul(float(1).sub(foamNew)) as F;
+  // (the events' lens feathered as the sim's sheet is, by depth: whole by 2 mm at the eye's feet, by 1.2 cm where a
+  // pixel spans a metre — its depth grows as the square of the distance behind the tip, so that is ~1.5 m of feather)
+  const water0F = smoothstep(float(0.0003), mix(float(0.002), float(0.012), smoothstep(0.08, 1, footprint)), sw.depth) as F;
+  const waterEv = fresnel.mul(water0F).mul(float(1).sub(overSea)).mul(float(1).sub(foamNew)) as F;
   // THE SIM'S WATER is the whole surface over its domain (the sea is faded out there, surfaceMaterial shoreSim), and
   // it is drawn AS the sea draws its water (surfaceMaterial.ts, the transmission channel), from the sea's own params,
   // light and scene copy, so the two are one water at the hand-over (the 2026-10-30 aerials: the sim's strip, drawn
@@ -742,10 +798,30 @@ export function createShoreline(o: {
   const waterS2 = (SWASH_SEA_COMPOSITE ? seaComp.waterS2 : waterS20) as F;
   const foamAll = mix(foamNew, foamS, sIn) as F;
   const waterNew = mix(waterEv, waterS2, sIn) as F;
+  // WET SAND'S SHEEN (the same note, 2026-11-01: "no layers"). Between the water and the dry sand a real beach keeps a
+  // band of sand glossy with water — the film the backwash leaves for the seconds it takes to sink in, the sand still
+  // saturated from the last run-ups, the water table seeping out along the still waterline — and at a grazing view it
+  // mirrors the sky nearly as the water does: at dusk the brightest thing on the beach after the water itself, going
+  // matte as it drains, its upper edge the last run-ups' reach. The sand drew none of it (its glaze is a rough
+  // microfacet lobe lit by the key light; nothing mirrors the sky on the terrain), so the water's mirror stepped
+  // straight to dark matte sand at the sheet's edge: the one sharp line. Drawn here as the water's own mirror
+  // (`reflectedG`: the sea's sky, island and glitter, on the layer's rippled normal — the sand's roughness, roughly),
+  // by Fresnel at the view's grazing over a flat bed, × how much of a film the sand still holds: SHEEN.glazed where
+  // the water has just left it (the sim's glaze, the events' `fresh`: FRESH s), SHEEN.wet where it is still saturated
+  // (the sim's wetness from 0.15, drying over DRY s), SHEEN.table up to SHEEN.tableRise over the still water; draining
+  // unevenly, in patches of a metre or so
+  const cosFlat = viewDir.y.max(0) as F;
+  const fresnelFlat = float(r0F).add(float(1 - r0F).mul(float(1).sub(cosFlat).pow(5))).mul(oceanSurfaceParams.reflectionStrength).min(1 - oceanSurfaceParams.transmissionFloor) as F;
+  const filmOf = (glazed: F, wet: F): F => glazed.mul(SHEEN.glazed).max(smoothstep(0.15, 0.9, wet).mul(SHEEN.wet)) as F;
+  const table = smoothstep(SHEEN.tableRise, 0, heightAbove).mul(smoothstep(-0.01, 0, heightAbove)).mul(SHEEN.table) as F;
+  const drains = fbm2(xzP.mul(0.9).add(vec2(7.3, 1.9)), 2).mul(0.7).add(0.65).clamp(0, 1) as F;
+  // (none under the sea's own water beyond the sim, where the events' wetness runs on below the still line)
+  const film = mix(filmOf(sw.fresh, sw.wet), filmOf(mS.w as F, mS.z as F), sIn).max(table).mul(drains).mul(smoothstep(-0.02, 0, heightAbove).max(sIn)) as F;
+  const sheenA = fresnelFlat.mul(film).mul(float(1).sub(waterNew)).mul(float(1).sub(foamAll)).clamp(0, 1) as F;
   // (foam OVER the water: the water's share already leaves the foam's out, waterS2 and waterEv. Their max instead
   // let half-foamed deep water go half transparent, and the sand under the sea's hand-over showed through as a dark
   // band along it — the tower agent's beach_650 still, 2026-10-29, pale where that foam was whiter)
-  const alphaNew = waterNew.add(foamAll.mul(0.96)).clamp(0, 1) as F;
+  const alphaNew = waterNew.add(sheenA).add(foamAll.mul(0.96)).clamp(0, 1) as F;
   const shareNew = foamAll.div(alphaNew.max(1e-4)).clamp(0, 1) as F;
 
   m.positionNode = vec3(positionLocal.x, yNew, positionLocal.z);
@@ -753,7 +829,7 @@ export function createShoreline(o: {
   m.roughnessNode = mix(float(0.06), float(0.85), shareNew);
   m.specularIntensityNode = shareNew;
   const foamGlow = (swashLight.sun as unknown as V3).mul(FOAM_SUN).mul(cloudV).add(swashLight.sky as unknown as V3).mul(FOAM * 0.6) as V3;
-  m.emissiveNode = mix(reflectedG, colourS, sIn).mul(waterNew.div(alphaNew.max(1e-4))).add(foamGlow.mul(shareNew));
+  m.emissiveNode = mix(reflectedG, colourS, sIn).mul(waterNew).add(reflectedG.mul(sheenA)).div(alphaNew.max(1e-4)).add(foamGlow.mul(shareNew));
   m.opacityNode = alphaNew;
   if (o.cloudSun) (m as unknown as { receivedShadowNode: unknown }).receivedShadowNode = (sh: F) => sh.mul(cloudV);
   // (the shading normal, view space: the water's own surface; foam lit as a rough white surface on the same normal)

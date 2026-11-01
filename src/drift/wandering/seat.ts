@@ -76,3 +76,22 @@ export function seated(foot: THREE.Vector3[], m: THREE.Matrix4, ground: (x: numb
 export function specimens(names: string[]): string[] {
   return names.map((n) => /_([a-z])$/.exec(n)?.[1] ?? '');
 }
+
+/**
+ * Where a seated plant meets the ground, for its CONTACT SHADE (forest.ts contactMask): the middle of its footprint
+ * placed by `m` (world x, z), the footprint's radius about it (m) and the plant's height (m: `tall`, the file's, by
+ * `m`'s stretch up).
+ */
+export function contactOf(foot: THREE.Vector3[], m: THREE.Matrix4, tall: number): [number, number, number, number] {
+  let x = 0;
+  let z = 0;
+  const pts = foot.map((p) => p.clone().applyMatrix4(m));
+  for (const p of pts) {
+    x += p.x / pts.length;
+    z += p.z / pts.length;
+  }
+  let r = 0;
+  for (const p of pts) r = Math.max(r, Math.hypot(p.x - x, p.z - z));
+  const e = m.elements;
+  return [x, z, r, tall * Math.hypot(e[4], e[5], e[6])];
+}

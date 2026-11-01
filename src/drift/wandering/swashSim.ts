@@ -544,11 +544,13 @@ export function swashIn(p: THREE.Node<'vec2'>): F {
     .mul(swashField.active) as F;
 }
 /** 1 where the sea lets the sim's water be the surface (surfaceMaterial shoreSim, the shoreline's composite): only
- * where the sim is already whole — 5.5–8 m in from its seaward edge on the same wandering line, past its ends' fade,
- * short of its landward edge */
+ * where the sim is already whole — 5–13 m in from its seaward edge on the same wandering line, past its ends' fade,
+ * short of its landward edge. (Over 5.5–8 m the two waters met along a line: the sim's, over shallower sand, darker
+ * and finer-rippled than the sea's beside it, read from the walkers' raised view at ~700 s as a dark patch "bounded by
+ * a sharp edge", the user, 2026-11-01. Over 8 m the one grades into the other) */
 export function swashSeaGone(p: THREE.Node<'vec2'>): F {
   const d = swashFromSea(p);
-  return smoothstep(5.5, 8, d.add(seaWander(p)))
+  return smoothstep(5, 13, d.add(seaWander(p)))
     .mul(smoothstep(SWASH.nx * SWASH.cell, SWASH.nx * SWASH.cell - 0.5, d))
     .mul(endsIn(p, 42, 8))
     .mul(swashField.active) as F;

@@ -17,7 +17,8 @@
  * the air it does not. A pure function of the time into c3; positions in the eye's level frame.
  */
 import * as THREE from 'three/webgpu';
-import { float, mix, positionLocal, sin, smoothstep, uniform, vec3 } from 'three/tsl';
+import { exp, float, mix, positionLocal, sin, smoothstep, uniform, vec3 } from 'three/tsl';
+import { SAILING, beatStarts, raftPose, speedAt } from './beats';
 
 /** m/s² */
 const G = 9.81;
@@ -42,15 +43,6 @@ export type Surfacing = [number, number, number, SurfacingKind, number?];
  * distance (m) from the eye, and its heading (deg: its bow swung that far to the left, broadside to us).
  */
 export const C3_RAFT = { bearing: 10, distance: 10, heading: 70 };
-/** where the case lands, on the raft: m across from its centreline toward the eye, and m forward of its centre
- * (the fore-deck, ahead of the cabin and the mast foot) */
-export const CASE_ON_DECK = { across: 1.9, along: 3.0 };
-/** the flip: m from the deck spot it throws at, and the way in (deg off the raft's own bow line, toward the eye).
- * In along the bow line, from ahead of the raft, so the flip is far enough out to be on the dome: at 45° it came
- * up 7 m ahead, where the water is under the tilted dome's rim (a point shows while its drop below the eye is
- * under its distance ahead × tan 15°), and the case seemed to come from nowhere at the bottom (the v10 review) */
-const FLIP_RANGE = 8;
-const FLIP_IN = 10;
 
 const D = Math.PI / 180;
 /** eye-frame (x right, z ahead) of a raft-local spot (across toward the eye, along toward the bow) */
@@ -62,46 +54,169 @@ export function c3RaftPoint(across: number, along: number): [number, number] {
   const n: [number, number] = n0[0] * -c[0] + n0[1] * -c[1] > 0 ? n0 : [-n0[0], -n0[1]];
   return [c[0] + a[0] * along + n[0] * across, c[1] + a[1] * along + n[1] * across];
 }
-/** the deck spot (eye frame), and the dolphin's line in to it: out from the spot, toward the eye and the bow */
-export const CASE_TARGET: [number, number] = c3RaftPoint(CASE_ON_DECK.across, CASE_ON_DECK.along);
-const FLIP_OUT: [number, number] = (() => {
-  const p = c3RaftPoint(CASE_ON_DECK.across + Math.sin(FLIP_IN * D), CASE_ON_DECK.along + Math.cos(FLIP_IN * D));
-  return [p[0] - CASE_TARGET[0], p[1] - CASE_TARGET[1]];
-})();
-const onLine = (d: number): [number, number] => [CASE_TARGET[0] + FLIP_OUT[0] * d, CASE_TARGET[1] + FLIP_OUT[1] * d];
+/** eye-frame (x right, z ahead) of a bearing (deg right of the front) and a distance (m) */
+const seen = (bearing: number, distance: number): [number, number] => [Math.sin(bearing * D) * distance, Math.cos(bearing * D) * distance];
 
 /**
- * Porpoising in from far out on the left on a diagonal that crosses the Sun's line (c3's Sun sets ~22° left: a
- * dark body only reads against the afterglow, so the high breach is on that line, 20 m out), round close by us
- * on the left, and in to the raft — broadside by then, its near side to us and its bow to the left, toward the
- * afterglow — straight at the fore-deck: the flip is on that line, FLIP_RANGE m out, so the case is thrown on
- * the way the dolphin was going and comes down on the deck (it had been thrown a fixed reach along the heading
- * and landed on the water: the v9 review). The dolphin goes down short of the raft, passes under its side and
- * turns away, off the way it came. Spaced for ~3.5–4 m/s, a dolphin's cruise; slower into the flip. A `swim` is
- * a waypoint under water (no surfacing).
+ * THE STAGE (the 2026-11-01 review: "We need a better view of the dolphin and to make it easier to understand what's
+ * happening"). Stills every 2 s through c3 and dome masters at 390–414 s showed the dolphin never in the 16:9 frame
+ * (±30°): it came in 45–50° left, leapt at 31–45° left, rolled 7 m off our left where the water is under the tilted
+ * dome's rim, circled behind our left shoulder (76–103°), flipped from 40° left at the dome's bottom edge and left
+ * behind us on the right — on the dome a speck near the rim, in the 16:9 one splash. And it leapt in dark water left
+ * of the light. What the eye has from here: the Sun setting 22° left, its glitter road on the water from ~16° to ~28°
+ * left, the raft's bow at 21° left under it, the set sail and the cabin filling 11° left to 30°+ right. So the stage
+ * is the open water and the sky LEFT OF THE SAIL, 12–38° left, in the Sun's light: every surfacing that matters is
+ * there, backlit (at last light a dark body reads only against the bright sea or sky), and none is closer than ~14 m
+ * ahead (the rim: a point shows while its drop below the eye is under its distance ahead × tan 15°).
+ *
+ * THE CASE IS THERE FROM THE START: a blue hard case afloat in the debris, drifting down on the raft as it sails (it
+ * rides the water; the raft and the eye make way past it, beats.ts speedAt and the raft's heading), so the audience
+ * has seen it before the dolphin finds it. The dolphin noses it, circles off and comes up under it, and flips it.
+ *
+ *   3–6 s    first sighting far out on the glitter road: a low leap at 54 m, its spray in the Sun, and a roll
+ *   8–11 s   two leaps across the Sun's line, left to right, side-on: the second, 2.4 m, by the Sun itself
+ *   13–19 s  it turns back toward us: a leap nearer in the glitter (24 m), a roll off the case's near side, and a
+ *            loop out to the left — the circle, part of it past the 16:9 frame's left edge
+ *   22.4 s   the nose: it rolls up to the case from the left, its head at it, and nudges it on (the case rocks)
+ *   26.8 s   the flip: under the case again, slowly, and up head-high, 25° left and 16 m out, just under the setting
+ *            Sun (its elevation ~0.2° by then): the case flicked off its snout, up over the horizon against the
+ *            afterglow and down onto the fore-deck, 16° left, 11 m off, in plain view; it hops and skids to a stop
+ *   29–41 s  the dolphin away, the way it came: a roll and a last leap in the afterglow, and gone
+ *
+ * The flip is thrown from beyond the bow, across it toward us: from the raft's far side, ahead of the mast and the
+ * cabin, so the throw passes over nothing but the bow (from the near side the dolphin had to be between us and the
+ * raft, under the dome's rim — the v10 review — and from along the bow line it was 40° left, off the stage).
  */
+/** where the case lands, on the raft: m across from its centreline toward the eye, and m forward of its centre: the
+ * fore-deck's foremost logs, ahead of the mast (1.2 m) and the people about its foot, left of the sail as we see it
+ * (at 3.0 m, 1.9 m across, it came down in the sail's edge among the people) */
+export const CASE_ON_DECK = { across: 0.6, along: 5.0 };
+/** the flip: where the dolphin comes up under the case, raft-local (m across toward the eye: negative, its far side;
+ * m along toward the bow: 2.75 m past its tip, clear of it) — 25° left, 16 m out, the Sun's line */
+const FLIP_AT = { across: -1.6, along: 9.6 };
+/** s into c3: the dolphin noses the case, and comes up under it for the flip (leaves the water) */
+const NOSE_T = 22.4;
+const FLIP_T = 26.8;
+/** m the nose pushes the case along the dolphin's heading, and s that takes (an exponential's time constant) */
+export const CASE_PUSH = 0.6;
+const PUSH_TAU = 0.35;
+/** s into c3 the case comes up out of the swell, far out (~60 m: a speck nobody sees arrive) */
+export const CASE_FROM = -12;
+/** m from the body's centre to the beak's tip */
+const NOSE = 1.3;
+
+/** the deck spot (eye frame), where the flip is, and the throw's line from one to the other */
+export const CASE_TARGET: [number, number] = c3RaftPoint(CASE_ON_DECK.across, CASE_ON_DECK.along);
+const FLIP_XZ: [number, number] = c3RaftPoint(FLIP_AT.across, FLIP_AT.along);
+const LINE: [number, number] = (() => {
+  const d = [CASE_TARGET[0] - FLIP_XZ[0], CASE_TARGET[1] - FLIP_XZ[1]];
+  const l = Math.hypot(d[0], d[1]);
+  return [d[0] / l, d[1] / l];
+})();
+/** k m back along the throw's line from the flip (negative: on past it, toward the raft) */
+const onLine = (k: number): [number, number] => [FLIP_XZ[0] - LINE[0] * k, FLIP_XZ[1] - LINE[1] * k];
+
+/**
+ * THE WATER PAST THE EYE: the eye and the raft make way through the water along the raft's heading (sea.ts sailedFrom:
+ * its speed beats.ts speedAt, its heading the raft's pose), so anything afloat drifts the other way in the eye's frame,
+ * at 1.2 m/s through c2, easing to 0.6 m/s by 12 s into c3 as the raft swings broadside. The c3-relative clock: the
+ * beats laid from a c1 that ends at 0 (only differences matter, and the raft's pose from c2 + 14 s on is the beats'
+ * keys alone, not c1's rest pose). DRIFT[i]: m the water moves past the eye from CASE_FROM + i·DRIFT_STEP to FLIP_T.
+ */
+const SEA = beatStarts(0);
+const DRIFT_STEP = 0.05;
+const DRIFT: Array<[number, number]> = (() => {
+  const n = Math.ceil((FLIP_T - CASE_FROM) / DRIFT_STEP);
+  const out: Array<[number, number]> = new Array(n + 1);
+  out[n] = [0, 0];
+  for (let i = n - 1; i >= 0; i--) {
+    const t = SEA.starts.c3 + CASE_FROM + (i + 0.5) * DRIFT_STEP;
+    const v = speedAt(t, SEA.starts);
+    const h = raftPose(t, 0, SAILING).heading;
+    // (the eye goes along the bow, (−sin h, cos h) in its own frame; what floats is left that far behind)
+    out[i] = [out[i + 1][0] - Math.sin(h) * v * DRIFT_STEP, out[i + 1][1] + Math.cos(h) * v * DRIFT_STEP];
+  }
+  return out;
+})();
+/** m the water has yet to move past the eye between s (into c3) and the flip, eye frame */
+function driftToFlip(s: number): [number, number] {
+  const u = Math.min(DRIFT.length - 1, Math.max(0, (s - CASE_FROM) / DRIFT_STEP));
+  const i = Math.min(DRIFT.length - 2, Math.floor(u));
+  const f = u - i;
+  return [DRIFT[i][0] + (DRIFT[i + 1][0] - DRIFT[i][0]) * f, DRIFT[i][1] + (DRIFT[i + 1][1] - DRIFT[i][1]) * f];
+}
+
+/**
+ * THE PATH IN: the leaps and the circle, then the nose and the flip on the throw's line. The nose's waypoint is put
+ * where the case is then (it drifts: driftToFlip), the dolphin's beak at it. Spaced for ~2.5–3.5 m/s, a dolphin's
+ * cruise; slow from the nose on, idling with the case (~1 m/s), and up into the flip almost straight (its head high).
+ * A `swim` is a waypoint under water (no surfacing).
+ */
+const MID: [number, number] = onLine(3.4);
+const LOOP: [number, number] = [-13.6, 19.0];
+/** the nose's heading: from the loop's last waypoint toward the case, and on to the throw's line */
+const NOSE_DIR: [number, number] = (() => {
+  const c = driftToFlip(NOSE_T);
+  const d = [FLIP_XZ[0] + c[0] - LOOP[0], FLIP_XZ[1] + c[1] - LOOP[1]];
+  const l = Math.hypot(d[0], d[1]);
+  return [d[0] / l, d[1] / l];
+})();
+/** where the case floats at s (into c3; eye frame, m) until the dolphin picks it up: the flip's spot, plus the water
+ * still to drift past by then, less the nose's push before it is given */
+export function caseAfloat(s: number): [number, number] {
+  const d = driftToFlip(s);
+  const pushed = s < NOSE_T ? 0 : 1 - Math.exp(-(s - NOSE_T) / PUSH_TAU);
+  return [FLIP_XZ[0] + d[0] - NOSE_DIR[0] * CASE_PUSH * (1 - pushed), FLIP_XZ[1] + d[1] - NOSE_DIR[1] * CASE_PUSH * (1 - pushed)];
+}
+export const NOSE_AT = NOSE_T;
+export const FLIP_AT_T = FLIP_T;
+const NOSE_XZ: [number, number] = (() => {
+  const c = caseAfloat(NOSE_T - 1e-6);
+  return [c[0] - NOSE_DIR[0] * NOSE, c[1] - NOSE_DIR[1] * NOSE];
+})();
+
+/** the turn away after the flip: on a 2.5 m circle to the dolphin's left from where it leaves the line (onLine(−2.4)),
+ * `deg` round it */
+function turnOff(deg: number): [number, number] {
+  const r = 2.5;
+  const p = onLine(-2.4);
+  const left: [number, number] = [-LINE[1], LINE[0]];
+  const c = [p[0] + left[0] * r, p[1] + left[1] * r];
+  const a = deg * D;
+  const r0 = [p[0] - c[0], p[1] - c[1]];
+  return [c[0] + r0[0] * Math.cos(a) - r0[1] * Math.sin(a), c[1] + r0[0] * Math.sin(a) + r0[1] * Math.cos(a)];
+}
+
 export const SURFACINGS: Surfacing[] = [
-  [1.5, -45, 38, 'roll'],
-  [4.0, -36.4, 32.8, 'roll'],
-  [6.5, -27.8, 27.6, 'leap', 0.8],
-  [9.0, -19.2, 22.4, 'leap', 1.4],
-  [11.5, -10.6, 17.2, 'leap', 2.1],
-  [14.6, -5, 5.5, 'roll'],
-  [17.6, -14, 4, 'leap', 1.0],
-  // (round in a wide loop on our left to come back along the line: turned about at one roll, it all but stopped)
-  [19.2, -19.5, 2.8, 'swim'],
-  [20.7, -21.5, -1.0, 'roll'],
-  [22.3, -17.5, -4.0, 'swim'],
-  [25.3, ...onLine(FLIP_RANGE + 4.5), 'swim'],
-  [26.6, ...onLine(FLIP_RANGE), 'flip', 0.9],
-  // (two waypoints on the line past the flip, so its heading through the flip is the line: deep by then, under
-  // the raft's side; then out past the stern on our side and away — the bow line has no way round ahead)
-  [28.4, ...onLine(FLIP_RANGE - 3), 'swim'],
-  [29.5, ...onLine(FLIP_RANGE - 6), 'swim'],
-  [31.5, ...c3RaftPoint(3.6, -5), 'swim'],
-  [33.8, ...c3RaftPoint(5, -11.5), 'roll'],
-  [36.5, ...c3RaftPoint(7.5, -18.5), 'leap', 0.9],
-  [39.0, ...c3RaftPoint(10.5, -27), 'roll'],
+  // first sighting, far out on the glitter road: a low leap (its spray catches the Sun: a roll's back and fin 52 m
+  // out were lost among the debris, 2026-11-01), and a roll
+  [3.0, ...seen(-31, 54), 'leap', 1.1],
+  [5.8, ...seen(-28, 46), 'roll'],
+  // two leaps across the Sun's line, left to right: the second by the Sun
+  [8.4, ...seen(-23.5, 38.5), 'leap', 1.4],
+  [10.9, ...seen(-14, 36), 'leap', 2.4],
+  // round toward us, under the horizon's glitter, and a leap nearer in it, going left
+  [13.4, ...seen(-12, 29), 'swim'],
+  [15.2, ...seen(-22, 23), 'leap', 1.6],
+  // the circle: off the case's near side, out past the frame's left edge, round behind, and back at it from the left
+  [18.0, ...seen(-38, 18.5), 'roll'],
+  [19.1, -15.3, 14.9, 'swim'],
+  [20.1, -16.6, 18.0, 'swim'],
+  [21.0, ...LOOP, 'swim'],
+  [NOSE_T, ...NOSE_XZ, 'roll'],
+  // under the case and along the throw's line, slowly, and up into the flip; then down, a metre on, short of the bow
+  [24.6, ...MID, 'swim'],
+  [FLIP_T, ...FLIP_XZ, 'flip', 0.9],
+  // (two waypoints on the line past the flip, so its heading through the flip and the release is the line's)
+  [28.0, ...onLine(-1.5), 'swim'],
+  [28.8, ...onLine(-2.4), 'swim'],
+  // away the way it came: round under the bow, at depth (a left turn of ~2.5 m radius off the line), out on the raft's
+  // far side, and a roll, a last leap in the afterglow and a roll far out, back along the Sun's line
+  [30.0, ...turnOff(90), 'swim'],
+  [31.2, ...turnOff(180), 'swim'],
+  [33.9, ...seen(-18, 25), 'roll'],
+  [36.3, ...seen(-24, 34), 'leap', 1.2],
+  [39.0, ...seen(-29, 42), 'roll'],
 ];
 /** s it swims on after the last surfacing (out of sight) */
 const AWAY = 3.5;
@@ -124,6 +239,8 @@ export interface DolphinPose {
   phase: number;
   /** m/s along the water */
   speed: number;
+  /** s since its back last came up out of the water (0 under it): the sheet of water running off (outOfWaterFor) */
+  dry: number;
 }
 
 /** the path over the water: a Catmull-Rom through the surfacings (and a lead-in and a lead-out along their line) */
@@ -235,35 +352,73 @@ export function caseOnDeck(): { spot: [number, number]; dir: [number, number] } 
   };
 }
 
-/** a splash (splash.ts): s into c3, where (eye frame, m), the body's velocity along the water then (m/s), how
- * hard (0..1: the drops' throw), and whether it is the blow at a roll rather than spray */
+/** what a splash throws (splash.ts): spray flung up and out where the body crosses the surface; the blow's mist (none
+ * drawn: see dolphinSplashes); a RING of foam spreading on the water where it broke it; DRIPS falling off the body in
+ * the air */
+export type SplashKind = 'spray' | 'blow' | 'ring' | 'drip';
+/** a splash (splash.ts): s into c3, where (eye frame, m) and how high (m: where its drops start), the body's velocity
+ * along the water then (m/s), how hard (0..1: the drops' throw; a drip's: the share of its drops drawn), and its kind */
 export interface Splash {
   at: number;
   x: number;
   z: number;
+  y: number;
   vx: number;
   vz: number;
+  /** m/s: the body's vertical velocity then (a drip's: its drops leave with it) */
+  vy: number;
   energy: number;
-  blow: boolean;
+  kind: SplashKind;
 }
 
-/** where the dolphin throws water: out of the sea and back into it at each leap (harder coming down, and the
- * harder the higher it went). No blows at the rolls: a dolphin's is a faint puff, and drawn as a column it read
- * as a whale's spout (the v9 review) */
+/** s between the drip splashes shed along a leap in the air (splash.ts spreads each one's drops over it) */
+const DRIP_EVERY = 0.22;
+
+/** where the dolphin throws water: out of the sea and back into it at each leap and at the flip (harder coming down,
+ * and the harder the higher it went), a ring of foam spreading where it broke the water, and drips off the body in the
+ * air; at a roll only the ring its back raises, a small one (the coordinator's 2026-11-01 note: "the water it breaks: a
+ * short wake/ring"). No blows at the rolls: a dolphin's is a faint puff, and drawn as a column it read as a whale's
+ * spout (the v9 review). At the nose, the water it pushes up at the case */
 export function dolphinSplashes(): Splash[] {
   const out: Splash[] = [];
-  const at = (t: number, energy: number, blow: boolean): void => {
+  const add = (t: number, energy: number, kind: SplashKind, y = 0, vy = 0): void => {
     const p = track(t);
-    out.push({ at: t, x: p.x, z: p.z, vx: p.vx, vz: p.vz, energy, blow });
+    out.push({ at: t, x: p.x, z: p.z, y, vx: p.vx, vz: p.vz, vy, energy, kind });
   };
   for (const [t, , , kind, h = 0] of SURFACINGS) {
-    if (kind === 'roll' || kind === 'swim') continue;
+    if (kind === 'swim') continue;
+    if (kind === 'roll') {
+      add(t - 0.2, t === NOSE_T ? 0.45 : 0.25, 'ring');
+      if (t === NOSE_T) add(t, 0.25, 'spray');
+      continue;
+    }
     const vy0 = Math.sqrt(2 * G * h);
+    const air = (2 * vy0) / G;
     const k = Math.min(1, vy0 / 6.5);
-    at(t, 0.35 + 0.35 * k, false);
-    at(t + (2 * vy0) / G, 0.55 + 0.45 * k, false);
+    add(t, 0.25 + 0.25 * k, 'spray');
+    add(t, 0.4 + 0.3 * k, 'ring');
+    add(t + air, 0.45 + 0.35 * k, 'spray');
+    add(t + air, 0.7 + 0.3 * k, 'ring');
+    // water running off it in the air: shed from the body's middle as it goes, fewer as it dries
+    // (each from the body's centre and with its velocity then: splash.ts sends its drops off along the body's path)
+    // (a thin trickle off the flukes for the first half second out: 2026-11-01, "only a thin trickle")
+    for (let s = 0.08; s < Math.min(air - DRIP_EVERY, 0.55); s += DRIP_EVERY) add(t + s, 0.03 * Math.exp(-s / 0.4), 'drip', rise(t + s)[0], rise(t + s)[1]);
   }
   return out;
+}
+
+/**
+ * THE WET SKIN (the user, 2026-11-01: "the dolphin should be slightly wet"): s since the body last came up out of the
+ * water — 0 under it — so the sheet of water on it can run off and thin over the next second or two. Pure in t: looked
+ * back for the moment its back broke the surface, in 0.05 s steps, at most SHEET s.
+ */
+const SHEET = 2;
+export function outOfWaterFor(t: number): number {
+  // (its back, ~0.3 m over its centre: out once that is over the water)
+  if (rise(t)[0] + 0.3 < 0) return 0;
+  let s = 0;
+  while (s < SHEET && rise(t - s - 0.05)[0] + 0.3 >= 0) s += 0.05;
+  return s;
 }
 
 /** the path's heading and pitch at t (no bends: what the bends are measured from) */
@@ -288,11 +443,16 @@ function curvature(t: number): { bend: number; turn: number } {
   const a = aim(t);
   const a0 = aim(t - BEND_WINDOW);
   const a1 = aim(t + BEND_WINDOW);
+  // (over a speed of at least BEND_SPEED: idling at the case, ~1 m/s, a turn of the body in place is not a fold of it —
+  // at the path's own speed the arch hit its clamp and let go again within frames, as the nose roll ended and as the
+  // flip's lunge began: the 2026-11-01 choreography)
   return {
-    bend: Math.max(-0.5, Math.min(0.5, -(a1.pitch - a0.pitch) / (2 * BEND_WINDOW * a.v))),
-    turn: Math.max(-0.5, Math.min(0.5, wrap(a1.heading - a0.heading) / (2 * BEND_WINDOW * a.vh))),
+    bend: Math.max(-0.5, Math.min(0.5, -(a1.pitch - a0.pitch) / (2 * BEND_WINDOW * Math.max(a.v, BEND_SPEED)))),
+    turn: Math.max(-0.5, Math.min(0.5, wrap(a1.heading - a0.heading) / (2 * BEND_WINDOW * Math.max(a.vh, BEND_SPEED)))),
   };
 }
+/** m/s: the least speed the body's bends are taken over (curvature) */
+const BEND_SPEED = 2;
 
 export function dolphinPose(t: number): DolphinPose {
   const p = track(t);
@@ -309,7 +469,7 @@ export function dolphinPose(t: number): DolphinPose {
   const bank = Math.max(-0.6, Math.min(0.6, Math.atan((a.vh * a.vh * turn) / G)));
   // the tail beats under water, stills as the body leaves it
   const wet = 1 - smoothstep01((y + 0.6) / 0.5);
-  return { x: p.x, y, z: p.z, heading: a.heading, pitch: a.pitch, bend, turn, bank, beat: BEAT_AMP * wet, phase: 2 * Math.PI * BEAT * t, speed: a.vh };
+  return { x: p.x, y, z: p.z, heading: a.heading, pitch: a.pitch, bend, turn, bank, beat: BEAT_AMP * wet, phase: 2 * Math.PI * BEAT * t, speed: a.vh, dry: outOfWaterFor(t) };
 }
 
 function smoothstep01(x: number): number {
@@ -412,9 +572,24 @@ export function createDolphin(): Dolphin {
   const uTurn = uniform(0);
   const uBeat = uniform(0);
   const uPhase = uniform(0);
-  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.32, metalness: 0 });
-  // counter-shaded: the back dark slate, the belly pale
-  mat.colorNode = mix(vec3(0.62, 0.64, 0.64), vec3(0.2, 0.23, 0.26), smoothstep(-0.12, 0.1, positionLocal.y));
+  const uDry = uniform(0);
+  // WET (the user, 2026-11-01: "the dolphin should be slightly wet"): a dolphin's skin is smooth and always wet — a
+  // glossy coat over a darker skin (wet skin is darker: the water film takes the scatter out of it), its highlights
+  // sharp. Just out of the water a SHEET runs off it: streaks along the body, running tail-ward, that sharpen the
+  // highlights to glints and thin out over ~1.5 s (uDry: s out of the water). Backlit at last light it is the rim of
+  // highlights along its back that tells it is wet.
+  const mat = new THREE.MeshPhysicalNodeMaterial({ metalness: 0 });
+  // counter-shaded: the back dark slate, the belly pale — both a step darker, wet
+  // (the belly 0.3, not 0.5: turned toward us in the leaps' descent, backlit, it read flat pale grey and cut out —
+  // 2026-11-01; a dolphin's belly is pale, but not paler than the sky-lit sea round it)
+  mat.colorNode = mix(vec3(0.3, 0.31, 0.32), vec3(0.1, 0.115, 0.135), smoothstep(-0.12, 0.1, positionLocal.y));
+  const sheet = exp(uDry.mul(-1 / 0.6));
+  // (streaks: thin lines along the body, round its girth, beaded and running toward the flukes, +z)
+  const streak = smoothstep(0.55, 0.95, sin(positionLocal.x.mul(53).add(positionLocal.y.mul(41)).add(sin(positionLocal.z.mul(3.1)).mul(2))))
+    .mul(smoothstep(0.2, 0.9, sin(positionLocal.z.mul(9).sub(uPhase.mul(0.55)))));
+  mat.roughnessNode = mix(float(0.3), float(0.14), sheet);
+  mat.clearcoatNode = float(1);
+  mat.clearcoatRoughnessNode = mix(float(0.09), float(0.02), sheet.mul(streak.mul(0.7).add(0.3)));
   // the arch (nose and tail toward the arc's centre) and, under water, the tail's beat, a wave running to the
   // flukes, growing toward them
   const z = positionLocal.z;
@@ -447,7 +622,10 @@ export function createDolphin(): Dolphin {
   group.name = 'drift-dolphin';
   for (const g of parts) {
     const mesh = new THREE.Mesh(g, mat);
+    // (casts on the sea, which samples the Sun's shadow map, and takes the raft's, the sail's and its own: the user,
+    // 2026-11-01, "it's still not getting shadows?" — it had cast but not received)
     mesh.castShadow = true;
+    mesh.receiveShadow = true;
     // (the vertex shader bends it: its bounds are no longer the geometry's)
     mesh.frustumCulled = false;
     group.add(mesh);
@@ -459,6 +637,7 @@ export function createDolphin(): Dolphin {
       uTurn.value = p.turn;
       uBeat.value = p.beat;
       uPhase.value = p.phase;
+      uDry.value = p.dry;
     },
   };
 }

@@ -58,7 +58,7 @@ Parts A (galaxies → Milky Way → Earth at dawn) and B (time wave, overshoot, 
 |---|---|---|---|---|
 | C1 a raft | 313.9 s | morning (Act 2's) | one continuous descent into a slow follow; the sea's scene takes over in a 3 s crossfade | a small brightness step at the hand-over; the sea too flat on the approach |
 | C2 seafaring | 355 s | sunset | far rafts on the horizon; the sail set | debris at sea reads as black slabs at sunset; near debris reads as plain boxes |
-| C3 the dolphin | 385 s | last light | the dolphin (real outline and motion) flips the blue case onto the fore-deck | people on the raft are capsule stand-ins |
+| C3 the dolphin | 385 s | last light | the dolphin (real outline and motion, wet skin) on the stage left of the sail, in the Sun's road: leaps across the Sun, circles the blue case afloat, noses it, flips it over the horizon onto the bow; the 16:9 turns 10° left for it (2026-11-01) | people on the raft are capsule stand-ins |
 | C4 the network | 430 s | night | night falls in a 22 s time-lapse (was a dissolve the user found too fast); beams between island stations | verify the fall into night; raft lights a touch dimmer |
 
 The raft throughout: CC0 props and the hard case are in; open are its wake and contact (a collar, bow heap and eddies
