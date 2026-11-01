@@ -295,6 +295,9 @@ export interface CrewWalker {
   stride(phase: number): void;
   /** pose it as `p` */
   pose(p: WalkerPose): void;
+  /** its two feet's joints (at the ankle; their world positions once posed and the matrices updated): what its
+   * contact shade on the sand follows (props.ts) */
+  readonly feet: readonly THREE.Object3D[];
 }
 
 /** rad at a full stoop: the upper body forward at the waist, the thighs forward, the knees bent, the reaching arm
@@ -401,6 +404,7 @@ export function createCrewWalker(look: CrewLook, height: number): CrewWalker {
     group: g,
     stride: (phase) => pose({ phase, amp: 1, stoop: 0, look: 0 }),
     pose,
+    feet: legs.map((l) => l.foot),
   };
 }
 

@@ -302,9 +302,20 @@ export function createBeachTerrain(
       const fray = fbm2(pP.mul(1.4).add(vec2(8.3, 2.6)), 2).sub(0.5).mul(0.05).add(fbm2(pP.mul(4.7).add(vec2(0.9, 6.1)), 2).sub(0.5).mul(0.02)) as F;
       const reachTop = wetTop.add(cusp).add(fray) as F;
       const graded = mix(float(1), float(0.45), smoothstep(-0.02, reachTop.mul(0.9), rise)).mul(float(1).sub(smoothstep(reachTop.sub(0.03), reachTop, rise))) as F;
-      const damp = graded.max(mix(swE.wet, wetSim, simIn)) as F;
+      // OVER THE SWASH SIM, ITS WATER ALONE WETS THE SAND (the user, 2026-11-01, of the walkers' view at 705 s: "the wet
+      // sand effect is way too far up for the distance the waves actually reach here. It's also not synced, so it moves
+      // disconnected from the water … We had this looking better at the landing shot"). That band and its reach line
+      // stood at a fixed WET_RISE over the sea — 0.45–0.75 m of rise, 5–8 m of the 1:11 face — where the sim's run-ups
+      // at dusk reach 1.4–4 m: a dark band metres above every wave, its edge wandering with its own noise. Where the
+      // sim runs, the sand is as wet as its water left it (`wetSim`: under each run-up, drying over the sim's DRY s
+      // behind it and wicking soft — the last few waves' reach, and nothing above it), on a thin strip of seep along
+      // the still waterline (the water table, ~0.05 m of rise: half a metre of face). The fixed band stays only beyond
+      // the sim's ends, under the analytic events (shoreline.ts swashAt)
+      const seep = float(1).sub(smoothstep(-0.02, 0.05, rise)) as F;
+      const damp = mix(graded, seep, simIn).max(mix(swE.wet, wetSim, simIn)) as F;
       const wetA = SAND_WET.mul(mix(float(1), wet.albedo.dot(LUM).div(0.54), 0.5)) as V3;
-      const margin = float(1).sub(smoothstep(reachTop, reachTop.add(0.5), rise)).mul(0.1) as F;
+      // (the shade darker above the band: over the sim, above where its water has been, not above a fixed line)
+      const margin = float(1).sub(smoothstep(reachTop, reachTop.add(0.5), rise)).mul(0.1).mul(float(1).sub(simIn)) as F;
       // sand: dry above the wet band, wet in it, foam where the swash is. UNDER WATER it is the lagoon's white coral
       // sand, neutral grey-beige (§12.4: #9a9888 under 20–50 cm); the water's own absorption turns it turquoise
       // (only under a quarter metre of water and more, and darker than it was: a pale grey-beige from 5 cm down painted

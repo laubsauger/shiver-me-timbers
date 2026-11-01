@@ -62,6 +62,14 @@ const WALKERS: Array<{ crew: number; height: number }> = [
   { crew: 1, height: 1.64 },
   { crew: 2, height: 1.72 },
 ];
+/** THEIR CONTACT SHADE (the 2026-11-01 dusk views at 700–705 s: the walkers "not grounded"). Their sun shadows are
+ * real (castShadow, crew.ts; the coast's shadow map reaches 90 m round the eye, sea.ts SHADOW_EXTENT) — but from ~700 s
+ * the Sun is down and the sky is the only light, and a figure on sand under a sky darkens the sand right under it:
+ * the share of the sky its body hides, strongest at the soles. Drawn as soft dark patches laid on the ground, one
+ * under the body (m along their way × across; its darkest share) and one under each foot that fades as the foot
+ * lifts (m over the ground its ankle rises through, from planted to swung clear), placed from their pose at t
+ * (pure in t, as the walk is) */
+const CONTACT = { body: [1.0, 0.7, 0.3], foot: [0.34, 0.2, 0.5], lift: [0.1, 0.2] } as const;
 /** m/s they walk at, s before w5 they set off, and where along the beach (beats.ts: `along`, m) the first starts */
 const WALK_SPEED = 1.15;
 const WALK_LEAD = 1;
@@ -704,6 +712,36 @@ export function createProps(): Props {
   const walkerShapes = WALKERS.map((w) => createCrewWalker(CREW[w.crew].look, w.height));
   walkerShapes.forEach((w) => walkers.add(w.group));
   group.add(walkers);
+  // their contact shade (CONTACT): a soft dark disc per patch, its darkness a uniform of its own, laid on the sand in
+  // the world frame (not the walker's: it stays on the ground as the body bobs). Drawn before the shoreline layer
+  // (its renderOrder −0.25), so the swash's copy of the scene behind it holds the shade under the feet in the water
+  const contactGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+  const contactPatch = (): { mesh: THREE.Mesh; dark: { value: number } } => {
+    const dark = uniform(0);
+    const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
+    m.polygonOffset = true;
+    m.polygonOffsetFactor = -1;
+    const r = uv().sub(0.5).length().mul(2);
+    m.colorNode = vec4(0, 0, 0, 1);
+    m.opacityNode = exp(r.mul(r).mul(-3)).mul(smoothstep(1, 0.75, r)).mul(dark);
+    const mesh = new THREE.Mesh(contactGeo, m);
+    mesh.renderOrder = -0.3;
+    mesh.frustumCulled = false;
+    return { mesh, dark: dark as unknown as { value: number } };
+  };
+  const contacts = walkerShapes.map(() => ({ body: contactPatch(), feet: [contactPatch(), contactPatch()] }));
+  contacts.forEach((c) => walkers.add(c.body.mesh, ...c.feet.map((f) => f.mesh)));
+  const contactUp = new THREE.Vector3();
+  const contactAt = new THREE.Vector3();
+  /** lay `mesh` on the ground at world (x, z): `len` m along `heading` (rad about y), `wid` across, tilted to the slope */
+  const layContact = (ground: (x: number, z: number) => number, mesh: THREE.Object3D, x: number, z: number, heading: number, len: number, wid: number): void => {
+    const e = 0.25;
+    contactUp.set(ground(x - e, z) - ground(x + e, z), 2 * e, ground(x, z - e) - ground(x, z + e)).normalize();
+    mesh.position.set(x, ground(x, z) + 0.015, z);
+    mesh.quaternion.setFromUnitVectors(THREE.Object3D.DEFAULT_UP, contactUp);
+    mesh.rotateY(heading);
+    mesh.scale.set(wid, 1, len);
+  };
 
   const tmp = new THREE.Vector3();
   const deckAt = new THREE.Vector3(0.6, 0, -1.4);
@@ -1006,6 +1044,21 @@ export function createProps(): Props {
           w.group.position.set(x, Math.max(-0.05, s.ground(x, z)), z);
           w.group.rotation.y = p.heading + 0.25 * p.look;
           w.pose(p);
+          // the contact shade under the body and each planted foot (CONTACT)
+          const c = contacts[i];
+          layContact(s.ground, c.body.mesh, x, z, w.group.rotation.y, CONTACT.body[0], CONTACT.body[1]);
+          c.body.dark.value = CONTACT.body[2];
+          w.group.updateMatrixWorld(true);
+          w.feet.forEach((f, k) => {
+            f.getWorldPosition(contactAt);
+            // (a little ahead of the ankle, under the sole's middle: the walker faces −z in its own frame)
+            const fx = contactAt.x - 0.05 * Math.sin(w.group.rotation.y);
+            const fz = contactAt.z - 0.05 * Math.cos(w.group.rotation.y);
+            const lift = contactAt.y - s.ground(fx, fz);
+            const planted = 1 - Math.min(1, Math.max(0, (lift - CONTACT.lift[0]) / (CONTACT.lift[1] - CONTACT.lift[0])));
+            layContact(s.ground, c.feet[k].mesh, fx, fz, w.group.rotation.y, CONTACT.foot[0], CONTACT.foot[1]);
+            c.feet[k].dark.value = CONTACT.foot[2] * planted * planted;
+          });
         });
       }
     },

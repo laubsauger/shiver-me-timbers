@@ -28,8 +28,10 @@
  * wide shots with the people walking" — and from the air, a dark straight "road" on the lagoon beach): the wide shots
  * of w5–w6 see the shore to the point ~300 m ahead, the 200 m strip ended 90 m ahead of the beach's middle, square
  * across. So the grid runs on SWASH_ROWS: 180 m further ahead and 65 m further behind, in rows that coarsen ALONG the
- * shore only (10 cm → 40 cm, ×1.03 a row) — across it, where the bores travel and the run-up climbs, the cells stay
- * 10 cm, and along it the water's features are metres long (crests 2–16° off the normal, sets ~100 m). Where the shore
+ * shore only (10 cm → 40 cm, ×1.01 a row: over 30 m, where ×1.03 did it in 10 m and the swash went "suddenly very
+ * smooth or blurred" halfway up the wide view along the beach, the user, 2026-11-01; shoreline.ts jitters the wide
+ * rows' lookups too) — across it, where the bores travel and the run-up climbs, the cells stay
+ * 10 cm, and along it the water's features are metres long (crests 3–8° off the normal, sets ~100 m). Where the shore
  * curves (seaward ahead, to the point; landward behind), each row is shifted across by whole cells to follow its
  * waterline (swashShifts), so every row starts in the same ~0.8 m of water: a staircase band along the curve, its
  * cells still axis-aligned squares and rows' neighbours found at the same world x. ~2650 rows, a third more work than
@@ -38,8 +40,8 @@
  *
  * THE WAVES come in through the seaward edge (a generating-absorbing boundary on the Riemann invariants: the
  * incoming one set by the forcing, the outgoing one from inside, so what the beach reflects leaves again), a train
- * deterministic in t (swashForcing): a long, low swell (8–11 s) of six components from 2–16° off the beach's
- * normal — they meet in and out of step along the beach over a hundred metres or so, so a crest stands twice as
+ * deterministic in t (swashForcing): a long, low swell (8–11 s) of six components from 5–40° off the beach's
+ * normal offshore, refracted to 3–8° by the edge (REFRACTED, at swashForcing) — they meet in and out of step along the beach over a hundred metres or so, so a crest stands twice as
  * high in one stretch as further on, breaks in long sections, and the groups of them that make the sets travel
  * along it. They shoal over the flat and break into bores near the face by themselves. Sized
  * for a low-energy but living beach (the 2026-10-29 note on the v2 clips: "reads like a calm lake … no visible bore,
@@ -59,6 +61,7 @@
  * within a few periods (the seam: tests/swashSim.test.ts). Every frame a pure function of t up to that seam.
  */
 import * as THREE from 'three/webgpu';
+import { fbm2 } from '../../terrain/noise';
 import { Fn, float, instanceIndex, int, ivec2, max, min, mix, select, sin, smoothstep, sqrt, textureLoad, textureStore, uniform, vec2, vec3, vec4 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
@@ -70,7 +73,7 @@ type V4 = THREE.Node<'vec4'>;
 export const SWASH = { cell: 0.1, nx: 340, nz: 2000, x0: -19.5, z0: -90 } as const;
 /** the domain on along the beach beyond that core (AND ON ALONG THE BEACH in the header): m further ahead (−z) and
  * behind (+z), the rows' growth a row, and the coarsest row (m) */
-export const SWASH_ROWS = { ahead: 180, behind: 65, grow: 1.03, coarse: 0.4 } as const;
+export const SWASH_ROWS = { ahead: 180, behind: 65, grow: 1.01, coarse: 0.4 } as const;
 
 /** the rows of the grid, −z first: each one's width along (m), its centre (m from the beach's middle, world z), the
  * first row's −z edge and the last's +z edge (m, the same frame), and the core's rows [first, end) */
@@ -204,27 +207,41 @@ export const SWASH_CALM: [number, number] = [6, 9];
  * the heights still vary ×2–3 along the beach, over ~100 m (the run-up in the set window, eight places: 1.4–4.0 m),
  * and the front's line is smooth — 0.03 m rms off its own 10 m mean, its steepest turn 0.10 m per m along (the 2D
  * CPU reference over 60 m, sea 420–432 s; the spread swell's: 0.06 and 0.25).
+ *
+ * REFRACTED, NEARLY SQUARE TO THE SHORE (the user, 2026-11-01, of the walkers' view at ~700–705 s: "too much of a
+ * sharp-angled wave … a very sharp triangle" — one straight bore running in 10–16° oblique, meeting the waterline as a
+ * long straight-sided wedge of foam). The 2–16° had been taken as the crests' angle AT the domain's edge, in 0.85 m of
+ * water: a swell that oblique in water that shallow would have to come in at 50–90° in deep water. A real swell slows
+ * as it feels the bottom (c = √(g h) in the shallows, gT/2π offshore), and its crests swing round toward the contours
+ * — Snell: what stays the same all the way in is the wavenumber along the shore, k·sinθ. So SWELL_DIR is now the
+ * swell's direction OFFSHORE, in deep water (k = ω²/g), and kz = (ω²/g)·sinθ is what arrives: over 5–40° offshore,
+ * 2.7–8.2° at the edge (0.85 m: c 2.9 m/s against ~15 offshore), and less again as the sim's own water refracts it
+ * further in over the 1:11 face. The crests come in nearly parallel to the shore, bent into the standing wander's
+ * long lobes (wanderCpu: ±2.6 m of crest over ~100–200 m), the run-ups' heights still ×2 along the walk (the
+ * largest crest at the edge per place, sea 300–400 s: 0.08–0.16 m), and SET_PHASE's sets where they were (its scan
+ * gives 113–117 s for this swell too)
  */
 /** the swell's components (period s, amplitude m, alongshore wavenumber rad/m, phase rad): SWELL_N of them, their
- * periods spread over SWELL_T, their directions over SWELL_DIR (deg off the beach's normal: their crests that much
- * oblique to it), their heights a peaked spectrum scaled to SWELL_VAR — drawn once by a fixed generator, so every
- * frame is the same function of t */
+ * periods spread over SWELL_T, their directions OFFSHORE over SWELL_DIR (deg off the beach's normal, in deep water:
+ * refracted to a few degrees by the edge, REFRACTED in the header), their heights a peaked spectrum scaled to
+ * SWELL_VAR — drawn once by a fixed generator, so every frame is the same function of t */
 const SWELL_N = 6;
 const SWELL_T: [number, number] = [8, 11];
-const SWELL_DIR: [number, number] = [2, 16];
+const SWELL_DIR: [number, number] = [5, 40];
 /** m²: Σa², the swell's height (its variance at the edge is half of it) */
 const SWELL_VAR = 0.0065;
 const WAVES: Array<[number, number, number, number]> = (() => {
   let seed = 20261030;
   const rnd = (): number => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
-  // (the wavenumber over the domain's seaward edge, ~0.85 m of still water: shallow-water waves, c = √(g h))
-  const c0 = Math.sqrt(G * 0.85);
   const out: Array<[number, number, number, number]> = [];
   for (let k = 0; k < SWELL_N; k++) {
     const T = SWELL_T[0] + (SWELL_T[1] - SWELL_T[0]) * ((k + rnd()) / SWELL_N);
     const dir = ((SWELL_DIR[0] + (SWELL_DIR[1] - SWELL_DIR[0]) * rnd()) * Math.PI) / 180;
     const peak = Math.exp(-(((T - 9.5) / 1.3) ** 2));
-    out.push([T, peak, ((2 * Math.PI) / T / c0) * Math.sin(dir), 2 * Math.PI * rnd()]);
+    // (the alongshore wavenumber Snell keeps from deep water, k∞·sinθ∞ with k∞ = ω²/g: REFRACTED in the header. It
+    // had been (ω/√(g·0.85))·sinθ — the angle taken at the edge itself)
+    const w = (2 * Math.PI) / T;
+    out.push([T, peak, ((w * w) / G) * Math.sin(dir), 2 * Math.PI * rnd()]);
   }
   const sum = out.reduce((s, w) => s + w[1] * w[1], 0);
   for (const w of out) w[1] *= Math.sqrt(SWELL_VAR / sum);
@@ -526,6 +543,18 @@ function seaWander(p: THREE.Node<'vec2'>): F {
   const z = p.y.sub((swashField.geo as unknown as V4).y);
   return sin(z.mul(0.09).add(0.7)).mul(0.8).add(sin(z.mul(0.23).add(2.1)).mul(0.5)) as F;
 }
+/** m the sea's hand-over line moves (swashSeaGone): ±3 m, irregular — value noise along the shore over ~8–40 m, and
+ * across it over ~6 m, so the line breaks into tongues and islands of either water rather than wandering as one
+ * smooth curve (local coordinates, as seaWander's) */
+function handWander(p: THREE.Node<'vec2'>): F {
+  const z = p.y.sub((swashField.geo as unknown as V4).y);
+  const d = swashFromSea(p);
+  return fbm2(vec2(z.mul(0.025), d.mul(0.04)).add(vec2(3.1, 7.4)), 2)
+    .sub(0.5)
+    .mul(6)
+    .add(fbm2(vec2(z.mul(0.11), d.mul(0.17)).add(vec2(9.2, 1.3)), 2).sub(0.5).mul(3))
+    .clamp(-3, 3) as F;
+}
 /** 0 … 1 in from the domain's ends along the beach: over `band` m (m along, from `from` m in), on a line that wanders
  * across the shore (endWander; `from` ≥ its 9 m, so none of it falls outside the grid) */
 function endsIn(p: THREE.Node<'vec2'>, from: number, band: number): F {
@@ -544,13 +573,16 @@ export function swashIn(p: THREE.Node<'vec2'>): F {
     .mul(swashField.active) as F;
 }
 /** 1 where the sea lets the sim's water be the surface (surfaceMaterial shoreSim, the shoreline's composite): only
- * where the sim is already whole — 5–13 m in from its seaward edge on the same wandering line, past its ends' fade,
- * short of its landward edge. (Over 5.5–8 m the two waters met along a line: the sim's, over shallower sand, darker
- * and finer-rippled than the sea's beside it, read from the walkers' raised view at ~700 s as a dark patch "bounded by
- * a sharp edge", the user, 2026-11-01. Over 8 m the one grades into the other) */
+ * where the sim is already whole — 4.5–15 m in from its seaward edge on an irregular line (handWander ±3 m: from
+ * 1.5 m in at the earliest, whole by 18 m, short of the still waterline ~19.5 m in), past its ends' fade, short of its
+ * landward edge. (Over 5.5–8 m the two waters met along a line: the sim's, over shallower sand, darker and
+ * finer-rippled than the sea's beside it, read from the walkers' raised view at ~700 s as a dark patch "bounded by a
+ * sharp edge", the user, 2026-11-01. Over 8 m on a smooth ±1.3 m curve it still read as "a sharp line roughly
+ * parallel to the beach" from above and at grazing, the same evening: now the widest band the domain holds, its line
+ * broken into tongues — wider would need the domain itself to reach further out) */
 export function swashSeaGone(p: THREE.Node<'vec2'>): F {
   const d = swashFromSea(p);
-  return smoothstep(5, 13, d.add(seaWander(p)))
+  return smoothstep(4.5, 15, d.add(handWander(p)))
     .mul(smoothstep(SWASH.nx * SWASH.cell, SWASH.nx * SWASH.cell - 0.5, d))
     .mul(endsIn(p, 42, 8))
     .mul(swashField.active) as F;

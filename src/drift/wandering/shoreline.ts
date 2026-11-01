@@ -524,7 +524,13 @@ export function createShoreline(o: {
 
   // THE SIM'S WATER here: depth, velocity, its surface's slope (central differences over a cell), its foam
   const sIn = simIn(xz);
-  const suv = simUV(xz);
+  // (beyond the core strip the grid's rows widen along the shore to 40 cm, and the fields' linear filter drew its
+  // water and foam there as smooth as a blur: from the wide view along the beach at ~700–710 s the swash turned "very
+  // smooth or blurred" halfway up the frame — the user, 2026-11-01. The lookup there jitters along the shore by up to
+  // the row's extra width, in irregular patches ~0.5–1 m, so a wide row's water carries breakup on the core's scale;
+  // none in the core, whose rows are a cell wide)
+  const rowJitter = (swashRowWidth(xz).sub(SWASH.cell).max(0) as unknown as F).mul(fbm2(xzP.mul(vec2(0.9, 2.1)).add(vec2(6.3, 1.7)), 2).sub(0.5).mul(1.6)) as unknown as F;
+  const suv = simUV(xz.add(vec2(0, rowJitter)) as V2);
   const wS = texture(swashField.water, suv) as unknown as THREE.Node<'vec4'>;
   const mS = texture(swashField.marks, suv) as unknown as THREE.Node<'vec4'>;
   const du = vec2(1 / SWASH.nx, 0) as V2;
@@ -642,17 +648,28 @@ export function createShoreline(o: {
   // what a pixel cannot see goes, rather than sizzles
   // (the two longest drawn out along the shore, as a swell's ripples run along their crests: round, they mirrored the
   // high sky as dark blotches a metre across, nothing like the streaked sea beyond)
+  // THIN WATER LIES FLAT (the user, 2026-11-01, of the walkers' view at ~705 s: a dark, speckled patch of thin water
+  // over the sand landward of the bore). The octaves ran at 0.45 of their height even in a film of a few mm, and at a
+  // grazing view each 10–30 cm bump tipped its pixel from the bright sky's mirror (Fresnel ~0.6) to the dark wet sand
+  // under it (~0.1): a speckle of dark flecks over the whole sheet. A film that thin cannot hold a wave longer than
+  // a few times its depth — what is left on it is the flow's own fine pucker — so each octave comes in only where the
+  // water is deep enough to carry it (from a tenth of its size deep, whole by four tenths: the 1.1/m octave from ~9 cm, the 37/m
+  // from ~3 mm), and a sheet of a few mm is the glossy mirror a real backwash is, the sand faint through it. With
+  // distance each octave still goes only by the pixel's footprint, smoothly: no region of the beach switches its
+  // detail off (the same day's note on the wide view along it: "a sharp change halfway up … suddenly very smooth")
   const octave = (k: number, a: number, seed: number, along = 1): V3 => {
     const q = xzP.mul(vec2(k, k * along)) as V2;
     const c = vec3(fbm2(q.add(vec2(seed, 0.4)), 2).sub(0.5), 0, fbm2(q.add(vec2(4.1, seed)), 2).sub(0.5)) as V3;
-    return c.mul(a).mul(smoothstep(0.5, 0.25, footprint.mul(k))) as V3;
+    const deepEnough = smoothstep(0.1 / k, 0.4 / k, hS) as F;
+    return c.mul(a).mul(smoothstep(0.5, 0.25, footprint.mul(k))).mul(deepEnough) as V3;
   };
   const rippleS = octave(1.1, 0.2, 3.3, 0.3).add(octave(2.9, 0.3, 1.7, 0.4)).add(octave(7.3, 0.5, 6.2)).add(octave(17, 0.55, 8.4)).add(octave(37, 0.5, 2.8)).mul(rough) as V3;
   // (the slope those octaves left out where a pixel cannot hold them — the sea's `unresolvedVar`: its share of the
   // ~0.12 rms, by each octave's amplitude², for the mirror's horizon below)
   const OCT = [[1.1, 0.2], [2.9, 0.3], [7.3, 0.5], [17, 0.55], [37, 0.5]];
   const octW = OCT.reduce((a, [, w]) => a + w * w, 0);
-  const unresolvedS = OCT.reduce<F>((acc, [k, w]) => acc.add(float(1).sub(smoothstep(0.5, 0.25, footprint.mul(k))).mul((w * w) / octW)) as F, float(0) as F)
+  // (what the footprint took out of an octave, not what the depth did: a flat film has no slope left)
+  const unresolvedS = OCT.reduce<F>((acc, [k, w]) => acc.add(float(1).sub(smoothstep(0.5, 0.25, footprint.mul(k))).mul(smoothstep(0.1 / k, 0.4 / k, hS)).mul((w * w) / octW)) as F, float(0) as F)
     .mul(rough.mul(rough))
     .mul(0.12 * 0.12) as F;
   // (its slope held to an unbroken swell's, 0.15: a bore in the sim is a first-order shock, its face 2–3 cells, ~45°,
@@ -736,7 +753,12 @@ export function createShoreline(o: {
   // (mean of lit·spot ≈ 0.5 × 0.14; the dark between the points keeps 0.3 of the light)
   const glitter = float(0.3).add(lit.mul(spot).mul(0.7 / 0.07)) as F;
   // (under a cloud's shadow the Sun is gone from its mirror too: the ray to it crosses the same cloud)
-  const reflectedG = reflected.mul(mix(float(1), glitter.mul(cloudV), toSun)) as V3;
+  // (only where there are facets to break it up — a film a few mm thin lies flat, THIN WATER LIES FLAT, and mirrors
+  // the aureole whole — and not once the Sun is below the horizon: split into points with a 0.3 floor between them,
+  // the dusk aureole in the thin backwash came out as a dark sheet flecked with gold, the "dark, speckled" patch of the
+  // walkers' view at 705 s, the user, 2026-11-01)
+  const facets = smoothstep(0.014, 0.055, hS).mul(smoothstep(-0.03, 0.01, sunD.y)) as F;
+  const reflectedG = reflected.mul(mix(float(1), glitter.mul(cloudV), toSun.mul(mix(float(1), facets, sIn)))) as V3;
   // (the events' lens feathered as the sim's sheet is, by depth: whole by 2 mm at the eye's feet, by 1.2 cm where a
   // pixel spans a metre — its depth grows as the square of the distance behind the tip, so that is ~1.5 m of feather)
   const water0F = smoothstep(float(0.0003), mix(float(0.002), float(0.012), smoothstep(0.08, 1, footprint)), sw.depth) as F;
@@ -813,7 +835,9 @@ export function createShoreline(o: {
   const cosFlat = viewDir.y.max(0) as F;
   const fresnelFlat = float(r0F).add(float(1 - r0F).mul(float(1).sub(cosFlat).pow(5))).mul(oceanSurfaceParams.reflectionStrength).min(1 - oceanSurfaceParams.transmissionFloor) as F;
   const filmOf = (glazed: F, wet: F): F => glazed.mul(SHEEN.glazed).max(smoothstep(0.15, 0.9, wet).mul(SHEEN.wet)) as F;
-  const table = smoothstep(SHEEN.tableRise, 0, heightAbove).mul(smoothstep(-0.01, 0, heightAbove)).mul(SHEEN.table) as F;
+  // (over the sim the seep is the beach's own, beachMaterial.ts: ~0.05 m of rise, not the fixed 0.12 — its sheen sat
+  // over a metre of face above the run-ups' reach, the 2026-11-01 note on the 705 s view)
+  const table = smoothstep(mix(float(SHEEN.tableRise), float(0.05), sIn), 0, heightAbove).mul(smoothstep(-0.01, 0, heightAbove)).mul(SHEEN.table) as F;
   const drains = fbm2(xzP.mul(0.9).add(vec2(7.3, 1.9)), 2).mul(0.7).add(0.65).clamp(0, 1) as F;
   // (none under the sea's own water beyond the sim, where the events' wetness runs on below the still line)
   const film = mix(filmOf(sw.fresh, sw.wet), filmOf(mS.w as F, mS.z as F), sIn).max(table).mul(drains).mul(smoothstep(-0.02, 0, heightAbove).max(sIn)) as F;
