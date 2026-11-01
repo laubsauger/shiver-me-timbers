@@ -27,7 +27,8 @@ type V3 = THREE.Node<'vec3'>;
 
 /** m: the field's radius (a galaxy of debris 24 km across: from 30 km up it spans ~40° of the dome, low in front) */
 export const DEBRIS_RADIUS = 12000;
-/** the pattern: Act 2's own spiral look (galaxies.ts OUR_LOOK) */
+/** the pattern: Act 2's own spiral look (galaxies.ts OUR_LOOK, at its old 13° pitch: our galaxy's arms opened to 18° on
+ * 2026-11-01 against the far disc's rings; the debris, seen from above, keeps the tighter wind and its pieces' places) */
 const ARMS = 2;
 const WIND = 1 / Math.tan((13 * Math.PI) / 180);
 const PHASE = 0.6;

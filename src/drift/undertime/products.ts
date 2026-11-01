@@ -219,7 +219,13 @@ export function createProducts(tracks: readonly ProductTrack[], U: ProductUnifor
   const alpha = passed.mul(coverage).mul(pocketKeep);
   // a track fades on its own time scale: a quick pion's is gone in a breath, a slow curl lingers a little
   const tau = T.life.mul(0.6).add(0.15).min(0.9);
-  const lasting = passedGeo.mul(coverage).mul(pocketKeep).mul(exp(age.div(tau.mul(2.5)).negate())).mul(glowOf ? glowOf.gain : float(1)).mul(left);
+  // a SURVIVOR's run is gone soon after it rests: its grain (survivors.ts, the hero grain) is the thing left, alone.
+  // With only the e-fold above (2.25 s for the hero's 2.1 s run, survivor-bright) the run's curl still hung by the
+  // grain as faint smudges 6 s on, in the remain beat's dark (the coordinator's check of 48.5 s, 2026-11-01: hidden
+  // with the product trails, they went). Out from 1 s to 2.5 s after the run ends: the hero's by 45.1 s, the remain
+  // beat's start
+  const rested = float(1).sub(isSurvivor.mul(smoothstep(tEnd.add(1), tEnd.add(2.5), U.time)));
+  const lasting = passedGeo.mul(coverage).mul(pocketKeep).mul(exp(age.div(tau.mul(2.5)).negate())).mul(glowOf ? glowOf.gain : float(1)).mul(left).mul(rested);
   const trailMat = additive('undertime-product-trails');
   trailMat.positionNode = pos.add(acrossView.mul(side.mul(drawn).mul(step(0.0005, lasting))));
   trailMat.colorNode = Fn(() => {
@@ -236,7 +242,7 @@ export function createProducts(tracks: readonly ProductTrack[], U: ProductUnifor
     const glowC = tint.mul(glow).mul(exp(age.div(tau.mul(2)).negate())).mul(0.4);
     let c: V3 = coreC.add(glowC).mul(breakup);
     if (glowOf) c = afterglowColour(c, glowOf.heat, glowOf.on).mul(glowOf.gain);
-    return vec4(c.mul(U.radiance).mul(T.energy).mul(alpha).mul(left).mul(exp(U.fog.mul(dist).negate())), 1);
+    return vec4(c.mul(U.radiance).mul(T.energy).mul(alpha).mul(left).mul(rested).mul(exp(U.fog.mul(dist).negate())), 1);
   })();
   // (128 segments: a delta ray's or a slow pion's tight curl seen edge-on drew as a zigzag at 64)
   const trails = new THREE.InstancedMesh(strip(128), trailMat, Math.max(1, tracks.length));

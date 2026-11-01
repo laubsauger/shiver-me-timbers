@@ -10,6 +10,8 @@
  * WHERE IT LOOKS, by beat (show s for the beat lengths of 2026-10-30; the moves are timed from the beats, so they
  * follow a change of length):
  *
+ *   38–54     Act 1's one grain (remain)              up to 32 and back to 22 over the gather (73–88): the grain
+ *                                                    37° up sits 5° over the middle, not on the top edge
  *   0–200     Acts 1–2 up to the dawn on the limb    pitch 22 (30 until the 2026-10-30 "too high" note): Act 1's field and its one warm grain (remain, centred
  *                                                    at +30 in up30_0050), the web, the galaxies, the band, the Earth
  *                                                    coming in low on the right and its limb across the bottom third
@@ -86,6 +88,14 @@ export const FLAT_START: FlatView = { yaw: 0, pitch: 22, fov: 60 };
 
 /** the moves (header table) */
 export const FLAT_MOVES: readonly FlatMove[] = [
+  // Act 1's one grain: up 10° as the wave goes over and the dark comes, so the grain (37° up: undertime/timeline.ts
+  // heroGrainPosition, heroGrainEl 52 on the 15°-tilted dome) sits just above the middle — at 22 it sat 15° over the
+  // middle, against the frame's top edge (y ≈ 65/720 at 48.5 s, the coordinator's 2026-11-01 check). 16 s for 10°
+  // (the rate cap) does not fit the 10 s remain beat, so it starts with the wave (remain − 7); done 1 s before the
+  // zoom, which pulls back about the grain, so through the zoom the grain stays where it is in the frame
+  { beat: 'remain', at: -7, dur: 16, to: { pitch: 32 } },
+  // and back to Acts 1–2's 22 as the first stars ignite, before the galaxies (header)
+  { beat: 'gather', at: 0, dur: 15, to: { pitch: 22 } },
   // the lights and the flood: one tilt down across both, from the timewave's dawn (the limb at the bottom third at
   // +30, up30_0190–0205) through the cities filling the frame (+15 at ~230: limb at the top third, s/up30_0225–0245)
   // to straight down onto the flood; over by Drift-2's own look-down (starts 4 s before drift2)

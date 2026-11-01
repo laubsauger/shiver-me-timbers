@@ -39,6 +39,15 @@ const CLOUDS_FORM = 16;
 const FOCUS_LEAD = 3;
 const FOCUS_S = 6;
 
+/**
+ * s: the debris MATS on the planet's water (debris.ts driftMatter: the brown turbid arms and their slicks, the field
+ * as the planet's sea colour carries it from afar) fade out over this long, ending as the hand-over into the sea's
+ * scene begins (`seaFrom`). The sea's scene has no such mats — only the pieces (debrisField.ts), which both scenes
+ * draw and so carry on — so the streaks used to vanish inside the 3 s crossfade, a pop at 314–317 s (the coordinator,
+ * 2026-11-01). From the hand-over's 150 m (SEA_FROM_ALT) the pieces carry the field on their own.
+ */
+const MATS_OUT = 6;
+
 const smoothstep01 = (x: number): number => {
   const k = Math.min(1, Math.max(0, x));
   return k * k * (3 - 2 * k);
@@ -245,7 +254,9 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
         // (the eye in the field's frame, m: the descent's waves are laid out from it, earth.ts ripples)
         eye: ((tr) => [tr.east, tr.alt, tr.north] as [number, number, number])(landingTrack(t, p, tiltDeg)),
       };
-      earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift });
+      // (the mats out before the hand-over: MATS_OUT; the pieces below keep drift.presence)
+      const mats = { ...drift, presence: drift.presence * (1 - smoothstep01((t - (hi - MATS_OUT)) / MATS_OUT)) };
+      earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift: mats });
       // the pieces: where the gathering point is now (the planet only translates), turning with the field, lit by
       // the same air as the sea there
       field.visible = drift.presence > 0;

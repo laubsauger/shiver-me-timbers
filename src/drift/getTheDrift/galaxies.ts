@@ -79,8 +79,10 @@ export function loadGalaxyAtlas(base = `${import.meta.env.BASE_URL}drift/galaxie
   return atlas;
 }
 
-/** the atlas tiles' brightest part is 1: their light against the analytic model's */
-const ATLAS_GAIN = 0.9;
+/** the atlas tiles' brightest part is 1: their light against the analytic model's. (0.9 until the coordinator's check
+ * of ~92 s, 2026-11-01: the near galaxies "read a bit bright and photographic"; with COOL_NEAR they sit in the web's
+ * light instead of on it) */
+const ATLAS_GAIN = 0.65;
 /** the galaxy quad spans ±EXTENT radii (the outer disk fades by then) */
 const EXTENT = 1.5;
 /** BIRTHS: s into the act the first galaxy is born, and the s they are spread over (by `appear`) */
@@ -114,6 +116,10 @@ const DESTRETCH = 1.45;
 /** the web's pale filament colour (webVolume.ts palette), normalised to luminance 1 */
 const WEB_TINT: [number, number, number] = [0.75, 1.02, 1.5];
 const COOL = 0.55;
+/** the share of the web's tint even the nearest galaxy takes (the same check): unfogged, the near ones kept the
+ * photographs' full warm Hubble colour and contrast, cut-outs laid on a blue web; a quarter of its light in the
+ * web's colour makes them seen THROUGH its light, as the far ones are */
+const COOL_NEAR = 0.25;
 /**
  * THE FOCUS (the same review: "this galaxy to the left of our actual Milky Way … stays there for way too long … make
  * sure it goes away so that once we are in the zoom we can focus on the Milky Way"): from the zoom's start (`focus`,
@@ -123,8 +129,10 @@ const COOL = 0.55;
 const FOCUS_CONE = 22;
 const FOCUS_SOFT = 25;
 
-/** OUR galaxy's model parameters (the volume reads the same ones) */
-export const OUR_LOOK = { arms: 2, wind: 1 / Math.tan((13 * Math.PI) / 180), phase: 0.6, seed: 3.7, elliptical: 0 };
+/** OUR galaxy's model parameters (the volume reads the same ones). Arms of 18° pitch (13° until 2026-11-01: wound that
+ * tight, two arms and their lanes crossed a radius six times and the inclined disc read as nested rings at ~100 s;
+ * galaxyModel.ts armWander) */
+export const OUR_LOOK = { arms: 2, wind: 1 / Math.tan((18 * Math.PI) / 180), phase: 0.6, seed: 3.7, elliptical: 0 };
 
 export interface GalaxyUniforms {
   /** s, the act's own time */
@@ -253,7 +261,7 @@ export function createGalaxies(specs: GalaxySpec[], U: GalaxyUniforms, atlas: Ga
     const lum = photo.dot(vec3(0.2126, 0.7152, 0.0722));
     const destretched = photo.mul(lum.max(1e-4).pow(DESTRETCH - 1));
     const cool = vec3(...WEB_TINT).mul(destretched.dot(vec3(0.2126, 0.7152, 0.0722)));
-    const real = mix(destretched, cool, float(1).sub(fogged).mul(COOL))
+    const real = mix(destretched, cool, max(float(1).sub(fogged).mul(COOL), COOL_NEAR))
       .mul(fogged)
       .mul(float(1).sub(smoothstep(WINDOW[0], WINDOW[1], r)))
       .mul(ATLAS_GAIN);

@@ -11,7 +11,7 @@ import * as THREE from 'three/webgpu';
 import { FLAT_MOVES, FLAT_START, MAX_RATE, flatFramingTrack, viewAngle, type FlatMove } from '../src/drift/flatFraming';
 import { FLAT_SAFE, FLAT_WIDTH, flatTitleLines } from '../src/drift/flatTitles';
 import { DomeCapture } from '../src/cine/domeCapture';
-import { beatStarts as act1Beats } from '../src/drift/undertime/timeline';
+import { beatStarts as act1Beats, eyePath, heroGrainPosition } from '../src/drift/undertime/timeline';
 import { beatStarts as act2Beats } from '../src/drift/getTheDrift/timeline';
 import { C1_FOLLOW, coastLook, beatStarts as seaBeats } from '../src/drift/wandering/beats';
 import { driftParams } from '../src/params/drift';
@@ -89,10 +89,16 @@ describe('the 16:9 cut: framing', () => {
     for (let t = 0; t < marks.timewave + 10; t += 0.5) expect(view(t).pitch, `at ${t} s`).toBeGreaterThanOrEqual(20);
   });
 
-  it("frames Undertime's one warm grain (~30° up through the remain beat) inside the frame", () => {
-    for (let t = marks.remain; t < marks.zoom; t += 0.5) {
+  it("frames Undertime's one warm grain well inside the frame, from when it is alone through the zoom about it", () => {
+    // the grain's elevation from the eye (deg; 37: heroGrainEl on the tilted dome). At pitch 22 it sat 15° over the
+    // middle, on the frame's top edge (the coordinator's 2026-11-01 check: y ≈ 65/720 at 48.5 s) — held now to the
+    // frame's middle three fifths from 2 s into the remain beat (its text at + 3) to the zoom's end
+    const g = heroGrainPosition(p);
+    for (let t = marks.remain + 2; t < marks.gather; t += 0.5) {
+      const e = eyePath(t, p);
+      const el = (Math.atan2(g[1] - e[1], Math.hypot(g[0] - e[0], g[2] - e[2])) * 180) / Math.PI;
       const v = view(t);
-      expect(Math.abs(v.pitch - 30), `at ${t} s`).toBeLessThan(halfV(v.fov) - 6);
+      expect(Math.abs(v.pitch - el), `at ${t} s`).toBeLessThan(halfV(v.fov) * 0.6);
     }
   });
 

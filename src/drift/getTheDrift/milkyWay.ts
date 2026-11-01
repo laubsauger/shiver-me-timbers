@@ -139,7 +139,8 @@ export function starTemp(i: number): number {
 export const starTint = (temp: THREE.Node<'float'>): V3 =>
   mix(mix(vec3(1, 0.72, 0.5), vec3(1, 0.95, 0.88), smoothstep(0, 0.55, temp)), vec3(0.72, 0.82, 1), smoothstep(0.75, 1, temp)) as V3;
 
-export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
+export function createMilkyWay(g: OurGalaxy, steps: number, opts: { look?: typeof OUR_LOOK; wander?: number } = {}): MilkyWay {
+  const L = opts.look ?? OUR_LOOK;
   const u = {
     centre: uniform(new THREE.Vector3(...g.centre)),
     X: uniform(new THREE.Vector3(...g.xAxis)),
@@ -166,7 +167,7 @@ export function createMilkyWay(g: OurGalaxy, steps: number): MilkyWay {
     const m2 = oc.dot(oc).sub(b.mul(b));
     return float(1).sub(step(m2, u.occRadius.mul(u.occRadius)).mul(step(0, b)));
   };
-  const look = { arms: float(OUR_LOOK.arms), wind: float(OUR_LOOK.wind), phase: float(OUR_LOOK.phase), seed: float(OUR_LOOK.seed), elliptical: float(0) };
+  const look = { arms: float(L.arms), wind: float(L.wind), phase: float(L.phase), seed: float(L.seed), elliptical: float(0), wander: float(opts.wander ?? 1) };
 
   // ------------------------------------------------------------------ the volume
   const material = new THREE.MeshBasicNodeMaterial();
