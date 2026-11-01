@@ -34,6 +34,12 @@
  *                                                    Up before the turn, not after it: after (+ 16) the 7° would have to
  *                                                    fit the 10 s before the turn back, 1.05°/s, and the flock would sit
  *                                                    cut at the top edge through its rise
+ *   688–700   w5 the wanderers                     down 6° as the eye pulls back and up behind them (beats.ts COAST_KEYS):
+ *                                                    the walkers walk on along the waterline 40–50 m ahead, ~10° under
+ *                                                    the horizon — at pitch 0 they sat at the frame's bottom quarter,
+ *                                                    small (the user, 2026-11-01: "maybe we can work with the camera
+ *                                                    angle some more"); down, they sit just under the middle with the
+ *                                                    beach and the swash round them, the sky a third of the frame
  *   702–770   w6 the night                           up 10° and 6° right across the dissolve, toward the stations'
  *                                                    beams fanning from the coast tower (its lamp ~26° right, ~12° up:
  *                                                    dome_0720/0765) — the beams and the stars, the beach a strip at
@@ -90,6 +96,8 @@ export const FLAT_MOVES: readonly FlatMove[] = [
   // w4: up with the flock, done before the eye turns to it, and down after the eye has turned back (header)
   { beat: 'w4', at: -6, dur: 12, to: { pitch: 4 } }, // (7 → 4: "too high", the same note)
   { beat: 'w4', at: 36, dur: 17, to: { pitch: 0 } },
+  // w5: down with the wanderers as the eye pulls back behind them (header), after w4's way down is done
+  { beat: 'w5', at: 13, dur: 12, to: { pitch: -6 } },
   // w6: across the dissolve into the night (it runs 698–722), toward the beams
   { beat: 'w6', at: -8, dur: 26, to: { pitch: 6, yaw: -6 } }, // (10 → 6: "too high", the same note)
 ];

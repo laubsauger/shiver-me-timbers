@@ -101,12 +101,90 @@ export function wetSand(ground: (x: number, z: number) => number, beach: { x: nu
   };
 }
 
-export function wanderer(i: number, t: number, w5: number, edge: (along: number) => number): { along: number; off: number; walked: number } {
-  const walked = WALK_SPEED * Math.max(0, t - w5 + WALK_LEAD - i * WALK_FILE[0]);
+/**
+ * WANDERING, NOT MARCHING (the user, 2026-11-01: "the people could be more wandery"). They had walked one pace in
+ * near single file, 0.45 m apart across, all the way. Now each keeps a pace of their own that drifts (±10% over ~11 s,
+ * ±5% over ~4 s) and stops for what catches them (WANDER_STOPS: by time, s into w5 — looking out over the water,
+ * stooping to pick something off the wet sand, a glance back at the others, a look along the tree line); and their way
+ * wanders across the beach by the metres walked (WANDER_DRIFTS: up the dry sand and back, ankle-deep into the swash
+ * after a find), so they drift apart and together. Lateral moves are by distance, so no one slides sideways standing
+ * still, and they face their own way along it. Near the eye (`along` < 24 m: it holds at 12) they keep to the water's
+ * edge — WALK_CLEAR holds there.
+ */
+interface WanderStop {
+  /** s into w5 it starts and ends (the pace eases out and back in over STOP_EASE s round them) */
+  at: number;
+  end: number;
+  /** what they do: look (rad, + to their left: the sea), or stoop to the sand */
+  look?: number;
+  stoop?: boolean;
+}
+const STOP_EASE = 0.8;
+/** each one's pace (m/s) and its drift's phase; their stops (s into w5); their drifts across the beach (m walked
+ * from, to, m: − up the beach, + toward the sea; eased in and out over a third of it each) */
+const WANDER: Array<{ pace: number; stops: WanderStop[]; drifts: Array<[number, number, number]>; catchUp?: [number, number, number] }> = [
+  { pace: 1.12, stops: [{ at: 15.5, end: 19.5, look: 0.9 }, { at: 41, end: 44, stoop: true }], drifts: [[30, 60, -1.2]] },
+  // (the hat: stoops for a shell early, then catches up, wading out a little where it found it; a glance back)
+  { pace: 1.05, stops: [{ at: 9, end: 12, stoop: true }, { at: 27, end: 29, look: -1.1 }], drifts: [[12, 30, 0.6], [38, 70, -0.8]], catchUp: [12.5, 24, 0.18] },
+  // (wanders up the dry sand toward the trees, stops to look along them, and comes back down)
+  { pace: 1.18, stops: [{ at: 30, end: 33.5, look: -0.7 }], drifts: [[18, 40, -3]] },
+];
+const smoothRamp = (a: number, b: number, x: number): number => smooth(Math.min(1, Math.max(0, (x - a) / (b - a))));
+/** m/s wanderer i walks at, τ s into w5 (0 before it sets off) */
+function wanderPace(i: number, tau: number): number {
+  const w = WANDER[i];
+  let v = WALK_SPEED * (w.pace / 1.12) * (1 + 0.1 * Math.sin((2 * Math.PI * tau) / 11 + 2 * i) + 0.05 * Math.sin((2 * Math.PI * tau) / 4.3 + i));
+  for (const st of w.stops) v *= 1 - smoothRamp(st.at - STOP_EASE, st.at, tau) * (1 - smoothRamp(st.end, st.end + STOP_EASE, tau));
+  if (w.catchUp) v *= 1 + w.catchUp[2] * smoothRamp(w.catchUp[0], w.catchUp[0] + 2, tau) * (1 - smoothRamp(w.catchUp[1] - 2, w.catchUp[1], tau));
+  return v;
+}
+/** m across the beach (+ to sea) wanderer i strays from the water's edge, `walked` m into its walk at `along` */
+function wanderLane(i: number, walked: number, along: number): number {
+  let lane = (i - 1) * 0.45 + (0.35 * Math.sin(walked * 0.13 + 2 * i) + 0.2 * Math.sin(walked * 0.31 + i)) * smoothRamp(16, 30, along);
+  for (const [a, b, d] of WANDER[i].drifts) {
+    const third = (b - a) / 3;
+    lane += d * smoothRamp(a, a + third, walked) * (1 - smoothRamp(b - third, b, walked)) * smoothRamp(16, 30, along);
+  }
+  return lane;
+}
+/** s of the walk's integration steps (midpoint: every frame the same sum for the same t) */
+const WALK_STEP = 0.05;
+
+export function wanderer(i: number, t: number, w5: number, edge: (along: number) => number): { along: number; off: number; walked: number; phase: number; amp: number; stoop: number; look: number; heading: number } {
+  const tau = t - w5;
+  const start = -WALK_LEAD + i * WALK_FILE[0];
+  // the distance walked and the strides taken, summed from the start: a slower walk takes shorter strides
+  const height = WALKERS[i].height;
+  const strideOf = (v: number): number => strideLength(height) * (0.55 + 0.45 * Math.min(1, v / WALK_SPEED));
+  let walked = 0;
+  let phase = 0;
+  const span = Math.max(0, tau - start);
+  const n = Math.floor(span / WALK_STEP);
+  for (let k = 0; k < n; k++) {
+    const v = wanderPace(i, start + (k + 0.5) * WALK_STEP);
+    walked += v * WALK_STEP;
+    phase += (v / strideOf(v)) * WALK_STEP;
+  }
+  const rest = span - n * WALK_STEP;
+  const vNow = span > 0 ? wanderPace(i, tau) : 0;
+  if (rest > 0) {
+    const v = wanderPace(i, start + n * WALK_STEP + rest / 2);
+    walked += v * rest;
+    phase += (v / strideOf(v)) * rest;
+  }
   const along = WALK_FROM + walked - i * WALK_FILE[1];
-  // (not quite in single file: a little landward or seaward of each other, wandering a little as they go)
-  const off = edge(along) + (i - 1) * 0.45 + 0.2 * Math.sin(walked * 0.11 + i);
-  return { along, off, walked };
+  const offAt = (w: number): number => edge(WALK_FROM + w - i * WALK_FILE[1]) + wanderLane(i, w, WALK_FROM + w - i * WALK_FILE[1]);
+  const off = offAt(walked);
+  // facing its way: the path's turn per metre walked (defined standing still too)
+  const heading = Math.atan2(offAt(walked + 0.5) - offAt(walked - 0.5), 1);
+  let stoop = 0;
+  let look = 0;
+  for (const st of WANDER[i].stops) {
+    const on = smoothRamp(st.at - 0.2, st.at + 0.9, tau) * (1 - smoothRamp(st.end - 0.6, st.end + 0.4, tau));
+    if (st.stoop) stoop = Math.max(stoop, on);
+    if (st.look) look += st.look * on;
+  }
+  return { along, off, walked, phase, amp: smoothRamp(0, 0.5, vNow) * (0.6 + 0.4 * Math.min(1, vNow / WALK_SPEED)), stoop, look, heading };
 }
 
 /**
@@ -138,6 +216,11 @@ export function wanderer(i: number, t: number, w5: number, edge: (along: number)
 const FIELD_DARK: [number, number] = [0.7, 1];
 /** the field's weight under a sky of darkness `night` (PropsState.night): 0 by day and through dusk, 1 at night */
 export const fieldWeight = (night: number): number => smooth((night - FIELD_DARK[0]) / (FIELD_DARK[1] - FIELD_DARK[0]));
+/** the field's share on the coast at t under a sky this dark: only in its own beats (w3's field to w5, and w6's
+ * night), and there only in the dark — so not in w1's dark arrival from the sea's night (the 2026-11-01 dawn: the
+ * night is the network's, the field comes later) */
+export const fieldOnCoast = (t: number, starts: { w3: number; w5: number; w6: number }, night: number): number =>
+  (t > starts.w3 - 3 && t < starts.w5) || t > starts.w6 - 3 ? fieldWeight(night) : 0;
 /** m: no pair is born nearer the eye than this (a 0.5 m loop at 7 m spans 8°; at 2.5 m it was a 23° ring) */
 const FIELD_CLEARANCE = 7;
 
@@ -216,6 +299,8 @@ const BEAM_R = 9000;
 const BEAM_W = 30;
 /** s the outro's Rose (w6) fades in over */
 const BEAM_RETURN = 12;
+/** s c4's beams take to go quiet, ending 7 s before w1 (its dissolve starts 5 s before it) */
+const BEAM_QUIET = 10;
 /** rad an end of a beam turns by before its path is laid out again (0.13 px of the 4K master: the eye's bob at sea
  * turns the ring's lamps by less) */
 const AIM_TURN = 1e-4;
@@ -617,7 +702,10 @@ export function createProps(): Props {
       beamNight.value = s.night;
       // (in w6 the Rose comes back with every link long grown, so it fades in over BEAM_RETURN from its window's start
       // instead of switching on whole in one frame over the dusk sky — the 2026-10-30 night-ramp clip, 704 s)
-      beamGain.value = world === 'coast' ? 0.4 * smooth((t - (starts.w6 - 6)) / BEAM_RETURN) : 1;
+      // (and c4's goes quiet over its last seconds, gone before w1's dissolve: the dissolve changes the world in the dark
+      // and the night lifts into the morning after it — beams on one side and none on the other crossfaded, the
+      // network fading out as the island faded in, the 2026-11-01 review: "abrupt and blendy")
+      beamGain.value = world === 'coast' ? 0.4 * smooth((t - (starts.w6 - 6)) / BEAM_RETURN) : 1 - smooth((t - (starts.w1 - 17)) / BEAM_QUIET);
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
       // IN W6 THE COAST'S STATIONS ANSWER FROM THEIR COAST TOWERS (radioTower.ts FILM_COAST): their ring islands go,
@@ -692,8 +780,8 @@ export function createProps(): Props {
         fieldGroup.add(fieldBuilt.trails, fieldBuilt.sprites);
       }
       // (only in the dark: FIELD_DARK — by day it is not drawn at all, the 2026-10-30 QA sweep)
-      const dark = fieldWeight(s.night);
-      fieldGroup.visible = world === 'coast' && dark > 0 && ((t > starts.w3 - 3 && t < starts.w5) || t > starts.w6 - 3);
+      const dark = fieldOnCoast(t, starts, s.night);
+      fieldGroup.visible = world === 'coast' && dark > 0;
       fieldU.time.value = t;
       fieldU.eye.value.copy(s.eye);
       // at the edge of seeing (direction: "like heat shimmer or dust in sunlight"; brighter, the beads read as
@@ -712,11 +800,10 @@ export function createProps(): Props {
           const p = wanderer(i, t, starts.w5, edge);
           const x = s.beach.x - p.off;
           const z = s.beach.z - p.along;
-          // facing along their way (−z, with the shore's turn: the line a metre ahead)
-          const ahead = edge(p.along + 1) - edge(p.along - 1);
+          // facing along their way (−z, with its turns: wanderer), turned a little more as they look round
           w.group.position.set(x, Math.max(-0.05, s.ground(x, z)), z);
-          w.group.rotation.y = Math.atan2(ahead, 2);
-          w.stride(p.walked / strideLength(WALKERS[i].height));
+          w.group.rotation.y = p.heading + 0.25 * p.look;
+          w.pose(p);
         });
       }
     },

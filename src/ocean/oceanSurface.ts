@@ -77,6 +77,12 @@ export interface OceanSurfaceOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
   cloudSun?: (p: any) => any;
   /**
+   * FILM OPT-IN: where the sea lets go of its surface over the Drift's swash sim (surfaceMaterial `shoreSimMask`).
+   * Absent → the params box shoreSimX0…Z1, or nothing (the game).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  shoreSimMask?: (xz: any) => any;
+  /**
    * True when the scene is rendered into a HALF-FLOAT pass target rather than
    * straight to the canvas — i.e. when post-processing is on. The §V24
    * scene-colour copy has to be allocated in that format or WebGPU rejects
@@ -130,8 +136,8 @@ export class OceanSurface {
   private surface: OceanSurfaceMaterial;
   /** the sea's key radiance, haze colour and key direction, as it sets them each frame — read-only (The Drift's
    * swash draws its water as this sea draws its own, drift/wandering/shoreline.ts) */
-  get lightUniforms(): Pick<OceanSurfaceMaterial, 'sunColorUniform' | 'hazeColorUniform' | 'sunDirectionUniform'> {
-    return { sunColorUniform: this.surface.sunColorUniform, hazeColorUniform: this.surface.hazeColorUniform, sunDirectionUniform: this.surface.sunDirectionUniform };
+  get lightUniforms(): Pick<OceanSurfaceMaterial, 'sunColorUniform' | 'hazeColorUniform' | 'sunDirectionUniform' | 'sceneColorNode'> {
+    return { sunColorUniform: this.surface.sunColorUniform, hazeColorUniform: this.surface.hazeColorUniform, sunDirectionUniform: this.surface.sunDirectionUniform, sceneColorNode: this.surface.sceneColorNode };
   }
   private grid: SurfaceGridOptions;
   /**
@@ -175,6 +181,7 @@ export class OceanSurface {
       opts.fetch,
       opts.skySunTerm,
       opts.cloudSun,
+      opts.shoreSimMask,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);

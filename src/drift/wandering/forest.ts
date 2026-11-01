@@ -1103,6 +1103,14 @@ export function createForest(
   const sun = new THREE.Vector3(0, 1, 0);
   const shellMat = canopyMaterial(sun);
   aerial(shellMat);
+  // THE FAR MOTUS' CANOPY in the air in front of them (farAir.ts), as their ground and towers are (coast.ts): on the
+  // terrain's haze curve, which melts toward the horizon's mean colour, motu 1 (1.45 km, 78° left of the beach's
+  // front) came out "a small island with a tower that is entirely white, even though an even further island looks
+  // correct" (the user, 2026-11-01, of the view going ashore) — the high island beyond it already on farAir
+  const farShellMat = canopyMaterial(sun);
+  farShellMat.fog = false;
+  farAir.air.output(farShellMat);
+  const farLightU = farShellMat.userData.light as THREE.UniformNode<'color', THREE.Color>;
   const sunU = shellMat.userData.sun as THREE.UniformNode<'vec3', THREE.Vector3>;
   const lightU = shellMat.userData.light as THREE.UniformNode<'color', THREE.Color>;
   const loads: Promise<unknown>[] = [];
@@ -1118,7 +1126,7 @@ export function createForest(
         // rim and its line is a low mound of trees, not a slab with square ends)
         { spacing: 6.8, top: [8, 15], radius: [3.4, 6.6], edge: [12, 80], cell: [2.5, 2.5], seed: 23 + n, emergent: 0.09, heads: true };
     const geo = shellGeometry(isl, stand, ours ? walk : isl.box);
-    const mesh = new THREE.Mesh(geo, shellMat);
+    const mesh = new THREE.Mesh(geo, ours ? shellMat : farShellMat);
     mesh.name = `forest-${isl.name}`;
     mesh.castShadow = ours;
     mesh.receiveShadow = ours;
@@ -1145,6 +1153,7 @@ export function createForest(
       sun.copy(s);
       sunU.value.copy(s);
       lightU.value.copy(light);
+      farLightU.value.copy(light);
     },
   };
 }

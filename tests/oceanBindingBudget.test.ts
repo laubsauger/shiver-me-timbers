@@ -165,7 +165,14 @@ const LEDGER: readonly LedgerEntry[] = [
     // wave-bent lookup: 3 call sites, ONE texture). The Drift's shore fade (params shoreFadeThickness, built
     // only when it is on): +1 CALL SITE, +0 BINDINGS — the same shared DepthTexture straight behind the fragment,
     // and the seabed field already bound for the shallows tint.
-    sites: 7,
+    // The Drift's swash sea-composite (2026-11-01): +1 CALL SITE, +0 BINDINGS. The scene-colour copy is now made
+    // through one eagerly built `viewportTexture()` node that the sea reads by `.sample()` (2 sites), so the swash
+    // layer (drift/wandering/shoreline.ts) can take that node as its reference and share its copy target instead of
+    // allocating its own. The base node is never in the sea's graph: still ONE FramebufferTexture, textureLoad. Game
+    // and film paths alike. FILM ONLY, not in this file's count: `shoreSimMask` (swashSim.ts swashSeaGone) reads the
+    // swash's row lookup by textureLoad — +1 fragment texture, +0 samplers on the film's sea (19 textures under the
+    // raised limit, samplers still 15/16); the game passes no mask and binds nothing more.
+    sites: 8,
     // 3 displacement (sampleDisp, once per cascade — still three separate 2D
     // textures, see the vertex-stage note in the header) + ONE derivatives
     // ARRAY texture for all three cascades (sampleDeriv → sampleCascadeLayer,
@@ -182,7 +189,7 @@ const LEDGER: readonly LedgerEntry[] = [
     // vertex stage at all; see the header.
     vertexTextures: 3,
     vertexSamplers: 3,
-    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×4=1, viewportTexture()=1',
+    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×4=1, viewportTexture() + its .sample()=1',
   },
   {
     file: 'src/ocean/oceanTextures.ts',

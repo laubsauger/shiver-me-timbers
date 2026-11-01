@@ -48,7 +48,7 @@ import { oceanSurfaceParams } from '../../params/oceanSurface';
 import { causticsParams } from '../../params/caustics';
 import { terrainParams } from '../../params/terrain';
 import type { ReflectionShadeInput } from '../../reflection/reflectionShading';
-import { SWASH, SWASH_CALM, swashField, swashIn, swashUV } from './swashSim';
+import { SWASH, SWASH_CALM, SWASH_LAYOUT, swashField, swashFromSea, swashIn, swashRowWidth, swashSeaGone, swashUV } from './swashSim';
 import { texture } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
@@ -63,9 +63,13 @@ const LIFT = 0.025;
 /** m seaward of a point the roller looks for its bore's crest (a sim bore's face is 2–3 cells, 0.2–0.3 m) */
 const ROLL_AHEAD = 0.35;
 /** the sim's water drawn as the sea draws its own, over a copy of the scene behind it (the hand-over seam from above,
- * 2026-10-30). OFF for the final render: its copy target's memory at the 4096² dome is unmeasured (a farm box ran out
- * of GPU memory with it on) — on, it is built only then */
-const SWASH_SEA_COMPOSITE = false;
+ * 2026-10-30). It had been OFF for the final render: its own copy target cost a full-frame half-float texture per
+ * render target (a farm box ran out of GPU memory with it on), and the sheet's own model it fell back on read from
+ * the air as "a dark straight road" along the beach (the user, 2026-11-01). ON again, with no target of its own: its
+ * copy is the SEA's (bindSwashToSea: the sea's scene-colour node is its reference, three's ViewportTextureNode keeps
+ * one texture per render target per reference), copied again just before this layer draws — the opaque scene, which
+ * is what this water shows through */
+const SWASH_SEA_COMPOSITE = true;
 /** m the froth at a sim bore's toe stands over the water */
 const ROLL_LIP = 0.03;
 /** albedo of foam (fresh white water; its bubbles scatter nearly everything) */
@@ -118,9 +122,12 @@ const seaLight = {
   haze: uniform(new THREE.Color()),
   dir: uniform(new THREE.Vector3(0, 1, 0)),
 };
-let seaSource: { sunColorUniform: { value: THREE.Color }; hazeColorUniform: { value: THREE.Color }; sunDirectionUniform: { value: THREE.Vector3 } } | null = null;
+let seaSource: { sunColorUniform: { value: THREE.Color }; hazeColorUniform: { value: THREE.Color }; sunDirectionUniform: { value: THREE.Vector3 }; sceneColorNode?: unknown } | null = null;
+/** the shorelines' scene copies, which take the sea's as their reference (SWASH_SEA_COMPOSITE) */
+const behindNodes: Array<{ referenceNode: unknown }> = [];
 export function bindSwashToSea(sea: NonNullable<typeof seaSource>): void {
   seaSource = sea;
+  if (sea.sceneColorNode) for (const n of behindNodes) n.referenceNode = sea.sceneColorNode;
 }
 seaLight.sun.onRenderUpdate(() => {
   if (seaSource) (seaLight.sun.value as THREE.Color).copy(seaSource.sunColorUniform.value);
@@ -513,7 +520,8 @@ export function createShoreline(o: {
   const wS = texture(swashField.water, suv) as unknown as THREE.Node<'vec4'>;
   const mS = texture(swashField.marks, suv) as unknown as THREE.Node<'vec4'>;
   const du = vec2(1 / SWASH.nx, 0) as V2;
-  const dv = vec2(0, 1 / SWASH.nz) as V2;
+  // (a cell along, in this row's lookup: the rows coarsen along the shore beyond the core, swashSim.ts SWASH_ROWS)
+  const dv = vec2(0, float(SWASH.cell / SWASH_LAYOUT.nz).div(swashRowWidth(xz))) as V2;
   const etaAt = (q: V2): F => (texture(swashField.water, q) as unknown as THREE.Node<'vec4'>).x as F;
   const gEta = vec2(etaAt(suv.add(du)).sub(etaAt(suv.sub(du))), etaAt(suv.add(dv)).sub(etaAt(suv.sub(dv)))).div(2 * SWASH.cell) as V2;
   const hS = wS.y as F;
@@ -542,8 +550,7 @@ export function createShoreline(o: {
   const laceS = mix(laceAt(smear(flowAt(ph0).add(warp) as V2), foamDS), laceAt(smear(flowAt(ph1).add(warp).add(vec2(5.3, 2.1)) as V2), foamDS), wPh) as F;
   const steepS = gEta.length() as F;
   // (none in the sim's outer metres, as it makes none there: the sea takes over beyond them, SWASH_CALM)
-  const simX0 = (swashField.rect as unknown as THREE.Node<'vec4'>).x as F;
-  const calmS = smoothstep(simX0.add(SWASH_CALM[0]), simX0.add(SWASH_CALM[1]), xz.x) as F;
+  const calmS = smoothstep(SWASH_CALM[0], SWASH_CALM[1], swashFromSea(xz)) as F;
   // (the breaking face white and aerated where it is steep, in sections: a front breaks here and runs on unbroken
   // there, sections metres long that hold as it comes in (stretched across the shore). Whole and with the dense foam
   // behind it, it was a pale band as long as the beach)
@@ -674,7 +681,10 @@ export function createShoreline(o: {
     .mul(crestLift.add(1)) as V3;
   // · behind it the scene as it stands (the sand, the floor), copied as the sea copies it (a half-float target: the
   //   film's faces are drawn into one, and a copy in the canvas's format fails every frame — surfaceMaterial §V24)
-  const behind = (viewportTexture(screenUV, null, sceneBehind) as unknown as THREE.Node<'vec4'>).rgb as V3;
+  const behindNode = viewportTexture(screenUV, null, sceneBehind);
+  behindNodes.push(behindNode as unknown as { referenceNode: unknown });
+  if (seaSource?.sceneColorNode) (behindNode as unknown as { referenceNode: unknown }).referenceNode = seaSource.sceneColorNode;
+  const behind = (behindNode as unknown as THREE.Node<'vec4'>).rgb as V3;
   const throughBody = mix(bodyS, behind, trans.mul(0.9)) as V3;
   const shoreBody = smoothstep(float(0), (seaWater.shoreFade as unknown as F).max(1e-3), hS) as F;
   const transmitted = mix(behind, throughBody, shoreBody) as V3;
@@ -692,10 +702,9 @@ export function createShoreline(o: {
   // the sea a whole water of its own was seen through the sea's own: water twice, a bright turquoise stripe along the
   // hand-over in the first aerial of it. Over the band the two cross: the sea's share of the sim's water in what it
   // sees through peaks at a quarter, mid-band)
-  const R4 = swashField.rect as unknown as THREE.Node<'vec4'>;
-  const seaGone = smoothstep(R4.x.add(4), R4.x.add(6), xz.x)
-    .mul(smoothstep(R4.y.add(8), R4.y.add(12), xz.y))
-    .mul(smoothstep(R4.w.sub(8), R4.w.sub(12), xz.y)) as F;
+  // (and on the sand above the still water, where the sea draws nothing: the run-up's sheets stay drawn through the
+  // ends' 30 m crossfade, where the sea has not let go of its water yet)
+  const seaGone = swashSeaGone(xz).max(smoothstep(0, 0.04, heightAbove)) as F;
   const waterS2 = waterS.mul(float(1).sub(foamS)).mul(seaGone) as F;
     return { colourS, waterS2 };
   })();

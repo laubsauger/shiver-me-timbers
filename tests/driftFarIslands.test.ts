@@ -101,7 +101,9 @@ describe('the air in front of a far island', () => {
   });
 
   it('leaves the high island darker than the sky over its summit, morning and sunset (it read pale at w1)', () => {
-    for (const [show, beat] of [[500, 'w1'], [650, 'w4']] as const) {
+    // (w1's morning at 530 s: since the 2026-11-01 dawn, w1 opens in the night and its Sun is up ~527 s — at 500 s it
+    // is still −19°, island and sky both black)
+    for (const [show, beat] of [[530, 'w1'], [650, 'w4']] as const) {
       const sun = new THREE.Vector3(...beatSun(beat, show - SEA0, C1));
       // a dark canopy (forest.ts's greens) lit by the Sun and the sky
       const E = skyIrradiance(r0, sun);

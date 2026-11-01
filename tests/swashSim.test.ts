@@ -10,9 +10,13 @@
  *     further up the beach;
  *   - THE SEAM: a state warmed from rest SWASH_WARM s before its frame against one run on from 40 s earlier, on our
  *     beach's own profile: how much the warm start still shows 30 s later (the price of the wake's rule).
+ *   - ON ALONG THE BEACH (the 2026-11-01 note: the 200 m strip's edges read as "a rectangle on the shore"): the rows
+ *     that coarsen along the shore and shift across it to follow its curve keep the scheme's two guarantees — mass
+ *     to round-off over cells of their own widths, a lake at rest still across rows shifted by whole cells — and the
+ *     layout keeps the core's own 10 cm rows where they were, reaching the shore the wide shots see.
  */
 import { describe, expect, it } from 'vitest';
-import { stepSwashCpu, swashAtRest, swashForcing, swashPlan, SWASH_DT, SWASH_SUB, SWASH_WARM, SWASH, type SwashGrid } from '../src/drift/wandering/swashSim';
+import { stepSwashCpu, swashAtRest, swashForcing, swashPlan, SWASH_DT, SWASH_LAYOUT, SWASH_ROWS, SWASH_SUB, SWASH_WARM, SWASH, type SwashGrid } from '../src/drift/wandering/swashSim';
 
 const sum = (a: Float64Array): number => a.reduce((s, x) => s + x, 0);
 
@@ -85,6 +89,71 @@ describe('swash sim scheme', () => {
     }
     expect(du).toBeLessThan(1e-12);
     expect(dh).toBeLessThan(1e-12);
+  });
+
+  it('conserves mass over rows of their own widths (Σ h·dx·dz), as the coarse rows along the shore are', () => {
+    const nx = 60;
+    const nz = 40;
+    const dx = 0.1;
+    let a = swashAtRest(nx, nz, dx, bumpyBed(nx, nz, dx));
+    // (growing ×1.03 a row from 10 cm, as SWASH_ROWS: the dam's water crosses the change of width)
+    a.dz = Float64Array.from({ length: nz }, (_, j) => Math.min(0.4, dx * 1.03 ** j));
+    for (let j = 0; j < 15; j++) for (let i = 0; i < 20; i++) a.h[i + j * nx] += 0.3;
+    for (let k = 0; k < nx * nz; k++) if (a.h[k] > 0) a.hv[k] = 0.2 * a.h[k];
+    let b = clone(a);
+    const mass = (g: SwashGrid): number => g.h.reduce((s, h, k) => s + h * g.dz![Math.floor(k / nx)], 0);
+    const m0 = mass(a);
+    for (let n = 0; n < 600; n++) {
+      stepSwashCpu(a, b, n * SWASH_DT, SWASH_DT, { seaward: 'wall', ends: 'wall', friction: true });
+      [a, b] = [b, a];
+    }
+    expect(Math.abs(mass(a) - m0) / m0).toBeLessThan(1e-12);
+    // (a uniform-width mass would not hold: the test can tell the widths are used)
+    expect(Math.abs(sum(a.h) - sum(swashAtRest(nx, nz, dx, a.bed).h) - 0.3 * 300)).toBeGreaterThan(1e-6);
+  });
+
+  it('keeps a lake at rest still across rows shifted by whole cells to follow a curving shore', () => {
+    const nx = 60;
+    const nz = 40;
+    const dx = 0.1;
+    // the shore curving out to sea one cell in every two rows; each row's bed the same slope at its own world x
+    const shift = Int32Array.from({ length: nz }, (_, j) => Math.floor(j / 2));
+    const bed = new Float64Array(nx * nz);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) bed[i + j * nx] = -0.4 + 0.09 * (i - shift[j]) * dx + 0.05 * Math.sin(j * 0.3);
+    let a = swashAtRest(nx, nz, dx, bed);
+    a.shift = shift;
+    a.dz = Float64Array.from({ length: nz }, (_, j) => Math.min(0.4, dx * 1.03 ** j));
+    const h0 = a.h.slice();
+    let b = clone(a);
+    for (let n = 0; n < 400; n++) {
+      stepSwashCpu(a, b, n * SWASH_DT, SWASH_DT, { seaward: 'wall', ends: 'open', friction: true, infiltration: false });
+      [a, b] = [b, a];
+    }
+    let du = 0;
+    let dh = 0;
+    for (let k = 0; k < nx * nz; k++) {
+      du = Math.max(du, Math.abs(a.hu[k]), Math.abs(a.hv[k]));
+      dh = Math.max(dh, Math.abs(a.h[k] - h0[k]));
+    }
+    expect(du).toBeLessThan(1e-12);
+    expect(dh).toBeLessThan(1e-12);
+  });
+
+  it('lays its rows out along the beach: the core\'s 10 cm rows where they were, coarsening outward to 40 cm, out to the shore the wide shots see', () => {
+    const L = SWASH_LAYOUT;
+    const [c0, c1] = L.core;
+    expect(c1 - c0).toBe(SWASH.nz);
+    for (let j = c0; j < c1; j += 97) {
+      expect(L.dz[j]).toBe(SWASH.cell);
+      expect(L.zc[j]).toBeCloseTo(SWASH.z0 + (j - c0 + 0.5) * SWASH.cell, 9);
+    }
+    expect(Math.max(...L.dz)).toBeLessThanOrEqual(SWASH_ROWS.coarse);
+    // (no jump in width between neighbours bigger than the growth)
+    for (let j = 1; j < L.nz; j++) expect(Math.max(L.dz[j], L.dz[j - 1]) / Math.min(L.dz[j], L.dz[j - 1])).toBeLessThanOrEqual(SWASH_ROWS.grow + 1e-9);
+    // (along runs toward −z: 270 m ahead of the beach's middle and 175 m behind it)
+    expect(-L.zLo).toBeGreaterThanOrEqual(270);
+    expect(L.zHi).toBeGreaterThanOrEqual(175);
+    expect(L.nz).toBeLessThan(2800);
   });
 
   it('is deterministic: the same start and t give the same state; forcing and plan are pure', () => {

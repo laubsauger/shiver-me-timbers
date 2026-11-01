@@ -45,6 +45,13 @@ export interface BeatSpec {
    * its Sun from its start elevation to its end one, and its sky from the last beat's cover to its own, over this
    * many seconds (eased), then held (c4: night falls in a time-lapse, no crossfade) */
   lapse?: number;
+  /** a beat entered through a dissolve out of the NIGHT may bring its light UP in a scripted dawn instead of
+   * crossfading into day: its Sun held at `from` (deg, the night's own) through the dissolve, until `at` s into the
+   * beat, then eased up to its start elevation over `over` s and on in real time; its sky eased from the last beat's
+   * clouds to its own over the same run. The dissolve then changes the world in the dark, where both beats draw the
+   * same night, and the change the eye sees is the light lifting (w1: the night over the sea becomes the morning over
+   * the island) */
+  rise?: { from: number; at: number; over: number };
 }
 
 /** s c1 runs on past the landing's end: the slow follow before seafaring */
@@ -72,7 +79,12 @@ export const BEATS: BeatSpec[] = [
   // (the morning Sun behind us on the SEA side, over the lagoon: on the land side — behind right, as it was — the
   // forest stood between it and the beach, and the whole beach lay in the trees' long shadow, backlit and dark as we
   // came in, the raft's shadow thrown back across the shallows at us: the 2026-10-29 review)
-  { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: -125, cover: 0.4, cirrus: 0.12 },
+  // (THE NIGHT LIFTS INTO THE MORNING, not a crossfade: the 10 s dissolve went from c4's night straight to a 5° Sun,
+  // night and day on the screen at once — "the transition from night to we see the island feels a bit abrupt and
+  // blendy", the 2026-11-01 review. Now the world changes in the dark, both beats under the same night (the Sun at
+  // c4's −20°), and the dawn comes up over the island in one eased run of 42 s from the dissolve's end: first light
+  // (−12°) ~19 s into w1, the Sun on the horizon ~32 s, 5° ~37 s, on to 9° by w2 as before)
+  { name: 'w1', world: 'coast', length: 50, dissolve: 10, sunEl: [5, 9], sunAz: -125, cover: 0.4, cirrus: 0.12, rise: { from: -20, at: 4, over: 42 } },
   { name: 'w2', world: 'coast', length: 50, dissolve: 0, sunEl: [9, 14], sunAz: -125, cover: 0.4, cirrus: 0.12 },
   { name: 'w3', world: 'coast', length: 45, dissolve: 8, sunEl: [9, 6], sunAz: -68, cover: 0.24, cirrus: 0.12 },
   { name: 'w4', world: 'coast', length: 40, dissolve: 0, sunEl: [6, 1.5], sunAz: -68, cover: 0.24, cirrus: 0.12 },
@@ -129,15 +141,16 @@ export function beatsAt(t: number, c1End: number): Array<{ name: BeatName; weigh
 
 export const spec = (name: BeatName): BeatSpec | undefined => BEATS.find((b) => b.name === name);
 
-/** the clouds of beat `name` at sea time t: its own, or through its time-lapse (`lapse`) eased in from the beat
- * before's */
+/** the clouds of beat `name` at sea time t: its own, or through its time-lapse (`lapse`) or its dawn (`rise`) eased
+ * in from the beat before's */
 export function beatSky(name: BeatName, t: number, c1End: number): { cover: number; cirrus: number } {
   const b = spec(name);
   if (!b) throw new Error(`beatSky: ${name} has no sky of its own`);
   const i = BEATS.indexOf(b);
-  if (!b.lapse || i === 0) return { cover: b.cover, cirrus: b.cirrus };
+  if ((!b.lapse && !b.rise) || i === 0) return { cover: b.cover, cirrus: b.cirrus };
   const a = BEATS[i - 1];
-  const k = smooth((t - beatStarts(c1End).starts[name]) / b.lapse);
+  const s = beatStarts(c1End).starts[name];
+  const k = b.lapse ? smooth((t - s) / b.lapse) : smooth((t - s - b.rise!.at) / b.rise!.over);
   return { cover: a.cover + (b.cover - a.cover) * k, cirrus: a.cirrus + (b.cirrus - a.cirrus) * k };
 }
 
@@ -152,7 +165,10 @@ export function beatSun(name: BeatName, t: number, c1End: number): [number, numb
   if (!b) throw new Error(`beatSun: ${name} has no light of its own`);
   const { starts } = beatStarts(c1End);
   const u = b.lapse ? smooth((t - starts[name]) / b.lapse) : Math.min(1, Math.max(0, (t - starts[name]) / b.length));
-  const el = ((b.sunEl[0] + (b.sunEl[1] - b.sunEl[0]) * u) * Math.PI) / 180;
+  let elDeg = b.sunEl[0] + (b.sunEl[1] - b.sunEl[0]) * u;
+  // (a dawn: held at the night's elevation, then eased up onto the real-time run — see `rise`)
+  if (b.rise) elDeg = b.rise.from + (elDeg - b.rise.from) * smooth((t - starts[name] - b.rise.at) / b.rise.over);
+  const el = (elDeg * Math.PI) / 180;
   const az = (b.sunAz * Math.PI) / 180;
   return [Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el)];
 }
@@ -202,15 +218,20 @@ const POSE_KEYS: PoseKey[] = [
 
 /** s into c4 the sail is struck over, as the night falls */
 const SAIL_STRIKE: [number, number] = [10, 17];
+/** s into w1 it is set again, as the dawn comes up (w1's `rise`: the Sun from ~−12° to ~−3° over these): struck through
+ * the dissolve, as c4 left it — set on one side and struck on the other, the dissolve drew a ghost of the sail (the
+ * 2026-11-01 review) */
+const SAIL_HOIST: [number, number] = [19, 29];
 
 /** the square sail, 0 furled .. 1 set: furled at rest in the debris, set at sea through the dolphin and on into
- * the night, struck there; set along the coast, struck as the raft comes to anchor off the beach (a dissolve
- * crossfades a hoist). Striking it at the dolphin's turn read as hoist-and-strike within 45 s (the v10 review):
+ * the night, struck there; struck still as the night becomes the coast's, set again at dawn, struck as the raft
+ * comes to anchor off the beach (never one state on each side of a dissolve: it would crossfade a hoist). Striking it at the dolphin's turn read as hoist-and-strike within 45 s (the v10 review):
  * the air turns with the raft instead (sea.ts), and dies at last light (`airAt`), the sail going slack. */
 export function sailsAt(name: BeatName, t: number, c1End: number): number {
   const { starts } = beatStarts(c1End);
   if (name === 'c4') return 1 - smooth((t - starts.c4 - SAIL_STRIKE[0]) / (SAIL_STRIKE[1] - SAIL_STRIKE[0]));
-  if (name === 'c2' || name === 'c3' || name === 'w1') return 1;
+  if (name === 'w1') return smooth((t - starts.w1 - SAIL_HOIST[0]) / (SAIL_HOIST[1] - SAIL_HOIST[0]));
+  if (name === 'c2' || name === 'c3') return 1;
   if (name === 'w2') return 1 - smooth((t - starts.w2 - 28) / 12);
   return 0;
 }
@@ -299,7 +320,9 @@ const COAST_KEYS: Array<{ beat: BeatName; at: number; along: number; off: number
   { beat: 'w4', at: 40, along: 12, off: -8 },
   // w5: held while the wanderers come past (props.ts), then back and up as they walk on
   { beat: 'w5', at: 12, along: 12, off: -8 },
-  { beat: 'w5', at: 35, along: -14, off: -3 },
+  // (to 22 m behind where they passed, not 26, and 9 m up, not 11: the wanderers ~45 m ahead at w5's end, a little
+  // larger in the wide shot — the user, 2026-11-01, "maybe we can work with the camera angle some more")
+  { beat: 'w5', at: 35, along: -8, off: -4 },
   { beat: 'w6', at: 60, along: -40, off: 6 },
 ];
 /** m/s the raft and the eye sail along the coast in w1 */
@@ -308,7 +331,7 @@ const COAST_DRIFT = 1.0;
 export const STEP_OFF = 30;
 /** m: the eye over the sand once ashore, and the height it rises to as w5 pulls back */
 export const EYE_ASHORE = 1.6;
-const EYE_W5 = 11;
+const EYE_W5 = 9;
 const EYE_W6 = 22;
 
 /**

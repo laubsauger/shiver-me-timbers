@@ -138,6 +138,8 @@ export interface OceanSurfaceMaterial {
   readonly hdrSceneTarget: boolean;
   /** live sun colour — push from the DirectionalLight every frame */
   sunColorUniform: { value: THREE.Color };
+  /** the scene-colour copy's node (a ViewportTextureNode): a reference for another layer's copy to share its target */
+  readonly sceneColorNode: unknown;
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
@@ -287,6 +289,12 @@ export function buildOceanSurfaceMaterial(
    * never the reflected sky. Absent (the game) → no node, the sea unchanged.
    */
   cloudSun?: (p: TslNode) => TslNode,
+  /**
+   * FILM OPT-IN: where the sea lets go of its surface over the Drift's swash sim (0 … 1 at a world xz), whose water is
+   * the surface there (drift/wandering/swashSim.ts swashSeaGone: its domain follows the curving shore, its edges
+   * wander). Takes the place of the box of params shoreSimX0…Z1. Absent (the game) → the box, or nothing.
+   */
+  shoreSimMask?: (xz: TslNode) => TslNode,
 ): OceanSurfaceMaterial {
   /**
    * §V24 scene-colour copy target — and a §V28-class silent failure if it is
@@ -308,6 +316,12 @@ export function buildOceanSurfaceMaterial(
     (sceneColorTexture as unknown as { internalFormat: string }).internalFormat =
       'rgba16float';
   }
+  // The copy's NODE, which owns the copies (three keeps one texture per render
+  // target per viewport node and its samples): the sea samples it below, and
+  // the Drift's swash layer takes it as its reference, so the two share one
+  // copy target instead of each allocating its own (OceanSurfaceMaterial
+  // sceneColorNode). The sea draws exactly as it did.
+  const sceneColorNode = viewportTexture(screenUV, null, sceneColorTexture);
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
   // pre-first-update placeholder: a 2.6° source, gate −2.1°..+1.1° (see the
@@ -1628,10 +1642,8 @@ export function buildOceanSurfaceMaterial(
       .exp()
       .mul(refraction.visible.and(lookupValid).select(float(1), float(0)))
       .mul(floorFade);
-    const sceneCol = viewportTexture(
+    const sceneCol = sceneColorNode.sample(
       refraction.useBent.select(refractedUV, lookupUV),
-      null,
-      sceneColorTexture,
     ).rgb;
     // NOTE: `sceneCol`/`seeThrough` are deliberately NOT composited into
     // `waterCol` here — see the transmission channel at the fresnel split
@@ -2817,7 +2829,9 @@ export function buildOceanSurfaceMaterial(
     const edgeWidth = uShoreEdge.mul(valueNoise(worldXZ.mul(0.9)).mul(0.6).add(valueNoise(worldXZ.mul(3.1).add(7.7)).mul(0.6)).add(0.4));
     let fade = shoreFadeOver(behind, uShoreEdge.greaterThan(0).select(edgeWidth, uShoreFade));
     // (params shoreSimX0…Z1: none over the film's swash sim, whose water is the surface there; built only when set)
-    if (sp.shoreSimX1 > sp.shoreSimX0) {
+    if (shoreSimMask) {
+      fade = fade.mul(float(1).sub(shoreSimMask(worldXZ)));
+    } else if (sp.shoreSimX1 > sp.shoreSimX0) {
       const [x0, z0, x1, z1] = [sp.shoreSimX0, sp.shoreSimZ0, sp.shoreSimX1, sp.shoreSimZ1];
       // (the sea goes only where the sim's water is already whole: past the band the sim fades in over — 1–4 m in
       // from its seaward edge, 8 m from its ends — so no sand ever shows between the two)
@@ -2998,6 +3012,7 @@ export function buildOceanSurfaceMaterial(
     radialLodUniform: uRadialA as unknown as { value: number },
     hdrSceneTarget,
     sunColorUniform: uSunLightColor as unknown as { value: THREE.Color },
+    sceneColorNode,
     updateFromParams,
   };
 }

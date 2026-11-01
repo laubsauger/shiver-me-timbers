@@ -2250,3 +2250,21 @@ describe('the wake must not composite as a solid sheet', () => {
     expect(wake).toBeGreaterThan(lum(oceanSurfaceParams.deepColor));
   });
 });
+
+describe("the raft's trail dose (flowfoam/hullContact wakeDose)", () => {
+  it('leaves all but nothing at a near-stop and ramps up with the way, full at the reference way', async () => {
+    // (the 2026-11-01 review: the wake "very intense even at the very slow speeds". The dose a patch of water gets is
+    // the rate × the time the transom dwells over it, so the mark a raft leaves has to fall faster than the way does)
+    const { wakeDose } = await import('../src/flowfoam/hullContact');
+    expect(wakeDose(0)).toBe(0);
+    expect(wakeDose(0.2)).toBeLessThan(0.05); // the night's drift
+    expect(wakeDose(0.6)).toBeLessThan(0.3); // c3's dying air
+    expect(wakeDose(1.2)).toBeCloseTo(1, 9); // c2's course speed
+    let last = -1;
+    for (let w = 0; w <= 2.5; w += 0.05) {
+      expect(wakeDose(w)).toBeGreaterThanOrEqual(last);
+      last = wakeDose(w);
+    }
+    expect(wakeDose(5)).toBeLessThanOrEqual(2.25);
+  });
+});

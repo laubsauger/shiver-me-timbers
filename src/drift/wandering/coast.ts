@@ -645,18 +645,24 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
       true,
     );
   }
+  // THE FAR LAND'S GROUND (the high island's and the motus'), seen through the air in front of it (farAir.ts, via
+  // `high`: forest.ts createForestGround). The motus had stayed on the terrain's haze curve, which melts toward the
+  // horizon's mean colour: motu 1 (1.45 km, 78° left of the beach's front) and its tower came out "entirely white,
+  // even though an even further island looks correct" (the user, 2026-11-01, going ashore) — the high island beyond
+  // it was already on farAir. Now every far island, its trees (forest.ts) and its towers (below) take the one air
+  const farGround = o.high?.(materials.terrain.uniforms.aerial.color);
   // the far motus in their own frames: 2.5 m cells over the island and its rim, coarse out to the lagoon floor
   for (const m of motus) {
     const ha = m.f.length / 2;
     const hw = m.f.width / 2;
     const us = graded(-ha - 300, ha + 300, -ha - 40, ha + 40, 2.5, 12);
     const vs = graded(-hw - 260, hw + 260, -hw - 60, hw + 60, 2.5, 12);
-    add(gridMesh(us, vs, m.toWorld, (x, z) => Math.max(LAGOON_FLOOR, m.heightAt(x, z))), 'coast-motu', false);
+    add(gridMesh(us, vs, m.toWorld, (x, z) => Math.max(LAGOON_FLOOR, m.heightAt(x, z))), 'coast-motu', false, farGround);
   }
   {
     const us = graded(hc[0] - HALF, hc[0] + HALF, hc[0] - 3600, hc[0] + 3600, 14, 30);
     const vs = graded(hc[1] - HALF, hc[1] + HALF, hc[1] - 3600, hc[1] + 3600, 14, 30);
-    add(gridMesh(us, vs, (x, z, out) => ((out[0] = x), (out[1] = z)), (x, z) => Math.max(LAGOON_FLOOR - 16, highAt(x, z))), 'coast-high', false, o.high?.(materials.terrain.uniforms.aerial.color));
+    add(gridMesh(us, vs, (x, z, out) => ((out[0] = x), (out[1] = z)), (x, z) => Math.max(LAGOON_FLOOR - 16, highAt(x, z))), 'coast-high', false, farGround);
   }
   // THE RADIO TOWERS (radioTower.ts: the network's stations that stand on this coast), each first leg's guys toward
   // our beach: on the high island's summit (the skyline from every eye of w1–w6), on each named motu's spine (its
@@ -675,8 +681,9 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
   };
   const on: Record<(typeof FILM_COAST)[string], { site: MastSite; air: MastAir; lod?: 0 | 1 }> = {
     high: { site: { ground: highAt, at: [summit.x, summit.z], toward: [bx, bz] }, air: farAir.air },
-    motu1: { site: { ground: heightAt, at: spine(motus[0]), toward: [bx, bz] }, air: terrainAir(aerial) },
-    motu2: { site: { ground: heightAt, at: spine(motus[1]), toward: [bx, bz] }, air: terrainAir(aerial) },
+    // (the motus' towers in their islands' air, farAir: on the terrain's they were the white tower of the 2026-11-01 note)
+    motu1: { site: { ground: heightAt, at: spine(motus[0]), toward: [bx, bz] }, air: farAir.air },
+    motu2: { site: { ground: heightAt, at: spine(motus[1]), toward: [bx, bz] }, air: farAir.air },
     // (seen from a few hundred metres: the kit's full detail)
     ours: { site: { ground: heightAt, at: [bx - OURS_MAST.off, bz - OURS_MAST.along], toward: [bx, bz] }, air: terrainAir(aerial), lod: 0 },
   };

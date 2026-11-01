@@ -276,12 +276,30 @@ const WALK_LEG = 0.85;
 /** m per stride for a figure `height` m tall: what WALK_HIP makes of its legs */
 export const strideLength = (height: number): number => 4 * WALK_LEG * Math.sin(WALK_HIP) * (height / 1.75);
 
+/** a walker's pose (THE WANDERERS WALKING, and what they do between their strides) */
+export interface WalkerPose {
+  /** strides into its walk */
+  phase: number;
+  /** 0 … 1: how far its stride swings (0: standing, its feet together; a slow walk swings less) */
+  amp: number;
+  /** 0 … 1: bent to the sand at the waist and knees, the right hand down to it (picking something up) */
+  stoop: number;
+  /** rad: its head turned (+ to its left), its shoulders a third as far */
+  look: number;
+}
+
 export interface CrewWalker {
   /** feet at its origin, facing −z */
   readonly group: THREE.Group;
-  /** pose it `phase` strides into its walk */
+  /** pose it `phase` strides into its walk, in its full stride */
   stride(phase: number): void;
+  /** pose it as `p` */
+  pose(p: WalkerPose): void;
 }
+
+/** rad at a full stoop: the upper body forward at the waist, the thighs forward, the knees bent, the reaching arm
+ * forward (a person picking a shell off wet sand bends at the waist more than the knees) */
+const STOOP = { waist: 1.05, thigh: 0.35, knee: 0.75, reach: 0.65 };
 
 /** one of the crew walking, dressed as `look`, `height` m tall (THE WANDERERS WALKING) */
 export function createCrewWalker(look: CrewLook, height: number): CrewWalker {
@@ -292,14 +310,27 @@ export function createCrewWalker(look: CrewLook, height: number): CrewWalker {
   const hair = material(look.hair, 0.75, 0);
   const g = new THREE.Group();
   g.name = 'drift-crew-walker';
-  // everything rides on the body, which rises and falls over the stance leg
+  // everything rides on the body, which rises and falls over the stance leg; the upper body on it bends at the
+  // pelvis (stooping), the head on that turns at the neck (looking round)
   const body = new THREE.Group();
   g.add(body);
-  body.add(torso(k.pelvis, k.neck, shirt));
+  const upper = new THREE.Group();
+  upper.position.copy(v3(k.pelvis));
+  body.add(upper);
+  const chest = torso(k.pelvis, k.neck, shirt);
+  chest.position.sub(v3(k.pelvis));
+  upper.add(chest);
+  const neck = new THREE.Group();
+  neck.position.copy(v3(k.neck)).sub(v3(k.pelvis));
+  upper.add(neck);
+  for (const o of headOf(k, look, skin, hair)) {
+    o.position.sub(v3(k.neck));
+    neck.add(o);
+  }
   const seat = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), shorts);
   seat.position.copy(v3(k.pelvis));
   seat.scale.set(1, 0.62, 0.78);
-  body.add(seat, ...headOf(k, look, skin, hair));
+  body.add(seat);
   const O: V = [0, 0, 0];
   const rel = (a: V, b: V): V => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
   const part = (a: V, f: number): V => [a[0] * f, a[1] * f, a[2] * f];
@@ -323,7 +354,7 @@ export function createCrewWalker(look: CrewLook, height: number): CrewWalker {
     return { hip, shin, foot };
   });
   const arms = ([0, 1] as const).map((s) => {
-    const shoulder = joint(body, k.shoulder[s]);
+    const shoulder = joint(upper, rel(k.shoulder[s], k.pelvis));
     const elbow = rel(k.elbow[s], k.shoulder[s]);
     const sleeve = part(elbow, 0.55);
     shoulder.add(limb(O, sleeve, 0.058, 0.052, shirt), limb(sleeve, elbow, 0.042, 0.037, skin));
@@ -343,26 +374,33 @@ export function createCrewWalker(look: CrewLook, height: number): CrewWalker {
     o.castShadow = true;
     o.receiveShadow = true;
   });
+  const pose = ({ phase, amp, stoop, look }: WalkerPose): void => {
+    // (rotation about x: + swings a limb forward, toward −z; the left side half a stride behind the right)
+    for (const s of [0, 1] as const) {
+      const w = 2 * Math.PI * (phase + s * 0.5);
+      const thigh = amp * WALK_HIP * Math.sin(w) + STOOP.thigh * stoop;
+      const bend = (WALK_KNEE[1] + (WALK_KNEE[0] - WALK_KNEE[1]) * Math.max(0, Math.cos(w)) ** 2) * amp + STOOP.knee * stoop;
+      legs[s].hip.rotation.x = thigh;
+      legs[s].shin.rotation.x = -bend;
+      legs[s].foot.rotation.x = bend - thigh;
+      const arm = -amp * WALK_ARM * Math.sin(w);
+      // (the right hand reaches down to the sand as it stoops)
+      arms[s].shoulder.rotation.x = arm * (1 - stoop) + (s === 0 ? STOOP.reach * stoop : 0.2 * stoop);
+      arms[s].fore.rotation.x = (0.25 + 0.3 * Math.max(0, arm / WALK_ARM)) * (1 - 0.6 * stoop);
+    }
+    upper.rotation.set(-STOOP.waist * stoop, look / 3, 0, 'YXZ');
+    neck.rotation.set(0.25 * stoop, (2 * look) / 3, 0, 'YXZ');
+    // the stance leg is the one swinging back (its thigh's angle falling): the body over it, highest as it passes
+    // under the hip (straight down), lowest at double support; and lower as the knees bend to stoop (the hip's
+    // height over the ankle with the thigh forward and the shin back, about 7 cm at a full stoop)
+    const stance = amp * WALK_HIP * Math.sin(2 * Math.PI * phase);
+    const crouch = 1 - 0.5 * (Math.cos(STOOP.thigh * stoop) + Math.cos((STOOP.thigh - STOOP.knee) * stoop));
+    body.position.y = -WALK_LEG * (1 - Math.cos(stance)) - WALK_LEG * crouch;
+  };
   return {
     group: g,
-    stride(phase) {
-      // (rotation about x: + swings a limb forward, toward −z; the left side half a stride behind the right)
-      for (const s of [0, 1] as const) {
-        const w = 2 * Math.PI * (phase + s * 0.5);
-        const thigh = WALK_HIP * Math.sin(w);
-        const bend = WALK_KNEE[1] + (WALK_KNEE[0] - WALK_KNEE[1]) * Math.max(0, Math.cos(w)) ** 2;
-        legs[s].hip.rotation.x = thigh;
-        legs[s].shin.rotation.x = -bend;
-        legs[s].foot.rotation.x = bend - thigh;
-        const arm = -WALK_ARM * Math.sin(w);
-        arms[s].shoulder.rotation.x = arm;
-        arms[s].fore.rotation.x = 0.25 + 0.3 * Math.max(0, arm / WALK_ARM);
-      }
-      // the stance leg is the one swinging back (its thigh's angle falling): the body over it, highest as it passes
-      // under the hip (straight down), lowest at double support
-      const stance = WALK_HIP * Math.sin(2 * Math.PI * phase);
-      body.position.y = -WALK_LEG * (1 - Math.cos(stance));
-    },
+    stride: (phase) => pose({ phase, amp: 1, stoop: 0, look: 0 }),
+    pose,
   };
 }
 

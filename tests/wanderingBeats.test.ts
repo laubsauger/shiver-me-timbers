@@ -51,6 +51,46 @@ describe('the beats after the landing', () => {
     expect(airAt(starts.c4, starts)).toBeLessThan(0.35);
   });
 
+  it('changes the world into the morning in the dark, then brings the dawn up in one continuous run', () => {
+    // (the 2026-11-01 review: the night-to-island dissolve felt "a bit abrupt and blendy" — night and day crossfaded.
+    // No crossfade in continuous action: the light is scripted over time. So through the dissolve both beats draw
+    // the same deep night (no day on either side), and the light lifts only once the new world stands alone)
+    const w1 = BEATS.find((b) => b.name === 'w1')!;
+    expect(w1.rise).toBeDefined();
+    const s = starts.w1;
+    const el = (v: number[]): number => (Math.asin(v[1]) * 180) / Math.PI;
+    for (let t = s - w1.dissolve / 2; t <= s + w1.dissolve / 2; t += 0.1) {
+      for (const { name } of beatsAt(t, c1End)) expect(el(beatSun(name, t, c1End)), `${name} at ${(t - s).toFixed(1)} s`).toBeLessThan(-18);
+    }
+    // the dawn is a passage, not a cut: from night (−12°, before any first light) to the morning's 5° takes well over
+    // the old dissolve's 10 s, and the Sun never steps
+    const h = 1 / 30;
+    let firstLight = NaN;
+    let up = NaN;
+    let fastest = 0;
+    for (let t = s; t < s + w1.length; t += h) {
+      const a = el(beatSun('w1', t, c1End));
+      if (Number.isNaN(firstLight) && a > -12) firstLight = t;
+      if (Number.isNaN(up) && a > 5) up = t;
+      fastest = Math.max(fastest, deg(beatSun('w1', t, c1End), beatSun('w1', t + h, c1End)) / h);
+    }
+    expect(up - firstLight).toBeGreaterThan(18);
+    expect(fastest).toBeLessThan(2);
+    // and it ends on the morning w2 runs on from
+    const end = beatSun('w1', starts.w2, c1End);
+    expect(deg(end, beatSun('w2', starts.w2, c1End))).toBeLessThan(0.05);
+  });
+
+  it('never draws the sail one way on one side of a dissolve and the other way on the other', () => {
+    // (struck at night and set in w1's morning, the dissolve drew a ghost sail over the struck one — 2026-11-01)
+    for (let t = 0; t < total; t += 0.05) {
+      const ps = beatsAt(t, c1End);
+      if (ps.length < 2) continue;
+      const [a, b] = ps.map((p) => sailsAt(p.name, t, c1End));
+      expect(Math.abs(a - b), `${ps[0].name}/${ps[1].name} at ${t.toFixed(2)}`).toBeLessThan(1e-6);
+    }
+  });
+
   it('draws every instant with one beat, or two crossfading only across the planned dissolves', () => {
     const dissolving = new Set<string>();
     for (let t = 0; t < total; t += 0.05) {
@@ -162,7 +202,9 @@ describe('the beats after the landing', () => {
     for (const b of BEATS.filter((x) => !x.lapse)) {
       const h = 1;
       let fastest = 0;
-      for (let t = starts[b.name]; t < starts[b.name] + b.length; t += h) fastest = Math.max(fastest, deg(beatSun(b.name, t, c1End), beatSun(b.name, t + h, c1End)) / h);
+      // (a dawn's run is a time-lapse too: real time from its end)
+      const from = starts[b.name] + (b.rise ? b.rise.at + b.rise.over : 0);
+      for (let t = from; t < starts[b.name] + b.length; t += h) fastest = Math.max(fastest, deg(beatSun(b.name, t, c1End), beatSun(b.name, t + h, c1End)) / h);
       expect(fastest, b.name).toBeLessThan(0.15);
     }
   });

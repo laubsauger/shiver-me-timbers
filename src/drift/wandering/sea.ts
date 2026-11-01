@@ -63,7 +63,7 @@ import { createScannedRocks } from './scannedRocks';
 import { createFilmCoast, type FilmCoast } from './coast';
 import { createForest, createForestGround, litterMask, type Forest } from './forest';
 import { bindSwashToSea, createShoreline, swashLight } from './shoreline';
-import { createSwashSim, type SwashSim } from './swashSim';
+import { createSwashSim, swashSeaGone, type SwashSim } from './swashSim';
 import { filmShadowFilter } from './filmShadowFilter';
 import { createGroundDebris, type GroundDebris } from './groundDebris';
 import { SAND_ALBEDO, createBeachDressing, type BeachDressing } from './beachDressing';
@@ -407,7 +407,12 @@ export function createSea(
     cirrusCover: uniform(CIRRUS_COVER),
     sunCirrus: uniform(new THREE.Vector3()),
   };
-  const seaSky = createSeaSky(FAR * 0.8, bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0)), {
+  const nightSky = bakeNightSky(renderer, front, new THREE.Vector3(0, 1, 0));
+  /** the night sky as it is laid for the open sea's eye (its `front`, c1's rest yaw), and turned for the coast's (see
+   * the per-beat turn in `update`) */
+  const toGalaxySea = nightSky.toGalaxy.clone();
+  const toGalaxyCoast = toGalaxySea.clone().multiply(new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationY(yaw - COAST_YAW)));
+  const seaSky = createSeaSky(FAR * 0.8, nightSky, {
     data: cloudData,
     uniforms: cu as unknown as CloudUniforms,
   });
@@ -584,7 +589,9 @@ export function createSea(
   // the wake's thin coverage as bubbles under the surface (aerated, milky turquoise), white only where dense; and the
   // scar's slick reaching the middle cascade, so the lane reads glassy on a light-air sea (2026-10-29: "no visible
   // turbulence, no trailing")
-  oceanSurfaceParams.wakeAeration = 1.5;
+  // (0.6, from 1.5: the 2026-11-01 review, "a bit too opaque … looks a bit pasted on" — at the trail's full dose the
+  // body went 36% milky, a band of paint; now ~7%, and the trail's dose is less and ∝ the way², hullContact wakeDose)
+  oceanSurfaceParams.wakeAeration = 0.6;
   oceanSurfaceParams.wakeAerationColor = '#86cfc4';
   oceanSurfaceParams.wakeSmoothLong = 0.7;
   const raftWater = createHullContact(raftLogsInPlan());
@@ -596,6 +603,8 @@ export function createSea(
     skyDomeColor: seaSky.dome,
     skySunTerm: seaSky.sunTerm,
     cloudSun: seaSky.cloudSun,
+    // (none of the sea over the swash sim's water, on its own curving, feathered edges: swashSim.ts swashSeaGone)
+    shoreSimMask: swash ? swashSeaGone : undefined,
     seabed: land.seabed,
     // the dome's cube target is half-float, as the game's HDR scene target
     hdrSceneTarget: true,
@@ -1116,6 +1125,14 @@ export function createSea(
         }
         sun.set(...beatSun(beat, t, c1End)).applyAxisAngle(UP, eyeYaw);
       }
+      // THE NIGHT SKY LAID FOR THE EYE, ON THE COAST'S NIGHT ARRIVAL TOO (the 2026-11-01 c4→w1 dissolve, the world
+      // changing in the dark): the galaxy is placed for the open sea's front (c1's rest yaw), and the coast's eye faces
+      // COAST_YAW — so across the dissolve the same view looked at two different stretches of the Milky Way, the
+      // galactic centre's bright glow at sea and a dim reach of the band on the coast (a sky patch 101,72,38 against
+      // 10,5,2: clouds, the Sun's bearing, the exposure and every mesh but the sky ruled out one by one). Through w1 and
+      // w2 the sky is turned by the difference, so it stands over the eye as it did at sea. (Not in w6: its night is
+      // framed on the sky as it has been laid there; by w3 the stars are long gone in the day)
+      nightSky.toGalaxy.copy(beat === 'w1' || beat === 'w2' ? toGalaxyCoast : toGalaxySea);
       eye.updateMatrixWorld();
       if (act.reviewEye) {
         act.reviewEye(eye, { x: raftX, z: raftZ, heading: raftHeading });

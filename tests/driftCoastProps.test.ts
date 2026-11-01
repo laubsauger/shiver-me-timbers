@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { float, vec3 } from 'three/tsl';
 import { createFilmCoast } from '../src/drift/wandering/coast';
 import { BEATS, C1_FOLLOW, beatStarts, beatSun, beatsAt, coastEye, spec } from '../src/drift/wandering/beats';
-import { WALK_CLEAR, fieldWeight, wanderer, wetSand } from '../src/drift/wandering/props';
+import { WALK_CLEAR, fieldOnCoast, fieldWeight, wanderer, wetSand } from '../src/drift/wandering/props';
 
 const c1End = 21 + C1_FOLLOW;
 const { starts, total } = beatStarts(c1End);
@@ -27,14 +27,17 @@ const nightOf = (beat: (typeof BEATS)[number]['name'], t: number): number => {
 
 describe('the field on the coast', () => {
   it('is not drawn at all by day or through the dusk: in no coast pass but under w6\'s night', () => {
+    // (nor in w1's arrival out of the sea's night, 2026-11-01: dark, but the night there is the network's)
     let drawn = 0;
     for (let t = starts.w1 - 10; t < total; t += 0.25) {
       for (const p of beatsAt(t, c1End)) {
         if (spec(p.name)?.world !== 'coast' || p.name === 'w6') continue;
-        drawn = Math.max(drawn, fieldWeight(nightOf(p.name, t)));
+        drawn = Math.max(drawn, fieldOnCoast(t, starts, nightOf(p.name, t)));
       }
     }
     expect(drawn).toBe(0);
+    // (w1 does start dark: the field is kept out by its beats, not by the light)
+    expect(nightOf('w1', starts.w1)).toBe(1);
   });
 
   it('is whole under w6\'s night, so the night field keeps its look', () => {
@@ -74,6 +77,36 @@ describe('the wanderers', () => {
         expect(h).toBeLessThan(0.6);
       }
     }
+  });
+
+  it('wander, not march (the 2026-11-01 note: "the people could be more wandery"): each stops and goes, stoops or looks round, and they drift apart and together across the beach', () => {
+    const end = starts.w5 + spec('w5')!.length + 10;
+    let apart = 0;
+    let together = Infinity;
+    for (const i of [0, 1, 2]) {
+      let stopped = 0;
+      let walking = 0;
+      let did = 0;
+      for (let t = starts.w5 + 2; t < end; t += 0.25) {
+        const p = wanderer(i, t, starts.w5, edge);
+        const v = (wanderer(i, t + 0.25, starts.w5, edge).walked - p.walked) / 0.25;
+        if (v < 0.1) stopped += 0.25;
+        if (v > 0.9) walking += 0.25;
+        did = Math.max(did, p.stoop, Math.abs(p.look));
+      }
+      // (a pause of seconds, most of the time walking, and something done in it)
+      expect(stopped).toBeGreaterThan(2);
+      expect(walking).toBeGreaterThan(20);
+      expect(did).toBeGreaterThan(0.6);
+    }
+    for (let t = starts.w5 + 15; t < end; t += 0.5) {
+      const offs = [0, 1, 2].map((i) => wanderer(i, t, starts.w5, edge).off);
+      const spread = Math.max(...offs) - Math.min(...offs);
+      apart = Math.max(apart, spread);
+      together = Math.min(together, spread);
+    }
+    expect(apart).toBeGreaterThan(2.5);
+    expect(together).toBeLessThan(1.2);
   });
 
   it('walk on away from the eye, small, by the end of w5 — at a walk, without a jump', () => {

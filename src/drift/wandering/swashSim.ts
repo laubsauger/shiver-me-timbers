@@ -23,6 +23,19 @@
  * cells (SWASH): 340 × 2000. Beyond it the analytic events (shoreline.ts swashAt) stay as the far fallback,
  * crossfaded over a band.
  *
+ * AND ON ALONG THE BEACH (the user, 2026-11-01: "the shore area that is very detailed and active seems a bit too small;
+ * we see the boundary between it and the static bits very clearly as a rectangle on the shore, especially in the later
+ * wide shots with the people walking" — and from the air, a dark straight "road" on the lagoon beach): the wide shots
+ * of w5–w6 see the shore to the point ~300 m ahead, the 200 m strip ended 90 m ahead of the beach's middle, square
+ * across. So the grid runs on SWASH_ROWS: 180 m further ahead and 65 m further behind, in rows that coarsen ALONG the
+ * shore only (10 cm → 40 cm, ×1.03 a row) — across it, where the bores travel and the run-up climbs, the cells stay
+ * 10 cm, and along it the water's features are metres long (crests 2–16° off the normal, sets ~100 m). Where the shore
+ * curves (seaward ahead, to the point; landward behind), each row is shifted across by whole cells to follow its
+ * waterline (swashShifts), so every row starts in the same ~0.8 m of water: a staircase band along the curve, its
+ * cells still axis-aligned squares and rows' neighbours found at the same world x. ~2650 rows, a third more work than
+ * the 200 m strip. Its every edge feathered (swashIn, swashSeaGone): a 30 m crossfade at each end along a line that
+ * wanders across the shore, and the seaward hand-over to the sea wandering along it, so no edge is straight.
+ *
  * THE WAVES come in through the seaward edge (a generating-absorbing boundary on the Riemann invariants: the
  * incoming one set by the forcing, the outgoing one from inside, so what the beach reflects leaves again), a train
  * deterministic in t (swashForcing): a long, low swell (8–11 s) of six components from 2–16° off the beach's
@@ -46,7 +59,7 @@
  * within a few periods (the seam: tests/swashSim.test.ts). Every frame a pure function of t up to that seam.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, float, instanceIndex, int, ivec2, max, min, select, sin, smoothstep, sqrt, textureLoad, textureStore, uniform, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, float, instanceIndex, int, ivec2, max, min, mix, select, sin, smoothstep, sqrt, textureLoad, textureStore, uniform, vec2, vec3, vec4 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -55,6 +68,74 @@ type V4 = THREE.Node<'vec4'>;
 /** the grid: m a cell, cells across (world x, i = 0 at the seaward edge) and along (world z); m from the beach's
  * middle (beach.x, beach.z) to the domain's seaward and its −z edge */
 export const SWASH = { cell: 0.1, nx: 340, nz: 2000, x0: -19.5, z0: -90 } as const;
+/** the domain on along the beach beyond that core (AND ON ALONG THE BEACH in the header): m further ahead (−z) and
+ * behind (+z), the rows' growth a row, and the coarsest row (m) */
+export const SWASH_ROWS = { ahead: 180, behind: 65, grow: 1.03, coarse: 0.4 } as const;
+
+/** the rows of the grid, −z first: each one's width along (m), its centre (m from the beach's middle, world z), the
+ * first row's −z edge and the last's +z edge (m, the same frame), and the core's rows [first, end) */
+export interface SwashRows {
+  nz: number;
+  dz: Float64Array;
+  zc: Float64Array;
+  zLo: number;
+  zHi: number;
+  core: [number, number];
+}
+function rowLayout(): SwashRows {
+  // (outward from the core: each row SWASH_ROWS.grow times the last, to the coarsest, until the length is covered)
+  const out = (len: number): number[] => {
+    const d: number[] = [];
+    let sum = 0;
+    for (let k = 0; sum < len - 1e-9; k++) {
+      const w = Math.min(SWASH_ROWS.coarse, SWASH.cell * SWASH_ROWS.grow ** (k + 1));
+      d.push(w);
+      sum += w;
+    }
+    return d;
+  };
+  const ahead = out(SWASH_ROWS.ahead).reverse();
+  const behind = out(SWASH_ROWS.behind);
+  const dz = Float64Array.from([...ahead, ...new Array<number>(SWASH.nz).fill(SWASH.cell), ...behind]);
+  const zc = new Float64Array(dz.length);
+  const zLo = SWASH.z0 - ahead.reduce((a, b) => a + b, 0);
+  let z = zLo;
+  for (let j = 0; j < dz.length; j++) {
+    zc[j] = z + dz[j] / 2;
+    z += dz[j];
+  }
+  return { nz: dz.length, dz, zc, zLo, zHi: z, core: [ahead.length, ahead.length + SWASH.nz] };
+}
+export const SWASH_LAYOUT: SwashRows = rowLayout();
+
+/** m: the waterline's `off` (beach coordinates: out to sea, toward −x) at `zRel` m from the beach's middle (world z),
+ * averaged over 12 m along (the shore's small bays and ripples are not the curve the rows follow) */
+function waterlineOff(ground: (x: number, z: number) => number, beach: { x: number; z: number }, zRel: number): number {
+  let sum = 0;
+  for (let k = -2; k <= 2; k++) {
+    let land = -40;
+    let sea = 80;
+    for (let n = 0; n < 24; n++) {
+      const mid = (land + sea) / 2;
+      if (ground(beach.x - mid, beach.z + zRel + k * 3) > 0) land = mid;
+      else sea = mid;
+    }
+    sum += (land + sea) / 2;
+  }
+  return sum / 5;
+}
+
+/** cells each row is shifted out to sea (− : landward) to follow the waterline beyond the core (0 in it), so the row
+ * starts in the same depth of water as the core's (AND ON ALONG THE BEACH) */
+export function swashShifts(ground: (x: number, z: number) => number, beach: { x: number; z: number }, L: SwashRows = SWASH_LAYOUT): Int32Array {
+  const s = new Int32Array(L.nz);
+  const [c0, c1] = L.core;
+  const ahead = waterlineOff(ground, beach, L.zc[c0]);
+  const behind = waterlineOff(ground, beach, L.zc[c1 - 1]);
+  for (let j = 0; j < c0; j++) s[j] = Math.round((waterlineOff(ground, beach, L.zc[j]) - ahead) / SWASH.cell);
+  for (let j = c1; j < L.nz; j++) s[j] = Math.round((waterlineOff(ground, beach, L.zc[j]) - behind) / SWASH.cell);
+  return s;
+}
 /** s a substep, substeps a chunk (one frame at 30 fps), s of warm-up from rest, s ahead a continuation may step
  * (past it, or backward, the state is warmed again) */
 export const SWASH_DT = 1 / 240;
@@ -191,6 +272,11 @@ export interface SwashGrid {
   wet: Float64Array;
   glaze: Float64Array;
   strand: Float64Array;
+  /** rows of their own widths (m along, per row; default `dx`), shifted across by whole cells (per row; default 0),
+   * their centres m along for the forcing (default `z0` + j·dx): SWASH_LAYOUT's, swashShifts' */
+  dz?: Float64Array;
+  shift?: Int32Array;
+  zc?: Float64Array;
 }
 
 export interface SwashStepOptions {
@@ -258,6 +344,12 @@ export function stepSwashCpu(g: SwashGrid, out: SwashGrid, t: number, dt: number
       const k = at(i, j);
       const h = g.h[k];
       const b = g.bed[k];
+      // (this row's width along, and the cells of the rows either side at this cell's world x: its shift's
+      // difference from theirs — out of their range, an open edge)
+      const dzj = g.dz ? g.dz[j] : dx;
+      const across = (jj: number): number => i + (g.shift ? g.shift[jj] - g.shift[j] : 0);
+      const iS = j > 0 ? across(j - 1) : -1;
+      const iN = j < nz - 1 ? across(j + 1) : -1;
       const u = vel(h, g.hu[k]);
       const v = vel(h, g.hv[k]);
       // the four neighbours, ghosts at the edges
@@ -269,21 +361,22 @@ export function stepSwashCpu(g: SwashGrid, out: SwashGrid, t: number, dt: number
       let W: [number, number, number, number, number];
       if (i > 0) W = nb(i - 1, j);
       else if (o.seaward === 'generate') {
-        const z = (o.z0 ?? 0) + j * dx;
+        const z = g.zc ? g.zc[j] : (o.z0 ?? 0) + j * dx;
         const [hg, ug] = generating(swashForcing(t, z), Math.max(0.05, -b), h, u);
         W = [hg, ug, v, b, 0];
       } else W = [h, -u, v, b, g.foam[k]];
       const E: [number, number, number, number, number] = i < nx - 1 ? nb(i + 1, j) : [h, -u, v, b, g.foam[k]];
-      const S: [number, number, number, number, number] = j > 0 ? nb(i, j - 1) : o.ends === 'open' ? [h, u, v, b, g.foam[k]] : [h, u, -v, b, g.foam[k]];
-      const N: [number, number, number, number, number] = j < nz - 1 ? nb(i, j + 1) : o.ends === 'open' ? [h, u, v, b, g.foam[k]] : [h, u, -v, b, g.foam[k]];
+      const own: [number, number, number, number, number] = [h, u, v, b, g.foam[k]];
+      const S: [number, number, number, number, number] = j > 0 ? (iS >= 0 && iS < nx ? nb(iS, j - 1) : own) : o.ends === 'open' ? own : [h, u, -v, b, g.foam[k]];
+      const N: [number, number, number, number, number] = j < nz - 1 ? (iN >= 0 && iN < nx ? nb(iN, j + 1) : own) : o.ends === 'open' ? own : [h, u, -v, b, g.foam[k]];
       // x faces (normal u, tangential v), z faces (normal v, tangential u)
       const fe = face(h, u, v, b, E[0], E[1], E[2], E[3]);
       const fw = face(W[0], W[1], W[2], W[3], h, u, v, b);
       const fn = face(h, v, u, b, N[0], N[2], N[1], N[3]);
       const fs = face(S[0], S[2], S[1], S[3], h, v, u, b);
-      let h1 = h - (dt / dx) * (fe[0] - fw[0] + fn[0] - fs[0]);
-      let hu1 = g.hu[k] - (dt / dx) * (fe[1] + fe[3] - (fw[1] + fw[4]) + fn[2] - fs[2]);
-      let hv1 = g.hv[k] - (dt / dx) * (fe[2] - fw[2] + fn[1] + fn[3] - (fs[1] + fs[4]));
+      let h1 = h - (dt / dx) * (fe[0] - fw[0]) - (dt / dzj) * (fn[0] - fs[0]);
+      let hu1 = g.hu[k] - (dt / dx) * (fe[1] + fe[3] - (fw[1] + fw[4])) - (dt / dzj) * (fn[2] - fs[2]);
+      let hv1 = g.hv[k] - (dt / dx) * (fe[2] - fw[2]) - (dt / dzj) * (fn[1] + fn[3] - (fs[1] + fs[4]));
       h1 = Math.max(0, h1);
       // infiltration into the sand above the still water (the momentum with the water it carries)
       if (o.infiltration && b > 0 && h1 > 0) {
@@ -306,10 +399,10 @@ export function stepSwashCpu(g: SwashGrid, out: SwashGrid, t: number, dt: number
       // FOAM: carried upwind, made where the front is steep, decaying in the water, stranded where it drains
       const eta = (hh: number, bb: number): number => (hh > H_WET ? hh + bb : h > H_WET ? h + b : bb);
       const gx = (eta(E[0], E[3]) - eta(W[0], W[3])) / (2 * dx);
-      const gz = (eta(N[0], N[3]) - eta(S[0], S[3])) / (2 * dx);
+      const gz = (eta(N[0], N[3]) - eta(S[0], S[3])) / (2 * dzj);
       const steep = Math.hypot(gx, gz);
       const f = g.foam[k];
-      let f1 = f - (dt / dx) * (Math.max(u, 0) * (f - W[4]) + Math.min(u, 0) * (E[4] - f) + Math.max(v, 0) * (f - S[4]) + Math.min(v, 0) * (N[4] - f));
+      let f1 = f - (dt / dx) * (Math.max(u, 0) * (f - W[4]) + Math.min(u, 0) * (E[4] - f)) - (dt / dzj) * (Math.max(v, 0) * (f - S[4]) + Math.min(v, 0) * (N[4] - f));
       const rise = (h1 - h) / dt;
       // (never in the outer SWASH_CALM metres, where the sea takes over)
       const breaking = o.seaward === 'generate' ? smoothstepCpu(SWASH_CALM[0], SWASH_CALM[1], (i + 0.5) * dx) : 1;
@@ -324,8 +417,9 @@ export function stepSwashCpu(g: SwashGrid, out: SwashGrid, t: number, dt: number
       out.foam[k] = f1 - settled;
       // (the dry sand's wetness spreading through it, WICK: the four neighbours' Laplacian, the grid's edges mirrored)
       const wk = (ii: number, jj: number): number => g.wet[at(Math.min(nx - 1, Math.max(0, ii)), Math.min(nz - 1, Math.max(0, jj)))];
-      const lap = wk(i - 1, j) + wk(i + 1, j) + wk(i, j - 1) + wk(i, j + 1) - 4 * g.wet[k];
-      out.wet[k] = h1 > H_WET ? 1 : Math.min(1, Math.max(0, g.wet[k] + ((dt * WICK) / (dx * dx)) * lap)) * Math.exp(-dt / DRY);
+      const lapX = wk(i - 1, j) + wk(i + 1, j) - 2 * g.wet[k];
+      const lapZ = wk(j > 0 ? iS : i, j - 1) + wk(j < nz - 1 ? iN : i, j + 1) - 2 * g.wet[k];
+      out.wet[k] = h1 > H_WET ? 1 : Math.min(1, Math.max(0, g.wet[k] + dt * WICK * (lapX / (dx * dx) + lapZ / (dzj * dzj)))) * Math.exp(-dt / DRY);
       out.glaze[k] = h1 > H_WET ? 1 : g.glaze[k] * Math.exp(-dt / FRESH);
       out.h[k] = h1;
       out.hu[k] = hu1;
@@ -357,7 +451,7 @@ export function swashPlan(at: number | null, t: number): { reset: boolean; from:
 // ---------------------------------------------------------------------------------------------------------------
 
 const makeStateTexture = (filter: boolean): THREE.StorageTexture => {
-  const t = new THREE.StorageTexture(SWASH.nx, SWASH.nz);
+  const t = new THREE.StorageTexture(SWASH.nx, SWASH_LAYOUT.nz);
   t.type = THREE.FloatType;
   t.format = THREE.RGBAFormat;
   t.minFilter = t.magFilter = filter ? THREE.LinearFilter : THREE.NearestFilter;
@@ -366,32 +460,97 @@ const makeStateTexture = (filter: boolean): THREE.StorageTexture => {
   return t;
 };
 
+/** m between the row lookup's texels (swashField.rows): the core's rows are linear in z, so its linear filter is
+ * exact there; the coarse rows' shifts are interpolated over it */
+const ROW_LUT_STEP = 0.25;
+const ROW_LUT_N = Math.ceil((SWASH_LAYOUT.zHi - SWASH_LAYOUT.zLo) / ROW_LUT_STEP);
+
 /**
- * WHAT THE SIM PUBLISHES, sampled by the shoreline and the sand (module-level, so the beach's material, built before
- * the coast, can bind them): `water` = (η m over the sea, h m, u, v m/s), `marks` = (foam, stranded foam, wet,
- * glaze), both at each cell's centre over the domain `rect` (world x0, z0, x1, z1); `active` 0 until a sim runs.
+ * WHAT THE SIM PUBLISHES, sampled by the shoreline, the sand and the sea (module-level, so the beach's material, built
+ * before the coast, can bind them): `water` = (η m over the sea, h m, u, v m/s), `marks` = (foam, stranded foam, wet,
+ * glaze), both at each cell's centre; `rect` the domain's world box (x0, z0, x1, z1); `rows` the lookup from world z
+ * to the grid (its row coordinate over nz, its shift in cells, its row's width m), over `geo` = (the core's seaward
+ * world x, the domain's −z edge world z, the lookup's span m, the grid's width across m); `active` 0 until a sim runs.
  */
 export const swashField = {
   water: makeStateTexture(true),
   marks: makeStateTexture(true),
   rect: uniform(new THREE.Vector4(0, 0, 1, 1)),
+  rows: (() => {
+    const t = new THREE.DataTexture(new Float32Array(ROW_LUT_N * 4), ROW_LUT_N, 1, THREE.RGBAFormat, THREE.FloatType);
+    // (read with textureLoad and interpolated by hand, rowAt: no sampler. The sea's fragment stage reads it through
+    // shoreSimMask, and that stage keeps ONE spare sampler of 16 — tests/oceanBindingBudget.test.ts)
+    t.minFilter = t.magFilter = THREE.NearestFilter;
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    t.generateMipmaps = false;
+    return t;
+  })(),
+  geo: uniform(new THREE.Vector4(0, 0, 1, SWASH.nx * SWASH.cell)),
   active: uniform(0),
   /** the running sim (the review page times it: scripts' --post) */
   sim: null as SwashSim | null,
 };
 
-/** where `p` (world x, z) is on the published fields (uv over the domain) */
-export function swashUV(p: THREE.Node<'vec2'>): THREE.Node<'vec2'> {
-  const R = swashField.rect as unknown as V4;
-  return vec2(p.x.sub(R.x).div(R.z.sub(R.x)), p.y.sub(R.y).div(R.w.sub(R.y))) as THREE.Node<'vec2'>;
+/** the row lookup at `p` (world x, z): (row coordinate / nz, shift in cells, the row's width m) */
+function rowAt(p: THREE.Node<'vec2'>): V3 {
+  const G = swashField.geo as unknown as V4;
+  // (its two texels either side, blended: a linear filter's result, with a textureLoad's cost — no sampler)
+  const c = p.y.sub(G.y).div(G.z).mul(ROW_LUT_N).sub(0.5).clamp(0, ROW_LUT_N - 1) as F;
+  const k0 = c.floor() as F;
+  const at = (k: F): V3 => (textureLoad(swashField.rows, ivec2(int(k), int(0))) as unknown as V4).xyz as V3;
+  return mix(at(k0), at(k0.add(1).min(ROW_LUT_N - 1) as F), c.sub(k0)) as V3;
 }
-/** 1 well inside the domain, 0 outside it (and before a sim runs): 1–4 m in from its seaward edge (where the waves
- * are forced) and 8 m in from its ends — the band the fields hand over to the analytic swash across */
-export function swashIn(p: THREE.Node<'vec2'>): F {
+/** where `p` (world x, z) is on the published fields (uv over the grid) */
+export function swashUV(p: THREE.Node<'vec2'>): THREE.Node<'vec2'> {
+  const G = swashField.geo as unknown as V4;
+  const r = rowAt(p);
+  return vec2(p.x.sub(G.x).div(SWASH.cell).add(r.y).div(SWASH.nx), r.x) as THREE.Node<'vec2'>;
+}
+/** m the width along of the grid's row at `p` (the along neighbour of a lookup is a row away) */
+export function swashRowWidth(p: THREE.Node<'vec2'>): F {
+  return rowAt(p).z as F;
+}
+/** m in from the seaward edge of the grid's row at `p` (its shift followed) */
+export function swashFromSea(p: THREE.Node<'vec2'>): F {
+  const G = swashField.geo as unknown as V4;
+  return p.x.sub(G.x).add(rowAt(p).y.mul(SWASH.cell)) as F;
+}
+/** THE EDGES' WANDER (AND ON ALONG THE BEACH: no edge straight): m the hand-over lines move — the ends' line across
+ * the shore ±9 m, over 12–30 m across it; the seaward line ±1.3 m, over 27–70 m along (local coordinates: 40 km out a
+ * world position's sine loses its digits) */
+function endWander(p: THREE.Node<'vec2'>): F {
+  const x = p.x.sub((swashField.geo as unknown as V4).x);
+  return sin(x.mul(0.21).add(1.3)).mul(6).add(sin(x.mul(0.53).add(0.4)).mul(3)) as F;
+}
+function seaWander(p: THREE.Node<'vec2'>): F {
+  const z = p.y.sub((swashField.geo as unknown as V4).y);
+  return sin(z.mul(0.09).add(0.7)).mul(0.8).add(sin(z.mul(0.23).add(2.1)).mul(0.5)) as F;
+}
+/** 0 … 1 in from the domain's ends along the beach: over `band` m (m along, from `from` m in), on a line that wanders
+ * across the shore (endWander; `from` ≥ its 9 m, so none of it falls outside the grid) */
+function endsIn(p: THREE.Node<'vec2'>, from: number, band: number): F {
   const R = swashField.rect as unknown as V4;
-  return smoothstep(R.x.add(1), R.x.add(4), p.x)
-    .mul(smoothstep(R.y, R.y.add(8), p.y))
-    .mul(smoothstep(R.w, R.w.sub(8), p.y))
+  const z = p.y.sub(R.y).add(endWander(p)) as F;
+  const span = R.w.sub(R.y) as F;
+  return smoothstep(from, from + band, z).mul(smoothstep(span.sub(from), span.sub(from + band), z)) as F;
+}
+/** 1 well inside the domain, 0 outside it (and before a sim runs): 1.5–5 m in from its seaward edge (where the waves
+ * are forced), wandering along it, and over 30 m in from its ends (from 12 m in, past the wander and the open ends'
+ * own edge effects) — the band the fields hand over to the analytic swash across. (8 m from square ends, the hand-over
+ * read as "a rectangle on the shore", the 2026-11-01 note) */
+export function swashIn(p: THREE.Node<'vec2'>): F {
+  return smoothstep(1.5, 5, swashFromSea(p).add(seaWander(p)))
+    .mul(endsIn(p, 12, 30))
+    .mul(swashField.active) as F;
+}
+/** 1 where the sea lets the sim's water be the surface (surfaceMaterial shoreSim, the shoreline's composite): only
+ * where the sim is already whole — 5.5–8 m in from its seaward edge on the same wandering line, past its ends' fade,
+ * short of its landward edge */
+export function swashSeaGone(p: THREE.Node<'vec2'>): F {
+  const d = swashFromSea(p);
+  return smoothstep(5.5, 8, d.add(seaWander(p)))
+    .mul(smoothstep(SWASH.nx * SWASH.cell, SWASH.nx * SWASH.cell - 0.5, d))
+    .mul(endsIn(p, 42, 8))
     .mul(swashField.active) as F;
 }
 
@@ -406,16 +565,49 @@ export interface SwashSim {
 
 /** the sim over our beach: `ground` its height (m over the sea) at world x, z; `beach` its middle */
 export function createSwashSim(o: { ground: (x: number, z: number) => number; beach: { x: number; z: number } }): SwashSim {
-  const { nx, nz, cell } = SWASH;
+  const { nx, cell } = SWASH;
+  const L = SWASH_LAYOUT;
+  const nz = L.nz;
+  const shift = swashShifts(o.ground, o.beach, L);
+  /** world x of the core's seaward edge (a row's cells start `shift` cells seaward of it) */
   const x0 = o.beach.x + SWASH.x0;
-  const z0 = o.beach.z + SWASH.z0;
-  const rect: [number, number, number, number] = [x0, z0, x0 + nx * cell, z0 + nz * cell];
+  let sMin = 0;
+  let sMax = 0;
+  for (const v of shift) {
+    sMin = Math.min(sMin, v);
+    sMax = Math.max(sMax, v);
+  }
+  const rect: [number, number, number, number] = [x0 - sMax * cell, o.beach.z + L.zLo, x0 + (nx - sMin) * cell, o.beach.z + L.zHi];
   // the bed at each cell's centre
   const bedData = new Float32Array(nx * nz * 4);
   for (let j = 0; j < nz; j++) {
     for (let i = 0; i < nx; i++) {
-      bedData[(i + j * nx) * 4] = o.ground(x0 + (i + 0.5) * cell, z0 + (j + 0.5) * cell);
+      bedData[(i + j * nx) * 4] = o.ground(x0 + (i + 0.5 - shift[j]) * cell, o.beach.z + L.zc[j]);
     }
+  }
+  // each row: its width along (m), its shift (cells), its centre (m from the beach's middle, the forcing's z)
+  const rowData = new Float32Array(nz * 4);
+  for (let j = 0; j < nz; j++) rowData.set([L.dz[j], shift[j], L.zc[j], 0], j * 4);
+  const rows = new THREE.DataTexture(rowData, nz, 1, THREE.RGBAFormat, THREE.FloatType);
+  rows.minFilter = rows.magFilter = THREE.NearestFilter;
+  rows.generateMipmaps = false;
+  rows.needsUpdate = true;
+  // the lookup from world z (swashField.rows): the row coordinate over nz, the shift between rows' centres, the width
+  {
+    const lut = swashField.rows.image.data as Float32Array;
+    let j = 0;
+    let lo = L.zLo;
+    for (let k = 0; k < ROW_LUT_N; k++) {
+      const z = L.zLo + (k + 0.5) * ROW_LUT_STEP;
+      while (j < nz - 1 && z >= lo + L.dz[j]) lo += L.dz[j++];
+      const c = Math.min(nz, j + (z - lo) / L.dz[j]);
+      const cc = Math.min(nz - 1, Math.max(0, c - 0.5));
+      const j0 = Math.min(nz - 2, Math.floor(cc));
+      const f = Math.min(1, cc - j0);
+      lut.set([c / nz, shift[j0] * (1 - f) + shift[j0 + 1] * f, L.dz[j], 0], k * 4);
+    }
+    swashField.rows.needsUpdate = true;
+    swashField.geo.value.set(x0, o.beach.z + L.zLo, ROW_LUT_N * ROW_LUT_STEP, nx * cell);
   }
   const bed = new THREE.DataTexture(bedData, nx, nz, THREE.RGBAFormat, THREE.FloatType);
   bed.minFilter = bed.magFilter = THREE.NearestFilter;
@@ -459,6 +651,11 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       const h = c.x as F;
       const u = velN(h, c.y as F);
       const v = velN(h, c.z as F);
+      // this row (width along, shift, centre) and its neighbours' cells at this cell's world x (stepSwashCpu `across`)
+      const row = textureLoad(rows, ivec2(j, 0)) as V4;
+      const dzj = row.x as F;
+      const iS = i.add(int((textureLoad(rows, ivec2(j.sub(1).max(int(0)), 0)) as V4).y.sub(row.y))).toVar();
+      const iN = i.add(int((textureLoad(rows, ivec2(j.add(1).min(int(nz - 1)), 0)) as V4).y.sub(row.y))).toVar();
       const nb = (ii: unknown, jj: unknown) => {
         const s = textureLoad(src.state, ivec2(ii as never, jj as never)) as V4;
         const hh = s.x as F;
@@ -467,10 +664,10 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       // the neighbours, clamped into the grid, then the edges' ghosts in their place
       const Wc = nb(i.sub(1).max(int(0)), j);
       const Ec = nb(i.add(1).min(int(nx - 1)), j);
-      const Sc = nb(i, j.sub(1).max(int(0)));
-      const Nc = nb(i, j.add(1).min(int(nz - 1)));
+      const Sc = nb(iS.clamp(int(0), int(nx - 1)), j.sub(1).max(int(0)));
+      const Nc = nb(iN.clamp(int(0), int(nx - 1)), j.add(1).min(int(nz - 1)));
       // seaward: the generating-absorbing ghost (forcing at this row's z, m along from the beach's middle)
-      const z = float(SWASH.z0 + 0.5 * cell).add(float(j).mul(cell));
+      const z = row.z as F;
       const h0 = max(b.negate(), 0.05);
       const rp = sqrt(h0.add(forcingNode(t, z)).max(0).mul(G)).mul(4).sub(sqrt(h0.mul(G)).mul(2));
       const rm = u.sub(sqrt(h.mul(G)).mul(2));
@@ -486,8 +683,9 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       // landward: a wall; the ends: open
       const atLand = i.equal(nx - 1);
       const E = { h: select(atLand, h, Ec.h) as F, u: select(atLand, u.negate(), Ec.u) as F, v: select(atLand, v, Ec.v) as F, b: select(atLand, b, Ec.b) as F, f: select(atLand, c.w, Ec.f) as F };
-      const atS = j.equal(0);
-      const atN = j.equal(nz - 1);
+      // (the ends, and a row's cells past its neighbour's range: open)
+      const atS = j.equal(0).or(iS.lessThan(0)).or(iS.greaterThan(nx - 1));
+      const atN = j.equal(nz - 1).or(iN.lessThan(0)).or(iN.greaterThan(nx - 1));
       const S = { h: select(atS, h, Sc.h) as F, u: select(atS, u, Sc.u) as F, v: select(atS, v, Sc.v) as F, b: select(atS, b, Sc.b) as F, f: select(atS, c.w, Sc.f) as F };
       const N = { h: select(atN, h, Nc.h) as F, u: select(atN, u, Nc.u) as F, v: select(atN, v, Nc.v) as F, b: select(atN, b, Nc.b) as F, f: select(atN, c.w, Nc.f) as F };
       const fe = faceN(h, u, v, b, E.h, E.u, E.v, E.b);
@@ -495,9 +693,10 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       const fn = faceN(h, v, u, b, N.h, N.v, N.u, N.b);
       const fs = faceN(S.h, S.v, S.u, S.b, h, v, u, b);
       const k = dt / cell;
-      const h1a = max(h.sub(fe.F.x.sub(fw.F.x).add(fn.F.x).sub(fs.F.x).mul(k)), 0) as F;
-      const hu1a = (c.y as F).sub(fe.F.y.add(fe.corrL).sub(fw.F.y.add(fw.corrR)).add(fn.F.z).sub(fs.F.z).mul(k)) as F;
-      const hv1a = (c.z as F).sub(fe.F.z.sub(fw.F.z).add(fn.F.y.add(fn.corrL)).sub(fs.F.y.add(fs.corrR)).mul(k)) as F;
+      const kz = float(dt).div(dzj) as F;
+      const h1a = max(h.sub(fe.F.x.sub(fw.F.x).mul(k)).sub(fn.F.x.sub(fs.F.x).mul(kz)), 0) as F;
+      const hu1a = (c.y as F).sub(fe.F.y.add(fe.corrL).sub(fw.F.y.add(fw.corrR)).mul(k)).sub(fn.F.z.sub(fs.F.z).mul(kz)) as F;
+      const hv1a = (c.z as F).sub(fe.F.z.sub(fw.F.z).mul(k)).sub(fn.F.y.add(fn.corrL).sub(fs.F.y.add(fs.corrR)).mul(kz)) as F;
       // infiltration above the still water
       const keep = select(b.greaterThan(0).and(h1a.greaterThan(0)), max(h1a.sub(dt * INFILTRATION), 0).div(max(h1a, 1e-12)), float(1)) as F;
       const h1 = h1a.mul(keep) as F;
@@ -510,10 +709,10 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       // FOAM (as stepSwashCpu)
       const etaOf = (hh: F, bb: F): F => select(hh.greaterThan(H_WET), hh.add(bb), select(h.greaterThan(H_WET), h.add(b), bb)) as F;
       const gx = etaOf(E.h, E.b).sub(etaOf(W.h, W.b)).div(2 * cell);
-      const gz = etaOf(N.h, N.b).sub(etaOf(S.h, S.b)).div(2 * cell);
+      const gz = etaOf(N.h, N.b).sub(etaOf(S.h, S.b)).div(dzj.mul(2));
       const steep = vec2(gx, gz).length();
       const f = c.w as F;
-      const adv = max(u, 0).mul(f.sub(W.f)).add(min(u, 0).mul(E.f.sub(f))).add(max(v, 0).mul(f.sub(S.f))).add(min(v, 0).mul(N.f.sub(f))).mul(k);
+      const adv = max(u, 0).mul(f.sub(W.f)).add(min(u, 0).mul(E.f.sub(f))).mul(k).add(max(v, 0).mul(f.sub(S.f)).add(min(v, 0).mul(N.f.sub(f))).mul(kz));
       const breaking = smoothstep(SWASH_CALM[0], SWASH_CALM[1], float(i).add(0.5).mul(cell)) as F;
       const made = smoothstep(STEEP[0], STEEP[1], steep)
         .mul(select(h.greaterThan(0.01), float(1), float(0)))
@@ -530,8 +729,9 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       textureStore(dst.state, ivec2(i, j), vec4(h1, hu1, hv1, f1.sub(settled))).toWriteOnly();
       // (the dry sand's wetness spreading, WICK, as stepSwashCpu)
       const wetAt = (ii: unknown, jj: unknown): F => (textureLoad(src.aux, ivec2(ii as never, jj as never)) as V4).x as F;
-      const lapW = wetAt(i.sub(1).max(int(0)), j).add(wetAt(i.add(1).min(int(nx - 1)), j)).add(wetAt(i, j.sub(1).max(int(0)))).add(wetAt(i, j.add(1).min(int(nz - 1)))).sub((a.x as F).mul(4));
-      const wetDry = (a.x as F).add(lapW.mul((dt * WICK) / (cell * cell))).clamp(0, 1).mul(Math.exp(-dt / DRY)) as F;
+      const lapX = wetAt(i.sub(1).max(int(0)), j).add(wetAt(i.add(1).min(int(nx - 1)), j)).sub((a.x as F).mul(2));
+      const lapZ = wetAt(iS.clamp(int(0), int(nx - 1)), j.sub(1).max(int(0))).add(wetAt(iN.clamp(int(0), int(nx - 1)), j.add(1).min(int(nz - 1)))).sub((a.x as F).mul(2));
+      const wetDry = (a.x as F).add(lapX.mul((dt * WICK) / (cell * cell)).add(lapZ.mul(dt * WICK).div(dzj.mul(dzj)))).clamp(0, 1).mul(Math.exp(-dt / DRY)) as F;
       textureStore(dst.aux, ivec2(i, j), vec4(select(wetNow, float(1), wetDry), select(wetNow, float(1), (a.y as F).mul(Math.exp(-dt / FRESH))), strand, 0)).toWriteOnly();
     })() as unknown as { compute(n: number): unknown }).compute(nx * nz);
 

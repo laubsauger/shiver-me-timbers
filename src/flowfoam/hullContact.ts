@@ -104,6 +104,27 @@ export interface HullContactParams {
   /** 0..1: how much of the roughness astern is wound into spiral arms round the eddies (0: even boils) */
   spiral: number;
   /**
+   * THE EDDIES SEEN TURNING (the 2026-11-01 review of the wake: "not swirly or eddy-like yet"): peak slope of the
+   * ripples wound into two arms round each eddy. The arms are the eddy's own differential rotation — an arm laid
+   * radially at its birth is turned by ω(r)·age, ω the Lamb–Oseen angular speed, fast inside, slow outside — so they
+   * wind up into spirals as it ages, spread with its core and go with its circulation. Shape only (the normal, not a
+   * dose): nothing is advected, so nothing streaks; band-limited where the winding outgrows the texel
+   */
+  eddyArms: number;
+  /**
+   * THE STEERING OAR'S EDDIES: a smaller street shed off the blade (on the centreline, `oarAstern` m astern of the
+   * transom), every `oarShedSpacing` m, each turning `oarStrength` × the corners' sense per unit core, its core
+   * `oarCore` m, its dimple `oarDimple` m per m/s, its circulation falling by e over `oarDecay` s and gone by `oarLife`:
+   * small, quick whirls that spin, spread and fade among the corners' larger slow ones
+   */
+  oarShedSpacing: number;
+  oarAstern: number;
+  oarCore: number;
+  oarStrength: number;
+  oarDimple: number;
+  oarDecay: number;
+  oarLife: number;
+  /**
    * THE SEA'S OWN RIPPLES, ROUGHENED: per second, how fast churned water banks roughness at full stir (a NEGATIVE
    * slick, .g < 0: accumulated, advected round the eddies and fading with the slick's half-life like any slick), and
    * the gain it puts on the ocean's fine cascade, its micro-wavelets and its glitter per unit banked (flowfoam
@@ -211,8 +232,9 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   churnReach: 0.8,
   churnWay: 1,
   // (a blunt body sheds an eddy off each side in turn, ~1.5 beams apart: Strouhal ≈ 0.2 on its 5.4 m beam)
-  shedSpacing: 8,
-  shedStrength: 0.8,
+  // (6 m and 1.0, from 8 and 0.8: the 2026-11-01 review, "not swirly or eddy-like yet" — more of them, turning faster)
+  shedSpacing: 6,
+  shedStrength: 1,
   // (a core a third of the beam: turns once in ~25 s at landing speed; a 0.9 m core spun foam into hair)
   eddyCore: 1.9,
   eddySpread: 0.04,
@@ -226,6 +248,16 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   roughSlope: 0.5,
   roughLengths: [0.8, 0.55],
   spiral: 0.4,
+  eddyArms: 0.35,
+  // (the blade's 0.4 m chord sheds whirls ~1.5 blades apart; a 0.6 m core, a little over three near-tier texels, the
+  // smallest the 0.19 m tier draws round; ~3 m astern where the dipped blade meets the water: raftPartsHull.ts oar)
+  oarShedSpacing: 2.5,
+  oarAstern: 3,
+  oarCore: 0.6,
+  oarStrength: 1.2,
+  oarDimple: 0.025,
+  oarDecay: 8,
+  oarLife: 30,
   roughen: 0.12,
   roughGain: 2.2,
   lumpHeight: 0.045,
@@ -265,12 +297,16 @@ export const HULL_CONTACT_DEFAULTS: HullContactParams = {
   trailStir: 1.2,
   // (0.12 per s over 3 m: a patch the transom passes over at WAY_REF is left at ~0.3 coverage — ∝ the way, see the
   // field — under the lace's dense-white 0.6, and thins below its 0.04 gate ~16 s (~19 m) on; at c3's 0.6 m/s ~6 m)
-  trailFoam: 0.12,
+  // (0.05, and the dose ∝ the way SQUARED (`wakeDose`): the 2026-11-01 review, "a bit too opaque, very intense even at
+  // the very slow speeds, looks a bit pasted on" — at WAY_REF a patch is left at ~0.12, a quarter of it at c3's
+  // 0.6 m/s, ~1/20 at the night's 0.2 m/s: all but none)
+  trailFoam: 0.05,
   trailFoamReach: 3,
 };
 
-/** eddy slots (at 1.9 m/s and 3.2 m apart, a minute of eddies would be 36: the oldest go first, already faint) */
-export const HULL_EDDIES = 40;
+/** eddy slots (at 1.2 m/s, the corners' every 6 m for 75 s are 15, the oar's every 2.5 m for 30 s 15; at 1.9 m/s
+ * 24 and 23: the oldest go first, already faint) */
+export const HULL_EDDIES = 48;
 /** push-aside launches kept (at `pushEvery` 0.4 s, the last 19 s of them; older ones have faded by then) */
 export const HULL_PUSHES = 48;
 /** trail points kept (at `trailSpacing` 1.5 m, 96 m of trail: a full-way trail's 45 s at 1.8 m/s is 81 m) */
@@ -279,6 +315,9 @@ export const HULL_TRAIL = 64;
 const WAY_REF = 1.2;
 /** m/s² */
 const G = 9.81;
+/** s: an eddy's arms wind for this long, then hold their turn (fading with it): wound on, the tightest spiral's period
+ * fell under the near tier's texel, where the band limit takes it away anyway */
+const ARM_WIND = 20;
 /** floor for divisors and smoothstep spans (§V28) */
 const EPS = 1e-6;
 /** m: the logs are blended into one outline over this (it closes the 2–3 cm chinks and rounds the stagger's steps) */
@@ -299,6 +338,22 @@ interface Eddy {
   /** signed circulation (m²/s), + turning from +x toward +z */
   gamma: number;
   born: number;
+  /** m: its core at birth; the share of `stirRadius` it stirs; s its circulation falls by e over, and its life */
+  core: number;
+  stir: number;
+  decay: number;
+  life: number;
+}
+
+/**
+ * The share of the trail's full dose (at WAY_REF) a raft making `way` m/s lays: the way SQUARED, capped at 1.5×.
+ * The dose a patch of water gets is the rate × the time the transom takes to pass over it, so a rate ∝ the way alone
+ * left the same mark at any speed, and one ∝ the way left a slow raft's half as strong as a sailing one's — "very
+ * intense even at the very slow speeds" (the 2026-11-01 review). Squared, a raft all but stopped leaves next to none.
+ */
+export function wakeDose(way: number): number {
+  const k = Math.min(1.5, Math.max(0, way) / WAY_REF);
+  return k * k;
 }
 
 export function createHullContact(logs: readonly HullLog[], params: Partial<HullContactParams> = {}) {
@@ -325,7 +380,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const uRun = uniform(new THREE.Vector4());
   /** (pressureGain, sideCp, sternCp, pressureReach) */
   const uPress = uniform(new THREE.Vector4());
-  /** (heapMax, 0, 0, spiral) */
+  /** (heapMax, eddyArms, 0, spiral) */
   const uMisc = uniform(new THREE.Vector4());
   /** (rippleHeight, length 1, rippleReach, length 2) */
   const uRipple = uniform(new THREE.Vector4());
@@ -336,7 +391,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const uStir = uniform(new THREE.Vector4());
   /** per eddy: (x, z, circulation now, age) */
   const eddyVecs = Array.from({ length: HULL_EDDIES }, () => new THREE.Vector4(0, 0, 0, 0));
-  /** per eddy: (dimple depth now, 0, 0, 0) */
+  /** per eddy: (dimple depth now, the way it was shed at (WAY_REF = 1), its core at birth m, its stir's share now:
+   * the corners' 1, the oar's its core over theirs, faded out by its life) */
   const dimpleVecs = Array.from({ length: HULL_EDDIES }, () => new THREE.Vector4(0, 0, 0, 0));
   const uEddies = uniformArray<'vec4'>(eddyVecs);
   const uDimples = uniformArray<'vec4'>(dimpleVecs);
@@ -365,7 +421,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const uTrail = uniformArray<'vec4'>(trailVecs);
   const uTrailCount = uniform(0);
   const uTrailHead = uniform(new THREE.Vector4());
-  /** (trailStir, trailFoam, trailFoamReach, 0) */
+  /** (trailStir, trailFoam, trailFoamReach, the dose's share by the way now: `wakeDose`) */
   const uTrailLook = uniform(new THREE.Vector4());
 
   const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0, t: 0, cx: 0, cz: 1 };
@@ -373,6 +429,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
   const drift = { x: 0, z: 0 };
   let odo = 0;
   let shed = 0;
+  let oarShed = 0;
   const eddies: Array<Eddy & { dimple: number; k: number }> = [];
   const pushes: Array<{ x: number; z: number; rx: number; rz: number; born: number; amp: number }> = [];
   /** the trail's points (the stern's centre every `trailSpacing` m), each with the way it was laid at (WAY_REF = 1) */
@@ -613,6 +670,8 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       // the log of the radius turned with the eddy's own sense), so the band shows the eddies turning in it
       const sum = float(0).toVar();
       const arms = float(0).toVar();
+      /** the eddies' wound arms (`eddyArms`): Σ stir × arm, band-limited */
+      const wound = float(0).toVar();
       const dimple = float(0).toVar();
       const dimpleSlope = vec2(0, 0).toVar();
       Loop(HULL_EDDIES, ({ i }) => {
@@ -621,19 +680,36 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           const age = e.w;
           // (the way it was shed at, WAY_REF = 1: a slow raft's eddies stir less, narrower and for less long — the
           // 2026-10-31 review, "a bit more speed dependent")
-          const kE = uDimples.element(int(i)).y;
-          const rad = uEddyShape.z.add(uEddyShape.w.mul(age)).mul(kE.min(1).mul(0.3).add(0.7));
+          const de = uDimples.element(int(i));
+          const kE = de.y;
+          // (an eddy's stirred water as wide as its core is, against the corners': the oar's whirls stir a third)
+          const rad = uEddyShape.z.add(uEddyShape.w.mul(age)).mul(kE.min(1).mul(0.3).add(0.7)).mul(de.z.div(uEddyShape.x.max(EPS)));
           const dp = worldXZ.sub(vec2(e.x, e.y));
           const r2 = dp.dot(dp);
           const life = age.div(uStir.x.mul(kE.min(1).mul(0.6).add(0.4)).max(EPS)).negate().exp().mul(age.min(1));
-          const wgt = r2.div(rad.mul(rad).max(EPS)).negate().exp().mul(life).mul(kE);
+          const wgt = r2.div(rad.mul(rad).max(EPS)).negate().exp().mul(life).mul(kE).mul(de.w);
           sum.addAssign(wgt);
-          const rc = uEddyShape.x.add(uEddyShape.y.mul(age));
+          const rc = de.z.add(uEddyShape.y.mul(age));
           const r = r2.sqrt().max(EPS);
           const turn = select(e.z.greaterThanEqual(0), float(1), float(-1));
           const psi = atan(dp.y, dp.x).mul(2).add(r.div(rc.max(EPS)).add(1).log().mul(3).mul(turn)).sub(t.mul(0.25).mul(turn));
           arms.addAssign(wgt.mul(psi.cos().mul(0.5).add(0.5)));
           if (detail) {
+            // THE EDDY SEEN TURNING (see `eddyArms`): two arms laid radially at its birth, each point of them turned
+            // since by ω(r)·age — ω = Γ(1 − e^(−x))/(2πr²), x = r²/rc², the Lamb–Oseen angular speed — so they wind
+            // into spirals, tight inside, open outside. §V48: the arms' radial period, 2π / (2·age·|dω/dr|), and their
+            // arc, πr, kept to the texel (dω/dr = Γ/(πr³)·(x·e^(−x) − (1 − e^(−x))))
+            const x2 = r2.div(rc.mul(rc).max(EPS));
+            const ex = x2.negate().exp();
+            const r2s = r2.max(1e-4);
+            const omega = e.z.mul(ex.oneMinus()).div(r2s.mul(2 * Math.PI));
+            const wind = age.min(ARM_WIND);
+            const psiW = atan(dp.y, dp.x).sub(omega.mul(wind)).mul(2);
+            const dOmega = e.z.div(r2s.mul(r).mul(Math.PI)).mul(x2.mul(ex).sub(ex.oneMinus())).abs();
+            const radialPeriod = float(2 * Math.PI).div(dOmega.mul(wind).mul(2).max(EPS));
+            const keep = bandKeep(radialPeriod, texel).mul(bandKeep(r.mul(Math.PI), texel));
+            const arm = psiW.cos().mul(0.5).add(0.5);
+            wound.addAssign(wgt.mul(arm.mul(arm)).mul(keep));
             // the broken ring of bubbles round a young eddy (`ringFoam`): its gaps world-anchored, so once laid the
             // eddy's own flow turns them about it
             const ringR = rc.mul(1.35);
@@ -681,7 +757,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
         const behindT = srT.dot(vec2(uCourse.z, uCourse.w)).negate();
         const zoneT = smoothstep(-0.3, 0.5, behindT).mul(smoothstep(uTrailLook.z, uTrailLook.z.mul(0.3), behindT));
         const broad = smoothstep(0.3, 0.65, fbm2(worldXZ.mul(0.3).add(vec2(23.1, 8.7)), 2)).mul(0.7).add(0.3);
-        foam.addAssign(uTrailLook.y.mul(trailK).mul(uLane.w).mul(zoneT).mul(broad));
+        foam.addAssign(uTrailLook.y.mul(trailK).mul(uTrailLook.w).mul(zoneT).mul(broad));
       }
       // THE BOILS (see `boilHeight`): domes on a drifting cellular field, each cell pulsing at its own phase; kept off
       // the logs' first metre as the lumps are. Their share of the stirred water also decides where it is glassy (on a
@@ -729,6 +805,9 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           // its boils are smooth domes)
           const churnShare = churn.div(sum.add(churn).max(EPS));
           slope.addAssign(rough.mul(uStir.y).mul(stir).mul(spiral).mul(patches).mul(churnShare));
+          // the eddies' own arms: the same ripples, wound round each eddy (see `eddyArms`) — the lane between them
+          // stays glassy, so the turning reads in the sky's mirror
+          slope.addAssign(rough.mul(uMisc.y).mul(wound.min(1)));
           // THE LUMPS (see `lumpHeight`): the stirred band's surface heaved into mounds and dimples, drifting and
           // boiling slowly. η = H·n(x/L) with n gradient noise in [−1, 1], so ∇η = H·∇n/L exactly — the shape the eye
           // sees in the mesh IS the shape the normal shades. Kept off the logs' first metre: the raft is posed on a sea
@@ -796,7 +875,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       Loop(HULL_EDDIES, ({ i }) => {
         If(float(i).lessThan(uEddyCount), () => {
           const e = uEddies.element(int(i));
-          const rc = uEddyShape.x.add(uEddyShape.y.mul(e.w));
+          const rc = uDimples.element(int(i)).z.add(uEddyShape.y.mul(e.w));
           const dp = worldXZ.sub(vec2(e.x, e.y));
           const r2 = dp.dot(dp).max(EPS);
           const k = e.z.div(r2.mul(2 * Math.PI)).mul(float(1).sub(r2.div(rc.mul(rc).max(EPS)).negate().exp()));
@@ -858,9 +937,36 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           dimple: p.eddyDimple * pose.speed,
           k: Math.min(1.5, pose.speed / WAY_REF),
           born: pose.t,
+          core: p.eddyCore,
+          stir: 1,
+          decay: p.eddyDecay,
+          life: p.eddyLife,
         });
       }
-      while (eddies.length > 0 && (eddies.length > HULL_EDDIES || pose.t - eddies[0].born > p.eddyLife)) eddies.shift();
+      // THE OAR'S (see `oarShedSpacing`): off the blade, on the centreline astern, each side in turn — the water
+      // dragged past the blade's port edge turns one way, its starboard edge's the other
+      const oarSpacing = Math.max(0.5, p.oarShedSpacing);
+      for (let n = Math.floor(prev / oarSpacing) + 1; n * oarSpacing <= odo; n++) {
+        const side = oarShed++ % 2 === 0 ? -1 : 1;
+        const back = stern - Math.max(0, p.oarAstern);
+        const off = 0.25;
+        eddies.push({
+          x: pose.x + pose.fz * side * off + pose.fx * back,
+          z: pose.z - pose.fx * side * off + pose.fz * back,
+          gamma: (-side * p.oarStrength * 0.3 * pose.speed * 2 * Math.PI * p.oarCore) / 0.72,
+          dimple: p.oarDimple * pose.speed,
+          k: Math.min(1.5, pose.speed / WAY_REF),
+          born: pose.t,
+          core: Math.max(0.2, p.oarCore),
+          stir: Math.max(0.2, p.oarCore) / Math.max(0.2, p.eddyCore),
+          decay: p.oarDecay,
+          life: p.oarLife,
+        });
+      }
+      // (each goes at its own life: the oar's short-lived whirls among the corners' long ones; then the oldest first
+      // if the slots run out)
+      for (let i = eddies.length - 1; i >= 0; i--) if (pose.t - eddies[i].born > eddies[i].life) eddies.splice(i, 1);
+      while (eddies.length > HULL_EDDIES) eddies.shift();
       // THE TRAIL (see `trailSpacing`): a point at the stern's centre at each multiple of the spacing the odometer
       // passes — and the first as soon as the raft has way, so the chain reaches the transom from its first metre
       for (const q of trail) {
@@ -892,7 +998,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       }
       uTrailCount.value = Math.min(trail.length, HULL_TRAIL);
       uTrailHead.value.set(sx, sz, kNow, halfOf(kNow));
-      uTrailLook.value.set(Math.max(0, p.trailStir), Math.max(0, p.trailFoam), Math.max(0.5, p.trailFoamReach), 0);
+      uTrailLook.value.set(Math.max(0, p.trailStir), Math.max(0, p.trailFoam), Math.max(0.5, p.trailFoamReach), wakeDose(pose.speed));
       // a push wave launched each `pushEvery` s of sea time (slots on the absolute clock: the same launches however
       // the replay is stepped) from where the hull is, to the sides of the heading it has
       const every = Math.max(0.05, p.pushEvery);
@@ -930,16 +1036,17 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
           continue;
         }
         const age = Math.max(0, pose.t - e.born);
-        const fade = Math.min(1, age) * smooth01((p.eddyLife - age) / (p.eddyLife * 0.3));
-        const left = Math.exp(-age / Math.max(EPS, p.eddyDecay)) * fade;
+        const fade = Math.min(1, age) * smooth01((e.life - age) / (e.life * 0.3));
+        const left = Math.exp(-age / Math.max(EPS, e.decay)) * fade;
         eddyVecs[i].set(e.x, e.z, e.gamma * left, age);
-        dimpleVecs[i].set(e.dimple * left, e.k, 0, 0);
+        // (.w: its stir's share, gone smoothly by its own life — the oar's whirls go at 30 s, with their stir unspent)
+        dimpleVecs[i].set(e.dimple * left, e.k, e.core, e.stir * smooth01((e.life - age) / (e.life * 0.3)));
       }
       uEddyCount.value = Math.min(eddies.length, HULL_EDDIES);
       uFoam.value.set(p.slapFoam, p.bowFoam, p.collarWidth, p.chopSpread);
       uRun.value.set(p.runup, p.runupReach, p.churnReach, p.churnWay);
       uPress.value.set(p.pressureGain, p.sideCp, p.sternCp, p.pressureReach);
-      uMisc.value.set(p.heapMax, 0, 0, p.spiral);
+      uMisc.value.set(p.heapMax, Math.max(0, p.eddyArms), 0, p.spiral);
       uRipple.value.set(p.rippleHeight, p.rippleLengths[0], p.rippleReach, p.rippleLengths[1]);
       uChopLen.value.set(...p.chopLengths);
       uEddyShape.value.set(p.eddyCore, p.eddySpread, p.stirRadius, p.stirSpread);
@@ -961,6 +1068,7 @@ export function createHullContact(logs: readonly HullLog[], params: Partial<Hull
       drift.z = 0;
       odo = 0;
       shed = 0;
+      oarShed = 0;
       eddies.length = 0;
       uEddyCount.value = 0;
       pushes.length = 0;
