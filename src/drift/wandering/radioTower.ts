@@ -183,6 +183,8 @@ export interface RadioTower {
   readonly lamp: [number, number, number];
   /** s: the lamp's clock */
   setTime(t: number): void;
+  /** the lamp's answer flare, 0 … ~1.5, added to its blink (the Rose's traffic: roseTraffic.ts) */
+  setFlare(f: number): void;
 }
 
 /**
@@ -193,9 +195,10 @@ export function createRadioTower(site: MastSite, spec: MastSpec, o: { air: MastA
   const group = new THREE.Group();
   group.name = 'drift-radio-tower';
   const time = uniform(0);
+  const flare = uniform(0);
   const lamp: [number, number, number] = [site.at[0], site.ground(site.at[0], site.at[1]) - MAST.sink + lampOverFoot(spec), site.at[1]];
   const ready = loadMastKit(MAST_KIT_URL).then((root) => {
-    group.add(buildMast(root, site, spec, { time, air: o.air, luxPerUnit: LUX_PER_UNIT, lod: o.lod, lamp: filmLamp(o.haze) }).group);
+    group.add(buildMast(root, site, spec, { time, air: o.air, luxPerUnit: LUX_PER_UNIT, lod: o.lod, lamp: { ...filmLamp(o.haze), flare: flare as unknown as F } }).group);
   });
   return {
     group,
@@ -203,6 +206,9 @@ export function createRadioTower(site: MastSite, spec: MastSpec, o: { air: MastA
     lamp,
     setTime(t) {
       time.value = t;
+    },
+    setFlare(f) {
+      flare.value = f;
     },
   };
 }

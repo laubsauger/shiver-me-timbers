@@ -7,11 +7,13 @@
  *   dolphin    c3: porpoising in, circling the raft, then flips the blue case onto the deck with its snout
  *              (dolphin.ts: its outline and its motion)
  *   case       the blue hard case; in c4 its radio's dial glows
- *   beams      c4: signals made visible, arcing between far stations below the horizon across the sky,
- *              few at first, more as stations answer, until every station answers every other: a mystic rose
- *              over the dome — thin, slow, soft-edged, warm (direction.md); each station a radio tower on its
- *              island, the beams running lamp to lamp (radioTower.ts, the network's beacons); in w6 the coast's
- *              stations answer from their towers on the coast
+ *   beams      c4: signals made visible, arcing between far stations below the horizon across the sky: the
+ *              network wakes (our radio crackles, the station ahead answers, the rest light tower by tower from
+ *              it), until every station answers every other: a mystic rose over the dome — slow, soft, warm
+ *              (direction.md). Each station a radio tower on its island, the arcs light in the haze running
+ *              lamp to lamp (radioTower.ts, the network's beacons), messages as pulses along them, each lamp
+ *              flaring as one reaches it (roseTraffic.ts); in w6 the quieter chatter, the coast's stations
+ *              answering from their towers on the coast
  *   field      w3–w4: Drift 3, Act 1's pairs (events.ts, loops.ts) at a breath of their energy, every pair
  *              meeting its partner — no bursts, no remainder: sensed more than seen; and again in w6, over
  *              the eye as it rises into the night, among the stars. Drawn only in the dark (FIELD_DARK: since
@@ -21,7 +23,7 @@
  * Sea-scene metres (x east, y up, z north).
  */
 import * as THREE from 'three/webgpu';
-import { Fn, abs, cameraPosition, float, normalWorld, positionLocal, positionWorld, sin, smoothstep, uniform, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, acos, asin, cameraPosition, cos, cross, exp, float, mix, modelPosition, normalize, sin, smoothstep, step, uniform, uv, vec3, vec4 } from 'three/tsl';
 import { driftParams } from '../../params/drift';
 import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
@@ -37,6 +39,7 @@ import { farAir } from './farAir';
 import { hash2Cpu } from '../../terrain/noiseCpu';
 import { stationOf, type MastLamp } from '../../radio/network';
 import { beaconLevelNode } from '../../radio/mast';
+import { chatterTraffic, dialFlare, roseLinks, stationFlare, wakeTraffic, type RoseMessage } from './roseTraffic';
 import type { AerialUniforms } from '../../terrain/aerialPerspective';
 
 const smooth = (x: number): number => {
@@ -247,7 +250,7 @@ export interface PropsState {
   coastEyeAt: (t: number) => THREE.Vector3;
   ground: (x: number, z: number) => number;
   /** the network's stations that stand on the coast and their lamps (coast.ts): the Rose answers from them in w6 */
-  towers?: ReadonlyArray<{ id: string; lamp: [number, number, number] }>;
+  towers?: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare?(f: number): void }>;
 }
 
 export interface Props {
@@ -288,22 +291,78 @@ const ROAD_RED: [number, number, number] = [1, 0.045, 0.02].map((c) => c / (0.21
 const ROAD = 3e-3;
 const UP = new THREE.Vector3(0, 1, 0);
 /** EVERY STATION TO EVERY OTHER (the user, 2026-10-28: "connect each to each … have a cool little thing, like
- * shape appear"; it had been nine of the 21 links, and read lost): the ring of neighbours first, then the
- * heptagram's chords, then the widest — each round from the front, a beam every 1.8 s from 9 s into c4 */
-const LINKS: Array<[number, number, number]> = [1, 2, 3].flatMap((skip, layer) =>
-  [2, 3, 1, 4, 0, 5, 6].map((a, i): [number, number, number] => [a, (a + skip) % STATIONS.length, 9 + (layer * 7 + i) * 1.8]),
-);
-/** m: the sphere the beams' paths are laid out on (each is then drawn at its lamps' own distances: `chord`), and
- * their tube's radius there (soft: brightest at its core, a few pixels across in the master) */
-const BEAM_R = 9000;
-const BEAM_W = 30;
+ * shape appear"; it had been nine of the 21 links, and read lost): the ring of neighbours, the heptagram's chords and
+ * the widest (roseTraffic.ts roseLinks; what runs along them, and when: roseTraffic.ts) */
+const LINKS = roseLinks(STATIONS.length);
 /** s the outro's Rose (w6) fades in over */
 const BEAM_RETURN = 12;
 /** s c4's beams take to go quiet, ending 7 s before w1 (its dissolve starts 5 s before it) */
 const BEAM_QUIET = 10;
-/** rad an end of a beam turns by before its path is laid out again (0.13 px of the 4K master: the eye's bob at sea
- * turns the ring's lamps by less) */
-const AIM_TURN = 1e-4;
+/**
+ * THE ARCS AS LIGHT IN THE HAZE (the 2026-11-01 review of the Rose, the user and the client: "pasted on, slapped on,
+ * cheap, not blending"). They had been 21 tubes of a constant 30 m radius, each lit whole once grown, a slow ripple
+ * along it, dimmed toward the horizon — a drawn line. Now each is a camera-facing ribbon carrying a soft profile: a
+ * thin core where a pulse is, and round it the glow the air scatters, both shaped by the air the arc runs through:
+ * brighter and broader low, where the marine haze is thick (its density falls off over HAZE_H m of height), fainter
+ * toward the zenith (to ARC.floor of it), softer the farther it is. Angles in degrees across the arc (σ of a gaussian).
+ *
+ *   segments  along the ribbon
+ *   ext       the ribbon runs on this share of its arc past each lamp, so a flaring lamp's glow is round, not cut
+ *   core      σ of a pulse's core aloft (×(1 + 0.6·density) low; 0.044° is a 4K master's pixel)
+ *   halo      σ of the haze's glow aloft (×(0.6 + 0.8·density))
+ *   floor     the air's scatter aloft, of the low air's
+ *   flick     deg along the arc a lamp's own blink carries into it (its rhythm, not the network's)
+ *   glow      σ of a lamp's answer flare in the haze about it
+ */
+const ARC = { segments: 256, ext: 0.03, core: 0.06, halo: 0.5, floor: 0.3, flick: 5, glow: 0.35 };
+/** m: the marine haze's scale height (the boundary layer's aerosol, thickest within a kilometre or two of the sea) */
+const HAZE_H = 1500;
+/** a pulse (roseTraffic.ts): its head's σ (s, at TRAVEL.speed ~6° of arc), its short trail's and its afterglow's time
+ * constants (s) and shares — the path a message has just run along glows on in the haze and fades. (A 1 s trail at
+ * 0.55 and a 6 s afterglow, the first look, 2026-11-01: under the night's exposure every arc a message had crossed
+ * stayed a full bright line for seconds — the drawn line again)
+ */
+const PULSE = { head: 0.35, trail: 0.6, trailK: 0.35, long: 4, longK: 0.12 };
+/** radiances (scene units, at the night's exposure; the drawn tubes had peaked at 0.025): a pulse's core, the haze's
+ * glow about it, the faint glow a lit path keeps between messages (halo only: no line), a lamp's flare in the haze */
+// (rest 0.0022, then 0.0015: under w6's and c4's night exposure every lit path stayed a soft full line converging on its
+// lamp — the drawn Rose again; at 0.0004 a path is barely sensed between its messages)
+const ARC_L = { core: 0.035, halo: 0.01, rest: 0.0004, flare: 0.012 };
+/** the light's colours (linear): the pulse's warm white, the haze's amber (the raft's dial's own), a lamp's red-amber */
+const ARC_CORE: [number, number, number] = [1, 0.84, 0.6];
+const ARC_HALO: [number, number, number] = [1, 0.62, 0.3];
+const ARC_LAMP: [number, number, number] = [1, 0.3, 0.12];
+/** the dial's crackle as the network first answers: × its glow at the peak (roseTraffic.ts dialFlare) */
+const DIAL_FLARE = 2.2;
+
+/** THE ARC'S PATH (CPU mirror of `arcPath` in createProps): from lamp `a` to lamp `b` (m from the eye) at `u` 0 … 1 — the
+ * STRAIGHT CHORD between them as the dome's fisheye draws the sky about the zenith (equidistant: the zenith at 0, the
+ * horizon at 1), so the 21 make the rose's figure overhead (a neighbour's an arch ~10° up, the widest pass ~20° from the
+ * zenith), at a distance log-interpolated between the lamps' own (so it ends IN each lamp, depth-tested) */
+export function arcPoint(a: THREE.Vector3, b: THREE.Vector3, u: number): THREE.Vector3 {
+  const flatOf = (d: THREE.Vector3): THREE.Vector2 => {
+    const n = d.clone().normalize();
+    const r = Math.acos(Math.min(1, Math.max(-1, n.y))) / (Math.PI / 2);
+    const l = Math.max(Math.hypot(n.x, n.z), 1e-9);
+    return new THREE.Vector2((n.x / l) * r, (n.z / l) * r);
+  };
+  const q = flatOf(a).lerp(flatOf(b), u);
+  const l = Math.max(q.length(), 1e-9);
+  const th = (l * Math.PI) / 2;
+  const r = a.length() * Math.pow(b.length() / a.length(), u);
+  return new THREE.Vector3((q.x / l) * Math.sin(th), Math.cos(th), (q.y / l) * Math.sin(th)).multiplyScalar(r);
+}
+/** deg: the arc's length as the eye sees it */
+export function arcDegrees(a: THREE.Vector3, b: THREE.Vector3): number {
+  let deg = 0;
+  let p = arcPoint(a, b, 0).normalize();
+  for (let i = 1; i <= 128; i++) {
+    const q = arcPoint(a, b, i / 128).normalize();
+    deg += (p.angleTo(q) * 180) / Math.PI;
+    p = q;
+  }
+  return deg;
+}
 
 export function createProps(): Props {
   const group = new THREE.Group();
@@ -348,13 +407,16 @@ export function createProps(): Props {
   caseMesh.add(radioLight);
   group.add(caseMesh);
 
-  // THE BEAMS: one tube per link on a sphere about the eye (it follows the eye: they are far)
+  // THE BEAMS: one ribbon per link, about the eye (it follows the eye; each arc's path is laid out in its shader from
+  // its two lamps, every frame)
   const beams = new THREE.Group();
   beams.name = 'drift-beams';
   const beamTime = uniform(0);
   const beamNight = uniform(0);
   // (the outro's network is the memory of c4's: fainter)
   const beamGain = uniform(1);
+  /** each station's answer flare, 0 … ~1.5 (roseTraffic.ts stationFlare): its lamp, its road and its arcs' ends */
+  const flareU = STATIONS.map(() => uniform(0));
   const dirAt = (bearingDeg: number, elDeg: number): THREE.Vector3 => {
     const b = (bearingDeg * Math.PI) / 180;
     const e = (elDeg * Math.PI) / 180;
@@ -378,9 +440,10 @@ export function createProps(): Props {
   // …and its road on the water below it: a light on the horizon is a column of glitter down to the eye (the mirror
   // fades out at 2.5 km, the stations are 7 km off) — red now, blinking with its lamp, and far dimmer than the warm
   // light's was (ROAD: a deep red under the night's exposure, as the lamp's own core is kept)
-  const roadMatFor = (lamp: MastLamp): THREE.MeshBasicNodeMaterial => {
+  const roadMatFor = (lamp: MastLamp, i: number): THREE.MeshBasicNodeMaterial => {
     const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
-    const level = beaconLevelNode(lampTime as unknown as THREE.Node<'float'>, lamp);
+    // (and it flares with its lamp as a message reaches the station)
+    const level = beaconLevelNode(lampTime as unknown as THREE.Node<'float'>, lamp).add(flareU[i]);
     m.colorNode = Fn(() => {
       const q = uv();
       const across = smoothstep(0.5, 0, q.x.sub(0.5).abs());
@@ -445,7 +508,7 @@ export function createProps(): Props {
     if (spec.lamp.alive) {
       // the road: flat on the sea from near the eye out to the island's foot, a constant ~0.5° wide as seen from
       // the eye (a strip of constant width is a sub-pixel line at the horizon and a slab close by)
-      road = new THREE.Mesh(roadGeo, roadMatFor(spec.lamp));
+      road = new THREE.Mesh(roadGeo, roadMatFor(spec.lamp, i));
       road.rotation.y = (-bearing * Math.PI) / 180;
       // (1.6 m over the mean sea, under the night eye (2.2 m and up): lower, the sea hid it; from 150 m out, as a
       // road comes in to the one who sees it)
@@ -458,90 +521,150 @@ export function createProps(): Props {
   });
   group.add(stations);
 
-  /** a direction as the dome's fisheye draws it about the zenith (equidistant: the zenith at 0, the horizon at 1) */
-  const flat = (d: THREE.Vector3): THREE.Vector2 => {
-    const r = Math.acos(Math.min(1, Math.max(-1, d.y))) / (Math.PI / 2);
-    const l = Math.hypot(d.x, d.z);
-    return new THREE.Vector2((d.x / l) * r, (d.z / l) * r);
+  /** each station's lamp from the eye (m, world axes: the beams' group stands at the eye, unturned) — set every frame
+   * from the very lamp positions the towers are drawn at, so every arc ends in its lamps however the eye moves */
+  const lampU = beaconAt.map((v) => uniform(v.clone()));
+  /** m: the eye over the sea (the air's density is by height) */
+  const eyeY = uniform(0);
+  /** each lamp's own blink (dead: none), for the arcs' ends */
+  const levelN = STATIONS.map((_, i) => {
+    const lamp = stationOf(FILM_RING[i]).mast.lamp;
+    return lamp.alive ? beaconLevelNode(lampTime as unknown as THREE.Node<'float'>, lamp) : null;
+  });
+  type F = THREE.Node<'float'>;
+  type V3 = THREE.Node<'vec3'>;
+  /** the arc from A to B at u (TSL mirror of `arcPoint`) */
+  const arcPath = (A: V3, B: V3, u: F): V3 => {
+    const flatOf = (d: V3) => {
+      const n = d.normalize();
+      return n.xz.div(n.xz.length().max(1e-6)).mul(acos(n.y.clamp(-1, 1)).div(Math.PI / 2));
+    };
+    const q = mix(flatOf(A), flatOf(B), u);
+    const l = q.length().max(1e-6);
+    const th = l.mul(Math.PI / 2);
+    const ra = A.length();
+    const r = ra.mul(B.length().div(ra).pow(u));
+    return vec3(q.x.div(l).mul(sin(th)), cos(th), q.y.div(l).mul(sin(th))).mul(r) as V3;
   };
-  /** from station to station, lamp to lamp (on the beams' sphere, along the lamps' own directions): the STRAIGHT
-   * CHORD between them as the fisheye draws the sky about the zenith, so the 21 make the rose's figure overhead — a
-   * neighbour's an arch ~10° up, the widest pass ~20° from the zenith (7 stations: none opposite) */
-  const chord = (a: THREE.Vector3, b: THREE.Vector3): THREE.BufferGeometry => {
-    const A = flat(a);
-    const B = flat(b);
-    const pts: THREE.Vector3[] = [];
-    for (let i = 0; i <= 64; i++) {
-      const q = A.clone().lerp(B, i / 64);
-      const th = (q.length() * Math.PI) / 2;
-      const l = Math.max(q.length(), 1e-9);
-      pts.push(new THREE.Vector3((q.x / l) * Math.sin(th), Math.cos(th), (q.y / l) * Math.sin(th)).multiplyScalar(BEAM_R));
+  /** the eye in the beams' frame */
+  const camL = cameraPosition.sub(modelPosition) as V3;
+  /** rad between two unit directions (well-conditioned at small angles, as acos is not) */
+  const angle = (p: V3, q: V3): F => asin(p.sub(q).length().mul(0.5).min(1)).mul(2) as F;
+  const DEG = Math.PI / 180;
+  /** the air about a point of the arc: its density (0 … 1, by height over the sea), its haze's σ across and its core's (rad) */
+  const airAt = (P: V3) => {
+    const density = exp(P.y.add(eyeY).max(0).div(-HAZE_H));
+    const far = P.sub(camL).length().div(7000).clamp(0.3, 1.5);
+    const halo = density.mul(0.8).add(0.6).mul(ARC.halo * DEG).mul(far.mul(0.3).add(0.7));
+    const core = density.mul(0.6).add(1).mul(ARC.core * DEG).mul(far.mul(0.3).add(0.7));
+    return { density, halo, core };
+  };
+  /** a pulse's slot: (t0 sea s, dur s, dir +1 from a / −1 from b, unused: t0 far ahead) */
+  const NONE = 1e7;
+  const SLOTS = 3;
+  const links = LINKS.map(([a, b]) => {
+    const slots = Array.from({ length: SLOTS }, () => uniform(new THREE.Vector3(NONE, 1, 1)));
+    // the first message along it in this window: the path glows faintly once that has run (never before)
+    const first = uniform(new THREE.Vector3(NONE, 1, 1));
+    const g = new THREE.BufferGeometry();
+    const pos: number[] = [];
+    const uvs: number[] = [];
+    const idx: number[] = [];
+    for (let i = 0; i <= ARC.segments; i++) {
+      const u = -ARC.ext + ((1 + 2 * ARC.ext) * i) / ARC.segments;
+      pos.push(0, 0, 0, 0, 0, 0);
+      uvs.push(u, 0, u, 1);
+      if (i < ARC.segments) idx.push(2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 1, 2 * i + 3, 2 * i + 2);
     }
-    return new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 160, BEAM_W, 8, false);
-  };
-  /** m: each station's lamp from the beams' origin (the eye) — where its beams end */
-  const reach = beaconAt.map(() => uniform(STATION_DIST));
-  const tubes: THREE.Mesh[] = [];
-  for (const [a, b, at] of LINKS) {
-    const geo = chord(beaconAt[a].clone().normalize(), beaconAt[b].clone().normalize());
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    g.setIndex(idx);
     // DEPTH-TESTED, AT THE LAMPS' OWN DISTANCES (the user, 2026-10-30, on a dusk frame from the water by the beach:
     // "These rose lines are drawn on top of both the trees and the sails and the boat and everything … it looks like
-    // a cheap overlay"). Added light that writes no depth, after everything opaque — so whatever stands nearer than a
-    // beam hides it. Each is laid out on the BEAM_R sphere and drawn pushed in or out along its own directions to
-    // its lamps' distances (log-interpolated from end to end: 7 km round the Rose's ring, from a few hundred metres
-    // to 7.6 km between the coast's towers in w6): the figure the eye sees is the same, the tube's width the same
-    // angle, and it ends IN its lamp — behind the trees and the masts in front of it, never over the near land, the
-    // raft and its sails, and inside the face cameras' far plane (sea.ts FAR, 12 km) everywhere. A world-space tube,
-    // so it runs on across the dome's cube faces as any geometry does.
+    // a cheap overlay"). Added light that writes no depth, after everything opaque — so whatever stands nearer than an
+    // arc hides it: it ends IN its lamps, behind the trees and the masts in front of it, never over the near land, the
+    // raft and its sails, and inside the face cameras' far plane (sea.ts FAR, 12 km) everywhere.
+    // LAID OUT IN THE SHADER FROM ITS LAMPS, EVERY FRAME (the same review: "their position doesn't always align with
+    // the towers when they fade in"). The tubes' paths were rebuilt on the CPU only when an end had turned by more than
+    // 1e-4 rad, and every end's reference was reset at each rebuild, so a link whose two ends each moved a little was
+    // never rebuilt and drifted off its lamps — by an amount that hung on the frames drawn before (a render lane
+    // starting elsewhere drew it elsewhere). Now nothing is kept: the vertex shader lays the path from the two lamp
+    // uniforms and faces the ribbon to the eye, so it runs on across the dome's cube faces (one eye for all six).
     const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
-    mat.positionNode = positionLocal.mul(reach[a].mul(reach[b].div(reach[a]).pow(uv().x)).div(BEAM_R));
-    const start = uniform(at);
+    const A = lampU[a] as unknown as V3;
+    const B = lampU[b] as unknown as V3;
+    mat.positionNode = Fn(() => {
+      const u = uv().x;
+      const P = arcPath(A, B, u);
+      const dP = arcPath(A, B, u.add(1e-3)).sub(arcPath(A, B, u.sub(1e-3)));
+      const toEye = camL.sub(P);
+      const side = normalize(cross(dP, toEye));
+      // (3 σ of the haze's glow each side: the ribbon holds all of its light)
+      const half = airAt(P).halo.mul(3);
+      return P.add(side.mul(uv().y.mul(2).sub(1).mul(toEye.length()).mul(half)));
+    })();
     mat.colorNode = Fn(() => {
       const u = uv().x;
-      // it grows from the station that calls to the one that answers over 4 s, then a slow pulse runs along it
-      const grown = smoothstep(u.sub(0.04), u, beamTime.sub(start).div(4));
-      const pulse = sin(u.mul(18).sub(beamTime.mul(0.9))).mul(0.25).add(0.75);
-      // soft-edged: brightest where the tube faces the eye
-      const facing = abs(normalWorld.dot(cameraPosition.sub(positionWorld).normalize())).pow(3);
-      const ends = smoothstep(0, 0.01, u).mul(smoothstep(1, 0.99, u));
-      // the haze: low over the sea a beam is seen through kilometres more air, and dims into the horizon
-      const up = positionWorld.sub(cameraPosition).normalize().y;
-      const haze = smoothstep(-0.01, 0.2, up).mul(0.75).add(0.25);
-      const k = grown.mul(pulse).mul(facing).mul(ends).mul(haze).mul(beamNight);
-      return vec4(vec3(1, 0.74, 0.42).mul(k.mul(0.025).mul(beamGain)), 1);
-    })();
-    const tube = new THREE.Mesh(geo, mat);
-    tube.frustumCulled = false;
-    tubes.push(tube);
-    beams.add(tube);
-  }
-  group.add(beams);
-  /** THE BEAMS RE-AIMED: each link run between the lamps at `lamps` (m from the eye, the beams' frame) — their
-   * distances every frame, their paths rebuilt only where an end turned by more than AIM_TURN (in w6 the coast's
-   * stations answer from their coast towers, seen from an eye that rises; at sea, the ring) */
-  const aimed = beaconAt.map((v) => v.clone().normalize());
-  const dirs = beaconAt.map(() => new THREE.Vector3());
-  const aim = (lamps: THREE.Vector3[]): void => {
-    lamps.forEach((v, i) => {
-      reach[i].value = v.length();
-      dirs[i].copy(v).normalize();
-    });
-    const moved = dirs.map((d, i) => d.angleTo(aimed[i]) > AIM_TURN);
-    if (!moved.some(Boolean)) return;
-    LINKS.forEach(([a, b], k) => {
-      if (!moved[a] && !moved[b]) return;
-      const g = chord(dirs[a], dirs[b]);
-      const geo = tubes[k].geometry;
-      for (const name of ['position', 'normal']) {
-        const to = geo.getAttribute(name) as THREE.BufferAttribute;
-        (to.array as Float32Array).set(g.getAttribute(name).array as Float32Array);
-        to.needsUpdate = true;
+      const P = arcPath(A, B, u);
+      const air = airAt(P);
+      const dir = P.sub(camL).normalize();
+      // the angle across the arc, and along it from each lamp
+      const across = uv().y.mul(2).sub(1).mul(air.halo.mul(3));
+      const fromA = angle(dir, A.sub(camL).normalize());
+      const fromB = angle(dir, B.sub(camL).normalize());
+      const inside = step(0, u).mul(step(u, 1));
+      // THE PULSES: each slot's head, and behind it the trail and the afterglow of the path it has just run along
+      let coreK: F = float(0);
+      let haloK: F = float(0);
+      for (const slot of slots) {
+        const sl = slot as unknown as V3;
+        const s = u.mul(sl.z).add(float(1).sub(sl.z).mul(0.5));
+        const tau = lampTime.sub(sl.x).sub(s.mul(sl.y));
+        // (squares as products: WGSL's pow is undefined for a negative base)
+        const h = tau.div(PULSE.head);
+        const head = exp(h.mul(h).negate());
+        const after = tau.max(0);
+        const trail = step(0, tau).mul(exp(after.div(-PULSE.trail)).mul(PULSE.trailK));
+        const long = step(0, tau).mul(exp(after.div(-PULSE.long)).mul(PULSE.longK));
+        // (the core is the pulse and its short trail; the afterglow is the haze's alone)
+        coreK = coreK.add(head.add(trail)) as F;
+        haloK = haloK.add(head.mul(0.8).add(trail.mul(0.5)).add(long)) as F;
       }
-      geo.computeBoundingSphere();
-      g.dispose();
-    });
-    dirs.forEach((d, i) => aimed[i].copy(d));
-  };
+      // a lit path's rest: faint, glow only
+      const fs = u.mul(first.z).add(float(1).sub(first.z).mul(0.5));
+      const lit = smoothstep(0, 3, lampTime.sub(first.x).sub(fs.mul(first.y)));
+      // EACH LAMP'S OWN RHYTHM near it: the arc dims between its flashes and brightens with them (a dead lamp: none)
+      const rhythm = (lv: F | null, from: F): F =>
+        lv ? (exp(from.div(-ARC.flick * DEG)).mul(lv.mul(0.9).sub(0.35)).add(1) as F) : float(1);
+      const flick = rhythm(levelN[a], fromA).mul(rhythm(levelN[b], fromB));
+      const xc = across.div(air.core);
+      const xh = across.div(air.halo);
+      const coreProfile = exp(xc.mul(xc).negate());
+      const haloProfile = exp(xh.mul(xh).negate());
+      // the core keeps its light however soft it is drawn (σ against its aloft σ)
+      const coreL = coreK.mul(coreProfile).mul(ARC_L.core).mul(float(ARC.core * DEG).div(air.core));
+      const haloL = haloK.mul(ARC_L.halo).add(lit.mul(ARC_L.rest)).mul(haloProfile);
+      // the air's scatter: more where it is dense, ARC.floor of it aloft
+      const scatter = air.density.mul(1 - ARC.floor).add(ARC.floor);
+      // (under the horizon: nothing — the ribbon runs on past a lamp, down toward the sea)
+      const above = smoothstep(-0.006, 0, dir.y);
+      const arc = vec3(...ARC_CORE).mul(coreL).add(vec3(...ARC_HALO).mul(haloL)).mul(inside).mul(flick).mul(scatter);
+      // A LAMP'S ANSWER in the haze about it, as a message reaches it (and its own lamp flares: radioTower.ts setFlare)
+      const glowAt = (f: unknown, from: F): F => exp(from.mul(from).add(across.mul(across)).div(-((ARC.glow * DEG) ** 2))).mul(f as F) as F;
+      const lamps = vec3(...ARC_LAMP).mul(glowAt(flareU[a], fromA).add(glowAt(flareU[b], fromB)).mul(ARC_L.flare));
+      return vec4(arc.add(lamps).mul(above).mul(beamNight).mul(beamGain), 1);
+    })();
+    const ribbon = new THREE.Mesh(g, mat);
+    ribbon.frustumCulled = false;
+    beams.add(ribbon);
+    return { slots, first };
+  });
+  group.add(beams);
+  /** the arcs' lengths as the eye at sea sees them (deg; the ring's lamps from 2.2 m over the sea): how long a pulse takes */
+  const arcDeg = LINKS.map(([a, b]) => arcDegrees(beaconAt[a].clone().setY(beaconAt[a].y - 2.2), beaconAt[b].clone().setY(beaconAt[b].y - 2.2)));
+  /** the traffic (roseTraffic.ts), laid once the beats' starts are known: per link, its messages by time, and each
+   * window's first; and all of them by time, for the flares */
+  let traffic: { all: RoseMessage[]; byLink: RoseMessage[][] } | null = null;
   const lampsFrom = beaconAt.map(() => new THREE.Vector3());
 
   // THE FIELD (Drift 3): Act 1's grammar on the beach, at a breath of its energy
@@ -689,13 +812,17 @@ export function createProps(): Props {
       // first light ~19 s, the Sun up ~32 s). It went out over w1's first 3 s, before the dawn — "the radio goes dark
       // at w1's start", the 2026-11-01 review
       const radio = smooth((t - starts.c4 + 2) / 4) * (1 - smooth((t - starts.w1 - 22) / 10));
-      dialGlow.value = radio * (0.85 + 0.15 * Math.sin(t * 7.3) * Math.sin(t * 2.1)) * 6;
+      // …and it CRACKLES as the network first answers (roseTraffic.ts dialFlare: the static rises, holds while the
+      // station ahead answers, settles), its flicker deeper while it does — but slow, no flashing
+      const crackle = dialFlare(t, starts.c4);
+      const flicker = 0.85 + (0.15 + 0.25 * crackle) * Math.sin(t * 7.3) * Math.sin(t * 2.1);
+      dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle) * 6;
       radioLight.intensity = (dialGlow.value / 6) * 0.08;
 
       // THE BEAMS: about the eye, in c4's night
       beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
       beams.position.copy(s.eye);
-      beams.rotation.set(0, s.yaw, 0);
+      beams.rotation.set(0, 0, 0);
       // the stations' islands are on the open sea's horizon all along (the coast's are the archipelago's)
       stations.visible = world === 'open' || beams.visible;
       stations.position.set(s.eye.x, 0, s.eye.z);
@@ -703,14 +830,23 @@ export function createProps(): Props {
       (uHorizon.value as THREE.Color).copy(s.horizon);
       beamTime.value = t - starts.c4;
       beamNight.value = s.night;
-      // (in w6 the Rose comes back with every link long grown, so it fades in over BEAM_RETURN from its window's start
-      // instead of switching on whole in one frame over the dusk sky — the 2026-10-30 night-ramp clip, 704 s)
+      eyeY.value = s.eye.y;
+      // (in w6 the Rose comes back, so it fades in over BEAM_RETURN from its window's start instead of switching on in
+      // one frame over the dusk sky — the 2026-10-30 night-ramp clip, 704 s)
       // (and c4's goes quiet over its last seconds, gone before w1's dissolve: the dissolve changes the world in the dark
       // and the night lifts into the morning after it — beams on one side and none on the other crossfaded, the
       // network fading out as the island faded in, the 2026-11-01 review: "abrupt and blendy")
-      beamGain.value = world === 'coast' ? 0.4 * smooth((t - (starts.w6 - 6)) / BEAM_RETURN) : 1 - smooth((t - (starts.w1 - 17)) / BEAM_QUIET);
+      const roseIn = world === 'coast' ? smooth((t - (starts.w6 - 6)) / BEAM_RETURN) : 1 - smooth((t - (starts.w1 - 17)) / BEAM_QUIET);
+      beamGain.value = world === 'coast' ? 0.4 * roseIn : roseIn;
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
+      // THE TRAFFIC (roseTraffic.ts), once: c4's wake and w6's chatter, pure in the beats' starts
+      if (!traffic) {
+        const wake = wakeTraffic(starts.c4, LINKS, arcDeg, STATIONS.length).messages;
+        const chatter = chatterTraffic(starts.w6 - 6, starts.w6 + spec('w6')!.length + 10, LINKS, arcDeg);
+        const all = [...wake, ...chatter].sort((x, y) => x.t0 - y.t0);
+        traffic = { all, byLink: LINKS.map((_, k) => all.filter((m) => m.link === k)) };
+      }
       // IN W6 THE COAST'S STATIONS ANSWER FROM THEIR COAST TOWERS (radioTower.ts FILM_COAST): their ring islands go,
       // and their beams run to the coast towers' lamps as the rising eye sees them; the other three stay on the ring
       // (the ring's −40° island had stood right in front of the high island, whose station it is)
@@ -721,15 +857,38 @@ export function createProps(): Props {
         r.tower.group.visible = here;
         if (r.road) r.road.visible = here;
       }
+      // each station's answer flare: its lamp (on the ring and on the coast), its road, its arcs' ends — c4's quiet
+      // and w6's return fade them with the arcs
+      ring.forEach((r, i) => {
+        const f = stationFlare(t, i, traffic!.all, LINKS) * roseIn;
+        flareU[i].value = f;
+        r.tower.setFlare(f);
+        s.towers?.find((x) => x.id === r.id)?.flare?.(f);
+      });
       if (beams.visible) {
         ring.forEach((r, i) => {
           const at = fromCoast ? s.towers!.find((x) => x.id === r.id) : undefined;
-          // each lamp from the eye, in the beams' frame (turned with the eye's yaw): a coast tower's from the world,
-          // a ring station's from the stations' frame (about the eye at the sea's level)
-          if (at) lampsFrom[i].set(at.lamp[0] - s.eye.x, at.lamp[1] - s.eye.y, at.lamp[2] - s.eye.z).applyAxisAngle(UP, -s.yaw);
-          else lampsFrom[i].copy(beaconAt[i]).setY(beaconAt[i].y - s.eye.y);
+          // each lamp from the eye (world axes): a coast tower's from the world, a ring station's from the stations'
+          // frame (about the eye at the sea's level, turned with its yaw) — where the towers are drawn this frame
+          if (at) lampsFrom[i].set(at.lamp[0] - s.eye.x, at.lamp[1] - s.eye.y, at.lamp[2] - s.eye.z);
+          else lampsFrom[i].copy(beaconAt[i]).applyAxisAngle(UP, s.yaw).setY(beaconAt[i].y - s.eye.y);
+          (lampU[i].value as THREE.Vector3).copy(lampsFrom[i]);
         });
-        aim(lampsFrom);
+        // each link's pulses: its last SLOTS messages to have left (or about to: a head glows a moment before), and
+        // the first of this window (c4's before w1, w6's after)
+        const from = world === 'coast' ? starts.w6 - 6 : -Infinity;
+        const to = world === 'coast' ? Infinity : starts.w1;
+        links.forEach((l, k) => {
+          const ms = traffic!.byLink[k].filter((m) => m.t0 >= from && m.t0 < to);
+          const gone = ms.filter((m) => m.t0 <= t + 1);
+          const dirOf = (m: RoseMessage): number => (m.from === 0 ? 1 : -1);
+          l.slots.forEach((u, j) => {
+            const m = gone[gone.length - 1 - j];
+            (u.value as THREE.Vector3).set(m ? m.t0 : NONE, m ? m.dur : 1, m ? dirOf(m) : 1);
+          });
+          const f = ms[0];
+          (l.first.value as THREE.Vector3).set(f ? f.t0 : NONE, f ? f.dur : 1, f ? dirOf(f) : 1);
+        });
       }
       // the far islands' air, from this eye under this Sun (farAir.ts; the coast's own update asks the same)
       if (stations.visible) farAir.update(s.eye, s.sun);
