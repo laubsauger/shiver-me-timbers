@@ -135,6 +135,8 @@ export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: Wea
   caustics.setFetchField(fetchField);
   cpuOcean.setFetch(fetchField);
   cpuOcean.setWakeField(flowFoam);
+  // the sea at the eye: the surface draws its underside only for an eye under the water (params undersideEyeBand)
+  surface.setWaterHeightAt((x, z, t) => cpuOcean.heightAt(x, z, t));
 
   return {
     ocean, foam, flowFoam, clouds, caustics, archipelago, fetchField, reflection,

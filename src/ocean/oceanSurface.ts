@@ -156,6 +156,8 @@ export class OceanSurface {
    * no dt, no rate limit, no accumulation — so it cannot depend on frame rate.
    */
   private lodEyeBand = 0;
+  /** the sea's height at (x, z) and time (m) — the mirror the hulls float on; null: the eye's side is unknown */
+  private waterHeightAt: ((x: number, z: number, time: number) => number) | null = null;
 
   constructor(
     sim: OceanSimulation,
@@ -188,6 +190,15 @@ export class OceanSurface {
     this.mesh.frustumCulled = false; // displaced verts break static bounds
     this.mesh.name = 'ocean-surface';
     this.group.add(this.mesh);
+  }
+
+  /**
+   * The sea's height at (x, z) and time (m), for the eye's side of the water: the material draws the underside only
+   * for an eye under the surface (params undersideEyeBand). Hand it the CpuOcean the hulls float on (§V.8: the sea the
+   * GPU draws). Never set, the eye's depth stays 0 and the face's winding decides top or underside, as it used to.
+   */
+  setWaterHeightAt(fn: ((x: number, z: number, time: number) => number) | null): void {
+    this.waterHeightAt = fn;
   }
 
   /** how far the displaced sea reaches (m) — camera far must exceed this */
@@ -249,6 +260,13 @@ export class OceanSurface {
     const persp = camera as THREE.PerspectiveCamera;
     if (persp.isPerspectiveCamera) this.surface.cameraFarUniform.value = persp.far;
     this.surface.radialLodUniform.value = this.radialLodCoefficient(persp);
+    // the eye's depth under the sea at its own xz (+ = under): top or underside is the eye's side of the water. Same
+    // eye and query as the underwater grade (src/underwater, `camera.position`), so the two agree on which side it is.
+    // §V.28: a non-finite answer is no answer — 0, inside the band, where the face decides.
+    if (this.waterHeightAt) {
+      const d = this.waterHeightAt(camera.position.x, camera.position.z, time) - camera.position.y;
+      this.surface.eyeDepthUniform.value = Number.isFinite(d) ? d : 0;
+    }
     // haze target = the scene's fog colour (the sky rig retints it per frame),
     // so water and objects melt into the same horizon (§V30 — no seam where
     // the sea disc ends). With fog removed entirely, fall back to the sky's

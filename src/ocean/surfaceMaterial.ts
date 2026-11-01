@@ -134,6 +134,12 @@ export interface OceanSurfaceMaterial {
    * and restores the pre-LOD mesh bit-identically. OceanSurface.update owns it.
    */
   radialLodUniform: { value: number };
+  /**
+   * The eye's depth under the sea surface at the eye's own xz (m, + = under water, − = in the air): top or underside
+   * shading is the eye's side of the water (see the end of colorNode). OceanSurface.update owns it; 0 (the default,
+   * inside the waterline band) leaves the decision to the face's winding.
+   */
+  eyeDepthUniform: { value: number };
   /** true when the scene-colour copy target was built for a half-float pass */
   readonly hdrSceneTarget: boolean;
   /** live sun colour — push from the DirectionalLight every frame */
@@ -493,6 +499,10 @@ export function buildOceanSurfaceMaterial(
   const uGlintHaze = uniform(sp.glintHazePenetration);
   const uUnderCeiling = uniform(color(sp.underCeilingColor));
   const uUnderWindow = uniform(new THREE.Vector2(sp.underWindowBrightness, sp.underWindowSoftness));
+  // the EYE's depth under the sea at its own xz (m, + = under), OceanSurface.update's; and the waterline band (params
+  // undersideEyeBand) inside which the face decides instead — see the select at the end of colorNode
+  const uEyeDepth = uniform(0);
+  const uEyeBand = uniform(sp.undersideEyeBand);
   // (coreSpacing, growth k): the clipmap's spacing law, spacing = s0 + k·dist
   const gridOpts: SurfaceGridOptions = grid ?? {
     segments: sp.gridSegments,
@@ -2799,11 +2809,20 @@ export function buildOceanSurfaceMaterial(
     under.assign(mix(under, uFoam.mul(0.9), foamAmount.mul(0.6)));
     if (boatLight) under.addAssign(boatLight); // §T.209: the LEDs from below, through the same surface
 
-    // (params undersideShading false — a world whose eye never dives, The Drift: a back face seen from the air is the
-    // lee of a far wave past the grazing ray, and drew the ceiling's teal at the horizon, unhazed and lit by the light
-    // floor — cyan dots along the night sea, the 2026-11-01 review. The normal above is the analytic up-facing one, so
-    // `col` is the top's own shading there. The default keeps the select, so the game's graph is as it was)
-    return sp.undersideShading ? frontFacing.select(col, under) : col;
+    // TOP OR UNDERSIDE IS THE EYE'S SIDE OF THE WATER, NOT THE FACE'S WINDING. A ray from an eye in the air reaches
+    // the sheet from the air, so it sees the top whichever face it lands on; from an eye in the water it sees the
+    // underside. Decided by the face alone (`frontFacing.select(col, under)`, until 2026-11-01), every back face seen
+    // from the air — the lee of a far wave turned past the grazing view ray, a few texels at the horizon — drew the
+    // ceiling's teal, unhazed and lit by the light floor: cyan dots along the night sea (The Drift's c4, the
+    // 2026-11-01 review: "looks a bit wonky"; found by hiding the scene's parts one at a time). The normal above is the
+    // analytic up-facing one on both faces, so `col` is the top's own shading on a back face too. Within the waterline
+    // band (params undersideEyeBand) the face still decides: there the near plane straddles the water and the CPU's
+    // sea at the eye is centimetres from the drawn one, and the winding is the local truth near the lens. A world
+    // that never reports its sea leaves the depth at 0, in the band: the face decides everywhere, as it always did.
+    // (Two uniforms, no texture: §V.40's fragment budget does not move.)
+    const eyeInAir = uEyeDepth.lessThan(uEyeBand.negate());
+    const eyeInWater = uEyeDepth.greaterThan(uEyeBand);
+    return eyeInAir.select(col, eyeInWater.select(under, frontFacing.select(col, under)));
   })();
 
   // MeshBasicNodeMaterial: scene lights bypassed — colorNode owns lighting
@@ -2986,6 +3005,7 @@ export function buildOceanSurfaceMaterial(
       sp.underWindowBrightness,
       sp.underWindowSoftness,
     );
+    uEyeBand.value = Math.max(0, Number.isFinite(sp.undersideEyeBand) ? sp.undersideEyeBand : 0);
     (uLodSamples.value as THREE.Vector2).set(sp.lodSamplesFull, sp.lodSamplesCut);
     uNormalStretch.value = sp.normalDetailStretch;
     // cheap (a 256-bin walk ×3) and it MUST run here: the footprints are
@@ -3014,6 +3034,7 @@ export function buildOceanSurfaceMaterial(
     seaRmsUniform: uSeaRms as unknown as { value: number },
     choppinessUniform: uChoppiness as unknown as { value: number },
     radialLodUniform: uRadialA as unknown as { value: number },
+    eyeDepthUniform: uEyeDepth as unknown as { value: number },
     hdrSceneTarget,
     sunColorUniform: uSunLightColor as unknown as { value: THREE.Color },
     sceneColorNode,

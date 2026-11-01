@@ -641,6 +641,9 @@ async function boot(): Promise<void> {
    * both sides must reach that state by the same switch.
    */
   if (FEATURES.flowFoam) cpuOcean.setWakeField(flowFoam);
+  // the sea at the eye: the surface draws its underside only for an eye under the water (params undersideEyeBand),
+  // not on every back face — the same query the underwater grade asks at the camera
+  surface.setWaterHeightAt((x, z, t) => cpuOcean.heightAt(x, z, t));
 
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray

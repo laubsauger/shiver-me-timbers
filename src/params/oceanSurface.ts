@@ -1015,13 +1015,19 @@ export const oceanSurfaceParams = registerParams(
     /** softness of the Snell window edge (cos units) */
     underWindowSoftness: 0.12,
     /**
-     * The underside branch above (Snell's window, the ceiling) on the sheet's BACK faces (build-time). True: the game,
-     * whose eye dives. False: back faces take the top's own shading — for a world whose eye never goes under. Seen from
-     * the air, a back face is only ever the lee of a far wave turned past the grazing view ray, a few texels at the
-     * horizon, and the underside drew each one in the ceiling colour, lit by `lightFloor` and never hazed: at night,
-     * cyan dots and dashes scattered along the far sea (The Drift's c4, the 2026-11-01 review: "looks a bit wonky")
+     * Half-width (m) of the band around the waterline inside which the sheet's WINDING decides top or underside
+     * shading; outside it the EYE decides. The underside (Snell's window, the ceiling) is the view from the water, so
+     * it is drawn when the eye is under the surface — `OceanSurface.setWaterHeightAt` reports the sea at the eye each
+     * frame — and the top's shading when it is in the air, whichever face a pixel happens to show. It used to be the
+     * face alone (`frontFacing`), and seen from the air a back face is the lee of a far wave turned past the grazing
+     * view ray: a few texels at the horizon, each drawn in the ceiling colour, lit by `lightFloor` and never hazed —
+     * cyan dots and dashes along the night sea (The Drift's c4, the 2026-11-01 review: "looks a bit wonky"). Within the
+     * band the eye's answer is not good enough: the near plane straddles the water (the waterline split) and the
+     * CPU's sea and the drawn one differ by centimetres, so there the face, which is the local truth near the lens,
+     * decides as it always did. 0.25 = half the underwater grade's `hysteresisBand`, the same dead band. A world that
+     * never reports its sea stays at depth 0, inside the band: the face decides everywhere, as before.
      */
-    undersideShading: true,
+    undersideEyeBand: 0.25,
   },
   {
     gridSegments: { min: 64, max: 1024, step: 64 },
@@ -1120,5 +1126,6 @@ export const oceanSurfaceParams = registerParams(
     wakeSmoothLong: { min: 0, max: 1, step: 0.01 },
     underWindowBrightness: { min: 0, max: 3, step: 0.01 },
     underWindowSoftness: { min: 0.01, max: 0.5, step: 0.01 },
+    undersideEyeBand: { min: 0, max: 2, step: 0.05 },
   },
 );
