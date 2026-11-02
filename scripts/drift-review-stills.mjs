@@ -82,6 +82,9 @@ try {
   const sorted = jumps(order);
   if (asGiven > sorted) console.log(`[review] shots drawn in show-time order: as listed they jump back or >10 s ${asGiven} time(s), sorted ${sorted} (each jump replays the sea's wake, ~30 s on a 4090)`);
   else if (sorted > 2) console.log(`[review] ${sorted} gaps of >10 s between shots: each replays the sea's wake (~30 s on a 4090)`);
+  // ("[review] still k/N  ms" after each one: the console's progress and ETA for a stills job — the user, 2026-11-02:
+  // "just an ever increasing number … we have no idea how long that's gonna take")
+  let k = 0;
   for (const s of order) {
     const t0 = Date.now();
     frame = null;
@@ -102,6 +105,7 @@ try {
     const raft = await eyeReport(page, s);
     console.log(`[review] ${file}  t ${s.t} s  ss ${ss.toFixed(2)}  ${Date.now() - t0} ms${raft ? `  raft ${JSON.stringify(raft)}` : ''}`);
     if (POST) console.log(`[review] post ${s.name}:`, JSON.stringify(await run(POST)));
+    console.log(`[review] still ${++k}/${order.length}  ${Date.now() - t0} ms`);
   }
 } finally {
   await close();

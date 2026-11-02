@@ -80,12 +80,16 @@ try {
     },
     [SIZE, params],
   );
+  let k = 0;
   for (const t of times) {
+    const t0 = Date.now();
     await page.evaluate((x) => window.__drift.setTime(x), Number(t));
     await new Promise((r) => setTimeout(r, 1200));
     const file = join(OUT, `${tag}_${t}.png`);
     await page.screenshot({ path: file });
     console.log(file);
+    // (the console's progress for a stills job: drift-farm-client.mjs progressOf)
+    console.log(`[review] still ${++k}/${times.length}  ${Date.now() - t0} ms`);
   }
 } finally {
   await close();

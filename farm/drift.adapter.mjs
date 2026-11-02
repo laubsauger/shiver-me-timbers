@@ -59,6 +59,11 @@ export function progress(line, p = { done: null, total: null, unit: null, fps: n
     const [done, total, fps] = [Number(m[2]), Number(m[3]), Number(m[4])];
     return { done, total, unit: 'frames', fps, etaS: fps > 0 ? Math.round((total - done) / fps) : null };
   }
+  const st = /\[review\] still (\d+)\/(\d+)\s+(\d+) ms/.exec(line);
+  if (st) {
+    const [done, total, ms] = [Number(st[1]), Number(st[2]), Number(st[3])];
+    return { ...p, done, total, unit: 'stills', etaS: Math.round(((total - done) * ms) / 1000) };
+  }
   if (/\[review\] \S+\.(png|jpe?g)\s/.test(line)) return { ...p, done: (p.done ?? 0) + 1, unit: 'stills' };
   return p;
 }
