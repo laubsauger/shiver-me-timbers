@@ -53,6 +53,7 @@ import {
   fract,
   length,
   max,
+  min,
   mix,
   mx_noise_float,
   normalize,
@@ -71,7 +72,7 @@ import {
 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
-import { ELEV_TEXEL_KM, GLOBAL_ELEV_TEXEL, insetWater, latLon, loadEarthMaps, mapCoords, sampleBoth, sampleLevels, type GeoFrame } from './earthMaps';
+import { ELEV_TEXEL_KM, GLOBAL_ELEV_TEXEL, insetWater, latLon, loadEarthMaps, mapCoords, sampleBoth, sampleLevels, type Aniso, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
 import { STAR_SIGMA } from './milkyWay';
 import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, starburst, sunBloom, sunDisc, sunlight, towardEye } from './atmosphere';
@@ -79,6 +80,7 @@ export { EARTH_R };
 import type { LifeState } from './life';
 
 type F = THREE.Node<'float'>;
+type V2 = THREE.Node<'vec2'>;
 type V3 = THREE.Node<'vec3'>;
 type V4 = THREE.Node<'vec4'>;
 
@@ -157,6 +159,25 @@ function fbm(p: V3, f0: number | F, octaves: number, gain: number, fp: F): F {
   return sum;
 }
 
+/** ridged fbm (each octave 1 − |noise|, squared: sharp crests, rounded troughs) 0..~1.3, its octaves finer than the
+ * footprint faded out as fbm's */
+function ridged(p: V3, f0: F, octaves: number, gain: number, fp: F): F {
+  const sum = float(0).toVar();
+  const f = float(f0).toVar();
+  const a = float(1).toVar();
+  Loop(octaves, ({ i }) => {
+    const w = lod(f, fp).toVar();
+    If(w.lessThanEqual(0), () => {
+      Break();
+    });
+    const r = float(1).sub(abs(mx_noise_float(p.mul(f).add(vec3(-2.9, 1.3, 4.1).mul(float(i))))));
+    sum.addAssign(r.mul(r).mul(a.mul(w)));
+    f.mulAssign(LACUNARITY);
+    a.mulAssign(gain);
+  });
+  return sum;
+}
+
 // ------------------------------------------------------------------ the measured surface
 /** relief exaggeration for the shading (the real relief is too low to read from orbit) — over a baseline of RELIEF_KM[1]
  * and more; the real relief (1) from RELIEF_KM[0] down, where the near level's and the inset's finer elevation make
@@ -164,6 +185,32 @@ function fbm(p: V3, f0: number | F, octaves: number, gain: number, fp: F): F {
  * 70°: the ground shaded black and white) */
 const RELIEF = 2.5;
 const RELIEF_KM: [number, number] = [0.1, 0.8];
+/** deg: the Sun's elevation the exaggeration is held to. A slope's shading contrast grows as its gradient over the tangent
+ * of the Sun's elevation, so the exaggeration that makes the relief read under a high Sun overshoots in grazing light,
+ * where the real relief reads by itself: under this elevation the exaggeration falls with tan(elevation), to the
+ * real relief (1) by ~8°. (The 2026-10-31 look at the fine levels, the end of Drift-2: the Sun 4° up over the Alps,
+ * at 150–300 km the full 2.5× put the snowfields' sunward slopes at sin(4° + 2.5·β) — up to 10× the valleys' light,
+ * cream "bright blotches" against near-black ground. Daylight from the arrival to the time waves, 20°+ up, keeps the
+ * full 2.5×) */
+const RELIEF_SUN_DEG = 20;
+/**
+ * UNDER THE DATA'S TEXEL (the 2026-10-31 look at the Alps from 275–282 s: "still kind of blurry and pixely … the
+ * mountains"; the lit ridges read as soft blobs, no ridgelines or valleys). Where the view is closer than the finest
+ * elevation texel there (79 m over the inset, 460 m over the near level), the relief gets ridged detail under it:
+ * height noise of wavelength two texels and finer, its height RELIEF_DETAIL × the measured slope × the texel — none
+ * on the plains, most on the steep ground, as real terrain's roughness grows with its slope. It fades out (fbm's
+ * `lod`) as the footprint passes it, so from farther off only the measured relief is left.
+ */
+const RELIEF_DETAIL = 0.3;
+/** the upsun march for the terrain's own shadows (unit: the relief's baseline `eps`): ~2× to 75× it — at the Sun 4° up,
+ * a ridge 200 m higher 3 km upsun shades a slope (a 4096 master at 282 s: eps ~100–200 m, so out to 7–15 km) */
+const SHADOW_STEPS = [2, 5, 12, 30, 75];
+/** the Sun's angular diameter (rad): the shadows' penumbra grows by it with the distance to the ridge that casts them */
+const SUN_DIAM = 0.0093;
+/** calm water on the lakes (GGX α): sheltered, smoother than the open sea's 0.07–0.22, so the sky's mirror and a
+ * tighter glint read on them rather than a flat sheet of the Sun's colour (the 2026-10-31 look at 275 s: the lake
+ * "reads as flat saturated orange: water should mirror the sky (Fresnel) with a sun glint") */
+const LAKE_ROUGH: [number, number] = [0.02, 0.06];
 /** the relief's baseline is never under this share of the finest elevation texel there: a bilinear lookup's slope is
  * constant across a texel, so a shorter baseline draws the texel grid (the region's 1.1 km texels had a 0.8 km floor) */
 const RELIEF_TEXELS = 0.72;
@@ -282,13 +329,13 @@ export function createEarth(): Earth {
     const { lat, lon } = latLon(n, G);
     return { lat, ...mapCoords(lat, lon.sub(shift)) };
   };
-  const elevation = (c: ReturnType<typeof coords>, fp: F): F =>
-    sampleLevels({ global: maps.globalElevation, region: maps.regionElevation, near: maps.nearElevation, inset: maps.insetElevation, globalTexel: GLOBAL_ELEV_TEXEL }, c, fp).x as F;
+  const elevation = (c: ReturnType<typeof coords>, fp: F, smooth = true): F =>
+    sampleLevels({ global: maps.globalElevation, region: maps.regionElevation, near: maps.nearElevation, inset: maps.insetElevation, globalTexel: GLOBAL_ELEV_TEXEL, smooth }, c, fp).x as F;
   /** the clouds' map (G), and the lights (R) under them: the region over the global maps */
   const lcwAt = (c: ReturnType<typeof coords>, fp: F): V4 => sampleBoth(maps.regionLcw, maps.globalLcw, c, fp);
   /** the surface's lights (R) and water (B), down to the near level's 15″ and the inset's own water line */
-  const lcwSurface = (c: ReturnType<typeof coords>, fp: F): V4 => {
-    const v = sampleLevels({ global: maps.globalLcw, region: maps.regionLcw, near: maps.nearLcw }, c, fp);
+  const lcwSurface = (c: ReturnType<typeof coords>, fp: F, an?: Aniso): V4 => {
+    const v = sampleLevels({ global: maps.globalLcw, region: maps.regionLcw, near: maps.nearLcw, smooth: true }, c, fp, an);
     return vec4(v.x, v.y, insetWater(maps, c, fp, v.z as F), v.w);
   };
   /** cloud cover 0..1 at unit normal n (on the cloud shell), the data's own plus sub-km texture at its edges */
@@ -316,8 +363,17 @@ export function createEarth(): Earth {
     const t1 = sunward(n, muS).toVar();
     const t2 = cross(n, t1);
     const c = coords(n);
-    const real = sampleLevels({ global: maps.globalAlbedo, region: maps.regionAlbedo, near: maps.nearAlbedo, inset: maps.insetAlbedo }, c, fp).rgb.toVar();
-    const lcw = lcwSurface(c, fp).toVar();
+    // the footprint's ellipse for the colour and the lights (sampleLevels `an`): along the view tP/μV, across it tP
+    const vt = d.sub(n.mul(d.dot(n)));
+    const alongDir = normalize(select(length(vt).greaterThan(1e-7), vt, t1));
+    const minor = t.mul(P).div(EARTH_R).toVar();
+    const eastT = normalize(cross(G.north, n));
+    const northT = cross(n, eastT);
+    const cosLat = sqrt(float(1).sub(n.dot(G.north).pow(2)).max(1e-4));
+    const geoStep = (w: V3): V2 => vec2(w.dot(eastT).div(cosLat), w.dot(northT)).mul(180 / Math.PI) as V2;
+    const an: Aniso = { along: geoStep(alongDir.mul(minor.div(muV.max(0.03)))), across: geoStep(cross(n, alongDir).mul(minor)), minor };
+    const real = sampleLevels({ global: maps.globalAlbedo, region: maps.regionAlbedo, near: maps.nearAlbedo, inset: maps.insetAlbedo }, c, fp, an).rgb.toVar();
+    const lcw = lcwSurface(c, fp, an).toVar();
     const sea = seaLevel(L);
     // the measured elevation, with sub-pixel detail in the lowlands once the sea moves (a fractal flood line)
     const e0 = elevation(c, fp).toVar();
@@ -329,13 +385,26 @@ export function createEarth(): Earth {
     // relief: the elevation one footprint along the Sun's azimuth and across it, at least RELIEF_TEXELS of the finest
     // elevation texel there (0.8 km over the region, as before the near level and the inset came)
     const finest = mix(mix(float(0.8), float(RELIEF_TEXELS * ELEV_TEXEL_KM.near), c.wn), float(RELIEF_TEXELS * ELEV_TEXEL_KM.inset), c.wi);
-    const eps = max(fp, finest.mul(KM)).toVar();
-    const relief = mix(float(1), float(RELIEF), smoothstep(RELIEF_KM[0] * KM, RELIEF_KM[1] * KM, eps));
+    // (and no more than the Sun's elevation allows: RELIEF_SUN_DEG)
+    const tanSun = muS.div(sqrt(float(1).sub(muS.mul(muS)).max(1e-6)));
+    const relief = mix(float(1), float(RELIEF), smoothstep(RELIEF_KM[0] * KM, RELIEF_KM[1] * KM, max(fp, finest.mul(KM))))
+      .min(tanSun.mul(RELIEF / Math.tan((RELIEF_SUN_DEG * Math.PI) / 180)).max(1))
+      .toVar();
+    // ... the slope filtered over the pixel's whole footprint: `fp` is the footprint's geometric mean, but on the
+    // ground a pixel is an ellipse 1/√μV longer along the view than that (1/μV longer than across it). The relief's
+    // gradient taken at the mean under-filtered the long axis by 2× in the low views over the Alps (μV ~0.25 at the
+    // end of Drift-2), so a sunlit face's lit patch flickered between texels and read as a blotch (the 2026-10-31
+    // look at the fine levels: "sunlit Alpine slopes come out as bright blotches"). Diffuse light is linear in the
+    // normal, so the wider filter keeps the mean brightness right; only the clamp at the shadow line is softened.
+    // (`e0` itself, for the flood line and the colours, stays at `fp`: the coast keeps its sharpness)
+    const fpr = fp.div(sqrt(muV.max(0.03))).toVar();
+    const eps = max(fpr, finest.mul(KM)).toVar();
     const metres = eps.mul(6371000);
+    const er = elevation(c, fpr).max(0).toVar();
     // (the land's slopes only: the sea floor is held at the sea's surface. Over the inset's ~57 m baseline the step
     // from a coastal field down to the shelf's −25 m read as a 25° slope — a lit or shaded rim along every coast)
-    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), fp).max(0).sub(e0.max(0)).div(metres).toVar();
-    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), fp).max(0).sub(e0.max(0)).div(metres).toVar();
+    const g1 = elevation(coords(normalize(n.add(t1.mul(eps)))), fpr).max(0).sub(er).div(metres).toVar();
+    const g2 = elevation(coords(normalize(n.add(t2.mul(eps)))), fpr).max(0).sub(er).div(metres).toVar();
     const slope = sqrt(g1.mul(g1).add(g2.mul(g2)));
     // land above the sea now: the colour's own coast, and the risen sea over the measured elevation
     const above = e.sub(sea);
@@ -345,7 +414,40 @@ export function createEarth(): Earth {
     // the new sea over what was land: by the measured elevation (continuous across the old coast — the
     // satellite water mask is binary and would draw the old coastline across the sea as a hard edge)
     const flooded = smoothstep(-30, 4, e).mul(float(1).sub(dry));
-    const N = normalize(n.sub(t1.mul(g1).add(t2.mul(g2)).mul(relief).mul(land)));
+    // the relief under the data's texel (RELIEF_DETAIL): ridged height, its gradient by differences over `dd`
+    const texM = mix(mix(float(1100), float(ELEV_TEXEL_KM.near * 1000), c.wn), float(ELEV_TEXEL_KM.inset * 1000), c.wi);
+    const f0 = float(6371000 / 2).div(texM);
+    const dd = max(fpr, float(0.12).div(f0)).toVar();
+    const hd = (q: V3): F => ridged(q, f0, 4, 0.5, fpr);
+    const amp = slope.min(1.5).mul(texM).mul(RELIEF_DETAIL).toVar();
+    const hd0 = hd(n).toVar();
+    const gd1 = hd(normalize(n.add(t1.mul(dd)))).sub(hd0).mul(amp).div(dd.mul(6371000));
+    const gd2 = hd(normalize(n.add(t2.mul(dd)))).sub(hd0).mul(amp).div(dd.mul(6371000));
+    const N = normalize(n.sub(t1.mul(g1.mul(relief).add(gd1)).add(t2.mul(g2.mul(relief).add(gd2))).mul(land)));
+    // the snow's edges under the texel: the colour's own brightness above ~2000 m is how much of the texel is snow
+    // (the July maps' snowfields and glaciers, albedo ~0.4 a texel against ~0.06 lower down); under the texel it is
+    // set in crisp patches by the ridged height — snow in the hollows (low `hd0`), off the crests and the steep
+    // ground — brighter where it lies and darker between, the texel's mean kept, faded in only as the view comes
+    // closer than the texel (from farther off the map's own colour is all of it)
+    const snowShare = smoothstep(0.12, 0.55, real.dot(vec3(0.2126, 0.7152, 0.0722))).mul(smoothstep(1700, 2300, e0)).toVar();
+    const under = float(1).sub(smoothstep(0.5, 1, fp.mul(6371000).div(texM))).mul(c.wn);
+    const lies = smoothstep(-0.06, 0.06, snowShare.mul(float(1).sub(smoothstep(0.7, 1.2, slope).mul(0.6))).sub(hd0.mul(0.6)));
+    real.mulAssign(float(1).add(lies.sub(snowShare).mul(under).mul(0.7)).max(0.3));
+    // the terrain's own shadows in low sun: the elevation upsun along the Sun's azimuth against the ray toward it
+    // (the ground falls away under the tangent by d²/2R). Plain lookups at a footprint that grows with the distance
+    const terrainLit = float(1).toVar();
+    If(land.greaterThan(0.01).and(muS.greaterThan(-0.03)).and(muS.lessThan(0.5)), () => {
+      const h0 = er.mul(relief);
+      for (const k of SHADOW_STEPS) {
+        const dk = eps.mul(k);
+        const dm = dk.mul(6371000);
+        const h = elevation(coords(normalize(n.add(t1.mul(dk)))), max(fpr, dk.mul(0.25)), false).max(0).mul(relief);
+        const ray = h0.add(dm.mul(tanSun)).add(dm.mul(dm).div(2 * 6371000));
+        const soft = dm.mul(SUN_DIAM).max(3);
+        terrainLit.assign(min(terrainLit, smoothstep(soft.negate(), soft, ray.sub(h))));
+      }
+      terrainLit.assign(mix(terrainLit, float(1), smoothstep(0.35, 0.5, muS)));
+    });
 
     // land: the young world bare, life rolling over it in waves, the ice (lifeLayers.ts). Its bare rock is
     // the Sahara's (lat 18–30°, lon −12–29°: no Nile, no sea), mirrored over the planet so it has no seams
@@ -371,13 +473,19 @@ export function createEarth(): Earth {
     const foam = vec3(0.6, 0.57, 0.52);
     const albedo = mix(mix(mix(water, mats, matter.x.mul(0.9)), foam, matter.y.mul(0.6)), landAlbedo, land);
 
-    // sunlight at the terrain's height, under the clouds' shadows
-    const sun = sunlight(float(EARTH_R).add(e.max(0).mul(1e-6 * RELIEF)), muS).toVar();
+    // sunlight at the terrain's height, under the clouds' shadows. The height is exaggerated only as much as the
+    // relief's shading is there (`relief`: 2.5× from far off under a high Sun, the real height close in and in grazing
+    // light). It was 2.5× everywhere: at the end of Drift-2, the Sun 4° up over the Alps (az 56°), a 3 km summit lit
+    // as if 7.5 km up kept 2–3× the sunlight a real one does through that air mass, and nearly white instead of the
+    // morning's gold — the snow and bare rock above 2500 m (albedo ~0.4 against ~0.06 lower down, the same in the
+    // inset as in the Blue Marble: measured over lon 9.5–12.5, lat 45.8–46.9) came out as cream blotches far brighter
+    // than the valleys (the 2026-10-31 look at the fine levels)
+    const sun = sunlight(float(EARTH_R).add(e.max(0).mul(relief).mul(1e-6)), muS).toVar();
     const tanZ = sqrt(float(1).sub(muS.mul(muS)).max(0)).div(muS.max(0.08));
     const shadowAt = normalize(n.add(t1.mul(tanZ.mul(CLOUD_H / EARTH_R))));
     const overhead = cloudAt(n, max(fp, 2 * KM));
     const shade = float(1).sub(cloudAt(shadowAt, max(fp, 2 * KM)).mul(0.85));
-    const diffuse = mix(muS, N.dot(S), land).max(0);
+    const diffuse = mix(muS, N.dot(S).mul(terrainLit), land).max(0);
     // skylight: a little blue fill on the day side (none on the night side)
     const sky = vec3(0.3, 0.45, 0.8).mul(smoothstep(-0.12, 0.3, muS).mul(0.06));
     // the night side is not black: a faint moonlit ambient (the ISS night photographs show the ground and
@@ -392,7 +500,14 @@ export function createEarth(): Earth {
     // it swell and redden toward the terminator
     const h = normalize(S.add(v));
     // (along the eddy's slicks the floating matter calms the ripples: a smoother, brighter glint)
-    const a = mix(float(0.07), float(0.22), smoothstep(-0.35, 0.35, fbm(n.add(vec3(1, 4, 2)), 14, 4, 0.5, fp))).mul(float(1).sub(matter.y.mul(0.75)));
+    const windy = smoothstep(-0.35, 0.35, fbm(n.add(vec3(1, 4, 2)), 14, 4, 0.5, fp));
+    // the lakes: the maps' own water standing above the old sea (the inset's, measured flat: Garda at 61–65 m),
+    // sheltered in their basins and calmer (LAKE_ROUGH) — still so once the risen sea (70 m) has reached them.
+    // (the mask taken ~1.5 km wide: the risen sea over a lake's drowned shore is the same sheltered water, and a
+    // lake's own edge kept the open sea's rough glint as an orange rim round Garda at 275 s)
+    const basin = insetWater(maps, c, max(fp, 1.5 * KM), lcw.z);
+    const lake = float(1).sub(land).mul(smoothstep(0.05, 0.4, basin)).mul(smoothstep(2, 8, e0)).toVar();
+    const a = mix(mix(float(0.07), float(0.22), windy), mix(float(LAKE_ROUGH[0]), float(LAKE_ROUGH[1]), windy), lake).mul(float(1).sub(matter.y.mul(0.75)));
     // (low down, the ripples: their normal for the glint and the sky in the water, the rest of their slopes in its α²)
     const near = low.mul(float(1).sub(land)).toVar();
     const rip = ripples(d, n, fp.mul(EARTH_R * 1e6), matter.y.mul(0.75));
@@ -405,7 +520,7 @@ export function createEarth(): Earth {
     // floating matter kills the glint where it lies; its specks catch the Sun
     const glint = ggx.mul(fresnel).mul(smith(muS.max(1e-3))).mul(smith(muV)).div(muV.mul(4)).mul(float(1).sub(land)).mul(shade).mul(float(1).sub(matter.x.mul(0.85)));
     // the sky in the water: Fresnel at grazing angles
-    const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land)).mul(float(1).sub(near));
+    const skyInWater = vec3(0.25, 0.4, 0.75).mul(pow(float(1).sub(muV), 5).mul(0.03).mul(smoothstep(-0.05, 0.3, muS))).mul(float(1).sub(land)).mul(float(1).sub(near)).mul(float(1).sub(lake));
     // ... and low down, the sky itself in the water (the sea's scene's far sea, seaSky.ts farSea): Fresnel's share of
     // the air's light along the ray the rippled water mirrors, held just over the horizon. Near grazing it is nearly
     // all of it — what makes the far sea meet the sky at the horizon; without it the water there drew only the dim
@@ -417,6 +532,15 @@ export function createEarth(): Earth {
       const rr = normalize(r.add(eyeUp.mul(float(0.003).sub(r.dot(eyeUp)).max(0))));
       const fresnelW = pow(float(1).sub(Nw.dot(v).max(1e-3)), 5).mul(0.98).add(0.02);
       mirrored.assign(scatter(cameraPosition, rr, C, S).light.mul(fresnelW).mul(near).mul(float(1).sub(matter.x.mul(0.85))));
+    });
+    // ... and on the lakes, from orbit: the sky the lake itself sees along the mirrored ray (the air's light from the
+    // water's surface up, not from the eye: the eye is above most of the air), by Fresnel
+    If(lake.greaterThan(1e-3).and(near.lessThan(0.999)), () => {
+      const r = d.sub(Nw.mul(d.dot(Nw).mul(2)));
+      const rr = normalize(r.add(n.mul(float(0.003).sub(r.dot(n)).max(0))));
+      const at = C.add(n.mul(float(EARTH_R).add(e0.max(0).mul(1e-6)).add(2e-5)));
+      const fresnelW = pow(float(1).sub(Nw.dot(v).max(1e-3)), 5).mul(0.98).add(0.02);
+      mirrored.addAssign(scatter(at, rr, C, S).light.mul(fresnelW).mul(lake).mul(float(1).sub(near)));
     });
     // the lights of the night side, dimmed and spread by the cloud over them
     // the lights come up behind the terminator as the dusk deepens (a gradient that follows it, not a switch)

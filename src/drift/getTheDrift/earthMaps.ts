@@ -28,7 +28,7 @@
  * lon 0° lat 0°, of lon 90°E) — the planet only translates, so they are fixed.
  */
 import * as THREE from 'three/webgpu';
-import { asin, atan, float, log2, min, mix, smoothstep, texture, vec2 } from 'three/tsl';
+import { asin, atan, exp2, float, floor, fract, log2, min, mix, smoothstep, texture, vec2 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -54,9 +54,10 @@ export const ELEV_TEXEL_KM = { inset: INSET_TEXEL * 6371, near: NEAR_TEXEL * 637
  * levels agree above the coarser one's texel (the bake makes them), so it is only the detail that fades */
 const FADE = { region: 1.5, near: 1, inset: 0.35 };
 const DEG = 180 / Math.PI;
-/** the near level and the inset: `?earthfine` turns them on, `?earthfine=0` off (an A/B against the region alone).
- * Off by default until the render boxes have their maps (drift-bundle.mjs --manifest-only) */
-const FINE_LEVELS = ((q: string | null) => (q === null ? false : q !== '0'))(typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('earthfine'));
+/** the near level and the inset: on by default (the render boxes have their maps, in the asset bundle since
+ * 2026-10-30); `?earthfine=0` turns them off, an A/B against the region alone that also skips their ~800 MB of
+ * textures */
+const FINE_LEVELS = ((q: string | null) => q !== '0')(typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('earthfine'));
 
 export interface GeoFrame {
   north: V3;
@@ -262,14 +263,80 @@ export function sampleBoth(regionTex: THREE.Texture, globalTex: THREE.Texture, c
 }
 
 /**
+ * A map magnified through a cubic B-spline instead of the bilinear tent: four bilinear taps (Sigg and Hadwiger's
+ * third-order filtering, GPU Gems 2 ch. 20). A bilinear lookup is only C0 across a texel's edge, and under a steep
+ * curve its texels show as squares: the Black Marble's own 15″ grid is single-texel speckle saturated in the cores,
+ * and the night lights' threshold (lifeLayers.ts nightLights `on`) cut it into hard squares ~500 m across once the
+ * near level came in (the 2026-10-31 look at 275 s: "blocky squares in the foreground"); the elevation's slope is
+ * constant across a texel, so the relief drew the inset's texel grid where the view is closer than its 79 m. The
+ * spline is smooth to the second derivative and keeps the map's mean. On each of the two mips the level falls
+ * between, blended as trilinear does: the level is set by the footprint's geometric mean, and at a grazing view the
+ * footprint across it is √μV of that, so even past the first mip a texel spans several pixels across the view (the
+ * squares at 275 s were mip 1–2 texels, 1–2 km, under a bilinear lookup).
+ */
+function bspline(tex: THREE.Texture, uv: V2, w: number, h: number, lvl: F): V4 {
+  const at = (L: F): V4 => {
+    const size = vec2(w, h).div(exp2(L));
+    const st = uv.mul(size).sub(0.5);
+    const i = floor(st);
+    const f = fract(st);
+    const f2 = f.mul(f);
+    const f3 = f2.mul(f);
+    const w0 = float(1).sub(f).pow(3).div(6);
+    const w1 = f3.mul(3).sub(f2.mul(6)).add(vec2(4)).div(6);
+    const w2 = f3.mul(-3).add(f2.mul(3)).add(f.mul(3)).add(1).div(6);
+    const w3 = f3.div(6);
+    const g0 = w0.add(w1);
+    const g1 = w2.add(w3);
+    // the two taps' texel positions (their centres at +0.5), in uv
+    const p0 = i.sub(0.5).add(w1.div(g0)).div(size);
+    const p1 = i.add(1.5).add(w3.div(g1)).div(size);
+    const tap = (x: F, y: F): V4 => texture(tex, vec2(x, y)).level(L) as unknown as V4;
+    return tap(p0.x, p0.y).mul(g0.x).add(tap(p1.x, p0.y).mul(g1.x)).mul(g0.y).add(tap(p0.x, p1.y).mul(g0.x).add(tap(p1.x, p1.y).mul(g1.x)).mul(g1.y)) as V4;
+  };
+  const L0 = floor(lvl);
+  return mix(at(L0), at(L0.add(1)), fract(lvl)) as unknown as V4;
+}
+
+/** the pixel's footprint on the ground as an ellipse, for anisotropic lookups: its axes along and across the view as
+ * (east, north) steps in degrees of longitude and latitude, and the minor axis's length (unit sphere) */
+export interface Aniso {
+  along: V2;
+  across: V2;
+  minor: F;
+}
+
+type Box = { lon0: number; lon1: number; lat0: number; lat1: number };
+const WORLD: Box = { lon0: -180, lon1: 180, lat0: -90, lat1: 90 };
+/** a (lon, lat) deg step as a step in a level's texture coordinates (v runs north to south) */
+const gradUv = (g: V2, b: Box): V2 => vec2(g.x.div(b.lon1 - b.lon0), g.y.div(b.lat1 - b.lat0).negate());
+
+/**
  * Every level of one map, each finer one over the coarser ones where it is: `near` and `inset` are left out for a map
  * that has none (the night lights stop at the near level). (All of them are fetched everywhere: four lookups a map
- * are cheap next to the surface's noise and air, and a branch around them would buy little on a GPU.)
+ * are cheap next to the surface's noise and air, and a branch around them would buy little on a GPU.) `smooth`: the
+ * near level and the inset magnified through the B-spline (`bspline`, above) — for the maps whose texels showed.
+ *
+ * `an`: the lookups filtered over the footprint's ellipse (the hardware's anisotropic filter, from the analytic
+ * gradients) instead of a mip from its mean. At the grazing views of Drift-2 (μV 0.1–0.3) the footprint across the
+ * view is √μV of the mean, so the mean's mip blurred everything 2–3× across the view: the Alps' ridges and the
+ * snowfields smeared sideways into soft blobs (the 2026-10-31 look at 275–282 s: "still kind of blurry and pixely").
  */
-export function sampleLevels(t: { global: THREE.Texture; region: THREE.Texture; near?: THREE.Texture; inset?: THREE.Texture; globalTexel?: number }, c: MapCoords, fp: F): V4 {
-  let v = sampleBoth(t.region, t.global, c, fp, t.globalTexel ?? GLOBAL_TEXEL);
-  if (t.near && FINE_LEVELS) v = mix(v, texture(t.near, c.near).level(level(fp, NEAR_TEXEL)), c.wn) as unknown as V4;
-  if (t.inset && FINE_LEVELS) v = mix(v, texture(t.inset, c.inset).level(level(fp, INSET_TEXEL)), c.wi) as unknown as V4;
+export function sampleLevels(t: { global: THREE.Texture; region: THREE.Texture; near?: THREE.Texture; inset?: THREE.Texture; globalTexel?: number; smooth?: boolean }, c: MapCoords, fp: F, an?: Aniso): V4 {
+  const look = (tex: THREE.Texture, uv: V2, texel: number, box: Box): V4 =>
+    (an ? texture(tex, uv).grad(gradUv(an.along, box), gradUv(an.across, box)) : texture(tex, uv).level(level(fp, texel))) as unknown as V4;
+  // a finer level: through the B-spline while it is magnified across the view, the plain lookup from there
+  const fine = (tex: THREE.Texture, uv: V2, texel: number, box: Box, w: number, h: number): V4 => {
+    if (!t.smooth) return look(tex, uv, texel, box);
+    const spline = bspline(tex, uv, w, h, level(fp, texel));
+    if (!an) return spline;
+    return mix(spline, look(tex, uv, texel, box), smoothstep(0.5, 1.5, level(an.minor, texel))) as unknown as V4;
+  };
+  let v = an
+    ? (mix(look(t.global, c.global, t.globalTexel ?? GLOBAL_TEXEL, WORLD), look(t.region, c.region, REGION_TEXEL, REGION), c.w) as unknown as V4)
+    : sampleBoth(t.region, t.global, c, fp, t.globalTexel ?? GLOBAL_TEXEL);
+  if (t.near && FINE_LEVELS) v = mix(v, fine(t.near, c.near, NEAR_TEXEL, NEAR, NEAR.w, NEAR.h), c.wn) as unknown as V4;
+  if (t.inset && FINE_LEVELS) v = mix(v, fine(t.inset, c.inset, INSET_TEXEL, INSET, INSET.w, INSET.h), c.wi) as unknown as V4;
   return v;
 }
 

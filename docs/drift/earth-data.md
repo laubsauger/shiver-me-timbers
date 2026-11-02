@@ -12,8 +12,9 @@ Four nested levels, all equirectangular, each finer one fading into the one unde
 | near | −12..20, 36..54 | 1/240° ~460 m (7680 × 4320): the Blue and Black Marble's own grid | colour, lights + water, elevation (zoom 9) | 1° |
 | inset | 6..14, 43.5..47 | 1/1000° × 1/1400° ~79 m (8000 × 4900) | Sentinel-2 colour, its own water, elevation (zoom 11, EU-DEM) | 0.35° |
 
-The near level and the inset are on by default only after the render boxes have their maps; until then
-`?earthfine` turns them on and `?earthfine=0` off (an A/B against the region alone).
+The near level and the inset are on by default (since 2026-11-01; the render boxes have their maps in the asset
+bundle); `?earthfine=0` turns them off (an A/B against the region alone, without their ~800 MB of textures). The
+on-screen credits these maps need are in [CREDITS.md](CREDITS.md).
 
 ## Rebuild
 
@@ -123,6 +124,22 @@ more.
 - The relief's baseline is never under 0.72 of the finest elevation texel there (0.8 km over the region as before,
   ~330 m over the near level, ~57 m over the inset), and its exaggeration falls from 2.5× at 0.8 km to 1× at
   100 m: real slopes at 60 m read by themselves (2.5× tipped the Alps' normals past 70°).
+- The relief's exaggeration is held to the Sun's elevation: under 20° it falls with tan(elevation), to the real
+  relief by ~8° (in grazing light the real relief reads by itself; 2.5× at the Sun 4° up made the Alps' snowfields
+  cream blotches at the end of Drift-2). The sunlight's height above the sea takes the same factor (it was 2.5×
+  always). The terrain casts its own shadows in low sun (a 5-step march upsun out to 75× the relief's baseline).
+- The colour and the lights are looked up over the footprint's ellipse (anisotropic, from analytic gradients: tP
+  across the view, tP/μV along it), not a mip from its mean, which blurred everything 2–3× across the view at
+  Drift-2's grazing angles.
+- The relief's gradient is filtered over the pixel's long axis (1/√μV longer than `fp`, the mean); the near level's
+  and the inset's elevation and lights are magnified through a cubic B-spline, not bilinear (their texels showed as
+  squares: the Black Marble's speckle under the lights' threshold, the slope constant across an elevation texel).
+- Under the finest elevation texel the relief gets ridged detail scaled by the measured slope, and the snow (the
+  colour's brightness above ~2000 m) its crisp edges, both fading out as the footprint passes the texel. Lakes (the maps'
+  water above the old sea, with their drowned shores) are calmer than the sea and mirror the sky they see.
+- Known limit: the left views late in Drift-2 (282 s, yaw 55°) look past the inset's east edge (lon 14°) onto the
+  Julian Alps and the Karawanks, which have only the near level's 460 m colour and zoom-9 terrain: still soft there.
+  Widening the inset to lon ~16° would need more Sentinel and zoom-11 tiles.
 - The flood line's sub-pixel noise over the inset starts at ~160 m and is 1 m high (7 m from ~2 km elsewhere: in
   a plain falling 1 m a km that moved the real coast by kilometres).
 
