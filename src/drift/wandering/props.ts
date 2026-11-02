@@ -383,9 +383,12 @@ const FIELD_DARK: [number, number] = [0.7, 1];
 export const fieldWeight = (night: number): number => smooth((night - FIELD_DARK[0]) / (FIELD_DARK[1] - FIELD_DARK[0]));
 /** the field's share on the coast at t under a sky this dark: only in its own beats (w3's field to w5, and w6's
  * night), and there only in the dark — so not in w1's dark arrival from the sea's night (the 2026-11-01 dawn: the
- * night is the network's, the field comes later) */
-export const fieldOnCoast = (t: number, starts: { w3: number; w5: number; w6: number }, night: number): number =>
-  (t > starts.w3 - 3 && t < starts.w5) || t > starts.w6 - 3 ? fieldWeight(night) : 0;
+ * night is the network's, the field comes later). `ending` (radioEnding, params/drift.ts): w6's field goes quiet with
+ * the Rose (roseTraffic.ts endingRose, ENDING.quiet: 740 → 748 show s, gone before the title) — its pairs, Act 1's
+ * loops in w6's sky, had competed with the stranger's braid in the same two colours (the 2026-11-02 review of the
+ * ending), which now climbs alone. Its look while it is there is unchanged. */
+export const fieldOnCoast = (t: number, starts: { w3: number; w5: number; w6: number }, night: number, ending = false): number =>
+  t > starts.w3 - 3 && t < starts.w5 ? fieldWeight(night) : t > starts.w6 - 3 ? fieldWeight(night) * (ending ? endingRose(t, starts.w6) : 1) : 0;
 /** m: no pair is born nearer the eye than this (a 0.5 m loop at 7 m spans 8°; at 2.5 m it was a 23° ring) */
 const FIELD_CLEARANCE = 7;
 
@@ -502,6 +505,9 @@ const ARC_HALO: [number, number, number] = [1, 0.62, 0.3];
 const ARC_LAMP: [number, number, number] = [1, 0.3, 0.12];
 /** the dial's crackle as the network first answers: × its glow at the peak (roseTraffic.ts dialFlare) */
 const DIAL_FLARE = 2.2;
+/** the dial's light on the deck and the sails: its colour (sRGB) and its reach (m, the point light's cut-off) */
+const RADIO_COLOR = 0xffa35a;
+const RADIO_REACH = 7;
 
 /**
  * THE RADIO STORY (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; what is said when:
@@ -510,7 +516,8 @@ const DIAL_FLARE = 2.2;
  *   radioCall      c4: our masthead lamp (a signal lamp at the raft's truck, dark but for the calls: roseTraffic.ts
  *                  callLamp) and its calls' pulses (radioSignal.ts) out to the lamp ahead (WAKE_FROM), which answers
  *                  the same rhythm (answerFlare); the Rose's wake becomes the cascade (cascadeTraffic) over arches
- *                  raised high (CASCADE.lift), and goes quiet later (CASCADE.quiet)
+ *                  raised high (CASCADE.lift), its pulses brighter for the thin air up there (CASCADE.gain), and goes quiet
+ *                  later (CASCADE.quiet)
  *   radioOperator  c1–w2: the crew's third kneels at the case's spot on the fore-deck, facing the eye across it, so the
  *                  case lands at their knees and the dial lights them from c4 on (THE OPERATOR)
  *   radioEnding    w6: our island's mast dark until it lights (oursLit), w6's traffic turned seaward and quiet
@@ -528,8 +535,13 @@ const CALL_NIGHT: [number, number] = [0.35, 0.65];
 /** THE OPERATOR: m from the case's resting place to the kneeler's, away from the eye (the case between them, so the
  * dial's light falls on their front as the eye sees it); and × the dial's point light while they are there (×5, the
  * first look at 448 s, out/drift/review/radio-1102/operator_440-452: the face and shirt burnt to a pale glow, a ghost
- * rather than a person lit by a dial) */
-const OPERATOR = { off: 0.6, light: 2.5 };
+ * rather than a person lit by a dial). And the light's pool while they are there: m its reach (the point light's
+ * cut-off distance; 7 m without them, which lights the deck and the sails about it), and its colour, sRGB — the
+ * 2026-11-02 review of that clip: "a tighter, warmer pool of light so the face doesn't flatten". Within ~1 m of the
+ * dial (the bowed head, the hands, the case) it is as bright as before; it is gone by ~2 m, so the figure stands in
+ * its own pool against a dark deck, and a deeper amber (the dial's own, its glow 1 : 0.62 : 0.25) than the 7 m
+ * light's paler one */
+const OPERATOR = { off: 0.6, light: 2.5, reach: 2.2, color: 0xff8a3c };
 /** THE FAR RAFTS COME IN (w6, radioEnding): each lantern's beach coordinates (along, off m: beats.ts COAST) at
  * ENDING.rafts' start and end — across the lagoon in front and to the left, 400–840 m off the eye, each ~60 m nearer
  * our beach by the end (~1.2 m/s, a raft on a light air), so they close on it rather than sit — and its height (m) */
@@ -550,7 +562,8 @@ const STRANGER = { dist: 6000, el: 0.4, gain: 0.6 };
  * zenith), at a distance log-interpolated between the lamps' own (so it ends IN each lamp, depth-tested).
  * RAISED by `lift` 0 … 1 (the 2026-11-02 next-level review: the c4 cascade "passing high overhead"; roseTraffic.ts
  * CASCADE.lift): the chord's point pulled toward the zenith by lift · 4u(1 − u) of its distance from it, so the ends
- * stay in their lamps and the middle rises — at 0.5 a neighbour's apex ~50° up, the widest ~80° */
+ * stay in their lamps and the middle rises — at 0.5 a neighbour's apex ~50° up, the widest ~80°; at 0.6 (CASCADE.lift
+ * now) ~58° */
 export function arcPoint(a: THREE.Vector3, b: THREE.Vector3, u: number, lift = 0): THREE.Vector3 {
   const flatOf = (d: THREE.Vector3): THREE.Vector2 => {
     const n = d.clone().normalize();
@@ -619,7 +632,7 @@ export function createProps(): Props {
   halo.position.set(0.08, 0.2, 0.05);
   caseMesh.add(halo);
   // and its light on the deck and the sails about it (always in the scene, so the light count never changes)
-  const radioLight = new THREE.PointLight(0xffa35a, 0, 7, 2);
+  const radioLight = new THREE.PointLight(RADIO_COLOR, 0, RADIO_REACH, 2);
   radioLight.position.set(0.08, 0.35, 0.05);
   caseMesh.add(radioLight);
   group.add(caseMesh);
@@ -752,6 +765,9 @@ export function createProps(): Props {
   type V3 = THREE.Node<'vec3'>;
   /** the arcs' raise toward the zenith (arcPoint `lift`): 0 but in c4 under radioCall (roseTraffic.ts CASCADE.lift) */
   const arcLift = uniform(0);
+  /** × a pulse's light, its core and its haze (not a lit path's rest, not a lamp's flare): 1 but in c4 under radioCall
+   * (roseTraffic.ts CASCADE.gain: the raised arches run through thin air) */
+  const pulseGain = uniform(1);
   /** the arc from A to B at u (TSL mirror of `arcPoint`) */
   const arcPath = (A: V3, B: V3, u: F): V3 => {
     const flatOf = (d: V3) => {
@@ -861,8 +877,8 @@ export function createProps(): Props {
       const coreProfile = exp(xc.mul(xc).negate());
       const haloProfile = exp(xh.mul(xh).negate());
       // the core keeps its light however soft it is drawn (σ against its aloft σ)
-      const coreL = coreK.mul(coreProfile).mul(ARC_L.core).mul(float(ARC.core * DEG).div(air.core));
-      const haloL = haloK.mul(ARC_L.halo).add(lit.mul(ARC_L.rest)).mul(haloProfile);
+      const coreL = coreK.mul(pulseGain).mul(coreProfile).mul(ARC_L.core).mul(float(ARC.core * DEG).div(air.core));
+      const haloL = haloK.mul(pulseGain).mul(ARC_L.halo).add(lit.mul(ARC_L.rest)).mul(haloProfile);
       // the air's scatter: more where it is dense, ARC.floor of it aloft
       const scatter = air.density.mul(1 - ARC.floor).add(ARC.floor);
       // (under the horizon: nothing — the ribbon runs on past a lamp, down toward the sea)
@@ -1154,6 +1170,8 @@ export function createProps(): Props {
       const flicker = 0.85 + (0.15 + 0.25 * crackle) * Math.sin(t * 7.3) * Math.sin(t * 2.1);
       dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle) * 6;
       radioLight.intensity = (dialGlow.value / 6) * 0.08 * (operatorOn ? OPERATOR.light : 1);
+      radioLight.distance = operatorOn ? OPERATOR.reach : RADIO_REACH;
+      radioLight.color.setHex(operatorOn ? OPERATOR.color : RADIO_COLOR);
 
       // THE BEAMS: about the eye, in c4's night
       beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
@@ -1178,6 +1196,7 @@ export function createProps(): Props {
       const roseIn = world === 'coast' ? smooth((t - (starts.w6 - 6)) / BEAM_RETURN) * (endOn ? endingRose(t, starts.w6) : 1) : 1 - smooth((t - (starts.w1 - q0)) / (q0 - q1));
       beamGain.value = world === 'coast' ? 0.4 * roseIn : roseIn;
       arcLift.value = callOn && world === 'open' ? CASCADE.lift : 0;
+      pulseGain.value = callOn && world === 'open' ? CASCADE.gain : 1;
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
       // THE TRAFFIC (roseTraffic.ts), once: c4's wake and w6's chatter, pure in the beats' starts
@@ -1365,7 +1384,7 @@ export function createProps(): Props {
         fieldGroup.add(fieldBuilt.trails, fieldBuilt.sprites);
       }
       // (only in the dark: FIELD_DARK — by day it is not drawn at all, the 2026-10-30 QA sweep)
-      const dark = fieldOnCoast(t, starts, s.night);
+      const dark = fieldOnCoast(t, starts, s.night, driftParams.radioEnding);
       fieldGroup.visible = world === 'coast' && dark > 0;
       fieldU.time.value = t;
       fieldU.eye.value.copy(s.eye);

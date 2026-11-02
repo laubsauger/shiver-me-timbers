@@ -47,6 +47,8 @@ interface Skeleton {
   shoulder: [V, V];
   elbow: [V, V];
   wrist: [V, V];
+  /** rad the head is bowed, turned about the neck's top (face down toward −z); none if absent */
+  bow?: number;
 }
 
 const sym = (p: V): [V, V] => [p, [-p[0], p[1], p[2]]];
@@ -59,7 +61,10 @@ const sym = (p: V): [V, V] => [p, [-p[0], p[1], p[2]]];
  * THE OPERATOR): on both knees, sitting half back on the heels with the feet flat behind, the body bent forward over
  * something on the deck ~0.5 m ahead — the right hand on it (a dial: the wrist ~0.3 m over the deck, the case's top
  * at 0.22), the left braced on the left thigh, the head bowed to it. Lengths as the others': thigh ~0.5 m, shin ~0.48,
- * pelvis to neck ~0.53.
+ * pelvis to neck ~0.53. BOWED OVER THE DIAL (the 2026-11-02 review of the first look: "a more pronounced bow over the
+ * dial"): the back 50° from upright (it was 28°, which read as someone sitting up behind the case, facing us), the
+ * pelvis up off the heels a little as the weight goes forward, and the head itself bowed 0.55 rad (`bow`) so its face
+ * is turned down to the dial and the eye sees more of the crown — the skull over the case's middle, ~0.6 m above it.
  */
 const POSES: Record<CrewPose, Skeleton> = {
   hug: {
@@ -87,16 +92,17 @@ const POSES: Record<CrewPose, Skeleton> = {
     wrist: sym([0.25, 0.05, 0.32]),
   },
   kneel: {
-    pelvis: [0, 0.45, 0.05],
-    neck: [0, 0.92, -0.2],
-    head: [0, 1.0, -0.32],
-    hip: sym([0.09, 0.43, 0.06]),
+    pelvis: [0, 0.5, 0.02],
+    neck: [0, 0.84, -0.386],
+    head: [0, 0.86, -0.5],
+    hip: sym([0.09, 0.48, 0.03]),
     knee: sym([0.12, 0.07, -0.3]),
     ankle: sym([0.1, 0.07, 0.18]),
     toe: sym([0.1, 0.03, 0.33]),
-    shoulder: sym([0.18, 0.87, -0.17]),
-    elbow: [[0.21, 0.6, -0.3], [-0.24, 0.62, -0.27]],
-    wrist: [[0.07, 0.31, -0.48], [-0.17, 0.42, -0.36]],
+    shoulder: sym([0.18, 0.8, -0.35]),
+    elbow: [[0.25, 0.56, -0.39], [-0.28, 0.58, -0.27]],
+    wrist: [[0.07, 0.3, -0.52], [-0.13, 0.36, -0.22]],
+    bow: 0.55,
   },
   stand: {
     pelvis: [0, 0.95, 0],
@@ -232,19 +238,29 @@ function headOf(k: Skeleton, look: CrewLook, skin: THREE.Material, hair: THREE.M
   const head = v3(k.head);
   const neckTop = head.clone().add(new THREE.Vector3(0, -0.08, 0.01));
   add(limb(k.neck, [neckTop.x, neckTop.y, neckTop.z], 0.05, 0.046, skin));
+  // a bowed head (Skeleton `bow`): its parts laid as if upright about the neck's top, and turned about it (the others'
+  // heads are laid as they always were)
+  const pivot = k.bow ? new THREE.Group() : null;
+  if (pivot) {
+    pivot.position.copy(neckTop);
+    pivot.rotation.x = -k.bow!;
+    head.sub(neckTop);
+    add(pivot);
+  }
+  const addHead = (...o: THREE.Object3D[]): unknown => (pivot ? pivot.add(...o) : add(...o));
   const skull = new THREE.Mesh(new THREE.SphereGeometry(0.1, 18, 14), skin);
   skull.position.copy(head);
   skull.scale.set(0.86, 1.12, 0.98);
-  add(skull);
+  addHead(skull);
   const jaw = new THREE.Mesh(new THREE.SphereGeometry(0.062, 12, 8), skin);
   jaw.position.copy(head).add(new THREE.Vector3(0, -0.06, -0.035));
   jaw.scale.set(1, 0.85, 1);
-  add(jaw);
+  addHead(jaw);
   const crown = new THREE.Mesh(new THREE.SphereGeometry(0.104, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.56), hair);
   crown.position.copy(head).add(new THREE.Vector3(0, 0.008, 0.012));
   crown.rotation.x = 0.42;
   crown.scale.set(0.9, 1.1, 1.02);
-  add(crown);
+  addHead(crown);
   if (look.hat) {
     const straw = material(0xb59a62, 0.95, 0.12);
     const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.22, 0.012, 28), straw);
@@ -253,7 +269,7 @@ function headOf(k: Skeleton, look: CrewLook, skin: THREE.Material, hair: THREE.M
     const top = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.104, 0.1, 20), straw);
     top.position.copy(head).add(new THREE.Vector3(0, 0.11, 0.005));
     top.rotation.x = 0.12;
-    add(brim, top);
+    addHead(brim, top);
   }
   return g;
 }

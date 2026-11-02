@@ -278,23 +278,31 @@ export function answerFlare(t: number, c4: number): number {
  * flight a side: no answer sent back along a link (the station reached flares, and calls on), no chords — at WAKE's
  * pace the ring and the chords filled 23 s with up to ten pulses at once, the "fireworks problem" the review warns of.
  * One pulse at a time round all seven links would take ~40 s and end after the dissolve; one a side closes the ring
- * behind us at ~474.3 s (the left side, three hops, has reached the back at ~468.8; the right's fourth arrives), on
+ * behind us at ~474.1 s (the left side, three hops, has reached the back at ~468.6; the right's fourth arrives), on
  * the score's last swell before its dip (476–479 s), where c4's Rose goes quiet (`quiet`: s before w1 its fade starts
  * and ends; WAKE's own runs 17 → 7, through the closing). Measured on the ring's own arcs (tests/radioStory.test.ts):
- * calls leave 452.0, the hops land 457.1/457.2, 462.7/463.1, 468.4/468.8 and 474.3 show s.
+ * calls leave 452.0, the hops land 457.1/457.2, 462.7/462.9, 468.4/468.6 and 474.1 show s (lift 0.6, speed 34).
  *
  *   lead    s the answering station waits after its answer's first flash before it calls on (the raft has begun to
  *           turn toward it: ANSWER_TURN) — with `call`, its first calls leave at 452.0 s, the review's cue list
  *           "452–490: the cascade"
  *   call    s a reached station waits before it calls on
- *   speed   deg/s along the raised arch (and TRAVEL.base s): a neighbour's ~110° arch in ~5.1 s (at 24 the ring
- *           closed at 477.9 s, in the fade; the Rose's own 16 would take ~8 s a hop)
+ *   speed   deg/s along the raised arch (and TRAVEL.base s): a neighbour's ~120° arch in ~5.1 s (at 24 the ring
+ *           closed at 477.9 s, in the fade; the Rose's own 16 would take ~8 s a hop). 30 at lift 0.5; 34 at 0.6, so
+ *           the longer arches keep the same hops (at 30 they ran 5.4–5.7 s and the ring closed at 476.0, on the
+ *           quiet's first second)
  *   min     s: no crossing shorter (the review: "each crossing taking 5 s or more")
- *   lift    the arches raised toward the zenith (props.ts arcPoint `lift`): a neighbour's apex ~50° up instead of ~9°,
+ *   lift    the arches raised toward the zenith (props.ts arcPoint `lift`): a neighbour's apex ~58° up instead of ~9°,
  *           so the ring stands high over the dome — and behind us, where the 15° tilt puts the dome's rim 15° up,
- *           an arch of 9° was under the rim, unseen
+ *           an arch of 9° was under the rim, unseen. 0.5 (apex ~50°) the first look; the 2026-11-02 seat-view review of
+ *           it: the ring "sits high instead of really crossing overhead" — 0.6
+ *   gain    × a cascade pulse's light (its core and the haze about it; not a lit path's rest, not a lamp's flare): an
+ *           arch raised into the thin air aloft loses most of the haze's scatter (props.ts ARC.floor, 0.3 of the low
+ *           air's), and the same review found the cascade "faint on the dome" — ×1.8: a pulse at the apex carries
+ *           about half a low one's light (it had 0.3 of it), still a pulse in the haze and no flash; the ring's rest
+ *           and the lamps are as they were
  */
-export const CASCADE = { lead: 3.5, call: 0.6, speed: 30, min: 5, lift: 0.5, quiet: [14, 6] as [number, number] };
+export const CASCADE = { lead: 3.5, call: 0.6, speed: 34, min: 5, lift: 0.6, gain: 1.8, quiet: [14, 6] as [number, number] };
 export const cascadeTravel = (arcDeg: number): number => Math.max(CASCADE.min, TRAVEL.base + arcDeg / CASCADE.speed);
 /** c4's wake under radioCall: the cascade from the answer (arcs `arcDeg` long as raised: CASCADE.lift) */
 export function cascadeTraffic(c4: number, links: Array<[number, number]>, arcDeg: number[], n: number): { messages: RoseMessage[]; litAt: number[] } {

@@ -14,7 +14,8 @@
  *     c4's Rose starts going quiet (else the ring closes in the fade, unseen);
  *   - the raft's bow comes round to the station that answered while the eye's own pose is untouched;
  *   - the ending: our station speaks only once it is lit, the traffic ends converging on one station before the title,
- *     and the stranger comes after the title and before the last flare, which comes before the black.
+ *     Act 1's pairs leave w6's sky with the Rose (the stranger's braid is the only thing in their colours), and the
+ *     stranger comes after the title and before the last flare, which comes before the black.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
@@ -42,7 +43,7 @@ import {
   strangerPulse,
 } from '../src/drift/wandering/roseTraffic';
 import { BEATS, C1_FOLLOW, beatStarts, raftPose, type RaftPose } from '../src/drift/wandering/beats';
-import { STATIONS, arcDegrees, arcPoint } from '../src/drift/wandering/props';
+import { STATIONS, arcDegrees, arcPoint, fieldOnCoast } from '../src/drift/wandering/props';
 import { FILM_RING } from '../src/drift/wandering/radioTower';
 import { stationOf } from '../src/radio/network';
 import { lampOverFoot } from '../src/radio/mast';
@@ -109,10 +110,11 @@ describe('move 1: call, wait, answer (c4)', () => {
     expect(step).toBeLessThan(0.25);
   });
 
-  it('raises the arches high: a neighbour’s apex ~50° up (it was ~9°), still ending in its lamps', () => {
+  it('raises the arches high: a neighbour’s apex ~58° up (it was ~9°), still ending in its lamps', () => {
     const [a, b] = [lamps[2], lamps[3]];
     expect(el(arcPoint(a, b, 0.5))).toBeLessThan(12);
-    expect(el(arcPoint(a, b, 0.5, CASCADE.lift))).toBeGreaterThan(40);
+    // (0.5's ~50° "sits high instead of really crossing overhead", the 2026-11-02 seat-view review)
+    expect(el(arcPoint(a, b, 0.5, CASCADE.lift))).toBeGreaterThan(54);
     expect(arcPoint(a, b, 0, CASCADE.lift).distanceTo(a)).toBeLessThan(1e-6 * a.length() + 1e-3);
     expect(arcPoint(a, b, 1, CASCADE.lift).distanceTo(b)).toBeLessThan(1e-6 * b.length() + 1e-3);
     expect(Math.min(...arcRaised.map((d, k) => d - arcFlat[k]))).toBeGreaterThan(0);
@@ -128,6 +130,11 @@ describe('move 1: call, wait, answer (c4)', () => {
     const closed = Math.max(...messages.map((m) => m.t0 + m.dur));
     const w1 = C4 + BEATS.find((b) => b.name === 'c4')!.length;
     expect(closed).toBeLessThan(w1 - CASCADE.quiet[0] + 1);
+    // …on the score's last swell, a beat clear of the quiet (raised higher, the arches are longer: CASCADE.speed)
+    expect(show(closed)).toBeLessThan(475);
+    // brighter for the thin air the raised arches run through, and only by a step (no flash, a pulse)
+    expect(CASCADE.gain).toBeGreaterThan(1);
+    expect(CASCADE.gain).toBeLessThanOrEqual(2);
     // the closing link is behind us: between the two stations nearest the back
     const last = messages.reduce((a, m) => (m.t0 + m.dur > a.t0 + a.dur ? m : a));
     const back = (i: number): number => Math.abs(Math.abs(STATIONS[i]) - 180);
@@ -187,6 +194,18 @@ describe('move 7: our lamp, then the stranger (w6)', () => {
     expect(Math.max(...ms.map((m) => m.t0))).toBeLessThanOrEqual(W6 + ENDING.seaward[1]);
     // (main-drift.ts endTitle: w6 + 38)
     expect(ENDING.quiet[1]).toBeLessThanOrEqual(38);
+  });
+  it('takes Act 1’s pairs out of w6’s sky with the Rose, so the stranger’s braid is alone in their colours', () => {
+    // (props.ts fieldOnCoast: the w6 field, Act 1's loops, fades with the Rose's quiet under radioEnding — and only then)
+    const sp = strangerPulse(W6);
+    expect(fieldOnCoast(W6 + ENDING.quiet[0] - 1, starts, 1, true)).toBe(fieldOnCoast(W6 + ENDING.quiet[0] - 1, starts, 1));
+    for (let t = W6 + ENDING.quiet[1]; t <= sp.t0 + sp.dur + 6; t += 0.25) expect(fieldOnCoast(t, starts, 1, true)).toBe(0);
+    // gone before the title (main-drift.ts endTitle: w6 + 38), well before the stranger's glow on the horizon
+    expect(ENDING.quiet[1]).toBeLessThanOrEqual(38);
+    // and without the param w6's field is as it was
+    expect(fieldOnCoast(sp.t0, starts, 1)).toBe(1);
+    // (w3's field is not touched)
+    expect(fieldOnCoast(starts.w3 + 10, starts, 1, true)).toBe(fieldOnCoast(starts.w3 + 10, starts, 1));
   });
   it('sends the stranger after the title, the last flare after it lands, black after that', () => {
     const sp = strangerPulse(W6);
