@@ -46,7 +46,6 @@ import {
   asin,
   atan,
   cameraPosition,
-  cos,
   cross,
   exp,
   float,
@@ -72,6 +71,7 @@ import {
 } from 'three/tsl';
 import { billboardMesh, eyeFacing } from '../undertime/billboard';
 import { lifeAlbedo, nightLights, seaLevel, type LifeUniforms } from './lifeLayers';
+import { CALM_SLOPE_VAR, descentSlopes, descentSpectrum, slopeNormal } from './descentSea';
 import { ELEV_TEXEL_KM, GLOBAL_ELEV_TEXEL, insetWater, latLon, loadEarthMaps, mapCoords, sampleBoth, sampleLevels, type Aniso, type GeoFrame } from './earthMaps';
 import { driftMatter, type DriftUniforms } from './debris';
 import { STAR_SIGMA } from './milkyWay';
@@ -224,19 +224,6 @@ const LOWLAND_DETAIL_INSET: [number, number] = [40000, 1];
 /** Mm above the sea: the descent's last few km come in over this (its waves, the sky in its water, the full haze at the
  * horizon: `low` in createEarth) — from the top of the range to all of it at the bottom */
 const LOW_FROM: [number, number] = [0.005, 0.03];
-/** the descent's ripple trains (createEarth `ripples`): wavelength m, rad off the sea's wind (wandering/sea.ts WIND_TO,
- * toward −z), phase rad — a light breeze's sea, from the chop's 1 m to its longest 14 m crests */
-const RIPPLES: ReadonlyArray<readonly [number, number, number]> = [
-  [14, 0.15, 0.3],
-  [9.3, -0.35, 2.1],
-  [6.1, 0.5, 4.4],
-  [4.2, -0.6, 1.2],
-  [2.8, 0.9, 5.3],
-  [1.9, -1.0, 3.6],
-  [1.2, 0.3, 0.8],
-];
-/** each train's slope amplitude: seven at 0.06 give an RMS slope of ~0.11, about Cox–Munk's for a 3–4 m/s breeze */
-const RIPPLE_SLOPE = 0.06;
 /** deg: the near cap's angular radius (the horizon is 5.6° off from 30 km up), and Mm: the height it is drawn below */
 const CAP_DEG = 6;
 const CAP_BELOW = 0.03;
@@ -303,34 +290,22 @@ export function createEarth(): Earth {
   const low = float(1).sub(smoothstep(LOW_FROM[0], LOW_FROM[1], eyeR.sub(EARTH_R)));
   /**
    * THE DESCENT'S WAVES (the 2026-10-30 review of the final render: the water "goes from perfectly flat to wavy" at the
-   * hand-over to the sea's scene): a light breeze's ripples on the water under the eye, as the sea's scene's own sea
-   * (wandering/sea.ts RIPPLE: 4 m/s toward −z, the debris galaxy's frame) — a few long-crested trains, 1–14 m, each
-   * drawn only where it is wider than a few pixels (`fpm`, the pixel's footprint, m) and its slopes otherwise folded
-   * into the glint's roughness (`rough2`, added to GGX's α²), so the sea's texture comes up out of the glint as the eye
-   * comes down. Laid on the flat sea under the eye (the curve's drop is far below a ripple where they show), in metres
-   * from the eye's own place in the field (`du.eye`): f32 Mm world positions are 0.5 m apart this close in. Returns the
-   * rippled normal (world).
+   * hand-over to the sea's scene): the sea's own spectrum under the eye, band-limited by the pixel's footprint and its
+   * unresolved slopes handed to the glint's roughness (descentSea.ts — which replaced the seven ripple trains here,
+   * the 2026-11-02 review: "the wave pattern is perfectly regular and tiled, and that's causing more ray effects").
+   * Laid on the flat sea under the eye (the curve's drop is far below a wave where they show), in metres from the
+   * eye's own place in the field (`du.eye`): f32 Mm world positions are 0.5 m apart this close in. Returns the
+   * rippled normal (world) and the slope variance the pixel does not hold (σ², the calm floor included), both
+   * calmed by the floating matter's slicks (`calm`).
    */
-  const ripples = (d: V3, n: V3, fpm: F, calm: F): { N: V3; rough2: F } => {
-    const dUp = d.dot(D.up);
-    const reach = du.eye.y.div(dUp.negate().max(1e-4));
-    const x = du.eye.x.add(d.dot(D.east).mul(reach));
-    const z = du.eye.z.add(d.dot(D.north).mul(reach));
-    let gx: F = float(0);
-    let gz: F = float(0);
-    let lost: F = float(0);
-    for (const [len, dir, phase] of RIPPLES) {
-      const k = (2 * Math.PI) / len;
-      const w = Math.sqrt(9.81 * k);
-      const [cx, cz] = [Math.sin(dir), -Math.cos(dir)];
-      const seen = float(1).sub(smoothstep(len / 3, len / 1.5, fpm));
-      const slope = cos(x.mul(cx * k).add(z.mul(cz * k)).sub(u.time.mul(w)).add(phase)).mul(RIPPLE_SLOPE).mul(seen);
-      gx = gx.add(slope.mul(cx)) as F;
-      gz = gz.add(slope.mul(cz)) as F;
-      lost = lost.add(float(1).sub(seen).mul((RIPPLE_SLOPE * RIPPLE_SLOPE) / 2)) as F;
-    }
+  const descent = descentSpectrum();
+  const ripples = (d: V3, n: V3, calm: F): { N: V3; rough2: F } => {
+    const w = descentSlopes(descent, { d, up: D.up, east: D.east, north: D.north, eye: du.eye as unknown as V3, time: u.time as unknown as F, pixel: P });
     const keep = float(1).sub(calm);
-    return { N: normalize(n.sub(D.east.mul(gx.mul(keep))).sub(D.north.mul(gz.mul(keep)))), rough2: lost.mul(keep.mul(keep)).mul(2) as F };
+    return {
+      N: slopeNormal(n, D.east, D.north, w.gx.mul(keep), w.gz.mul(keep)),
+      rough2: w.unresolved.mul(keep.mul(keep)).add(CALM_SLOPE_VAR) as F,
+    };
   };
   /** the two maps' coordinates at unit normal n, `shift` deg east */
   const coords = (n: V3, shift: F | number = 0) => {
@@ -516,11 +491,14 @@ export function createEarth(): Earth {
     const basin = insetWater(maps, c, max(fp, 1.5 * KM), lcw.z);
     const lake = float(1).sub(land).mul(smoothstep(0.05, 0.4, basin)).mul(smoothstep(2, 8, e0)).toVar();
     const a = mix(mix(float(0.07), float(0.22), windy), mix(float(LAKE_ROUGH[0]), float(LAKE_ROUGH[1]), windy), lake).mul(float(1).sub(matter.y.mul(0.75)));
-    // (low down, the ripples: their normal for the glint and the sky in the water, the rest of their slopes in its α²)
+    // (low down, the sea's waves: their normal for the glint and the sky in the water, the slopes the pixel cannot
+    // hold as its α² — in place of the orbit's wind-patch α, not on top of it: the spectrum's whole σ², ~0.023 with
+    // the calm floor, is the same glint as the orbit's α ~0.15, so the two meet as the eye comes into the low range.
+    // The lakes keep their own calm α)
     const near = low.mul(float(1).sub(land)).toVar();
-    const rip = ripples(d, n, fp.mul(EARTH_R * 1e6), matter.y.mul(0.75));
+    const rip = ripples(d, n, matter.y.mul(0.75));
     const Nw = normalize(mix(n, rip.N, near)).toVar();
-    const a2 = a.mul(a).add(rip.rough2.mul(near));
+    const a2 = mix(a.mul(a), rip.rough2, near.mul(float(1).sub(lake)));
     const nh = Nw.dot(h).max(0);
     const ggx = a2.div(PI.mul(pow(nh.mul(nh).mul(a2.sub(1)).add(1), 2)));
     const fresnel = pow(float(1).sub(v.dot(h).max(0)), 5).mul(0.98).add(0.02);
