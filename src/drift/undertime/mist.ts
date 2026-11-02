@@ -38,7 +38,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { packedSpiral, type PairEvent } from './events';
+import { beadOf, packedSpiral, type PairEvent } from './events';
 import { rng } from './web';
 import { billboardMesh, eyeFacing } from './billboard';
 import { arcPoint, pairTint, type Shades } from './loops';
@@ -137,8 +137,10 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
   const Z = new Float32Array(n * 4);
   const r = rng(99);
   let k = 0;
-  for (const e of events)
-    for (let q = 0; q < 2; q++)
+  for (const e0 of events)
+    for (let q = 0; q < 2; q++) {
+      // each bead's own path (events.ts beadOf: the pair's energy split), packed as that bead's record
+      const e = beadOf(e0, q === 0 ? 1 : -1);
       for (let j = 0; j < PUFFS; j++, k++) {
         A.set([e.birth, e.loop, e.open, e.radius], k * 4);
         V.set([...e.vertex, e.energy], k * 4);
@@ -146,6 +148,7 @@ export function createMist(events: readonly PairEvent[], U: MistUniforms, spark 
         Y.set([...e.across, q === 0 ? 1 : -1], k * 4);
         Z.set([packedSpiral(e), e.drift, e.arc, e.end], k * 4);
       }
+    }
   const a = attribute<'vec4'>('mistA', 'vec4');
   const v = attribute<'vec4'>('mistV', 'vec4');
   const x = attribute<'vec4'>('mistX', 'vec4');

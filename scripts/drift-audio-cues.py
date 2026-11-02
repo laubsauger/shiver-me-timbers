@@ -22,7 +22,9 @@ WHAT IT MEASURES, on the mono sum, 2048-sample Hann frames every 512 samples (10
              above the threshold, 0..1 over the act's 0–90 s. A "hit" is an onset that also carries low-band energy
              and a level jump (big collisions go there).
   SWELLS     stretches where the 1 s tide rises by at least 3 dB over at least 0.6 s; strength = the rise in dB / 12.
-             (A 2 s tide over 1.2 s missed the sharp swell into the wave at 35.5 s.)
+             (A 2 s tide over 1.2 s missed the sharp swell at 30.0 s: the score's boom, +12.7 dB. There is NO swell
+             at 35.5 s: 35–38.7 s is a quiet pulse train, ticks every 0.5 s at about −35 dB, and the music opens up
+             on the drop at 38.9–39.0 s, the sub in, +9 dB; that is where the wave's crescendo belongs.)
   PEAKS      local maxima of the 0.4 s level, at least 1.5 s apart, ranked; strength 0..1 against the loudest.
   CALM       windows of at least 1.5 s where the 1 s level sits in the act's quietest 40 % AND the 1 s flux under its
              median (either alone called the pulsing build at 31–39 s calm). Informative: the film picks its text
@@ -156,8 +158,18 @@ while i < frames:
         i += 1
 
 # the envelope at 20 Hz, for the film's curves (normalised 0..1 over 0–TO)
-step = int(fps / 20)
+# ON A TRUE 20 Hz GRID, interpolated at t = i/20 (the 2026-11-02 review of the 665ba98 render: "the biggest swell
+# lands at 35.5–37 s, before the wave beat"). Until then this took every 4th analysis frame — int(93.75 / 20) = 4,
+# so a sample every 42.7 ms (23.4 Hz) — and the film read it as 20 Hz: every envelope time came out 17 % late (the
+# score's boom at 30.75 s read at 36.0 s, its pulse train before the wave read as its loudest stretch) and the births'
+# breathing (field.ts breathe) and the text's calm entries (audioCues.ts calmest) followed a music that was not there.
+# The onsets, swells and peaks were always right: they carry their own times.
+ENV_RATE = 20
+grid = np.arange(0, TO, 1 / ENV_RATE)
 levN = np.clip((level - np.percentile(level, 2)) / max(1e-9, top - np.percentile(level, 2)), 0, 1)
+fluxS = uniform_filter1d(fluxN, max(1, int(fps / ENV_RATE)))
+# (before the first frame's centre, 21 ms: its value; the act's first second is silence anyway)
+env = lambda v: np.interp(grid, times, v)
 out = {
     "source": SRC.name,
     "duration": round(full_len, 3),
@@ -165,9 +177,9 @@ out = {
     "analysed": [0, TO],
     "hop": HOP,
     "note": "baked by scripts/drift-audio-cues.py; times in show s; read through src/drift/undertime/audioCues.ts",
-    "envelopeRate": 20,
-    "level": [round(float(v), 3) for v in levN[::step]],
-    "flux": [round(float(v), 3) for v in uniform_filter1d(fluxN, step)[::step]],
+    "envelopeRate": ENV_RATE,
+    "level": [round(float(v), 3) for v in env(levN)],
+    "flux": [round(float(v), 3) for v in env(fluxS)],
     "onsets": onsets,
     "swells": swells,
     "peaks": peaks,

@@ -3,7 +3,8 @@
  *
  *   creation      two photons — thin, intensely bright streaks — meet at a vertex and burst; a matter bead
  *                 (amber) and an antimatter bead (cyan-violet) leave it in a V
- *   the path      each bead curves away from the V's axis, the two as mirror images, slowing as they go.
+ *   the path      each bead curves away from the V's axis, the two turning opposite ways (each on its own path when
+ *                 the energy splits unevenly: beadOf), slowing as they go.
  *                 Three shapes, so the field is never one figure repeated:
  *                   LOOP    all the way round and back: the loops close on the axis, where the beads MEET
  *                   HELIX   the same loop drawn out into depth along the plane's normal (a corkscrew); they
@@ -59,7 +60,14 @@ export interface PairEvent {
   /** a BRAID: the centre's run along the axis, in loop radii (absent or 0: one of the other shapes). `arc` is then
    * the orbit's total angle */
   braid?: number;
+  /** −1..1, how the pair's energy SPLIT between its beads (`beadOf`): > 0 the matter bead took more, 0 or absent an
+   * even split — the two beads exact mirror images. A multiple of 1/SPLIT_STEPS (the GPU carries it as an integer:
+   * loops.ts packEvents) */
+  split?: number;
 }
+
+/** the steps `split` comes in (loops.ts packs it as an integer 0..2·SPLIT_STEPS beside `end`) */
+export const SPLIT_STEPS = 50;
 
 /** the `spiral` the GPU sees: a braid rides in it as −braid (loops.ts arcPoint; WebGPU's 8 vertex buffers are spent) */
 export const packedSpiral = (e: Pick<PairEvent, 'spiral' | 'braid'>): number => (e.braid ? -e.braid : e.spiral);
@@ -76,7 +84,35 @@ const norm = (a: Vec3): Vec3 => {
 /** the arc a LOOP sweeps: from leaving the vertex to meeting its partner on the axis behind it */
 export const loopArc = (open: number): number => 2 * Math.PI - 2 * open;
 
-type PathEvent = Pick<PairEvent, 'vertex' | 'axis' | 'across' | 'open' | 'radius' | 'spiral' | 'drift' | 'arc' | 'braid'>;
+type PathEvent = Pick<PairEvent, 'vertex' | 'axis' | 'across' | 'open' | 'radius' | 'spiral' | 'drift' | 'arc' | 'braid' | 'split'>;
+
+/**
+ * BEAD q's OWN PATH (the 2026-11-02 review of the 665ba98 render: "some particle tracks loop as mirror twins: two tracks
+ * look like mirrored copies of each other … make each track individual"). Until then the antimatter bead was the matter
+ * bead's exact mirror image (loopPoint: y → −y) — same radius, same tightening, same turns — so every pair drew one
+ * figure and its reflection, and the big spirals of the score's hits read as a symbol (an amber spiral and its cyan
+ * twin, side by side). A real pair splits the photon's energy unevenly; the more energetic bead curls wider (radius ∝
+ * momentum) and the slower one turns more often and tightens sooner. `split` (s) says how uneven: bead q's share is
+ * g = 1 + q·s (of an even 1), and
+ *
+ *   SPIRAL (spiral > 0; each ends on its own)   radius × g^0.8, arc × g^−0.5 (more turns for the slower), tightening
+ *                                               × g^−0.3 — at |s| 0.45 one spiral 2.2× the other's size, 1.6× its turns
+ *   LOOP, HELIX (spiral 0; they MEET)           the beads must still close on the axis together, at x = −2R·sin(open)
+ *                                               (where they did), so the faster bead leaves nearer the axis and curls
+ *                                               wider: open × (1 − s·q/2), radius R·sin(open)/sin(open_q), the arc to
+ *                                               the meeting 2π − 2·open_q — a lopsided heart, not a symmetric one
+ *   BRAID                                       as it was: a bound pair winds round one centre, symmetric by nature
+ *
+ * loops.ts beadNodes is the GPU twin; mist.ts packs each bead's path from this.
+ */
+export function beadOf<T extends PathEvent>(e: T, q: number): T {
+  const s = e.split ?? 0;
+  if (!s || e.braid) return e;
+  const g = 1 + q * s;
+  if (e.spiral > 0) return { ...e, radius: e.radius * g ** 0.8, arc: e.arc * g ** -0.5, spiral: e.spiral * g ** -0.3 };
+  const open = e.open * (1 - 0.5 * q * s);
+  return { ...e, open, radius: (e.radius * Math.sin(e.open)) / Math.sin(open), arc: e.arc + 2 * (e.open - open) };
+}
 
 /** 0..1 how far round its loop a bead is at loop progress u (it slows as it goes, still moving when they meet) */
 export const loopEase = (u: number): number => {
@@ -87,12 +123,15 @@ export const loopEase = (u: number): number => {
 /**
  * Where bead q (+1 matter, −1 antimatter) is at loop progress u ∈ [0, 1]. In the loop plane (x along the
  * axis, y across it) the matter bead leaves at angle +open and turns left about a centre one radius away,
- * the radius shrinking as e^(−spiral·φ) for a spiral; the antimatter bead is its mirror image (y → −y),
- * so a loop's two beads reach its axis crossing together. Both drift along the plane's normal by `drift`.
+ * the radius shrinking as e^(−spiral·φ) for a spiral; the antimatter bead turns the other way (y → −y), on its own
+ * path when the pair's energy split is uneven (beadOf), and a loop's two beads still reach its axis crossing together.
+ * Both drift along the plane's normal by `drift`.
  */
-export function loopPoint(e: PathEvent, q: number, u: number): Vec3 {
+export function loopPoint(e0: PathEvent, q: number, u: number): Vec3 {
   const f = loopEase(u);
-  if (e.braid) return braidPoint(e, q, f);
+  if (e0.braid) return braidPoint(e0, q, f);
+  // (each bead on its own path: beadOf)
+  const e = beadOf(e0, q);
   const phi = e.arc * f;
   const theta0 = e.open - Math.PI / 2;
   const r = e.radius * Math.exp(-e.spiral * phi);

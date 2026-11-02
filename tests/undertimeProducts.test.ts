@@ -11,7 +11,8 @@ import { describe, expect, it } from 'vitest';
 import { driftParams } from '../src/params/drift';
 import { HERO_RUN, beatStarts, eyePath, frontReach, heroGrainPosition, heroPassTime, undertimeState } from '../src/drift/undertime/timeline';
 import { SURVIVOR } from '../src/drift/undertime/productModel';
-import { PHOTON_SPEED, endPoint, generatePairs, loopPoint, meetingPoint, type PairEvent } from '../src/drift/undertime/events';
+import { PHOTON_SPEED, beadOf, endPoint, generatePairs, loopPoint, meetingPoint, type PairEvent } from '../src/drift/undertime/events';
+import { hitsIn } from '../src/drift/undertime/audioCues';
 import { MATTER, generateProducts, jet, trackPoint, trackTangent, type ProductTrack } from '../src/drift/undertime/productModel';
 import { undertimeEvents } from '../src/drift/undertime/field';
 import { RAG, frontFracCpu, frontRagCpu } from '../src/drift/undertime/front';
@@ -174,6 +175,50 @@ describe('Undertime act events and the light wave', () => {
     // and run quicker than the cooling's loops (medians: the cooling's own few slow pairs go on through the build)
     const median = (l: PairEvent[]): number => [...l].sort((a, c) => a.loop - c.loop)[Math.floor(l.length / 2)].loop;
     expect(median(built)).toBeLessThan(0.5 * median(early));
+  });
+
+  it('the crescendo lands on the score\'s drop into the wave, not on the quiet pulse before it', () => {
+    // (the 2026-11-02 review of the 665ba98 render: "the biggest swell lands at 35.5–37 s, before the fixed wave beat".
+    // The score ticks quietly every 0.5 s from 35.1 s and drops at 38.93 s, +9 dB: field.ts hitCollisions)
+    const drop = hitsIn(starts.wave, starts.wave + 1.5, 0.5).find((h) => h.jump >= 6);
+    expect(drop?.t).toBeCloseTo(38.93, 1);
+    const big = act.events.filter((e) => e.spiral > 0 && e.radius > 1 && Math.abs(e.loop - 3.7) <= 0.5 + 1e-9 && e.burst >= 0.3);
+    const endsAt = (t: number): PairEvent[] => big.filter((e) => Math.abs(e.birth + e.loop - t) < 1e-6);
+    const dropHit = endsAt(drop!.t);
+    expect(dropHit).toHaveLength(1);
+    // alive to its end: it annihilates ON the drop, ahead of the front
+    expect(dropHit[0].end).toBe(1);
+    expect(cut(dropHit[0].vertex)).toBeGreaterThan(drop!.t + 1);
+    // the pulse's ticks: at most one collision a second, each smaller and dimmer than the drop's
+    const t0 = starts.wave - p.waveBuild;
+    const ticks = hitsIn(t0, starts.wave, 0.55).flatMap((h) => endsAt(h.t));
+    expect(ticks.length).toBeLessThanOrEqual(Math.ceil(p.waveBuild));
+    for (const e of ticks) {
+      expect(e.energy).toBeLessThan(dropHit[0].energy);
+      expect(e.burst).toBeLessThan(dropHit[0].burst);
+    }
+  });
+
+  it('no pair draws its two tracks as mirror twins: each bead on its own path (the hero excepted)', () => {
+    // (the 2026-11-02 review: "some particle tracks loop as mirror twins … make each track individual"; events.ts beadOf)
+    const hero = act.events[0];
+    expect(hero.split ?? 0).toBe(0);
+    for (const e of act.events.slice(1)) {
+      if (e.braid) continue;
+      expect(Math.abs(e.split ?? 0)).toBeGreaterThanOrEqual(0.15 - 1e-9);
+      const m = beadOf(e, 1);
+      const a = beadOf(e, -1);
+      if (e.spiral > 0) {
+        // one spiral visibly bigger than the other, and turning a different number of times
+        expect(Math.max(m.radius, a.radius) / Math.min(m.radius, a.radius)).toBeGreaterThan(1.25);
+        expect(Math.abs(m.arc - a.arc)).toBeGreaterThan(0.1);
+      } else {
+        // a loop's beads leave at different angles and curl at different sizes, and still MEET where they did
+        expect(Math.abs(m.open - a.open)).toBeGreaterThan(0.01);
+        expect(len(sub(loopPoint(e, 1, 1), loopPoint(e, -1, 1)))).toBeLessThan(1e-6);
+        expect(len(sub(loopPoint(e, 1, 1), loopPoint({ ...e, split: 0 }, 1, 1)))).toBeLessThan(1e-6);
+      }
+    }
   });
 
   it('the hero\'s first light cascades: its gammas make the first new pairs before the arising', () => {

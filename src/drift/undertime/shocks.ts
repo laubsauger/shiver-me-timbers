@@ -6,7 +6,7 @@
  *   RING       the light of the annihilation leaving through the medium: a spherical shell, which a viewer sees as its
  *              limb — a thin circle facing the eye, centred on the event (the same reason the quads face the eye's
  *              position, billboard.ts). It decelerates as it spreads (radius ∝ 1 − e^(−age/0.35 s), out to 0.6–3.5 m
- *              by the event's energy) and fades as it goes (e-fold 0.3 s, gone by 1.6 s). Faint, neutral gold-white:
+ *              by the event's energy) and fades as it goes (e-fold RING.fade, gone by RING.life). Neutral gold-white:
  *              the colour script's annihilation light, never a coloured ring (direction.md: coloured rings read as a
  *              logo). Never thinner than ~1.5 px; what it gains in width it gives back in brightness.
  *   AFTERGLOW  where it happened, a POINT that cools — white, gold, ember — over ~1.2 s: the field remembers each
@@ -36,6 +36,25 @@ export interface Shock {
 /** the least energy (events.ts PairEvent.energy) an annihilation needs for a ring */
 export const RING_ENERGY = 0.6;
 
+/**
+ * THE RING'S LIGHT (the 2026-11-02 review of the 665ba98 render: "the shock rings are faint. They should read clearly on
+ * a dark dome, without blowing out"). It was 0.16 at its peak, fading with an e-fold of 0.3 s while it spread with one
+ * of 0.35 s — so by the time it was wide enough to read as a ring (half its reach, ~0.25 s) it was down to 0.07, a few
+ * grey levels over black after the tone map and the act's contrast grade (timeline.ts undertimeGrade, a power of 1.3
+ * below mid grey): a hit's ring of strength 1.3 reached ~0.09, the field's (0.5–0.9) under 0.05. Now 0.55 at its peak
+ * fading over 0.6 s, so it carries its light out with it: at half its reach a hit's ring is ~0.5 (a clear thin line,
+ * well under the tone map's shoulder — a line ~2 px wide at 4K that does not bloom into a disc), the field's 0.2–0.35,
+ * and it is gone by 2.2 s, eased out over its last 0.5 s (e^(−2.2/0.6) = 3 % left: no step). Thin as it was.
+ */
+export const RING = {
+  /** linear radiance of the ring at its start, × the shock's strength × the uniform radiance */
+  gain: 0.55,
+  /** s, the e-fold of its fading */
+  fade: 0.6,
+  /** s, its whole life (its last 0.5 s eased out) */
+  life: 2.2,
+} as const;
+
 export interface ShockUniforms {
   time: F;
   pixelAngle: F;
@@ -58,7 +77,8 @@ export function createShocks(shocks: readonly Shock[], U: ShockUniforms): { mesh
   const R = a.z;
   const at = b.xyz;
   const age = U.time.sub(t0);
-  const live = step(0, age).mul(step(age, 1.6)).mul(spent(frontTime(at, U.fx), U.fx, 0.1));
+  // (the afterglow is long gone by RING.life: its e-fold is 0.55 s)
+  const live = step(0, age).mul(step(age, RING.life)).mul(spent(frontTime(at, U.fx), U.fx, 0.1));
   const centre = waveWarp(at, U.fx);
   const dist = cameraPosition.sub(centre).length();
   // the quad: the ring's widest, with room for its width
@@ -81,7 +101,7 @@ export function createShocks(shocks: readonly Shock[], U: ShockUniforms): { mesh
     const w = max(w0, px.mul(1.5));
     const x = r.sub(rho).div(w);
     // (energy kept as it is floored: the floor's width is given back in brightness)
-    const ring = exp(x.mul(x).negate()).mul(w0.div(w)).mul(exp(s.div(0.3).negate())).mul(smoothstep(0, 0.04, s)).mul(0.16);
+    const ring = exp(x.mul(x).negate()).mul(w0.div(w)).mul(exp(s.div(RING.fade).negate())).mul(smoothstep(0, 0.04, s)).mul(smoothstep(RING.life, RING.life - 0.5, s)).mul(RING.gain);
     // the afterglow: a pixel-sized point at the centre, cooling white → gold → ember over ~1.2 s
     const al = max(px.mul(1.6), float(0.004));
     const heat = exp(s.div(0.4).negate());

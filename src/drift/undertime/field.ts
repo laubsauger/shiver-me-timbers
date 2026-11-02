@@ -22,7 +22,7 @@ import { createFlashes, type FlashUniforms } from './flashes';
 import { createUndertimeSky } from './sky';
 import { createWaveSparks } from './wave';
 import { createGrains, createHeroGrain, createStars, type GrainUniforms } from './grains';
-import { endPoint, eventLights, generatePairs, meetingPoint, type PairEvent } from './events';
+import { SPLIT_STEPS, endPoint, eventLights, generatePairs, meetingPoint, type PairEvent } from './events';
 import { RING_ENERGY, createShocks, type Shock } from './shocks';
 import { createLoopSprites, createLoopTrails } from './loops';
 import { createMist, type Mist } from './mist';
@@ -286,6 +286,8 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
       return true;
     });
   const hits = hitCollisions(p, b, clearOfText);
+  // every pair its own two tracks (events.ts beadOf), before anything reads where their beads go
+  unevenSplits([...field, ...build, ...hits], 4545);
   const kept = cutPairs([...field, ...build, ...hits]);
   // the strong annihilations that happen (not cut by the front: those die in its light): a ring and an afterglow each
   // (shocks.ts); the score's hits and their chains the strongest and widest
@@ -296,7 +298,9 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
     .flatMap((e) => (e.meets ? [meetingPoint(e)] : [endPoint(e, 1), endPoint(e, -1)]).map((pos) => ({
       t0: e.birth + e.loop,
       pos,
-      strength: (fromHit.has(e) ? 1.3 : 0.5 + (e.energy - RING_ENERGY)) * (e.meets ? 1 : 0.6),
+      // (a hit's own ring by its energy since the 2026-11-02 review: the build's ticks, sized down, ring softer and the
+      // drop strongest — 0.8 to 1.44 — the other hits as before, ~1.3; their chains' loops 1.3 as they were)
+      strength: (fromHit.has(e) ? 1.3 * (e.meets ? 1 : Math.min(1.11, e.energy / 0.9)) : 0.5 + (e.energy - RING_ENERGY)) * (e.meets ? 1 : 0.6),
       radius: fromHit.has(e) ? 1.2 + e.radius * 0.4 : 0.6 + 2.5 * (e.energy - RING_ENERGY),
     })));
   // THE SURVIVORS (survivors.ts): a few of the pairs the front catches leave their matter bead running on, out of the
@@ -336,10 +340,12 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
   // and the front itself is made of the grammar: a wall of small pairs born and annihilated ON it — fireballs,
   // quick loops, braids, gamma rays, stars and fans — creation and cancellation sweeping over the audience
   const front = frontEvents(p, eyeW, b);
+  unevenSplits(front.events, 4646);
   // what the collisions leave: the field's are cut by the front like the pairs; the front's own run their course
   // just behind it (they are its light), and make no new pairs there
   const fieldProducts = generateProducts([hero, ...kept], 8181, { hero: 0 });
   const conversions = cutPairs(fieldProducts.conversions.filter((e) => clearOfText(e.birth, e.vertex)));
+  unevenSplits(conversions, 4747);
   // (few stars on the front: a thousand of them were a field of scratches, not a front; 2026-10-30 first look)
   const frontProducts = generateProducts(front.events, 8282, { conversions: false, stars: 0.3 });
   return {
@@ -359,19 +365,66 @@ export function undertimeEvents(p: DriftParams, pocketAt: (t: number) => TextPoc
  * is looking), the rest out on the sides and overhead, so the hits also land around the whole dome. Their loops lean
  * toward the audience (seen in depth, as the hero's are) and run 2.6–3.4 s: slower than the field's, the eye can follow
  * one from its birth to the hit. Never in the text's sky; a hit whose places are all taken by the text gets none.
+ *
+ * THE CRESCENDO LANDS ON THE DROP (the 2026-11-02 review of the 665ba98 render: "the biggest swell lands at 35.5–37 s,
+ * before the fixed wave beat"). What the score does there: its boom at 30.5 s (+15.7 dB, the sub full) dies away, and
+ * from 35.1 s a quiet PULSE TRAIN ticks every 0.5 s at about −35 dB — the tension before the wave — until the DROP at
+ * 38.93 s (+9 dB in a quarter second, the sub back in, the whole texture opening up through 39–48 s). The ticks are
+ * sharp (spectral flux ~0.98), so the hit score counted five of them, 35.6–37.7 s, as hits ≥ 0.55, and each became a
+ * full-size collision in its turn: five of the act's biggest events in two seconds, the brightest stretch before the
+ * front (the seat view's mean light stepped up at 35.8 s and then sat flat to 39 s), on the music's quietest bars.
+ * Now, in the build (the last `waveBuild` s of the cooling) only the ticks with a hit of at least BUILD_TICK keep a
+ * collision — one a second, not two — and each is sized by the build's own tension then (waveEnvelope build: 0.40 →
+ * 0.69 across them), so they grow toward the wave and stay below the drop (TICK_SCALE). The DROP — the first hit in
+ * the wave's first 1.5 s with a level jump of at least DROP_JUMP dB — gets the act's biggest collision, in the focus
+ * zone, with a chain reaction, annihilating on it as the front starts to climb: the crescendo is the drop and the front.
  */
-function hitCollisions(p: DriftParams, b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }, clear: (t: number, at: readonly number[]) => boolean): PairEvent[] {
+/**
+ * NO MIRROR TWINS (the 2026-11-02 review of the 665ba98 render: "some particle tracks loop as mirror twins … make each
+ * track individual"; earlier work had already removed the cloned EVENTS — one figure repeated across the field, the
+ * 2026-11-01 notes — and what was left was inside each pair: its antimatter bead drawn as the matter bead's exact
+ * reflection). Each pair's energy now splits unevenly between its beads (events.ts beadOf): |split| SPLIT_MIN to
+ * SPLIT_MIN + SPLIT_SPAN, either way round, so no pair is ever near-even. The hero of the cold open keeps its even
+ * split: direction.md's first light is "mirror-image spirals" on purpose, the one symmetric figure of the act, and
+ * braids stay as they are (a bound pair winds round one centre). Own seeds per list, so the lists never shift each other.
+ */
+const SPLIT_MIN = 0.15;
+const SPLIT_SPAN = 0.3;
+function unevenSplits(list: readonly PairEvent[], seed: number): void {
+  const r = rng(seed);
+  for (const e of list) {
+    const m = SPLIT_MIN + SPLIT_SPAN * r();
+    const sign = r() < 0.5 ? -1 : 1;
+    if (!e.braid) e.split = Math.round(sign * m * SPLIT_STEPS) / SPLIT_STEPS;
+  }
+}
+
+/** hit score (audioCues.ts Onset.hit) a tick of the build's pulse train needs to keep a collision */
+const BUILD_TICK = 0.65;
+/** a build tick's size, energy and fireball: × (TICK_SCALE[0] + TICK_SCALE[1] × the build's tension then) */
+const TICK_SCALE = [0.45, 0.35] as const;
+/** dB: the level jump that makes a hit early in the wave the DROP (38.93 s: +9.0; the ticks jump 2–5) */
+const DROP_JUMP = 6;
+/** the drop's collision over a hit's: size, energy and fireball */
+const DROP_SCALE = 1.35;
+export function hitCollisions(p: DriftParams, b: { axis: [number, number, number]; front: [number, number, number]; right: [number, number, number] }, clear: (t: number, at: readonly number[]) => boolean): PairEvent[] {
   const { starts } = beatStarts(p);
   const r = rng(7373);
   const out: PairEvent[] = [];
   const D = Math.PI / 180;
-  const hits = hitsIn(starts.arise + 2, starts.wave - 0.4, 0.55);
+  const buildFrom = starts.wave - p.waveBuild;
+  const drop = hitsIn(starts.wave, starts.wave + 1.5, 0.5).find((h) => h.jump >= DROP_JUMP) ?? null;
+  const hits = [...hitsIn(starts.arise + 2, starts.wave - 0.4, 0.55).filter((h) => h.t < buildFrom || h.hit >= BUILD_TICK), ...(drop ? [drop] : [])];
+  const eyeW = eyePath(starts.wave, p);
   hits.forEach((h, i) => {
+    const isDrop = h === drop;
+    // (1 before the build; a build tick grows with its tension; the drop the biggest)
+    const scale = isDrop ? DROP_SCALE : h.t >= buildFrom ? TICK_SCALE[0] + TICK_SCALE[1] * waveEnvelope(h.t, p).build : 1;
     // (slower than the field's: the brief's "a few slower hero collisions in the focus zone")
     const loop = 3.2 + 1 * r();
     const birth = h.t - loop;
     const eye = eyePath(birth, p);
-    const focus = i % 2 === 0;
+    const focus = isDrop || i % 2 === 0;
     // a few tries at a place clear of the text, then none
     for (let k = 0; k < 6; k++) {
       const az = (focus ? (r() - 0.5) * 50 : (r() < 0.5 ? -1 : 1) * (50 + 70 * r())) * D;
@@ -380,6 +433,9 @@ function hitCollisions(p: DriftParams, b: { axis: [number, number, number]; fron
       const dir = [0, 1, 2].map((j) => Math.cos(el) * (Math.cos(az) * b.front[j] + Math.sin(az) * b.right[j]) + Math.sin(el) * b.axis[j]) as [number, number, number];
       const vertex = dir.map((x, j) => eye[j] + x * dist) as [number, number, number];
       if (!clear(birth, vertex) || !clear(h.t, vertex)) continue;
+      // (the drop's place: one the front reaches a second after it at the earliest, so its flashes and ring play out
+      // ahead of the line instead of being cut by it — at 38.93 s the front is ~8° over the horizon)
+      if (isDrop && frontReach([vertex[0] - eyeW[0], vertex[1] - eyeW[1], vertex[2] - eyeW[2]], p) < h.t + 1) continue;
       // the loop plane's normal: toward the eye, leaned off it by up to ~35°
       const lean = [r() - 0.5, r() - 0.5, r() - 0.5];
       const nrm = dir.map((x, j) => -x + 0.7 * lean[j]);
@@ -398,17 +454,17 @@ function hitCollisions(p: DriftParams, b: { axis: [number, number, number]; fron
       const decay = 0.05 + 0.16 * r();
       const hero: PairEvent = {
         birth, loop, vertex, axis, across, open,
-        radius: (1.1 + 2.1 * r()) * (focus ? 1 : 1.3),
-        energy: 0.75 + 0.25 * h.hit,
+        radius: (1.1 + 2.1 * r()) * (focus ? 1 : 1.3) * scale,
+        energy: Math.min(1, (0.75 + 0.25 * h.hit) * scale),
         gamma: across, spiral: decay, drift: 0, arc: Math.PI * (2.4 + 2.4 * r()), meets: 0,
         // (a modest fireball: at 0.9–1.7 m it was an orange puff over the loops, the 2026-11-01 first look)
-        burst: 0.45 + 0.35 * h.hit, end: 1,
+        burst: (0.45 + 0.35 * h.hit) * scale, end: 1,
       };
       out.push(hero);
       // A CHAIN REACTION, now and then (the brief: "occasional chain reactions"): the annihilation's two gamma rays
       // convert a couple of metres out into new, smaller pairs, which meet and annihilate in their turn — the hit
-      // echoing outward. Every third hit; one generation (two would crowd the focus zone)
-      if (i % 3 === 1) {
+      // echoing outward. Every third hit, and the drop; one generation (two would crowd the focus zone)
+      if (i % 3 === 1 || isDrop) {
         const meet = endPoint(hero, 1);
         for (const sgn of [1, -1]) {
           const reach = 1.8 + r();

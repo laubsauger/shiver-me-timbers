@@ -14,7 +14,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { attribute, cameraPosition, clamp, cos, exp, float, Fn, hash, instanceIndex, max, min, mix, normalize, PI, pow, sin, smoothstep, sqrt, step, uv, varying, vec3, vec4 } from 'three/tsl';
-import { packedSpiral, type PairEvent } from './events';
+import { SPLIT_STEPS, packedSpiral, type PairEvent } from './events';
 import { pocketMask, type PocketUniforms } from './pairModel';
 import { afterglow, afterglowColour, frontTime, spent, waveWarp, type WaveFxUniforms } from './waveFx';
 import { glowWindow, ribbonAcross, ribbonGlow, screenBend, spriteGlow, type GlowProfile } from './glow';
@@ -97,8 +97,13 @@ function packEvents(events: readonly PairEvent[]): Record<string, Float32Array> 
     y.set([...e.across, e.gamma[1] + (e.gamma[2] < 0 ? 4 : 0)], i * 4);
   });
   const z = new Float32Array(n * 4);
-  // w: the fraction of its loop the pair lives, signed: > 0 the beads meet at its end, < 0 each ends apart
-  events.forEach((e, i) => z.set([packedSpiral(e), e.drift, e.arc, e.end * (e.meets && e.end >= 1 ? 1 : -1)], i * 4));
+  // w: the fraction of its loop the pair lives (0..1], signed: > 0 the beads meet at its end, < 0 each ends apart; on
+  // top of it, 2 × the beads' energy split as an integer 0..2·SPLIT_STEPS (events.ts beadOf; SPLIT_STEPS for an even
+  // split). |w| ≤ 201: float32 keeps the fraction to 1.5e-5 there
+  events.forEach((e, i) => {
+    const k = Math.round(((e.split ?? 0) + 1) * SPLIT_STEPS);
+    z.set([packedSpiral(e), e.drift, e.arc, (e.end + 2 * k) * (e.meets && e.end >= 1 ? 1 : -1)], i * 4);
+  });
   return { pairA: a, pairV: v, pairX: x, pairY: y, pairZ: z };
 }
 
@@ -130,6 +135,8 @@ interface PairNodes {
   meets: F;
   /** fraction of the loop it lives (the wave cuts some short) */
   uEnd: F;
+  /** −1..1 the beads' energy split (events.ts beadOf; 0 mirror twins) */
+  split: F;
 }
 
 function pairNodes(): PairNodes {
@@ -155,7 +162,28 @@ function pairNodes(): PairNodes {
     drift: z.y,
     arc: z.z,
     meets: step(0, z.w),
-    uEnd: z.w.abs(),
+    // (|w| = end + 2k: packEvents)
+    uEnd: z.w.abs().sub(z.w.abs().mul(0.5).floor().mul(2)),
+    split: z.w.abs().mul(0.5).floor().div(SPLIT_STEPS).sub(1),
+  };
+}
+
+/**
+ * events.ts beadOf on the GPU: bead q's own path, from the pair's and its energy split — a spiral's size, turns and
+ * tightening; a loop's opening and radius, so the two still meet where they did; a braid as it is. The rest of the
+ * pair's record passes through.
+ */
+function beadNodes(P: PairNodes, q: F): PairNodes {
+  const g = float(1).add(q.mul(P.split));
+  const isSpiral = step(1e-4, P.spiral);
+  const isLoop = float(1).sub(isSpiral).sub(step(P.spiral, -1e-4));
+  const openL = P.open.mul(float(1).sub(q.mul(P.split).mul(0.5)));
+  return {
+    ...P,
+    open: mix(P.open, openL, isLoop),
+    radius: P.radius.mul(mix(float(1), pow(g, float(0.8)), isSpiral).mul(mix(float(1), sin(P.open).div(sin(openL)), isLoop))),
+    arc: P.arc.mul(mix(float(1), pow(g, float(-0.5)), isSpiral)).add(P.open.sub(openL).mul(2).mul(isLoop)),
+    spiral: P.spiral.mul(mix(float(1), pow(g, float(-0.3)), isSpiral)),
   };
 }
 
@@ -256,12 +284,13 @@ function strip(segments: number): THREE.BufferGeometry {
 }
 
 export function createLoopTrails(events: readonly PairEvent[], U: LoopUniforms): THREE.InstancedMesh {
-  const P = pairNodes();
   const SV = attribute<'vec2'>('loopSV', 'vec2');
   const S = SV.x;
   const side = SV.y;
   const k = float(instanceIndex);
   const q = float(1).sub(k.mod(2).mul(2)); // +1 matter, −1 antimatter
+  // (an instance is one bead: its own path, beadNodes)
+  const P = beadNodes(pairNodes(), q);
   const path = arcPoint(P, q, S);
   // the light wave (waveFx.ts): this point of the path is drawn where the front's pull puts it, and its clock stops
   // when the front reaches it — or, for a pair the front catches alive, when the pair dies on it (a little later
@@ -402,8 +431,9 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const life = P.loop.mul(P.uEnd);
   const since = age.sub(life);
   const fEnd = ease(P.uEnd);
-  const endM = arcPoint(P, float(1), fEnd);
-  const endA = arcPoint(P, float(-1), fEnd);
+  // (each bead on its own path, beadNodes)
+  const endM = arcPoint(beadNodes(P, float(1)), float(1), fEnd);
+  const endA = arcPoint(beadNodes(P, float(-1)), float(-1), fEnd);
   // photons: approaching the vertex from ±across, gone at the meeting
   const photonHead = P.vertex.add(P.across.mul(sgn.mul(C).mul(age.negate().max(0))));
   const rayKept = smoothstep(0.45, 0.6, P.energy);
@@ -412,11 +442,12 @@ export function createLoopSprites(events: readonly PairEvent[], U: LoopUniforms)
   const bq = mix(float(1), float(-1), is(4));
   const u = age.div(P.loop);
   const f = ease(u);
-  const bead = arcPoint(P, bq, f);
-  const beadDir = arcTangent(P, bq, f);
+  const PB = beadNodes(P, bq);
+  const bead = arcPoint(PB, bq, f);
+  const beadDir = arcTangent(PB, bq, f);
   const fdot = float(0.85 * 1.7).mul(pow(float(1).sub(clamp(u, 0, 1)).max(1e-3), float(0.7))).add(0.15);
-  const analyticSpeed = P.radius.mul(exp(P.spiral.max(0).mul(P.arc).mul(f).negate())).mul(P.arc);
-  const beadSpeed = mix(analyticSpeed, arcRate(P, bq, f), step(P.spiral, -1e-4)).mul(fdot).div(P.loop);
+  const analyticSpeed = PB.radius.mul(exp(PB.spiral.max(0).mul(PB.arc).mul(f).negate())).mul(PB.arc);
+  const beadSpeed = mix(analyticSpeed, arcRate(PB, bq, f), step(PB.spiral, -1e-4)).mul(fdot).div(P.loop);
   const beadA = step(0, age).mul(step(age, life)).mul(smoothstep(0, 0.08, age));
   // gammas: leaving the meeting point back to back (or, for a spiral, one from each end)
   const gammaFrom = mix(endM, mix(endM, endA, is(7)), float(1).sub(P.meets));
