@@ -103,6 +103,7 @@ and lapping at its sides, the walls' cold repeating weave, the cabin interior, s
 | Clouds | rebuilt with physical lighting (review stills in `out/drift/clouds_review/`) | flicker; sunset bases too evenly peach; cloudlets near the Sun too bright; soft overhead; cloud shadows on the sea; faint streaks in clear sky; the game to adopt the new system |
 | Ambient occlusion | seam-free GTAO in the dome capture, sea scene only | |
 | Water | per-world sea colours; reflections held above the horizon | caustics and transparency look plasticky; swell and ripple at the shore |
+| Crew | jointed stand-in rigs (crew.ts, crewLife.ts): clear of sail, spars, lanterns and each other over the whole show (tests/driftCrew); seated poses, reactions to sunset, dolphin, answer and landfall; idle life | **next edit: replace the stand-ins with real characters** (the user, 2026-11-02: "we definitely need to rework the characters … note it to rework this for the next edit"). Options found, nothing downloaded: Microsoft Rocketbox avatars (MIT, rigged, ~2–3 d), MakeHuman/MPFB2 (CC0 exports), Mixamo or CMU mocap clips sampled by t for natural motion (~1–2 d), Renderpeople free scans (check the licence); the clearance test carries over |
 
 ## Decisions still open
 
