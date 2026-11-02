@@ -1,0 +1,41 @@
+// The Drift's dome master, one chunk of show time per job: scripts/drift-render.mjs in the job's tree
+// (the workspace "smt" at the job's base, plus its diff), inside the box's slots. Flags travel only through `extra`,
+// each on its allowlist with a typed value; --channel chrome is fixed (Playwright's Chromium breaks the sea's shaders).
+// HOOKS: "farm/drift.adapter.mjs", resolved inside the job's own tree, so a job's hooks are its own code's.
+{
+  "name": "drift-render",
+  "version": 1,
+  "mode": "exec",
+  "about": "a chunk of The Drift's dome master: drift-render.mjs over [from, to)",
+  "workspace": "smt",
+  "carriesCode": true,
+  "kind": "long",
+  "params": {
+    "from": { "type": "number", "min": 0 },
+    "to": { "type": "number", "min": 0 },
+    "size": { "type": "int", "min": 256, "max": 16384, "default": 2048 },
+    "fps": { "type": "int", "min": 1, "max": 120, "default": 30 },
+    "lanes": { "type": "int", "min": 1, "max": 4, "default": 1 },
+    "ext": { "type": "enum", "enum": ["mp4", "mov", "mkv"], "default": "mp4" },
+    "extra": {
+      "type": "flags",
+      "allow": {
+        "--blur": { "type": "int", "min": 1, "max": 64 },
+        "--ss": { "type": "number", "min": 0.25, "max": 4 },
+        "--codec": { "type": "enum", "enum": ["x264", "prores", "proreshq", "prores4444", "ffv1", "hevc10"] },
+        "--depth": { "type": "enum", "enum": [8, 16] },
+        "--msaa": { "type": "enum", "enum": [0, 1, 4] },
+        "--shutter": { "type": "number", "min": 0, "max": 1 },
+        "--crf": { "type": "int", "min": 0, "max": 51 },
+        "--query": { "type": "string", "pattern": "^[\\w&=.-]*$", "maxLength": 200 },
+        "--allow-lanes": true
+      }
+    }
+  },
+  "outputs": { "chunk": "file" },
+  "resources": { "slots": "{lanes}", "vramGB": [{ "when": { "size": { "gte": 8192 } }, "value": 22 }, { "value": 10 }], "vramPerSlot": false },
+  "speedClass": "drift-render:{size}",
+  "argv": ["{node}", "scripts/drift-render.mjs", "--size", "{size}", "--fps", "{fps}", "--from", "{from}", "--to", "{to}", "--channel", "chrome", "--lanes", "{lanes}", "{...extra}", "--out", "{out:chunk}/chunk.{ext}"],
+  "stream": "\\.(json|txt)$",
+  "hooks": "farm/drift.adapter.mjs"
+}

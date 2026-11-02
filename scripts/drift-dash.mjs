@@ -29,10 +29,14 @@
  *     runs with their VRAM. The machine cards (scripts/drift-fleet.mjs) merge it with our heartbeats, for the render
  *     machines in scripts/drift-farm-nodes.json only, this Mac's card first. No hub: a hint how to start it, and our
  *     heartbeats alone. `--hub <url>` points elsewhere; DRIFT_DASH_NODES moves the node-report file (a test instance).
- *   - THE DRIFT FARM's hub (scripts/drift-farm.mjs): the job queue the render machines pull work from (their
- *     `drift-node.mjs worker`), at /farm/… on the same listeners, bearer token from farm.json (written with a random
- *     token on the first start; gitignored). Its queue is out/drift/farm (DRIFT_FARM_DIR; DRIFT_FARM_TOKEN_FILE moves
- *     farm.json, for a test instance). Status.farm shows it.
+ *   - THE DRIFT FARM's hub: the job queue the render machines pull work from (their `drift-node.mjs worker`), at
+ *     /farm/… on the same listeners, bearer token from farm.json (written with a random token on the first start;
+ *     gitignored). Its queue is out/drift/farm (DRIFT_FARM_DIR; DRIFT_FARM_TOKEN_FILE moves farm.json, for a test
+ *     instance). Status.farm shows it. The hub is the studio farm package's (src/hub.mjs of the sibling studio-farm
+ *     checkout, farm/package.mjs), with the Drift's types (farm/types) and its job kinds and speed classes for /farm/jobs
+ *     (farm/hub-hooks.mjs): the same /farm/* answers on the same data dir, plus /v1/* and per-client tokens
+ *     (out/drift/farm/tokens.json). DRIFT_FARM_IMPL=old, or a package that does not load, keeps today's hub
+ *     (scripts/drift-farm.mjs) — the way back while the switch settles.
  *
  * THE /report CONTRACT (JSON, at most 64 KB; only `node` is required):
  *   { node: "win-4090", os: "win32", commit: "abc1234", bundle: "20261029",
@@ -239,7 +243,8 @@ import { fileURLToPath } from 'node:url';
 import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
 import { farmNodes, fleetCards, macCard } from './drift-fleet.mjs';
 import { readYieldPolicy } from './drift-share.mjs';
-import { createFarmHub, farmToken } from './drift-farm.mjs';
+import { createFarmHub as createOldFarmHub, farmToken } from './drift-farm.mjs';
+import { STUDIO_FARM_DIR, fromPackage } from '../farm/package.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -595,12 +600,31 @@ async function status() {
 /** the render farm's hub (header); off, with the reason on the console, when farm.json cannot be read */
 const FARM_DIR = process.env.DRIFT_FARM_DIR ?? join(ROOT, 'out/drift/farm');
 let farm = null;
+/**
+ * the package's hub with the Drift's types and legacy hooks, or today's (DRIFT_FARM_IMPL=old; or the package's does not
+ * load or will not start: then the farm keeps running on today's, and the console says why). Both read the same data
+ * dir, so the queue, the speeds and the boxes' states carry over either way.
+ */
+async function startFarmHub(base) {
+  if (process.env.DRIFT_FARM_IMPL !== 'old') {
+    try {
+      const [{ createFarmHub }, { loadTypes }, legacyHooks] = await Promise.all([fromPackage('src/hub.mjs'), fromPackage('src/types.mjs'), import('../farm/hub-hooks.mjs')]);
+      const hub = createFarmHub({ ...base, types: await loadTypes(['farm/types'], { base: ROOT }), legacyHooks });
+      console.log(`[dash] farm: the studio farm's hub (${STUDIO_FARM_DIR})`);
+      return hub;
+    } catch (e) {
+      console.error(`[dash] farm: the studio farm's hub did not start (${e.message}); today's scripts/drift-farm.mjs instead`);
+    }
+  }
+  console.log('[dash] farm: the hub in scripts/drift-farm.mjs');
+  return createOldFarmHub(base);
+}
 try {
   const tokenFile = process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json');
   const t = farmToken(tokenFile);
   if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token. Each render machine needs it in its drift-node.json: "farm": { "token": "<the token in ${tokenFile}>" }`);
   // (repo: origin's head for the pulse; assetsRoot: where the bundle's files are served from, one by one)
-  farm = createFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
+  farm = await startFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
   farmView = farm.view;
 } catch (e) {
   console.error(`[dash] farm off: ${e.message}`);

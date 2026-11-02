@@ -1,0 +1,30 @@
+// Review stills through scripts/drift-review-stills.mjs: the shots file is an input (it travels with the job), each
+// still goes back as soon as it is written (PNGs stream), and a pure-black one fails the job and sends it to another
+// box (the adapter's checkOutput). `setup` and `post` are JavaScript the page runs: code params (the `code` scope).
+{
+  "name": "drift-review-stills",
+  "version": 1,
+  "mode": "exec",
+  "about": "Drift review stills: drift-review-stills.mjs <shots.json>",
+  "workspace": "smt",
+  "carriesCode": true,
+  "kind": "still",
+  "params": {
+    "width": { "type": "int", "min": 64, "max": 8192, "default": 1280 },
+    "dome": { "type": "bool", "default": false },
+    "ss": "number|null",
+    "query": { "type": "string", "pattern": "^[\\w&=.-]*$", "maxLength": 200, "default": "" },
+    "setup": { "type": "string", "maxLength": 4000, "nullable": true, "code": true },
+    "post": { "type": "string", "maxLength": 4000, "nullable": true, "code": true },
+    "allowLarge": { "type": "bool", "default": false }
+  },
+  "inputs": { "shots": { "maxBytes": 1048576 } },
+  "outputs": { "stills": "dir" },
+  "resources": { "slots": 1, "vramGB": 10 },
+  "speedClass": "drift-review-stills:{width}",
+  "argv": ["{node}", "scripts/drift-review-stills.mjs", "{in:shots}", "--width", "{width}", "--channel", "chrome",
+           { "if": "dome", "then": ["--dome"] }, { "if": "ss", "then": ["--ss", "{ss}"] }, { "if": "query", "then": ["--query", "{query}"] },
+           { "if": "setup", "then": ["--setup", "{setup}"] }, { "if": "post", "then": ["--post", "{post}"] }, { "if": "allowLarge", "then": ["--allow-large"] },
+           "--out", "{out:stills}"],
+  "hooks": "farm/drift.adapter.mjs"
+}

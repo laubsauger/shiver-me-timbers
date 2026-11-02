@@ -1,0 +1,35 @@
+// A 16:9 review clip (or, with dome, the square master) through scripts/drift-review-clip.mjs, the real pipeline.
+// The project's guards stay its own: more than 30 s needs allowLong, more than 1920 px allowLarge (the user's go).
+// `setup` is JavaScript the page runs: a code param, so it needs the client's `code` scope.
+{
+  "name": "drift-review-clip",
+  "version": 1,
+  "mode": "exec",
+  "about": "a Drift review clip [from, to): drift-review-clip.mjs",
+  "workspace": "smt",
+  "carriesCode": true,
+  "kind": "clip",
+  "params": {
+    "from": { "type": "number", "min": 0 },
+    "to": { "type": "number", "min": 0 },
+    "width": { "type": "int", "min": 64, "max": 8192, "default": 1280 },
+    "fps": { "type": "int", "min": 1, "max": 120, "default": 30 },
+    "dome": { "type": "bool", "default": false },
+    "flatTrack": { "type": "bool", "default": false },
+    "ss": "number|null",
+    "query": { "type": "string", "pattern": "^[\\w&=.-]*$", "maxLength": 200, "default": "" },
+    "shot": { "type": "string", "pattern": "^\\{[\\s\\S]*\\}$", "maxLength": 4000, "nullable": true },
+    "setup": { "type": "string", "maxLength": 4000, "nullable": true, "code": true },
+    "allowLong": { "type": "bool", "default": false },
+    "allowLarge": { "type": "bool", "default": false }
+  },
+  "outputs": { "clip": "file" },
+  "resources": { "slots": 1, "vramGB": 10 },
+  "speedClass": "drift-review-clip:{width}",
+  "argv": ["{node}", "scripts/drift-review-clip.mjs", "--from", "{from}", "--to", "{to}", "--width", "{width}", "--fps", "{fps}", "--channel", "chrome",
+           { "if": "dome", "then": ["--dome"] }, { "if": "flatTrack", "then": ["--flat-track"] }, { "if": "ss", "then": ["--ss", "{ss}"] }, { "if": "query", "then": ["--query", "{query}"] },
+           { "if": "shot", "then": ["--shot", "{shot}"] }, { "if": "setup", "then": ["--setup", "{setup}"] },
+           { "if": "allowLong", "then": ["--allow-long"] }, { "if": "allowLarge", "then": ["--allow-large"] },
+           "--out", "{out:clip}/clip.mp4"],
+  "hooks": "farm/drift.adapter.mjs"
+}

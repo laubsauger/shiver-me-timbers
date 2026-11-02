@@ -65,3 +65,5 @@ public/drift/clouds/
 public/drift/pbr/
 # the farm hub's bearer token (scripts/drift-dash.mjs writes it on first start). Never in this public repo
 /farm.json
+# the studio farm's per-client tokens for this Mac's submitters (farm token add … --out farm-mac.token). Never here either
+/farm-*.token
