@@ -41,7 +41,7 @@
  * clip.mjs), so its uv is the overlay's uv and the text is drawn into the middle 9/16 of the canvas.
  */
 import * as THREE from 'three/webgpu';
-import { FADE_OUT, LINE_PITCH, PEN, bodyPen, drawPen, glyphInk, inkGlyph, phraseLife, phrasePlacement, type CrawlLayout, type CrawlPhrase, type PenAt } from './undertime/crawl';
+import { FADE_OUT, LINE_PITCH, PEN, PEN_CORE, baselineBelowMiddle, bodyPen, drawBodyPen, phraseLife, phrasePlacement, writeBodyGlyph, type CrawlLayout, type CrawlPhrase, type InkLine } from './undertime/crawl';
 import { SANS, sansGlyph, sansGlyphPaint, sansWords, titleType } from './undertime/crawlSans';
 import { InkWord } from './titleInk';
 
@@ -60,6 +60,13 @@ export const FLAT_SAFE = 0.1;
 export const FLAT_ARC = 2.2;
 /** px of the square canvas: the width of the slices the signature is bent in */
 const ARC_SLICE = 2;
+/**
+ * px of the square canvas: the core of the pen's light here (crawl.ts drawPen), 1.6× the dome's. The canvas is cut to a
+ * 1280 frame at 0.625×, so the dome's 2 px core was ~1.25 px there, "barely visible at 1280" (the 2026-11-02 review);
+ * 3.2 px is 2 px of the cut, a point still (the dome's core is 4 px of a 4096 master, about 2.6 % of a body em, and this
+ * is about 3.7 % of the cut's em: a shade bolder against the text, for a frame seen at its own size, not round a dome)
+ */
+export const FLAT_PEN_CORE = PEN_CORE * 1.6;
 
 /** a point `s` px along a line's arc from its middle (mx, my): where it lies and how far it is turned (rad, clockwise) */
 export function arcPoint(s: number, mx: number, my: number, radius: number): { x: number; y: number; angle: number } {
@@ -149,8 +156,9 @@ export class FlatTitles {
     const h = size * FLAT_BAND;
     const top = (size - h) / 2;
     const radius = FLAT_ARC * size;
-    /** where fraction f of each body line is on the canvas, by line index, for the pen; and the pen's phrase */
-    const where: Array<(f: number) => [number, number]> = [];
+    /** each body line of the phrase being written, by line index, as placed here (its glyphs, where fraction f of it is),
+     * for the pen; and the pen's phrase */
+    const drawn: InkLine[] = [];
     let penLine: FlatLine | null = null;
     for (const line of lines) {
       if (line.signature) {
@@ -187,9 +195,11 @@ export class FlatTitles {
         px *= (FLAT_WIDTH * size) / w;
         width();
       }
-      // written by the survivor's light, glyph by glyph (undertime/crawl.ts bodyPen; the dome's dark halo behind every
-      // glyph, crawl.ts inkGlyph)
+      // written by the survivor's light, glyph by glyph along each glyph's own strokes (undertime/crawl.ts bodyPen and
+      // writeBodyGlyph, undertime/crawlInk.ts; the dome's dark halo behind every glyph, crawl.ts inkGlyph)
       const ink = line.pen && !this.sans ? bodyPen(line.pen.since, line.pen.lines) : null;
+      const oy = baselineBelowMiddle(ctx);
+      const placed: InkLine['glyphs'] = [];
       const words = this.sans ? sansWords(line.text) : null;
       const life = line.pen ? phraseLife(line.pen.lines) : 0;
       // glyph by glyph along the arc (THE ARC): each at its advance in the whole line (the prefix's width: the face's
@@ -201,8 +211,11 @@ export class FlatTitles {
         const x0 = ctx.measureText(prefix).width;
         prefix += g;
         const gw = ctx.measureText(g).width - tracking * px;
-        if (g.trim() === '') continue;
         const at = arcPoint(x0 + gw / 2 - total / 2, size / 2, top + line.y * h, radius);
+        // (fillText centres the glyph with its letterSpacing after it: its origin is half of both to the left)
+        const frame = { x: at.x, y: at.y, angle: at.angle, ox: -(gw + tracking * px) / 2, oy, px };
+        placed.push({ ch: g, f0: x0 / total, f1: (x0 + gw) / total, frame });
+        if (g.trim() === '') continue;
         if (words && line.pen) {
           // variant B: the glyph's own arriving or leaving state is its fade (as on the dome: crawl.ts drawSansLine)
           const s = sansGlyph(line.pen.since, life, FADE_OUT, line.pen.line, k, words[k], (x0 + gw / 2) / total);
@@ -214,19 +227,21 @@ export class FlatTitles {
           ctx.restore();
           continue;
         }
-        const r = ink && line.pen ? glyphInk(line.pen.since, ink.starts[line.pen.line], ink.durs[line.pen.line], x0 / total, (x0 + gw) / total) : { alpha: 1, warm: 0 };
-        if (r.alpha <= 0.002) continue;
+        if (!ink || !line.pen) continue;
         ctx.save();
         ctx.translate(at.x, at.y);
         ctx.rotate(at.angle);
-        inkGlyph(ctx, g, px, line.alpha * r.alpha, r.warm);
+        writeBodyGlyph(ctx, g, px, line.alpha, line.pen.since, ink.starts[line.pen.line], ink.durs[line.pen.line], x0 / total, (x0 + gw) / total, frame);
         ctx.restore();
       }
       if (line.pen) {
         const y = top + line.y * h;
-        where[line.pen.line] = (f: number): [number, number] => {
-          const at = arcPoint((f - 0.5) * total, size / 2, y, radius);
-          return [at.x, at.y];
+        drawn[line.pen.line] = {
+          glyphs: placed,
+          at: (f: number): [number, number] => {
+            const at = arcPoint((f - 0.5) * total, size / 2, y, radius);
+            return [at.x, at.y];
+          },
         };
         penLine = line;
       }
@@ -235,13 +250,11 @@ export class FlatTitles {
     // the pen's light: it comes down from above the text (the act's one place, the grain's spot — PEN.spotEl on the
     // dome, as many ems above the first line here as there), writes, and goes back up
     if (penLine?.pen && !this.sans) {
-      const ink = bodyPen(penLine.pen.since, penLine.pen.lines);
       const first = lines.find((l) => l.pen && l.pen.lines === penLine?.pen?.lines);
-      if (ink.pen && first && where[0]) {
+      if (first && drawn[0]) {
         const emPx = first.em * h;
         const spotY = Math.max(top + FLAT_SAFE * h, top + first.y * h - ((PEN.spotEl - L.elTop) / (L.size * 180)) * emPx);
-        const pos = (a: PenAt): [number, number] => (a.line < 0 || !where[a.line] ? [size / 2, spotY] : where[a.line](a.f));
-        drawPen(ctx, pos(ink.pen.from), pos(ink.pen.to), ink.pen.k, ink.pen.glow * first.alpha);
+        drawBodyPen(ctx, penLine.pen.since, penLine.pen.lines, drawn, [size / 2, spotY], first.alpha, FLAT_PEN_CORE);
       }
     }
     this.texture.needsUpdate = true;

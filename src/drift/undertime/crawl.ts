@@ -31,6 +31,7 @@
 import * as THREE from 'three/webgpu';
 import { InkWord, inkProgress } from '../titleInk';
 import { SANS, sansGlyph, sansGlyphPaint, sansWords, titleType } from './crawlSans';
+import { REACH, REACH_PAD, framePoint, glyphWriting, hasGlyphPath, lineEnds, linePen, type GlyphFrame, type GlyphWriting, type LineGlyph, type PenPoint } from './crawlInk';
 
 export interface CrawlPhrase {
   /** one or two lines, read top to bottom */
@@ -126,6 +127,16 @@ export function phrasePlacement(t: number, p: CrawlPhrase, L: CrawlLayout): Plac
  * quicker than anyone reads — so the reading follows the light rather than waiting for it, and every phrase is whole
  * ~2 s after it begins (its hold, 1.5 s + 0.3 s a word, counts from its fade-in as before). Pure in the time since
  * the phrase began (tested), as the title's pen is (../titleInk.ts).
+ *
+ * ON THE LETTERS' OWN STROKES (the 2026-11-02 review: the light "follows the line's centre, not the letters' strokes,
+ * so it looks fake"; the client's note of 2026-10-31: "less stiff"): while it writes a line the light no longer runs
+ * along the line's middle over a soft wipe. In each glyph's slot (glyphInk's, unchanged) it runs that glyph's baked
+ * strokes in writing order and the glyph comes up under it through a stroke mask, as the title does (./crawlInk.ts,
+ * scripts/drift-copy-strokes.py); between strokes and glyphs it lifts, dimmed to PEN.air. At this pace a glyph's
+ * slot is ~35 ms, about a frame at 30 fps, so the light also leaves a short STREAK along the way it came over the last
+ * PEN.trail s — what a camera's open shutter would see of a point of light moving that fast — which is what draws the
+ * letter's shape at the pen; without it the point would hop a glyph a frame. The arc down from the spot, the crossing
+ * between lines and the rise back are as they were, ending and starting on the strokes.
  */
 export const PEN = {
   /** s the light takes from the spot down to the first line's start */
@@ -143,6 +154,14 @@ export const PEN = {
   cool: 0.5,
   /** deg, the spot's dome elevation (timeline.ts heroGrainPosition: heroGrainEl, straight ahead) */
   spotEl: 52,
+  /** the light's strength while lifted, between strokes and between glyphs (a point of light that went out at every
+   * lift would flicker 28 times a second; the title's pen, slower, does go out) */
+  air: 0.4,
+  /** s of the way it came the streak shows: half a frame at 30 fps (a 180° shutter) */
+  trail: 1 / 60,
+  /** samples along the streak: near enough that the points merge into a line at the pen's speed (~2.5k canvas px/s
+   * on the dome's 2048 canvas while it writes: 24 over 1/60 s ≈ 1.8 px apart, inside the core's 2.2 px width) */
+  trailSamples: 24,
 } as const;
 
 /** where the pen is: on line `line` (−1: the spot) at fraction `f` of its width */
@@ -220,7 +239,7 @@ export interface CrawlFonts {
   signatureTracking: number;
 }
 
-const FONTS: CrawlFonts = {
+export const FONTS: CrawlFonts = {
   body: 'italic 560 {px}px "EB Garamond", Georgia, serif',
   bodyTracking: 0.01,
   // (a script's letters join: no tracking, and the baked pen path is for the word as the face sets it)
@@ -268,19 +287,17 @@ export class CrawlOverlay {
       if (!at) continue;
       const since = t - p.at;
       const ink = p.signature || this.sans ? null : bodyPen(since, p.lines);
-      const where: Array<(f: number) => [number, number]> = [];
+      const drawn: InkLine[] = [];
       const life = phraseLife(p.lines);
       p.lines.forEach((line, j) => {
         const el = at.el - j * textDeg(at.size) * LINE_PITCH;
         if (p.signature) this.drawSignature(line, el, at.size, at.alpha, at.ink);
-        else if (ink) where.push(this.drawLine(line, el, at.size, at.alpha, (f0, f1) => glyphInk(since, ink.starts[j], ink.durs[j], f0, f1)));
+        else if (ink) drawn.push(this.drawLine(line, el, at.size, at.alpha, since, ink.starts[j], ink.durs[j]));
         else this.drawSansLine(line, el, at.size, since, life, j);
       });
-      if (ink?.pen) {
+      if (ink) {
         const c = size / 2;
-        const spot = (): [number, number] => [c, c + ((90 - PEN.spotEl) / 90) * c];
-        const pos = (a: PenAt): [number, number] => (a.line < 0 ? spot() : where[a.line](a.f));
-        drawPen(ctx, pos(ink.pen.from), pos(ink.pen.to), ink.pen.k, ink.pen.glow * at.alpha);
+        drawBodyPen(ctx, since, p.lines, drawn, [c, c + ((90 - PEN.spotEl) / 90) * c], at.alpha);
       }
     }
     this.texture.needsUpdate = true;
@@ -362,9 +379,9 @@ export class CrawlOverlay {
     });
   }
 
-  /** a body line, each glyph as `reveal` (its span's fractions of the line) has it; returns where fraction f of the
-   * line is on the canvas (the pen) */
-  private drawLine(text: string, el: number, sizeFrac: number, alpha: number, reveal: (f0: number, f1: number) => { alpha: number; warm: number }): (f: number) => [number, number] {
+  /** a body line written from `start` over `dur` s after its phrase began (bodyPen), each glyph as far as the pen has
+   * written it `since` s after; returns where its glyphs are and where fraction f of the line is on the canvas (the pen) */
+  private drawLine(text: string, el: number, sizeFrac: number, alpha: number, since: number, start: number, dur: number): InkLine {
     const { ctx, size } = this;
     const c = size / 2;
     const R = ((90 - el) / 90) * c; // master radius of this elevation circle
@@ -383,29 +400,35 @@ export class CrawlOverlay {
       px *= (this.layout.maxArc * R) / m.total;
       m = measure();
     }
+    const oy = baselineBelowMiddle(ctx);
     // azimuth grows to the viewer's right; start half the arc to the left of the front
     const az0 = -m.total / 2 / R;
     let az = az0;
     let run = 0;
+    const glyphs: InkLine['glyphs'] = [];
     m.chars.forEach((ch, k) => {
       const w = m.widths[k] - tracking * px;
       const mid = az + w / 2 / R;
-      const g = reveal(run / m.total, (run + w) / m.total);
+      const f0 = run / m.total;
+      const f1 = (run + w) / m.total;
       run += m.widths[k];
       az += m.widths[k] / R;
-      if (g.alpha <= 0.002 || ch.trim() === '') return;
-      // canvas y points down; the front (azimuth 0) is the bottom of the frame
-      const x = c + R * Math.sin(mid);
-      const y = c + R * Math.cos(mid);
+      // canvas y points down; the front (azimuth 0) is the bottom of the frame; glyph top toward the zenith (frame centre)
+      const frame: GlyphFrame = { x: c + R * Math.sin(mid), y: c + R * Math.cos(mid), angle: -mid, ox: -w / 2, oy, px };
+      glyphs.push({ ch, f0, f1, frame });
+      if (ch.trim() === '') return;
       ctx.save();
-      ctx.translate(x, y);
-      ctx.rotate(-mid); // glyph top toward the zenith (frame centre)
-      inkGlyph(ctx, ch, px, alpha * g.alpha, g.warm);
+      ctx.translate(frame.x, frame.y);
+      ctx.rotate(frame.angle);
+      writeBodyGlyph(ctx, ch, px, alpha, since, start, dur, f0, f1, frame);
       ctx.restore();
     });
-    return (f: number): [number, number] => {
-      const a = az0 + (f * m.total) / R;
-      return [c + R * Math.sin(a), c + R * Math.cos(a)];
+    return {
+      glyphs,
+      at: (f: number): [number, number] => {
+        const a = az0 + (f * m.total) / R;
+        return [c + R * Math.sin(a), c + R * Math.cos(a)];
+      },
     };
   }
 }
@@ -434,8 +457,128 @@ export function inkGlyph(ctx: CanvasRenderingContext2D, ch: string, px: number, 
   }
 }
 
+/** a written body line as a renderer placed it: its glyphs (their shares of the line, crawlInk.ts, and where each is on
+ * the canvas), and where fraction f of the line is (the pen over a line none of whose glyphs has a baked path) */
+export interface InkLine {
+  glyphs: Array<LineGlyph & { frame: GlyphFrame }>;
+  at: (f: number) => [number, number];
+}
+
+/** px the alphabetic baseline lies below the 'middle' one in `ctx`'s current font (a glyph's origin, from where
+ * fillText with textBaseline 'middle' puts it) */
+export function baselineBelowMiddle(ctx: CanvasRenderingContext2D): number {
+  const was = ctx.textBaseline;
+  ctx.textBaseline = 'alphabetic';
+  const a = ctx.measureText('x').fontBoundingBoxAscent;
+  ctx.textBaseline = 'middle';
+  const m = ctx.measureText('x').fontBoundingBoxAscent;
+  ctx.textBaseline = was;
+  return a - m;
+}
+
+/**
+ * One body glyph, its centre at the context's origin (turned to its line), as the pen has written it `since` s after its
+ * phrase began; its line written from `start` over `dur` s, its share of the line [f0, f1]. A glyph with a baked path
+ * (./crawlInk.ts) is nothing before its slot, written through the stroke mask in it, and whole after it, cooling from
+ * the pen's amber (glyphInk's warmth); one without keeps the soft wipe. Shared with the 16:9 titles (../flatTitles.ts).
+ */
+export function writeBodyGlyph(ctx: CanvasRenderingContext2D, ch: string, px: number, alpha: number, since: number, start: number, dur: number, f0: number, f1: number, frame: GlyphFrame): void {
+  const g = glyphInk(since, start, dur, f0, f1);
+  if (!hasGlyphPath(ch)) {
+    if (g.alpha > 0.002) inkGlyph(ctx, ch, px, alpha * g.alpha, g.warm);
+    return;
+  }
+  const q = (since - start - dur * f0) / Math.max(1e-9, dur * (f1 - f0));
+  if (q <= 0) return;
+  if (q >= 1) inkGlyph(ctx, ch, px, alpha, g.warm);
+  else maskedGlyph(ctx, ch, px, alpha, glyphWriting(ch, q)!, frame);
+}
+
+/**
+ * A glyph part-written: the face's own glyph, kept only inside the pen's mask (round-ended capsules along the strokes so
+ * far, each as wide as the ink there × REACH: a canvas clip, the union of them under the nonzero rule), hot (warm 1:
+ * the ink at the pen is the amber it is written in). The ink the mask does not reach comes up over the slot's end
+ * (`tail`) under it, the two summed to the glyph's own opacity, so at the slot's end it is exactly the whole glyph.
+ * (The clip also clips the glyph's dark halo to the mask: for the ~35 ms the glyph is being written.)
+ */
+function maskedGlyph(ctx: CanvasRenderingContext2D, ch: string, px: number, alpha: number, w: GlyphWriting, f: GlyphFrame): void {
+  /** the glyph's fill opacity (inkGlyph: 0.92 × alpha) from the tail, and what the mask adds over it to reach it */
+  const aTail = 0.92 * alpha * w.tail;
+  if (aTail > 0.002) inkGlyph(ctx, ch, px, alpha * w.tail, 1);
+  const aMask = (0.92 * alpha - aTail) / Math.max(1e-6, 1 - aTail) / 0.92;
+  if (!w.segments.length || aMask <= 0.002) return;
+  const path = new Path2D();
+  const P = (x: number, y: number): [number, number] => [f.ox + x * f.px, f.oy + y * f.px];
+  for (const [x0, y0, x1, y1, r] of w.segments) {
+    const rad = (r * REACH + REACH_PAD) * f.px + 0.5;
+    const a = P(x0, y0);
+    const b = P(x1, y1);
+    // (every piece wound the same way, so the clip is their union)
+    path.moveTo(a[0] + rad, a[1]);
+    path.arc(a[0], a[1], rad, 0, 2 * Math.PI);
+    path.moveTo(b[0] + rad, b[1]);
+    path.arc(b[0], b[1], rad, 0, 2 * Math.PI);
+    const n = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (n < 1e-6) continue;
+    const nx = (-(b[1] - a[1]) / n) * rad;
+    const ny = ((b[0] - a[0]) / n) * rad;
+    let quad: Array<[number, number]> = [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
+    let area = 0;
+    for (let i = 0; i < 4; i++) area += quad[i][0] * quad[(i + 1) % 4][1] - quad[(i + 1) % 4][0] * quad[i][1];
+    if (area < 0) quad = quad.reverse(); // the arcs' winding: clockwise on the canvas, a positive area with y down
+    path.moveTo(quad[0][0], quad[0][1]);
+    for (let i = 1; i < 4; i++) path.lineTo(quad[i][0], quad[i][1]);
+    path.closePath();
+  }
+  ctx.save();
+  ctx.clip(path);
+  inkGlyph(ctx, ch, px, aMask * alpha, 1);
+  ctx.restore();
+}
+
+/** where the pen is `since` s after its phrase began, on the canvas: from a to b, k of the way, its light 0..1 */
+function bodyPenAt(since: number, lines: readonly string[], drawn: readonly InkLine[], spot: [number, number]): { a: [number, number]; b: [number, number]; k: number; glow: number } | null {
+  const ink = bodyPen(since, lines);
+  const pen = ink.pen;
+  if (!pen) return null;
+  const P = (pt: PenPoint, j: number): [number, number] => framePoint(drawn[j].glyphs[pt.g].frame, pt.x, pt.y);
+  // writing a line: on the strokes of the glyph in hand, or in the air between them
+  if (pen.from.line >= 0 && pen.from.line === pen.to.line && drawn[pen.from.line]) {
+    const j = pen.from.line;
+    const lp = linePen(since, ink.starts[j], ink.durs[j], drawn[j].glyphs);
+    if (lp) return { a: P(lp.a, j), b: P(lp.b, j), k: lp.k, glow: pen.glow * (lp.down ? 1 : PEN.air) };
+  }
+  // coming down from the spot, crossing to the next line, going back: to and from where the line's writing begins and ends
+  const pos = (a: PenAt): [number, number] => {
+    const d = a.line >= 0 ? drawn[a.line] : undefined;
+    if (!d) return spot;
+    const e = lineEnds(d.glyphs);
+    if (e && a.f <= 0) return P(e.first, a.line);
+    if (e && a.f >= 1) return P(e.last, a.line);
+    return d.at(a.f);
+  };
+  return { a: pos(pen.from), b: pos(pen.to), k: pen.k, glow: pen.glow };
+}
+
+/**
+ * The survivor's light on a body phrase `since` s after it began: the point at the pen and its streak along the way it
+ * came over the last PEN.trail s (a pure function of `since`: each sample is the pen at an earlier time, never a
+ * remembered position). `drawn` the phrase's lines as the renderer placed them, `spot` the act's one place on its
+ * canvas, `alpha` the phrase's, `core` the point's size (drawPen). Shared with the 16:9 titles (../flatTitles.ts).
+ */
+export function drawBodyPen(ctx: CanvasRenderingContext2D, since: number, lines: readonly string[], drawn: readonly InkLine[], spot: [number, number], alpha: number, core = PEN_CORE): void {
+  const n: number = PEN.trailSamples;
+  // the streak first, the point last (on top): the tail fading toward the way it came, only the point with a skirt
+  for (let i = n; i >= 0; i--) {
+    const at = bodyPenAt(since - (i / n) * PEN.trail, lines, drawn, spot);
+    if (!at) continue;
+    const fade = i === 0 ? 1 : 0.55 * (1 - i / (n + 1));
+    drawPen(ctx, at.a, at.b, at.k, at.glow * alpha * fade, core, i === 0 ? 1 : 0);
+  }
+}
+
 /** canvas px: the pen's core (its Moffat α) — ~1.6 px of the 16:9 cut at 1280, ~2 px of the master at 2K, 4 at 4K */
-const PEN_CORE = 2;
+export const PEN_CORE = 2;
 
 /**
  * The pen's light between canvas points a and b, k of the way (on a gentle arc that lifts over the move, as a hand
@@ -445,8 +588,10 @@ const PEN_CORE = 2;
  * looks horrendous. What's up with those things being so blobby?" Now a point-spread function sized in pixels, not
  * ems: a Moffat core (1 + (r/α)²)^−2.5, α = PEN_CORE px, white-hot, over a faint warm skirt 3.5α wide that falls
  * continuously to zero — no plateau, no edge. The canvas is LDR, so "hot" is its centre at full opacity and white.)
+ * `core` the α in canvas px (the 16:9 cut draws a larger one: ../flatTitles.ts FLAT_PEN_CORE), `skirt` 0..1 the warm
+ * skirt's share (0 for the samples of the streak behind the point: drawBodyPen).
  */
-export function drawPen(ctx: CanvasRenderingContext2D, a: [number, number], b: [number, number], k: number, glow: number): void {
+export function drawPen(ctx: CanvasRenderingContext2D, a: [number, number], b: [number, number], k: number, glow: number, core = PEN_CORE, skirt = 1): void {
   if (glow <= 0.002) return;
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
@@ -454,11 +599,12 @@ export function drawPen(ctx: CanvasRenderingContext2D, a: [number, number], b: [
   const lift = n * 0.18 * Math.sin(Math.PI * k);
   const x = a[0] + dx * k + (dy / n) * lift;
   const y = a[1] + dy * k - (dx / n) * lift;
-  const al = PEN_CORE;
-  const R = al * 10;
+  const al = core;
+  const R = al * (skirt > 0 ? 10 : 4);
   // (the skirt at 0.16 over 6α read as a brown disc round the point at 1:1 — the overlay is mixed over the frame by its
   // alpha, so a broad low-alpha film is a film, not light: 0.06 over 3.5α)
-  const profile = (r: number): number => Math.min(1, (1 + (r / al) ** 2) ** -2.5 + 0.06 * Math.exp(-((r / (3.5 * al)) ** 2)) * (1 - (r / R) ** 2) ** 2);
+  // (the streak's samples, `skirt` 0, are the core alone: two dozen skirts summed would be that film again)
+  const profile = (r: number): number => Math.min(1, (1 + (r / al) ** 2) ** -2.5 + skirt * 0.06 * Math.exp(-((r / (3.5 * al)) ** 2)) * (1 - (r / R) ** 2) ** 2);
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.shadowColor = 'transparent';
