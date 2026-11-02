@@ -21,7 +21,7 @@ through the resumable render queue (§6). After a stop, the same command again g
 | … with other settings | `--set ss=1` · `--set msaa=0` · `--set blur=8` · `--set from=300,to=330` · `--only <job>` |
 | only pull | `sync` (`--dry-run`: say what it would do, change nothing) |
 | where it stands | `status` (commit, bundle, GPU check, the job, its frames and ETA) · `logs -f` |
-| farm work out (on the Mac) | `node scripts/drift-slot.mjs --farm auto -- <command>` ("The farm", below); a box takes jobs with `worker` |
+| farm work out (on the Mac) | `node scripts/drift-slot.mjs --farm auto -- <command>` ("The farm", below); a box takes jobs with the studio-farm worker |
 | watch every machine | the studio dashboard on the Mac, `node scripts/drift-dash.mjs --tailnet` (http://<mac>:5190): each node's state, GPU, job, frames and ETA, from a heartbeat the command sends every 5 s. `dash` runs a dashboard on the node itself |
 
 **Publishing the current state, on the Mac:** commit and push the code (a node renders what is pushed: nothing
@@ -118,32 +118,50 @@ The code: `scripts/drift-share.mjs` (tests/driftShare.test.ts).
 
 ### The farm: the boxes take our daily work
 
-The boxes are also a render farm for everyday work: stills, review clips, single frames (the user, 2026-10-29: "make
-sure that these machines get fat work … so we have to wait less"). It is a pull model, so nothing listens on the
-boxes and no SSH is needed (the Windows boxes have none).
+The boxes are also a render farm for everyday work: stills, review clips, render chunks, whole-show renders (the
+user, 2026-10-29: "make sure that these machines get fat work … so we have to wait less"). It is a pull model, so
+nothing listens on the boxes and no SSH is needed (the Windows boxes have none). The farm itself (hub, worker, job
+types, the SDK and a `farm` command line) is the **studio-farm package**, a private sibling checkout beside this one
+(`../studio-farm`, or `STUDIO_FARM_DIR`); it is never a dependency in `package.json`, and a clone without it renders
+everything locally. What is the film's lives in `farm/`: the job types (`farm/types/*.json`), the adapter
+(`farm/drift.adapter.mjs`: progress, the black-frame check, the box's GPU check, which command is which type), the
+submitter (`farm/submit.mjs`) and the Drift's commands (`farm/cli.mjs`).
 
-- **The hub** is this Mac's dashboard, `node scripts/drift-dash.mjs --tailnet` (`/farm/…` on :5190; code in
-  `scripts/drift-farm.mjs`). The queue lives in `out/drift/farm/`. Its token is in `farm.json`, written on the first
-  start. That file is gitignored, and the dashboard refuses to write or use a `farm.json` that git would commit.
-- **A worker** on each box: `node scripts/drift-node.mjs worker`. Its `drift-node.json` needs
-  `{ "name": "windows-monster", "farm": { "hub": "http://laubs-mbp:5190" } }`. The three machines of
-  `scripts/drift-farm-nodes.json` need no token: the hub knows them by their tailnet address, and only for their own
-  work. The worker takes a job only while the GPU is free of others' work and the box is on mains power. On the
-  Windows boxes, studio-manager can start it as a service (`docs/drift/studio-manager-proposal.md`).
+- **The hub** is this Mac's dashboard, `node scripts/drift-dash.mjs --tailnet` (`/v1/…` and `/farm/…` on :5190). The
+  queue lives in `out/drift/farm/`, the clients' tokens in `out/drift/farm/tokens.json`. The Mac's submitters use
+  `farm-mac.token` (gitignored; `DRIFT_FARM_TOKEN_FILE` moves it); `farm.json` holds the older shared token. The
+  dashboard refuses to write or use a token file that git would commit.
+- **A worker** on each box: the studio-farm worker, started by the box's own wrapper (a systemd user unit on Linux, a
+  hidden scheduled task at logon on Windows; the package's docs say how to install it). Each round the wrapper runs
+  `node scripts/drift-node.mjs sync` here first (git pull, npm ci, the bundle, the GPU check), then the worker. The
+  boxes in `scripts/drift-farm-nodes.json` need no token: the hub knows them by their tailnet address. A worker takes
+  a job only while the GPU is free of others' work and the box is on mains power. The console sets each box to
+  accepting, draining, paused or removed.
 - **Submitting** (on the Mac, as an agent would):
   `node scripts/drift-slot.mjs --farm auto -- node scripts/drift-review-stills.mjs shots.json --out out/drift/x`.
-  The remote output shows in this terminal, and the files land at the `--out` path. `auto` picks the best free box,
-  and falls back to a slot here when none is free or none takes the job in 60 s. `--farm <box>` pins a box.
-  `DRIFT_FARM=auto` makes every agent's `drift-slot` use the farm. The render queue's own chunks never do.
+  A review clip, review stills or a render chunk goes as a **typed** job (`drift-review-clip@1`,
+  `drift-review-stills@1`, `drift-render@1`: the hub checks every parameter against its type). A command the types
+  cannot say exactly (another script, a flag no type takes: `--port`, `--shot-file`) goes as a `legacy-argv@1` job
+  while the boxes still take those; `DRIFT_FARM_TYPED=0` sends everything that way. The remote output shows in this
+  terminal, and the files land at the `--out` path. `auto` takes whichever box is free, and runs here only when the
+  farm cannot take the job at all (the hub does not answer, or no box takes work). `--farm <box>` pins a box;
+  `--priority low|normal|high`. `DRIFT_FARM=auto` makes every agent's `drift-slot` use the farm. The render queue's
+  own chunks never do.
+- **A whole show over every free box**: `node farm/cli.mjs render --from 0 --to 770 [--size 2048] [--flat 2048]
+  [--clean] [--box <name>]`: one job per 20 s chunk at low priority, the chunks landed in `<out>/chunks/` and joined
+  with their frame count checked; the same command resumes. `--clean` renders the pushed commit exactly.
+- **The rest from the Mac**: `node farm/cli.mjs consistency` (do the machines draw the same film), `kick <box>
+  sync-now|gpu-check-now|restart`, `state <box> accepting|draining|paused|removed`, `cancel --agent <name> | --all-low
+  | <id>…`, `status`, `logs <id> -f`, `workers`.
 - **What travels with a job**: the code as `git diff --binary origin/main`, plus untracked files under
   `src/ scripts/ tests/ public/`. Assets the boxes' bundle lacks go too, up to 200 MB; more fails, and asks for a
-  bundle rebuild. Input files outside the code are sent along; paths inside a JSON file are not rewritten. On the box,
-  each job gets its own tree in `../smt-farm/<job>`: `git archive` of the base, the patch, the bundle hard-linked,
-  `node_modules` linked. The tree is deleted afterwards. Every frame is a pure function of t, so a box draws what this
-  Mac would, up to the GPU vendor's arithmetic (the job records which box drew it).
-- **Who gets what**: stills go to whoever is free. Clips and long jobs go to the fastest free box; a slower one takes
-  them after 2 min of waiting. Speeds start from `drift-farm-nodes.json` (4090 desktops 1.0, the 100 W 5090 laptop
-  0.5) and are learned from measured frame rates (`out/drift/farm/speeds.json`).
+  bundle rebuild. A typed job's input files (a stills run's shots) travel as its inputs. On the box, each job gets its
+  own tree beside the checkout: `git archive` of the base, the patch, the bundle hard-linked, `node_modules` linked.
+  The tree is deleted afterwards. Every frame is a pure function of t, so a box draws what this Mac would, up to the
+  GPU vendor's arithmetic (the job records which box drew it).
+- **Who gets what**: any free box that takes work takes any job, the highest priority first; a low job never takes a
+  box a queued higher job could use. Speeds start from `drift-farm-nodes.json` (4090 desktops 1.0, the 100 W 5090
+  laptop 0.5) and are learned from measured frame rates (`out/drift/farm/speeds.json`).
 
 ## 0. What a node renders
 

@@ -393,7 +393,7 @@ before it, and steps it at 1/30 s to t — flowfoam's update, the raft's water a
 is how every frame stays a pure function of t; the price is (t − world start) × 30 GPU steps per jump. Its last step
 is partial (`wakeT = t`), which is why a forward catch-up from an off-grid state is not bit-identical to a replay.
 Proposed (with the wake's owner): keep the state on the 1/30 s grid and catch up for any forward jump; failing that,
-replay from max(world start, t − W), W the wake's decay horizon, with `drift-farm.mjs consistency` numbers at the chunk
+replay from max(world start, t − W), W the wake's decay horizon, with `farm/cli.mjs consistency` numbers at the chunk
 seams. Meanwhile `drift-review-stills.mjs` draws its shots in show-time order.
 
 **The materials' rebuild on a switch of world (open).** The ~10 s of TSL node building at the jump to 400 s (the sea,

@@ -21,16 +21,20 @@
  * running job's output is copied to `<slot>.log` beside its slot file as well as to the terminal, so the dashboard can
  * show the queue and read a clip's `[review] n/N` progress. The log stays after the job, until the slot's next job.
  *
- * ON THE FARM (scripts/drift-farm-client.mjs; the user, 2026-10-29: "make sure that these machines get fat work …
- * so we have to wait less"): `--farm [auto|<box>]` (or DRIFT_FARM=auto in the environment: every agent's job, with
- * one variable) sends the command to a studio render machine instead of a slot here, through this Mac's farm hub
- * (drift-dash.mjs, :5190; token from farm.json). Its output shows here as it runs, and its files land at the --out
- * paths it named, as if it had run here; files it reads outside the code are sent along. `auto`: whichever box takes
- * it first; a slot here only when the farm cannot take it at all — the hub does not answer, or no box that takes work
- * is online (busy boxes are a queue, not a reason to come back here). `--local` overrides DRIFT_FARM. A tree that does
- * not build (drift-precheck.mjs: a session mid-edit) is refused, here as on the farm.
+ * ON THE FARM (farm/submit.mjs, on the studio-farm package in the sibling checkout ../studio-farm; the user,
+ * 2026-10-29: "make sure that these machines get fat work … so we have to wait less"): `--farm [auto|<box>]` (or
+ * DRIFT_FARM=auto in the environment: every agent's job, with one variable) sends the command to a studio render
+ * machine instead of a slot here, through this Mac's farm hub (drift-dash.mjs, :5190; the token in farm-mac.token,
+ * or DRIFT_FARM_TOKEN_FILE). A review clip, review stills or a render chunk goes as a TYPED job (drift-review-clip@1,
+ * drift-review-stills@1, drift-render@1: the hub checks every param against its type); a command the types cannot
+ * say exactly goes as a legacy-argv@1 job, while the boxes take those; DRIFT_FARM_TYPED=0 sends everything that way.
+ * Its output shows here as it runs, and its files land at the --out paths it named, as if it had run here; files it
+ * reads outside the code are sent along. `auto`: whichever box takes it first; a slot here only when the farm cannot
+ * take it at all — the hub does not answer, or no box that takes work is online (busy boxes are a queue, not a reason
+ * to come back here). `--local` overrides DRIFT_FARM. A tree that does not build (drift-precheck.mjs: a session
+ * mid-edit) is refused, here as on the farm.
  * `--priority low|normal|high` (or DRIFT_FARM_PRIORITY; normal by default): the farm hands out the highest first, and a
- * low job only to a box no queued higher job could use (drift-farm.mjs PRIORITIES); a low job never falls back here.
+ * low job only to a box no queued higher job could use; a low job never falls back here.
  *
  *   node scripts/drift-slot.mjs --farm auto -- node scripts/drift-review-stills.mjs shots.json --out out/drift/x
  */
@@ -103,13 +107,12 @@ if (FARM) {
     console.error(`drift-slot: --priority ${priority}: low | normal | high`);
     process.exit(2);
   }
-  const { submit } = await import('./drift-farm-client.mjs');
   const { rmSync } = await import('node:fs');
   const stage = join(ROOT, 'out/drift/farm/stage', `${process.pid}-${Date.now()}`);
   let r;
   try {
-    const token = JSON.parse(readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8')).token;
-    r = await submit({ root: ROOT, hub: process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190', token, argv: cmd, prefer: FARM, weight: WEIGHT, priority, stage, say: (m) => console.error(`drift-slot: ${m}`) });
+    const { farmSubmit } = await import('../farm/submit.mjs');
+    r = await farmSubmit({ root: ROOT, argv: cmd, prefer: FARM, weight: WEIGHT, priority, stage, say: (m) => console.error(`drift-slot: ${m}`) });
   } catch (e) {
     // (a tree that does not build, drift-precheck.mjs, is refused here too: it would hang a slot here as on a box)
     if (e.precheck) {

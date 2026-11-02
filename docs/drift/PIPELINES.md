@@ -369,6 +369,7 @@ range.
 | `drift-render.mjs` (+ `cine-sink.mjs`, one sink per lane) | current (§10, §11) |
 | `drift-queue.mjs` + `drift-render-queue.example.jsonc` | current: the resumable, chunked render queue (§10, §11; RENDER-NODE.md) |
 | `drift-node.mjs` (+ `drift-node-lib.mjs`, `drift-node-presets.jsonc`) | current: a render node's one command — sync (pull, npm ci, the bundle from the Mac over SSH, GPU check) and render a preset or queue, with a heartbeat to the dashboard: RENDER-NODE.md |
+| `drift-slot.mjs --farm`, `farm/` (`submit.mjs`, `cli.mjs`, `drift.adapter.mjs`, `types/`) | current: jobs on the studio's render boxes, through the studio-farm package in a sibling checkout (`../studio-farm`): RENDER-NODE.md, "The farm" |
 | `drift-gpu-check.mjs`, `drift-chrome.mjs`, `drift-bundle.mjs`, `drift-node-setup.{sh,ps1}`, `cine-codecs.mjs` | current: render nodes (GPU self-test, browser launch, data bundles, setup, off-Mac codecs): RENDER-NODE.md |
 | `drift-review-stills.mjs`, `drift-review-clip.mjs` (+ `drift-review-page.mjs`, shared) | current (§13) |
 | `drift-seat-view.py` | current: a master clip as one Horizon 18 seat sees it (§13) |

@@ -4,8 +4,8 @@
  * came out brighter than its own Mac render of the same view, sand at 137 against 123 — "if boxes render differently
  * from each other, master chunks from different machines will jump at the seams, and review stills will mislead").
  *
- *   node scripts/drift-farm.mjs consistency [--boxes linux-monster,windows-monster,eeg-msi] [--width 960]
- *        [--shots <file.json>] [--no-mac] [--keep] [--save-ref]
+ *   node farm/cli.mjs consistency [--boxes linux-monster,windows-monster,eeg-msi] [--width 960]
+ *        [--shots <file.json>] [--no-mac] [--keep] [--save-ref]          (or node scripts/drift-consistency.mjs …)
  *
  *   --save-ref   the Mac's clean tree also refreshes the GPU check's reference (drift-gpu-check.mjs --save-ref →
  *                scripts/drift-gpu-check.ref.json, at this commit): the frames every box's GPU check is held to
@@ -18,11 +18,12 @@
  * One fixed shot list (scripts/drift-consistency-shots.json: the beach at 604, the sea at 400, night at 744, space at
  * 150), drawn by the review pipeline (drift-review-stills.mjs, 16:9) at ONE code state on every machine at once:
  *   - the commit is HEAD, which must be on origin (the boxes fetch it); nothing of this checkout's work in progress
- *     goes along (packState `clean`), so every machine draws exactly that commit;
+ *     goes along (a `clean` code state), so every machine draws exactly that commit;
  *   - the assets are this Mac's, published first (drift-bundle.mjs --manifest-only): each box patches its bundle to
  *     them before it draws (its job asks for that bundle), the Mac's own run links the same files;
- *   - this Mac draws in a clean tree of the same commit (out/drift/consistency/<commit>/tree, through its own render
- *     slot), each box through the farm, pinned to it.
+ *   - this Mac draws in a clean tree of the same commit (out/drift/consistency/<commit>/tree-job/tree, built as a box
+ *     builds a job's: the package's applyGitDiff; through its own render slot), each box through the farm, pinned to
+ *     it, as a typed drift-review-stills@1 job (farm/submit.mjs; on its own Vite port, the type's).
  * Then per shot and machine: mean luminance (Rec. 709 weights on the 8-bit sRGB values), the per-channel means, the
  * RMS against the Mac's still (0–255), the 99th percentile of the per-pixel difference, and a heatmap (|ΔY| × 8, as
  * grey) beside the stills. Everything lands in out/drift/consistency/<commit>/: <machine>/<shot>.png, diff/<machine>_
@@ -33,7 +34,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -123,7 +124,7 @@ const runCmd = (cmd, args, opts) =>
     p.on('close', (code) => ok({ code, out }));
   });
 
-async function main() {
+export async function main() {
   const boxes = String(arg('boxes', 'linux-monster,windows-monster,eeg-msi') ?? '').split(',').filter(Boolean);
   const width = Number(arg('width', '960'));
   const shotsFile = resolve(arg('shots', join(ROOT, 'scripts/drift-consistency-shots.json')));
@@ -143,21 +144,24 @@ async function main() {
   if (pub.status !== 0) throw new Error(`drift-bundle --manifest-only failed: ${pub.stderr}`);
   say(pub.stdout.trim().split('\n')[0].replace(/^\[bundle\] /, 'assets: '));
 
-  const { applyState, packState, submit } = await import('./drift-farm-client.mjs');
-  const token = JSON.parse(readFileSync(process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json'), 'utf8')).token;
-  const hub = process.env.DRIFT_FARM_HUB ?? 'http://localhost:5190';
-  const stillsArgs = (out, port) => ['scripts/drift-review-stills.mjs', shots, '--width', String(width), '--out', out, '--port', String(port), '--channel', 'chrome'];
+  const { hubOf, labelOf, packDrift, tokenFileOf } = await import('../farm/submit.mjs');
+  const { ASSET_SET, VITE_CACHES, typedJobOf } = await import('../farm/drift.adapter.mjs');
+  const { fromPackage } = await import('../farm/package.mjs');
+  const [{ createClient, submitterOf }, { applyGitDiff }] = await Promise.all([fromPackage('src/sdk.mjs'), fromPackage('src/codestate.mjs')]);
+  const stillsArgs = (out, port) => ['scripts/drift-review-stills.mjs', shots, '--width', String(width), '--out', out, ...(port ? ['--port', String(port)] : []), '--channel', 'chrome'];
 
   const runs = [];
   if (!has('no-mac')) {
     runs.push((async () => {
-      // a clean tree of the commit beside the results, the assets linked from this checkout (applyState, as a box does)
+      // a clean tree of the commit beside the results, the assets, packages and Vite caches linked from this checkout
+      // (the package's applyGitDiff, as a box builds a job's tree)
       const jobDir = join(dir, 'tree-job');
       rmSync(jobDir, { recursive: true, force: true });
       mkdirSync(jobDir, { recursive: true });
-      const { payload } = await packState({ root: ROOT, stage: join(dir, 'stage-mac'), base: head, clean: true });
+      const { payload } = await packDrift({ root: ROOT, stage: join(dir, 'stage-mac'), base: head, clean: true });
       spawnSync('tar', ['-xzf', payload, '-C', jobDir]);
-      const { tree } = await applyState({ main: ROOT, jobDir, say: (m) => say(`mac: ${m}`) });
+      const manifest = JSON.parse(readFileSync(join(ROOT, ASSET_SET.worker.installedManifest), 'utf8'));
+      const { tree } = await applyGitDiff({ main: ROOT, jobDir, say: (m) => say(`mac: ${m}`), link: { manifests: [manifest], modules: 'npm', warm: VITE_CACHES } });
       const out = join(dir, 'laubs-mbp');
       const r = await runCmd(process.execPath, [join(tree, 'scripts/drift-slot.mjs'), '--', 'node', ...stillsArgs(out, 5381)], {
         cwd: tree, prefix: '[mac]',
@@ -180,17 +184,28 @@ async function main() {
       return { machine: 'laubs-mbp', code: r.code };
     })());
   }
-  for (const [k, box] of boxes.entries()) {
+  // the boxes: one typed stills job each, pinned to it, all on one clean code state
+  const farm = createClient({ hub: hubOf(), tokenFile: tokenFileOf(ROOT) });
+  const packed = boxes.length ? await packDrift({ root: ROOT, stage: join(dir, 'stage-boxes'), base: head, clean: true }) : null;
+  for (const box of boxes) {
     runs.push((async () => {
-      const r = await submit({
-        root: ROOT, hub, token, prefer: box, stage: join(dir, `stage-${box}`), clean: true, base: head, priority: arg('priority', 'high'),
-        argv: ['node', ...stillsArgs(join(dir, box), 5382 + k)],
-        say: (m) => console.log(`[${box}] ${m}`), out: (s) => process.stdout.write(s.split('\n').filter(Boolean).map((l) => `[${box}] ${l}\n`).join('')),
-      });
-      return { machine: box, code: r.code ?? 1 };
+      const argv = ['node', ...stillsArgs(join(dir, box), null)];
+      const t = typedJobOf(argv, { cwd: ROOT });
+      try {
+        const { job, code } = await farm.run(
+          { ...t.spec, label: labelOf(argv), prefer: box, priority: arg('priority', 'high'), submitter: submitterOf() },
+          { inputs: t.inputs, code: packed.payload, land: t.land, say: (m) => console.log(`[${box}] ${m}`), onLog: (lines) => process.stdout.write(lines.map((l) => `[${box}] ${l}\n`).join('')) },
+        );
+        console.log(`[${box}] farm: job ${job.id} ${job.state} (exit ${job.exitCode ?? '—'})${job.error ? `: ${job.error}` : ''}`);
+        return { machine: box, code };
+      } catch (e) {
+        console.log(`[${box}] farm: ${e.message}`);
+        return { machine: box, code: 1 };
+      }
     })());
   }
   const done = await Promise.all(runs);
+  rmSync(join(dir, 'stage-boxes'), { recursive: true, force: true });
   for (const d of done) if (d.code !== 0) say(`${d.machine}: exit ${d.code} (its stills, if any, are compared below)`);
 
   // ------------------------------------------------------------------------------------------- the comparison
@@ -253,7 +268,7 @@ async function main() {
   process.exit(compared > 0 && differs.length === 0 ? 0 : 1);
 }
 
-if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url) || basename(process.argv[1] ?? '') === 'drift-farm.mjs') {
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
   main().catch((e) => {
     console.error(`[consistency] ${e.message}`);
     process.exit(2);

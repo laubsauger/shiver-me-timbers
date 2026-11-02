@@ -56,7 +56,10 @@ Several sessions often work in one tree at once: give your dev server its own po
 across every session: start every headless render (stills, review clips, benchmarks, lanes) through
 `node scripts/drift-slot.mjs [--weight <lanes>] -- <command>`, which waits for a free slot
 (`node scripts/drift-slot.mjs --status` shows who holds them). While someone works at the machine the limit is one:
-`out/drift/.slots/limit` holds it, machine-wide. Boot one page and reuse it for every shot and variant of a round.
+`out/drift/.slots/limit` holds it, machine-wide. `drift-slot.mjs --farm auto` (or `DRIFT_FARM=auto`) sends the job to
+the studio's render boxes instead: the farm is the studio-farm package in a sibling checkout (`../studio-farm`), the
+Drift's side of it is `farm/` (`node farm/cli.mjs render|consistency|cancel|status`); docs/drift/RENDER-NODE.md,
+"The farm". Boot one page and reuse it for every shot and variant of a round.
 **The studio dashboard**, `node scripts/drift-dash.mjs` (http://localhost:5190; `--tailnet` so render nodes can
 report to it), shows the slots, each job's progress and ETA, the work streams, the render nodes and the newest
 outputs. A session coordinating agents keeps `out/drift/dashboard/work.json` (streams, state, estimate, what waits
@@ -129,7 +132,7 @@ npm test                                 # everything
 |---|---|
 | `docs/drift/PIPELINES.md` | every process step by step: asset fetch, decimation, bakes, render, master, verification, review |
 | `docs/drift/STATUS.md` | where each act and beat stands, the open items |
-| `docs/drift/RENDER-NODE.md` | setting up another machine (Linux, Windows) to render: GPU check, asset bundle, render queue |
+| `docs/drift/RENDER-NODE.md` | setting up another machine (Linux, Windows) to render: GPU check, asset bundle, render queue; the farm |
 | `docs/drift/WORKING-NOTES.md` | the working rules in full, with the reasons behind them |
 | `docs/drift/engine-findings.md` | engine faults found by the offline renders, and their fixes |
 | `docs/drift/earth-data.md` | the Earth maps' sources and rebuild |

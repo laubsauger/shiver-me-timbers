@@ -17,16 +17,18 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
-import { createFarmHub } from '../scripts/drift-farm.mjs';
+import { pathToFileURL } from 'node:url';
 import {
   contentId, decideBundle, farmSource, needsLength, parseBundleSource, parseJsonc, parseSet, readConfig, resolveJobs, stateLabel, syncBundle,
   type BundleRecord, type QueueSpec,
 } from '../scripts/drift-node-lib.mjs';
 
 const ROOT = join(__dirname, '..');
+/** the studio-farm package's hub (the sibling checkout; without it, the farm-hub case is skipped) */
+const STUDIO_FARM = resolve(ROOT, process.env.STUDIO_FARM_DIR ?? '../studio-farm');
 const BUNDLE_SCRIPT = join(ROOT, 'scripts/drift-bundle.mjs');
 const scratch = mkdtempSync(join(tmpdir(), 'drift-node-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -195,12 +197,13 @@ describe('syncBundle from a folder (the hand-copied Google Drive / USB case), in
   });
 });
 
-describe('syncBundle from the farm hub (the Windows boxes: no SSH, the bundle over the farm\'s door)', () => {
+describe.skipIf(!existsSync(join(STUDIO_FARM, 'src/hub.mjs')))('syncBundle from the farm hub (the Windows boxes: no SSH, the bundle over the farm\'s door)', () => {
   it('reads the pointer and fetches, checks and unpacks the tarball over HTTP; a box needs no token', async () => {
     const share = join(scratch, 'hub-bundles');
     makeBundle(share, 'drift-assets-20261031.tar.gz', { 'public/drift/web/v.bin': 'web', 'public/drift/clouds/c.bin': 'cloud' });
+    const { createFarmHub } = await import(pathToFileURL(join(STUDIO_FARM, 'src/hub.mjs')).href);
     const hub = createFarmHub({ dir: join(scratch, 'hub-farm'), token: 'tok-tok-tok-tok-tok-tok', hints: () => [{ name: 'windows-monster', tailnetIp: '127.0.0.1' }], bundleDir: share });
-    const server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')));
+    const server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')).then((done: boolean) => (done ? undefined : res.writeHead(404).end())));
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     const a = server.address();
     const url = `http://127.0.0.1:${typeof a === 'object' && a ? a.port : 0}`;

@@ -88,7 +88,7 @@ try {
     const file = join(OUT, `${tag}_${t}.png`);
     await page.screenshot({ path: file });
     console.log(file);
-    // (the console's progress for a stills job: drift-farm-client.mjs progressOf)
+    // (the console's progress for a stills job: farm/drift.adapter.mjs progress)
     console.log(`[review] still ${++k}/${times.length}  ${Date.now() - t0} ms`);
   }
 } finally {

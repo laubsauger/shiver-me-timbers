@@ -6,8 +6,8 @@
  * (scaled to ≤640 px, JPEG quality ~70) and the render goes on; while one is still being written, the next offers are
  * dropped. It costs a 640 px encode every 10 s, against frames that take 0.2–1 s each.
  *
- * The file is DRIFT_PREVIEW_FILE, which the farm worker sets for each job (drift-farm-client.mjs runJob, which sends
- * it to the hub when it changes); without it, nothing happens.
+ * The file is DRIFT_PREVIEW_FILE, which the farm worker sets for each job (the studio-farm worker, through the Drift's
+ * workspace env in farm/drift.adapter.mjs; it sends the file to the hub when it changes); without it, nothing happens.
  */
 import { spawn } from 'node:child_process';
 import { renameSync } from 'node:fs';

@@ -26,17 +26,18 @@
  *
  *   - STUDIO-MANAGER'S HUB (the studio's fleet tool, ../studio-manager; `yarn studio` on this Mac, :4310): every 10 s,
  *     server-side, GET /api/fleet (2 s timeout) — each box's GPU load, VRAM, temperature and the services its agent
- *     runs with their VRAM. The machine cards (scripts/drift-fleet.mjs) merge it with our heartbeats, for the render
- *     machines in scripts/drift-farm-nodes.json only, this Mac's card first. No hub: a hint how to start it, and our
- *     heartbeats alone. `--hub <url>` points elsewhere; DRIFT_DASH_NODES moves the node-report file (a test instance).
- *   - THE DRIFT FARM's hub: the job queue the render machines pull work from (their `drift-node.mjs worker`), at
- *     /farm/… on the same listeners, bearer token from farm.json (written with a random token on the first start;
- *     gitignored). Its queue is out/drift/farm (DRIFT_FARM_DIR; DRIFT_FARM_TOKEN_FILE moves farm.json, for a test
- *     instance). Status.farm shows it. The hub is the studio farm package's (src/hub.mjs of the sibling studio-farm
- *     checkout, farm/package.mjs), with the Drift's types (farm/types) and its job kinds and speed classes for /farm/jobs
- *     (farm/hub-hooks.mjs): the same /farm/* answers on the same data dir, plus /v1/* and per-client tokens
- *     (out/drift/farm/tokens.json). DRIFT_FARM_IMPL=old, or a package that does not load, keeps today's hub
- *     (scripts/drift-farm.mjs) — the way back while the switch settles.
+ *     runs with their VRAM. The machine cards (the studio-farm package's src/fleet.mjs; this Mac's own card and the
+ *     heartbeats: scripts/drift-fleet.mjs) merge it with our heartbeats, for the render machines in
+ *     scripts/drift-farm-nodes.json only, this Mac's card first. No hub: a hint how to start it, and our heartbeats
+ *     alone. Without the package (a fresh clone with no sibling studio-farm checkout): this Mac's card alone. `--hub <url>` points elsewhere; DRIFT_DASH_NODES moves the node-report file (a test instance).
+ *   - THE DRIFT FARM's hub: the job queue the render machines pull work from (each box runs the studio-farm worker),
+ *     at /v1/… and /farm/… on the same listeners. It is the studio-farm package's (src/hub.mjs of the sibling checkout
+ *     ../studio-farm, STUDIO_FARM_DIR; farm/package.mjs), with the Drift's types (farm/types) and its job kinds and
+ *     speed classes for /farm/jobs (farm/hub-hooks.mjs). Per-client tokens in out/drift/farm/tokens.json (the Mac's
+ *     submitters: farm-mac.token); farm.json's token is the "legacy" client's (written with a random one on the first
+ *     start; gitignored). Its queue is out/drift/farm (DRIFT_FARM_DIR; DRIFT_FARM_TOKEN_FILE moves farm.json, for a test
+ *     instance). Status.farm shows it. No package, or a hub that will not start: the farm is off, and the console
+ *     says why.
  *
  * THE /report CONTRACT (JSON, at most 64 KB; only `node` is required):
  *   { node: "win-4090", os: "win32", commit: "abc1234", bundle: "20261029",
@@ -62,7 +63,7 @@
  * @property {Output[]} outputs          the newest review images and clips (served by GET /file?p=<path>)
  * @property {Machine[]} machines        this Mac first (self: true), then the render machines of scripts/drift-farm-nodes.json
  * @property {Sources} sources           where the machines' numbers came from
- * @property {Farm} farm                 the render farm's queue (drift-farm.mjs)
+ * @property {Farm} farm                 the render farm's queue (the studio-farm hub's view)
  * @property {object[]} nodes            raw drift-node heartbeats by node (kept for older pages; use machines)
  *
  * @typedef {object} LocalMachine
@@ -171,7 +172,7 @@
  * @property {boolean} enabled
  * @property {FarmJob[]} jobs            newest first: queued, running, then the finished of the last 24 h
  * @property {{ node: string, state: 'waiting'|'busy'|'busy-foreign'|'offline', seen: number, speed: number, job: string|null }[]} workers
- * @property {FarmRun[]} runs            the chunked renders of the last 24 h (drift-farm.mjs render), newest first: the
+ * @property {FarmRun[]} runs            the chunked renders of the last 24 h (farm/cli.mjs render), newest first: the
  *                                       console's full-show tracker
  *
  * @typedef {object} FarmRun
@@ -210,13 +211,13 @@
  * @property {string|null} last          newest output line
  * @property {{ path: string, bytes: number }[]} results   files it sent back, each landed at its local path (path)
  * @property {string|null} error
- * @property {object|null} submitter     what the submitting drift-farm-client sent ({ pid } today)
+ * @property {object|null} submitter     who sent it ({ pid, host, agent }: the SDK's submitterOf)
  * @property {string[]} argv             its command (paths as on the submitting machine): the console reads the settings from it
  * @property {string|null} cls           the class its speed is measured in ("drift-review-clip.mjs:1280")
  * @property {number|null} queuedAt      ms epoch: its payload arrived (createdAt → queuedAt: uploading)
  * @property {number|null} claimedAt     ms epoch: a box took it (preparing until startedAt)
  * @property {number} attempts           times it went back to the queue (a box stopped answering)
- * @property {[number, number, number|null][]} samples   while it runs: [ms epoch, fps, frames done], one per 10 s, the last 20 min (drift-farm.mjs fpsSamples)
+ * @property {[number, number, number|null][]} samples   while it runs: [ms epoch, fps, frames done], one per 10 s, the last 20 min (the hub's fps samples)
  * @property {string[]} outs            where its out folders and files land on the submitting machine (a whole render's chunks: <out>/chunks/chunk_<from>-<to>.mp4)
  * @property {'low'|'normal'|'high'} priority
  * @property {object|null} timing        the round trip, measured on the box: { payloadMs, bundleMs, treeMs, bootMs, renderMs, uploadMs, cache: 'warm'|'cold' }
@@ -241,9 +242,9 @@ import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writ
 import { join, dirname, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
-import { farmHeartbeats, farmNodes, fleetCards, macCard, newestHeartbeats } from './drift-fleet.mjs';
+import { randomBytes } from 'node:crypto';
+import { farmHeartbeats, macCard, newestHeartbeats } from './drift-fleet.mjs';
 import { readYieldPolicy } from './drift-share.mjs';
-import { createFarmHub as createOldFarmHub, farmToken } from './drift-farm.mjs';
 import { STUDIO_FARM_DIR, fromPackage } from '../farm/package.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -258,6 +259,9 @@ const TAILNET = argv.includes('--tailnet');
 const NODES_FILE = process.env.DRIFT_DASH_NODES ?? join(ROOT, 'out/drift/dashboard/nodes.json');
 const HUB = arg('hub', 'http://localhost:4310').replace(/\/+$/, '');
 const FARM_NODES = join(ROOT, 'scripts/drift-farm-nodes.json');
+/** the machine cards (the studio-farm package's src/fleet.mjs, header); without the package, this Mac's card alone */
+const fleet = await fromPackage('src/fleet.mjs').catch((e) => (console.error(`[dash] machines: the studio-farm package did not load (${e.message}): this Mac's card only`), null));
+const farmNodes = (file) => (fleet ? fleet.farmNodes(file) : []);
 const SLOTS = process.env.DRIFT_SLOTS_DIR ?? join(ROOT, 'out/drift/.slots');
 const WORK = join(ROOT, 'out/drift/dashboard/work.json');
 /** where review outputs land: the coordinating session's scratchpad (from work.json, else $DRIFT_SCRATCH) and out/drift */
@@ -556,7 +560,7 @@ const pollHub = async () => {
 pollAgents();
 setInterval(pollAgents, 5_000).unref();
 
-/** the farm's view for /api (Farm); replaced by the farm's own once it is wired (drift-farm.mjs) */
+/** the farm's view for /api (Farm); replaced by the hub's own once it starts */
 let farmView = () => ({ enabled: false, jobs: [], workers: [] });
 
 /**
@@ -587,7 +591,8 @@ function machinesNow(m, sl, farm, heartbeats = newestHeartbeats([...nodes.values
     return { machines: [], sources: { agents: {}, hub: { url: HUB, ok: false, at: 0, error: String(e.message), used: false } } };
   }
   const hubUsed = allow.some((n) => agents[n.name] && !agents[n.name].ok);
-  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: heartbeats, farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl, farm: farm.jobs, farmState: farm.nodes?.[MAC_NAME] ?? null, worker: (farm.workers ?? []).find((w) => w.node === MAC_NAME) ?? null }), policy, now: Date.now() });
+  const mac = macCard({ host: MAC_NAME, machine: m, slots: sl, farm: farm.jobs, farmState: farm.nodes?.[MAC_NAME] ?? null, worker: (farm.workers ?? []).find((w) => w.node === MAC_NAME) ?? null });
+  const machines = !fleet ? [mac] : fleet.fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: heartbeats, farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac, policy, now: Date.now() });
   const sources = { agents: Object.fromEntries(allow.map((n) => [n.name, { ok: agents[n.name]?.ok ?? false, at: agents[n.name]?.at ?? 0, error: agents[n.name] ? agents[n.name].error : 'not asked yet' }])), hub: { url: HUB, ok: hub.ok, at: hub.at, error: hub.error, used: hubUsed } };
   return { machines, sources };
 }
@@ -611,33 +616,37 @@ async function status() {
 const FARM_DIR = process.env.DRIFT_FARM_DIR ?? join(ROOT, 'out/drift/farm');
 let farm = null;
 /**
- * the package's hub with the Drift's types and legacy hooks, or today's (DRIFT_FARM_IMPL=old; or the package's does not
- * load or will not start: then the farm keeps running on today's, and the console says why). Both read the same data
- * dir, so the queue, the speeds and the boxes' states carry over either way.
+ * farm.json's token, the "legacy" client's (the Drift farm's one shared token, from before per-client tokens; the
+ * hub's /farm/* takes it), written with a new random one when there is none — only where git ignores the file: this
+ * repo is public, and a token in it opens the farm to anyone on the tailnet who reads GitHub (2026-10-29: the first
+ * farm.json was written before /farm.json was in .gitignore). A tracked or unignored farm.json stops the farm
+ * (`guard`: the package's guardSecretFile).
  */
-async function startFarmHub(base) {
-  if (process.env.DRIFT_FARM_IMPL !== 'old') {
-    try {
-      const [{ createFarmHub }, { loadTypes }, legacyHooks] = await Promise.all([fromPackage('src/hub.mjs'), fromPackage('src/types.mjs'), import('../farm/hub-hooks.mjs')]);
-      const hub = createFarmHub({ ...base, types: await loadTypes(['farm/types'], { base: ROOT }), legacyHooks });
-      console.log(`[dash] farm: the studio farm's hub (${STUDIO_FARM_DIR})`);
-      return hub;
-    } catch (e) {
-      console.error(`[dash] farm: the studio farm's hub did not start (${e.message}); today's scripts/drift-farm.mjs instead`);
-    }
+function farmToken(file, guard) {
+  guard(file, 'the farm\'s legacy token');
+  if (existsSync(file)) {
+    const t = JSON.parse(readFileSync(file, 'utf8')).token;
+    if (typeof t !== 'string' || t.length < 16) throw new Error(`${file}: "token" must be a string of 16+ characters`);
+    return { token: t, created: false };
   }
-  console.log('[dash] farm: the hub in scripts/drift-farm.mjs');
-  return createOldFarmHub(base);
+  const token = randomBytes(24).toString('base64url');
+  writeFileSync(file, `${JSON.stringify({ token, about: 'The Drift farm: the legacy client\'s token (the hub\'s /farm/* routes). Gitignored; never commit it.' }, null, 1)}\n`, { mode: 0o600 });
+  return { token, created: true };
 }
 try {
+  const [{ createFarmHub }, { loadTypes }, { guardSecretFile }, legacyHooks] = await Promise.all([fromPackage('src/hub.mjs'), fromPackage('src/types.mjs'), fromPackage('src/util.mjs'), import('../farm/hub-hooks.mjs')]);
   const tokenFile = process.env.DRIFT_FARM_TOKEN_FILE ?? join(ROOT, 'farm.json');
-  const t = farmToken(tokenFile);
-  if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token. Each render machine needs it in its drift-node.json: "farm": { "token": "<the token in ${tokenFile}>" }`);
+  const t = farmToken(tokenFile, guardSecretFile);
+  if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token (the legacy client's)`);
   // (repo: origin's head for the pulse; assetsRoot: where the bundle's files are served from, one by one)
   // (this Mac is a farm worker too, when its own worker runs (studio-farm's examples/drift/worker/mac-worker.sh): one of
   // the hub's workers, so the console's controls reach it before it has ever claimed, but never a fleet card of its own
   // — its card is the Mac's, first. No tailnet address: it works with a worker token, from loopback)
-  farm = await startFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => [...farmNodes(FARM_NODES), MAC_WORKER], bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
+  farm = createFarmHub({
+    dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => [...farmNodes(FARM_NODES), MAC_WORKER], bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT,
+    types: await loadTypes(['farm/types'], { base: ROOT }), legacyHooks, log: (m) => console.log(`[dash] ${m}`),
+  });
+  console.log(`[dash] farm: the studio farm's hub (${STUDIO_FARM_DIR})`);
   farmView = farm.view;
 } catch (e) {
   console.error(`[dash] farm off: ${e.message}`);

@@ -2,8 +2,9 @@
  * The farm's safety nets, from the QA sweep of 2026-10-30 (the coordinator):
  *   - SILENT BLACK FRAMES: linux-monster ran out of video memory beside sd-webrtc and returned 16 pure-black stills with
  *     exit 0 — "a master chunk could do the same unnoticed". Results are looked at (drift-sanity.mjs): a black still, a
- *     clip that is black throughout or drops to black, fails the job and sends it to another box; the film's own black
- *     (a fade up from it, as the opening at 60 s does) passes.
+ *     clip that is black throughout or drops to black, fails the job and sends it to another box (that part is the
+ *     studio-farm package's queue, tested there); the film's own black (a fade up from it, as the opening at 60 s
+ *     does) passes.
  *   - HALF-EDITED TREES: a session mid-edit (loops.ts importing what events.ts did not export yet) hung every job
  *     packed in its window at boot. A tree that does not build is refused before it is packed (drift-precheck.mjs).
  */
@@ -11,7 +12,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { AVOID_MS, pickWorker } from '../scripts/drift-farm.mjs';
 import { precheck } from '../scripts/drift-precheck.mjs';
 import { blackVerdict, BLACK_MAX, DROP_FROM } from '../scripts/drift-sanity.mjs';
 
@@ -44,17 +44,6 @@ describe('results that are not pictures', () => {
 
   it('a shot of the film\'s black can be asked for (allowBlack)', () => {
     expect(blackVerdict([0], { still: true, allowBlack: true })).toBeNull();
-  });
-});
-
-describe('a job sent back for black results goes to another box first', () => {
-  const linux = { node: 'linux-monster', speed: 1 };
-  const eeg = { node: 'eeg-msi', speed: 0.85 };
-  it('not to the box that drew black, while another takes work — for AVOID_MS, then any', () => {
-    const job = { kind: 'still', avoid: ['linux-monster'], avoidUntil: 1000 + AVOID_MS };
-    expect(pickWorker(job, [linux, eeg], 1000)).toBe('eeg-msi');
-    expect(pickWorker(job, [linux], 1000)).toBeNull();
-    expect(pickWorker(job, [linux], 1000 + AVOID_MS + 1)).toBe('linux-monster');
   });
 });
 

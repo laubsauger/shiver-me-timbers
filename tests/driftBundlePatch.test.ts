@@ -1,6 +1,7 @@
 /**
- * The asset bundle, patched file by file (scripts/drift-node-lib.mjs patchBundle; the hub's GET /farm/bundle/manifest
- * and /farm/bundle/file in scripts/drift-farm.mjs). The user, 2026-10-30: "make sure the bundle can be incrementally
+ * The asset bundle, patched file by file (scripts/drift-node-lib.mjs patchFromHub, on the studio-farm package's
+ * patchSet; the hub's GET /farm/bundle/manifest and /farm/bundle/file, the package's hub as drift-dash mounts it).
+ * Skipped without the sibling studio-farm checkout (a fresh clone of this public repo). The user, 2026-10-30: "make sure the bundle can be incrementally
  * patched instead of having to upload the whole huge thing all the time … wasteful and takes forever if you just
  * change a little asset". What must hold, because a render box with a wrong file renders a wrong film without a word:
  *   - ONLY WHAT DIFFERS MOVES: a changed or missing file is fetched, an unchanged one is not (and not even re-hashed
@@ -18,8 +19,12 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createFarmHub } from '../scripts/drift-farm.mjs';
-import { bundlePath, contentId, installedManifest, patchBundle } from '../scripts/drift-node-lib.mjs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { contentId, installedManifest, patchFromHub } from '../scripts/drift-node-lib.mjs';
+
+const STUDIO_FARM = resolve(__dirname, '..', process.env.STUDIO_FARM_DIR ?? '../studio-farm');
+const HAVE_PACKAGE = existsSync(join(STUDIO_FARM, 'src', 'hub.mjs'));
 
 const TOKEN = 'a-token-of-twenty-four-ch';
 const scratch = mkdtempSync(join(tmpdir(), 'drift-bundle-patch-'));
@@ -56,18 +61,21 @@ const publish = (files: Record<string, string>) => {
 
 let server: Server;
 let hubUrl = '';
-let hub: ReturnType<typeof createFarmHub>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let hub: any;
 beforeAll(async () => {
+  if (!HAVE_PACKAGE) return;
   publish(NEW);
+  const { createFarmHub } = await import(pathToFileURL(join(STUDIO_FARM, 'src', 'hub.mjs')).href);
   hub = createFarmHub({ dir: join(scratch, 'farm'), token: TOKEN, bundleDir, assetsRoot: mac, allow: () => true, hints: () => [] });
-  server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')));
+  server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')).then((done: boolean) => (done ? undefined : res.writeHead(404).end())));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const a = server.address();
   hubUrl = `http://127.0.0.1:${typeof a === 'object' && a ? a.port : 0}`;
 });
 afterAll(() => {
-  hub.close();
-  server.close();
+  hub?.close();
+  server?.close();
 });
 const source = () => ({ kind: 'farm' as const, hub: hubUrl, token: TOKEN, label: 'test hub' });
 
@@ -83,9 +91,9 @@ beforeEach(() => {
 });
 const read = (rel: string) => readFileSync(join(box, rel), 'utf8');
 
-describe('only what differs moves', () => {
+describe.skipIf(!HAVE_PACKAGE)('only what differs moves', () => {
   it('fetches the changed and the new file, removes the dropped one, leaves the rest and the box\'s own file alone', async () => {
-    const p = await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet });
+    const p = await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet });
     expect(p).not.toBeNull();
     expect(p!.files).toBe(2);
     expect(p!.bytes).toBe(Buffer.byteLength(NEW['public/drift/pbr/lamp/lamp.glb']) + Buffer.byteLength(NEW['public/drift/pbr/float/float.glb']));
@@ -100,18 +108,18 @@ describe('only what differs moves', () => {
   });
 
   it('a second sync moves nothing and hashes nothing (the index remembers each file by size and time)', async () => {
-    await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet });
-    const again = await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet });
+    await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet });
+    const again = await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet });
     expect(again).toMatchObject({ files: 0, bytes: 0, removed: 0, hashed: 0 });
   });
 });
 
-describe('nothing half-written', () => {
+describe.skipIf(!HAVE_PACKAGE)('nothing half-written', () => {
   it('a file changed on the box behind the index\'s back (same size) is found and fetched again', async () => {
-    await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet });
+    await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet });
     const rock = NEW['public/drift/pbr/rock/rock.glb'];
     put(box, 'public/drift/pbr/rock/rock.glb', 'X'.repeat(Buffer.byteLength(rock))); // same size, new time
-    const p = await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet });
+    const p = await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet });
     expect(p!.files).toBe(1);
     expect(read('public/drift/pbr/rock/rock.glb')).toBe(rock);
   });
@@ -126,7 +134,7 @@ describe('nothing half-written', () => {
       return new Response(new Uint8Array(body), { status: r.status, headers: r.headers });
     };
     const lines: string[] = [];
-    const p = await patchBundle({ root: box, source: source(), old: installedManifest(box), say: (l) => lines.push(l), fetchImpl: flaky });
+    const p = await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: (l) => lines.push(l), fetchImpl: flaky });
     expect(garbled).toBe(2);
     expect(lines.some((l) => /lamp\.glb: .*sha256.*fetching it again/.test(l))).toBe(true);
     expect(p!.files).toBe(2);
@@ -135,7 +143,7 @@ describe('nothing half-written', () => {
 
   it('a fetch cut short leaves the old file and the old manifest; the next sync resumes the .part and finishes', async () => {
     // the big file differs on this box (so it is fetched), and every fetch of it dies after 40 000 bytes: the first
-    // try and patchBundle's second (which resumes the first's .part) both fail, the sync fails loud
+    // try and patchFromHub's second (which resumes the first's .part) both fail, the sync fails loud
     put(box, 'public/drift/big.bin', 'y'.repeat(200_000));
     const cut: typeof fetch = async (url, init) => {
       const r = await fetch(url, init);
@@ -153,7 +161,7 @@ describe('nothing half-written', () => {
       return new Response(stream, { status: r.status, headers: r.headers });
     };
     const before = readFileSync(join(box, 'out/drift-bundle/manifest-assets.json'), 'utf8');
-    await expect(patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: cut, parallel: 1 })).rejects.toThrow(/connection reset/);
+    await expect(patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: cut, parallel: 1 })).rejects.toThrow(/connection reset/);
     expect(read('public/drift/big.bin')).toBe('y'.repeat(200_000)); // the old bytes, never half of the new ones
     expect(readFileSync(join(box, 'out/drift-bundle/manifest-assets.json'), 'utf8')).toBe(before);
     expect(existsSync(join(box, 'public/drift/big.bin.part'))).toBe(true);
@@ -164,7 +172,7 @@ describe('nothing half-written', () => {
       if (String(url).includes('big.bin')) ranged = h.range ?? '';
       return fetch(url, init);
     };
-    const p = await patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: watch });
+    const p = await patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: watch });
     expect(ranged).toBe('bytes=80000-');
     expect(p!.bytes).toBeLessThan(120_000 + 100); // (only the rest of the big file moved, plus the two small ones)
     expect(read('public/drift/big.bin')).toBe(NEW['public/drift/big.bin']);
@@ -173,7 +181,7 @@ describe('nothing half-written', () => {
   });
 });
 
-describe('the door', () => {
+describe.skipIf(!HAVE_PACKAGE)('the door', () => {
   const get = (path: string, headers: Record<string, string> = {}) => fetch(`${hubUrl}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...headers } });
 
   it('serves a manifest file with its sha256, and a Range of it', async () => {
@@ -206,11 +214,9 @@ describe('the door', () => {
   });
 
   it('a box writes only under public/, whatever a manifest says', async () => {
-    expect(bundlePath('public/drift/a.glb')).toBe('public/drift/a.glb');
-    for (const p of ['scripts/drift-node.mjs', 'public/../scripts/x.mjs', '/public/a', 'public\\drift\\a', 'C:/public/a', 'public//a']) expect(bundlePath(p), p).toBeNull();
     const evil: typeof fetch = async (url, init) =>
       String(url).endsWith('/farm/bundle/manifest') ? new Response(JSON.stringify({ files: [entry('scripts/drift-node.mjs', 'pwned')] })) : fetch(url, init);
-    await expect(patchBundle({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: evil })).rejects.toThrow(/may not write/);
+    await expect(patchFromHub({ root: box, source: source(), old: installedManifest(box), say: quiet, fetchImpl: evil })).rejects.toThrow(/may not write/);
     expect(existsSync(join(box, 'scripts/drift-node.mjs'))).toBe(false);
   });
 });

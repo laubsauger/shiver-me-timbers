@@ -6,3 +6,4 @@ export function readRgb(file: string): Rgb;
 export function means(p: Rgb): { y: number; r: number; g: number; b: number };
 export function compare(a: Rgb, ref: Rgb): { rms: number; p99: number; heat: Buffer };
 export function withinNoise(m: { y: number }, ref: { y: number }, c: { rms: number }): boolean;
+export function main(): Promise<void>;

@@ -1,6 +1,7 @@
 /**
  * JOINING CHUNKS into one clip, for every script that renders a show in pieces: the render queue on one machine
- * (drift-queue.mjs) and the farm's chunked render across machines (drift-farm-render.mjs). A chunk is a whole clip
+ * (drift-queue.mjs) and the farm's chunked render across machines (farm/submit.mjs farmRender, on the studio-farm
+ * package's own join). A chunk is a whole clip
  * that starts on a keyframe (x264 closes its GOP at a chunk's end; ProRes and FFV1 are intra-only), so the clips are
  * concatenated without re-encoding, `ffmpeg -f concat -c copy`, and the result is kept only when its frame count is
  * the sum of the chunks' (a chunk short by a frame would shift everything after it: a seam that jumps).

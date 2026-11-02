@@ -16,7 +16,7 @@
  *                           (DRIFT_NODE_CHROME: the checkout's, not the tree's), DRIFT_PREVIEW_FILE (the farm's
  *                           FARM_PREVIEW_FILE), DRIFT_SLOTS_DIR (the box's slots)
  * HUB HOOKS (the hub's legacy.hooks, for /farm/jobs while the Drift still sends argv): jobKind, jobClass.
- * SUBMITTER (scripts/drift-slot.mjs --farm and drift-farm-render.mjs, after the switch): the code state's paths
+ * SUBMITTER (farm/submit.mjs, for scripts/drift-slot.mjs --farm and the full-show render): the code state's paths
  * (PACK), the asset overlay (what the boxes' set lacks), the precheck, and `typedJobOf(argv)`: a drift-slot command line
  * mapped to a typed job, so only what the types cannot say still goes as legacy-argv.
  * WORKSPACE (a box's farm-worker.json "workspaces.smt"): WORKSPACE below — the asset set, the warm Vite caches, the

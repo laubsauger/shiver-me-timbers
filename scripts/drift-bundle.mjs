@@ -429,7 +429,7 @@ async function main() {
   if (flag('verify')) return verify();
   if (flag('manifest-only')) return manifestOnly();
   // the asset files a bundle would hold now, with their size and time, as JSON to a file (the render farm's
-  // submitter, drift-farm-client.mjs: which of them a box's bundle lacks, to send along with a job)
+  // submitter, farm/submit.mjs packDrift: which of them a box's bundle lacks, to send along with a job)
   if (arg('list-json', null)) {
     const sel = selectAssets();
     writeFileSync(resolve(arg('list-json')), JSON.stringify(sel.keep.map((f) => {

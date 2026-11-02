@@ -76,15 +76,7 @@ export function syncBundle(o: {
 export type BundleMoved = { mode: 'current' | 'patch' | 'tarball' | 'tarball+patch'; files: number; bytes: number; seconds: number };
 export type BundleManifest = { files: ManifestFile[]; created?: string; commit?: string; count?: number; bytes?: number };
 type FetchLike = (url: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
-export function bundlePath(p: string | null | undefined): string | null;
-export function diffBundle(
-  root: string,
-  man: BundleManifest,
-  old: BundleManifest | null,
-  index: Record<string, { bytes: number; mtimeMs: number; sha256: string }>,
-): Promise<{ need: ManifestFile[]; drop: string[]; hashed: number }>;
-export function fetchBundleFile(o: { root: string; source: BundleSource & { hub: string; token?: string | null }; entry: ManifestFile; onBytes?: (n: number) => void; fetchImpl?: FetchLike }): Promise<number>;
-export function patchBundle(o: {
+export function patchFromHub(o: {
   root: string;
   source: BundleSource & { hub: string; token?: string | null };
   old: BundleManifest | null;
