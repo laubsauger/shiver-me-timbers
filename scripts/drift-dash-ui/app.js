@@ -2088,10 +2088,11 @@ function tlRender(animateFrom) {
   const nx = X(now);
   h += `<div class="tl-now${nx < 0 || nx > W ? ' gone' : ''}" style="transform:translateX(${nx.toFixed(1)}px)" aria-hidden="true"><span>now ${clock(now)}</span></div>`;
   morph($('tl'), h);
-  // following now: the tracks glide from where they were to where they are (a transform on the compositor, 3 s)
+  // following now: the tracks glide from where they were to where they are (a transform on the compositor, 0.6 s:
+  // a glide over the whole 3 s poll kept the page compositing non-stop — the 2026-11-02 GPU note)
   if (animateFrom !== false && TL.follow && prevW0 && !CALM) {
     const dx = (w0 - prevW0) * k;
-    if (dx > 0 && dx < W / 3) for (const el of $('tl').querySelectorAll('.tl-trk')) el.animate([{ transform: `translateX(${dx.toFixed(1)}px)` }, { transform: 'none' }], { duration: POLL_MS, easing: 'linear' });
+    if (dx > 0 && dx < W / 3) for (const el of $('tl').querySelectorAll('.tl-trk')) el.animate([{ transform: `translateX(${dx.toFixed(1)}px)` }, { transform: 'none' }], { duration: 600, easing: 'cubic-bezier(.2,.7,.2,1)' });
   }
   // the controls: the range, the source, cancelled jobs, back to now; the agents' chips
   const rangeOn = TL_RANGES.find(([, v]) => Math.abs(v - TL.span) < 1000)?.[1];

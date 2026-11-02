@@ -76,8 +76,7 @@ svg { fill: currentColor; }
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   padding: 10px 20px;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--bg) 97%, transparent);
   border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -469,7 +468,7 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 /* the header: a slow drift of sea-and-night light behind the brand, one layer moved, never repainted */
 .top { overflow: hidden; isolation: isolate; }
 .top::before {
-  content: ""; position: absolute; inset: -80% -25%; z-index: -1; pointer-events: none;
+  content: ""; position: absolute; inset: 0 -25%; z-index: -1; pointer-events: none; will-change: transform;
   background:
     radial-gradient(36% 120% at 16% 50%, rgba(56, 199, 176, .14), transparent 62%),
     radial-gradient(30% 140% at 70% 40%, rgba(124, 108, 255, .11), transparent 60%),
@@ -477,6 +476,12 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
   animation: ambient 48s ease-in-out infinite alternate;
 }
 @keyframes ambient { to { transform: translate3d(10%, 0, 0); } }
+/* (cheap on purpose — the user, 2026-11-02, "our dashboard is rendering very inefficiently": ~50% GPU on the Mac.
+   What cost was not the drift itself but HOW it was drawn: a layer 2.6× the header's height, moving inside a header
+   with backdrop-filter: blur, so the blur of everything under the header was recomputed every frame at the display's
+   rate. Now the layer is the header's own height, moved by transform alone on its own compositor layer, and the
+   header has no backdrop blur (at 97% opacity it hid nothing worth blurring). The loops below animate only opacity
+   and transform, each on its own small layer, with no blend modes — compositor work, no repaints.) */
 
 /* panels: layered surfaces, a highlight on their top edge, a soft shadow under */
 .p {
@@ -512,7 +517,7 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .hspark polygon { fill: rgba(56, 199, 176, .16); }
 .hspark polyline { fill: none; stroke: var(--ours); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .hspark line { stroke: var(--line-2); vector-effect: non-scaling-stroke; }
-.hdot { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--ours); box-shadow: 0 0 10px var(--ours); animation: breathe 2.6s ease-in-out infinite; }
+.hdot { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--ours); box-shadow: 0 0 10px var(--ours); animation: breathe 2.6s ease-in-out infinite; will-change: transform, opacity; }
 .pips { position: absolute; right: 14px; top: 15px; display: flex; gap: 6px; }
 .pip { width: 12px; height: 12px; border-radius: 3px; background: var(--idle); }
 .pip.ours { background: var(--ours); box-shadow: 0 0 10px rgba(56, 199, 176, .6); }
@@ -541,7 +546,7 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 
 /* -------------------------------------------------------------- the tiles: live dot, hover depth, live previews */
 .live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; vertical-align: 2px; border-radius: 50%; background: var(--line-2); }
-.live-dot.on { background: var(--ours); box-shadow: 0 0 8px var(--ours); animation: breathe 2.6s ease-in-out infinite; }
+.live-dot.on { background: var(--ours); box-shadow: 0 0 8px var(--ours); animation: breathe 2.6s ease-in-out infinite; will-change: transform, opacity; }
 @keyframes breathe { 0%, 100% { opacity: .45; transform: scale(.82); } 50% { opacity: 1; transform: scale(1); } }
 .tile { transition: transform .3s ease, box-shadow .3s ease; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 12px 30px -22px rgba(0, 0, 0, .85); }
 .tile:hover { transform: translateY(-2px); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 18px 34px -20px rgba(0, 0, 0, .95); }
@@ -599,7 +604,7 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .gb.grp { box-shadow: inset 2px 0 0 var(--ac), inset -2px 0 0 color-mix(in srgb, var(--ac) 70%, transparent); background-image: repeating-linear-gradient(90deg, transparent 0 7px, rgba(255, 255, 255, .07) 7px 8px); }
 .gb.low { background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, .08) 0 4px, transparent 4px 9px); }
 .gb.st-running { background-color: color-mix(in srgb, var(--ac) 58%, #10202a); box-shadow: inset 2px 0 0 var(--ac), 0 0 16px -3px color-mix(in srgb, var(--ac) 75%, transparent); }
-.gb.st-running::after { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 3px; background: #fff; opacity: .5; animation: glow 2.2s ease-in-out infinite; }
+.gb.st-running::after { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 3px; background: #fff; opacity: .5; animation: glow 2.2s ease-in-out infinite; will-change: opacity; }
 @keyframes glow { 0%, 100% { opacity: .15; } 50% { opacity: .8; } }
 .gb.st-failed { box-shadow: inset 2px 0 0 var(--ac), inset -4px 0 0 var(--failed); }
 .gb.st-cancelled { opacity: .55; }
@@ -709,7 +714,10 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .ck.k-here { background: #1f6b61; box-shadow: none; }
 .ck.k-running { box-shadow: inset 0 0 0 1px var(--ours), 0 0 9px rgba(56, 199, 176, .55); }
 .ck.k-running b { position: absolute; inset: 0; background: var(--ours); transform-origin: left center; transition: transform .9s cubic-bezier(.2, .7, .2, 1); }
-.ck.k-running::after { content: ""; position: absolute; inset: 0; background: #fff; opacity: 0; animation: glow 2.2s ease-in-out infinite; mix-blend-mode: overlay; }
+.ck.k-running::after { content: ""; position: absolute; inset: 0; background: #fff; opacity: 0; animation: glow-soft 2.2s ease-in-out infinite; will-change: opacity; }
+/* (was a white overlay in mix-blend-mode: overlay — a blend mode makes the compositor read back what is under it each
+   frame; a plain white veil at low opacity reads the same on these dark chunks) */
+@keyframes glow-soft { 0%, 100% { opacity: .04; } 50% { opacity: .2; } }
 .ck.k-failed { background: var(--failed); box-shadow: none; }
 .ck.k-cancelled { background: var(--offline); box-shadow: none; }
 .sg-s { font-size: 12px; line-height: 16px; color: var(--ink-2); }
@@ -795,3 +803,4 @@ main.console { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); 
 /* the live view: no Previous/Next (those walk the outputs) */
 .viewer.v-live [data-step] { display: none; }
 .nw-pv.has { background: #05090c; }
+
