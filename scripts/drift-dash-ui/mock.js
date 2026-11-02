@@ -206,6 +206,8 @@ export function mockStatus(now, scenario = 'default', real = null) {
     gpu: { name: 'Apple M3 Max', utilPct: machine.gpuPct, usedGB: machine.gpuMemGB, totalGB: null, tempC: null, oursGB: null, othersGB: null },
     ramPct: 100 - machine.memFreePct, ramTotalGB: 36, cpuPct: Math.round((100 * machine.load[0]) / machine.cores), services: [],
     slots: { held: held.length, limit: 1, waiting: slots.waiting.length, jobs: held.map((h) => h.label) }, job: null, hub: false,
+    // (this Mac as a farm worker, 2026-11-02: paused and running; ?mock=yield: its worker not started — the card's hint)
+    farmState: 'paused', farmActions: ['accepting', 'removed'], farmWorker: yieldCase ? null : { state: 'waiting', why: null, seen: now, types: null },
   };
   const linuxJob = runOn('linux-monster');
   // (a DUAL-LANE render, the 2026-11-02 tile: two pages on the one card, each its half of the chunk's frames, as

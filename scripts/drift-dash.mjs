@@ -569,6 +569,13 @@ const MAC_NAME = (() => {
   return (n || hostname().replace(/\.local$/, '')).toLowerCase();
 })();
 
+/**
+ * this Mac as a farm worker (the user, 2026-11-02: "should we add for my local machine also accept, drain, pause and
+ * remove toggles in the dashboard, so we can join in or out of the render farm"): its hint for the hub. speed: an M3
+ * Max against a 4090, a first guess until speeds.json has measured it; battery: a laptop (the worker claims on AC only)
+ */
+const MAC_WORKER = { name: MAC_NAME, os: 'macos', gpu: 'Apple silicon', speed: 0.3, maxLanes: 1, battery: true, self: true };
+
 /** Status.machines and Status.sources (scripts/drift-fleet.mjs): this Mac, then the render machines */
 function machinesNow(m, sl, farm) {
   let allow = [];
@@ -580,7 +587,7 @@ function machinesNow(m, sl, farm) {
     return { machines: [], sources: { agents: {}, hub: { url: HUB, ok: false, at: 0, error: String(e.message), used: false } } };
   }
   const hubUsed = allow.some((n) => agents[n.name] && !agents[n.name].ok);
-  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl }), policy, now: Date.now() });
+  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl, farm: farm.jobs, farmState: farm.nodes?.[MAC_NAME] ?? null, worker: (farm.workers ?? []).find((w) => w.node === MAC_NAME) ?? null }), policy, now: Date.now() });
   const sources = { agents: Object.fromEntries(allow.map((n) => [n.name, { ok: agents[n.name]?.ok ?? false, at: agents[n.name]?.at ?? 0, error: agents[n.name] ? agents[n.name].error : 'not asked yet' }])), hub: { url: HUB, ok: hub.ok, at: hub.at, error: hub.error, used: hubUsed } };
   return { machines, sources };
 }
@@ -624,7 +631,10 @@ try {
   const t = farmToken(tokenFile);
   if (t.created) console.log(`[dash] farm: wrote ${tokenFile} with a new token. Each render machine needs it in its drift-node.json: "farm": { "token": "<the token in ${tokenFile}>" }`);
   // (repo: origin's head for the pulse; assetsRoot: where the bundle's files are served from, one by one)
-  farm = await startFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => farmNodes(FARM_NODES), bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
+  // (this Mac is a farm worker too, when its own worker runs (studio-farm's examples/drift/worker/mac-worker.sh): one of
+  // the hub's workers, so the console's controls reach it before it has ever claimed, but never a fleet card of its own
+  // — its card is the Mac's, first. No tailnet address: it works with a worker token, from loopback)
+  farm = await startFarmHub({ dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => [...farmNodes(FARM_NODES), MAC_WORKER], bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT, log: (m) => console.log(`[dash] ${m}`) });
   farmView = farm.view;
 } catch (e) {
   console.error(`[dash] farm off: ${e.message}`);

@@ -731,36 +731,54 @@ main.console { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); 
 .you-sec ul { max-height: 260px; overflow: auto; scrollbar-width: thin; }
 @media (min-width: 1100px) {
   main.console { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); grid-template-areas: "hero hero" "fleet fleet" "time side" "jobs streams"; }
+  /* (the newest outputs no taller than the last hours beside them: their own scroll) */
+  .side .outs .thumbs { max-height: 330px; overflow: auto; scrollbar-width: thin; align-content: start; }
 }
-/* A BIG SCREEN IS ONE VIEW (the user, 2026-10-30: "on my ultrawide screen without having to scroll, at least the
-   relevant bits … then we can always scroll stuff like the queue and the work streams"): the page is the window;
-   the hero, the fleet with its live frames, the timeline, the full-show strips, the asks and the newest outputs have
-   fixed regions; the queue and the streams fill the bottom row, the same height, and scroll inside it */
-@media (min-width: 1600px) and (min-height: 900px) {
-  body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-  .top { flex: none; }
-  main.console {
-    flex: 1 1 auto; min-height: 0; width: 100%; max-width: none; padding: 12px 18px 14px;
-    /* (the queue's column at least 820 px: its table keeps its columns, not stacked cards) */
-    grid-template-columns: minmax(840px, 2fr) minmax(0, 1.1fr) minmax(0, 1.15fr);
-    grid-template-rows: auto auto auto minmax(0, 1fr);
-    grid-template-areas: "hero hero hero" "fleet fleet fleet" "time time side" "jobs streams side";
-  }
-  .tiles .tile { margin-bottom: 0; }
-  .side { min-height: 0; }
-  .side .outs { flex: 1 1 0; min-height: 160px; display: flex; flex-direction: column; }
-  .streams .you-sec { flex: 0 0 auto; min-height: 0; max-height: 46%; display: flex; flex-direction: column; }
-  .streams .you-sec ul { max-height: none; flex: 1 1 auto; min-height: 0; }
-  .side .outs .thumbs { flex: 1 1 auto; min-height: 0; overflow: auto; scrollbar-width: thin; align-content: start; }
-  .jobs, .streams { min-height: 0; display: flex; flex-direction: column; }
-  .jt-wrap, .st-wrap { flex: 1 1 auto; max-height: none; min-height: 0; }
-}
-/* a big screen of only ~1080 px: the timeline's charts give their height to the queue (the fleet's list stays: since
-   2026-11-02 it is where our job shows, and the tile is shorter with it than it was without) */
-@media (min-width: 1600px) and (min-height: 900px) and (max-height: 1180px) {
-  .tl-chart, .tl-lab.ch { display: none; }
+/* THE PAGE SCROLLS (the user, 2026-11-02: "the layout is shifting when these previews come in and out, and we don't
+   have any space left for the render queue and 'waiting on you'. Maybe we allow the page to scroll and place the
+   render queue and 'waiting on you' below the fold"), instead of the one-window view of 2026-10-30 ("on my ultrawide
+   screen without having to scroll"): above the fold the hero, the fleet with its now-rendering row, the last hours
+   and the newest outputs; below it the queue (its table wants ≥ 820 px) and the asks with the work streams. The long
+   lists still scroll inside their own panels (.jt-wrap, .st-wrap) */
+@media (min-width: 1600px) {
+  main.console { max-width: none; padding: 12px 18px 14px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .top::before, .live-dot.on, .hdot, .gb.st-running::after, .ck.k-running::after { animation: none !important; }
 }
+
+/* THIS MAC IN THE FARM (app.js MAC_WORKER_OFF): where its card's farm controls go while its worker does not run */
+.fhint { flex: 0 1 auto; min-width: 0; color: var(--ink-3); }
+.fhint code { font: 11.5px/1 var(--f-mono, ui-monospace, monospace); color: var(--ink-2); }
+
+/* NOW RENDERING (app.js renderNow; the user, 2026-11-02: "a bit of a bigger preview for the currently rendering frame
+   … bigger, wider again", then "not really aligned with its machine card"): a row on the tiles' own columns (.tiles
+   above: 1, 2 or 4), each machine's job under its card and as wide; the row's height is fixed while any job runs —
+   a 16:9 frame at the column's width, at most 240 px — so nothing jumps as jobs come and go, and the frame sits
+   letterboxed in it (a dome master's square centred, as tall as the row). Always there: an idle column is a placeholder */
+.nowq { container-type: inline-size; }
+.nowr { --cols: 1; --gap: 12px; display: none; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); column-gap: var(--gap); row-gap: var(--gap); margin-top: 12px;
+  --nwh: min(240px, calc((100cqw - (var(--cols) - 1) * var(--gap)) / var(--cols) * 9 / 16)); }
+@media (min-width: 640px) { .nowr { --cols: 2; } }
+@media (min-width: 1280px) { .nowr { --cols: 4; } }
+.nowr.has { display: grid; }
+.nwc { position: relative; display: block; width: 100%; height: var(--nwh); min-width: 0; padding: 0; border: 0; border-radius: 8px; overflow: hidden; background: #05090c; color: var(--ink); text-align: left; font: inherit; }
+.nwc.nw-none { display: grid; place-items: center; background: none; border: 1px dashed var(--line); color: var(--ink-3); font-size: 12px; opacity: .7; }
+.nw { cursor: zoom-in; box-shadow: 0 0 0 1px var(--line-2); transition: box-shadow .2s ease; }
+.nw.nopv { cursor: default; }
+.nw:not(.nopv):hover, .nw:not(.nopv):focus-visible { box-shadow: 0 0 0 1px var(--ours), 0 6px 22px rgba(0, 0, 0, .35); outline: none; }
+.nw-pv img { object-fit: contain; }
+.nw-pv::after { top: 50%; opacity: 1; }
+.nw-wait { position: absolute; left: 0; right: 0; top: 34%; text-align: center; font-size: 12px; color: var(--ink-3); letter-spacing: .04em; }
+.nw-more { position: absolute; top: 8px; right: 8px; z-index: 1; padding: 1px 6px; border-radius: 4px; font: 600 12px/16px var(--f-ui); color: var(--ink); background: rgba(5, 9, 12, .72); box-shadow: inset 0 0 0 1px var(--line-2); }
+.nw-cap { position: absolute; left: 0; right: 0; bottom: 3px; z-index: 1; display: grid; gap: 1px; padding: 0 11px 6px; pointer-events: none; text-shadow: 0 1px 3px rgba(0, 0, 0, .7); }
+.nw-1 { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; font: 600 14px/18px var(--f-ui); }
+.nw-eta { font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.nw-2 { font-size: 12px; line-height: 16px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.nw-2 b { font-weight: 600; color: var(--ink); }
+.nw-2 .sep { color: var(--ink-3); padding: 0 5px; }
+.nw-bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; height: 3px; border-radius: 0; box-shadow: none; background: rgba(255, 255, 255, .08); }
+/* the live view: no Previous/Next (those walk the outputs) */
+.viewer.v-live [data-step] { display: none; }
+.nw-pv.has { background: #05090c; }

@@ -120,4 +120,23 @@ describe('the machine cards', () => {
   it('this Mac is rendering while a render slot is held', () => {
     expect(macCard({ host: 'm', machine: {}, slots: { held: [{ label: 'review clip 300–330 s' }], limit: 2, waiting: [] } })).toMatchObject({ badge: 'rendering', slots: { held: 1, jobs: ['review clip 300–330 s'] } });
   });
+
+  // (the user, 2026-11-02: "accept, drain, pause and remove toggles in the dashboard, so we can join in or out of the
+  // render farm"): the card's controls act on what the hub says of this Mac's worker, and only while it runs
+  it('this Mac in the farm: its farm state and moves, its worker only while the hub hears it, its farm job shown once', () => {
+    const farmJob = { id: 'j1', node: 'laubs-mbp', state: 'running', label: 'node drift-review-stills.mjs a.json', startedAt: NOW };
+    const c = macCard({
+      host: 'laubs-mbp', machine: {},
+      slots: { held: [{ label: 'farm j1 node drift-review-stills.mjs a.json', cmd: 'farm j1 node drift-review-stills.mjs a.json' }, { label: 'review clip', cmd: 'node scripts/drift-review-clip.mjs' }], limit: 2, waiting: [] },
+      farm: [farmJob, { id: 'j0', node: 'laubs-mbp', state: 'done' }, { id: 'j2', node: 'linux-monster', state: 'running' }],
+      farmState: { state: 'paused', at: NOW, by: 'x', actions: ['accepting', 'removed'] },
+      worker: { node: 'laubs-mbp', state: 'busy-foreign', why: 'local jobs first: 1 waiting for a slot', seen: NOW },
+    });
+    expect(c).toMatchObject({ farmState: 'paused', farmActions: ['accepting', 'removed'], excluded: 'paused from the dashboard', farm: { id: 'j1' }, farmWorker: { state: 'busy-foreign', why: 'local jobs first: 1 waiting for a slot' } });
+    // (the farm job's own slot is the job itself, not a second line of local work)
+    expect(c.slots.jobs).toEqual(['review clip']);
+    // a worker the hub no longer hears: no controls (the card says how to start it), and no farm state is made up
+    expect(macCard({ host: 'laubs-mbp', machine: {}, slots: { held: [], limit: 1, waiting: [] }, farmState: { state: 'paused', actions: [] }, worker: { node: 'laubs-mbp', state: 'offline' } }).farmWorker).toBeNull();
+    expect(macCard({ host: 'm', machine: {}, slots: { held: [], limit: 1, waiting: [] } })).toMatchObject({ farmState: undefined, farmWorker: null, farm: null });
+  });
 });

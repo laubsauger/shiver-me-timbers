@@ -9,4 +9,4 @@ export function machineCard(n: FarmNode, view: unknown, report: unknown, policy?
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function fleetCards(o: { agents?: Record<string, unknown>; hub?: unknown; reports?: unknown[]; farm?: unknown[]; farmNodes?: Record<string, { state: string; at?: number | null; by?: string | null; actions?: string[] }>; allow?: FarmNode[]; mac?: unknown; policy?: unknown; now?: number }): any[];
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function macCard(o: { host: string; machine: unknown; slots: unknown }): any;
+export function macCard(o: { host: string; machine: unknown; slots: unknown; farm?: unknown[]; farmState?: unknown; worker?: unknown }): any;

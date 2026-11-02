@@ -182,9 +182,19 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
   };
 }
 
-/** this Mac's card, from the dashboard's own probes: ioreg's GPU load and memory, RAM, our render slots */
-export function macCard({ host, machine, slots }) {
+/**
+ * this Mac's card, from the dashboard's own probes: ioreg's GPU load and memory, RAM, our render slots — and THIS MAC
+ * AS A FARM WORKER (the user, 2026-11-02: "accept, drain, pause and remove toggles in the dashboard, so we can join in
+ * or out of the render farm"), when the hub knows it: its farm state and moves (`farmState`, the hub's
+ * view().nodes[host]), its worker as the hub last heard it (`worker`, one of view().workers: null or offline when it
+ * does not run — the card then says how to start it), and the farm job it runs (`farm`, the hub's jobs). The farm
+ * job's own slot is left out of `slots.jobs`: the card shows the job itself, with its progress and preview.
+ */
+export function macCard({ host, machine, slots, farm = [], farmState = null, worker = null }) {
+  const farmJob = farm.filter((j) => j.node === host && ['preparing', 'running'].includes(j.state)).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0] ?? null;
+  const local = (slots?.held ?? []).filter((h) => !/^farm \S+ /.test(h.cmd ?? h.label ?? ''));
   const held = slots?.held?.length ?? 0;
+  const fs = farmState?.state ?? null;
   return {
     key: 'this-mac',
     name: host,
@@ -200,8 +210,16 @@ export function macCard({ host, machine, slots }) {
     // (no per-core CPU % here: the 1-min load over the cores, which is what the Mac's gauge shows)
     cpuPct: machine?.load && machine?.cores ? Math.min(100, Math.round((100 * machine.load[0]) / machine.cores)) : null,
     services: [],
-    slots: { held, limit: slots?.limit ?? null, waiting: slots?.waiting?.length ?? 0, jobs: (slots?.held ?? []).map((h) => h.label) },
+    slots: { held, limit: slots?.limit ?? null, waiting: slots?.waiting?.length ?? 0, jobs: local.map((h) => h.label) },
     job: null,
     hub: false,
+    farmState: fs ?? undefined,
+    farmActions: farmState?.actions ?? undefined,
+    farmStateAt: farmState?.at ?? null,
+    excluded: fs === 'paused' || fs === 'removed' ? `${fs} from the dashboard` : null,
+    farm: farmJob,
+    // (the hub's word for its worker: offline, waiting, busy, busy-foreign with why — on battery, local jobs first)
+    farmWorker: worker && worker.state !== 'offline' ? { state: worker.state, why: worker.why ?? null, seen: worker.seen ?? null, types: worker.types ?? null } : null,
+    farmWorkerSeen: worker?.seen || null,
   };
 }

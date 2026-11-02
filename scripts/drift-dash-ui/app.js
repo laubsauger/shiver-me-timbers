@@ -42,15 +42,16 @@ const MOCK = new URLSearchParams(location.search).get('mock');
 const CALM = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /**
- * THE CONTROL ROOM'S LAYOUT (the user, 2026-10-30: "I want to have the screen on my ultrawide screen without having
- * to scroll, at least the relevant bits"): this script lays out <main> itself, so a page and its script always change
- * together (index.html keeps the header, the icons, the viewer). On a big screen (app.css: ≥ 1600 × 900 px) the
- * regions are a grid that fills the window — the long lists (the queue, the streams) scroll inside their own panels
- * and push nothing down; a smaller screen stacks them and scrolls.
+ * THE CONTROL ROOM'S LAYOUT: this script lays out <main> itself, so a page and its script always change together
+ * (index.html keeps the header, the icons, the viewer). The page scrolls (the user, 2026-11-02: "we don't have any
+ * space left for the render queue and 'waiting on you'. Maybe we allow the page to scroll and place the render queue
+ * and 'waiting on you' below the fold"; until then a big screen was one window, 2026-10-30): the hero, the fleet and
+ * its now-rendering row, the last hours and the newest outputs above the fold, the queue and the streams below it;
+ * the long lists scroll inside their own panels. Nothing above the fold changes height as jobs come and go.
  */
 const SKELETON = `
 <section class="p hero" id="hero" aria-label="The farm at a glance"></section>
-<section class="p fleet" aria-labelledby="h-fleet"><div class="ph"><h2 id="h-fleet">Fleet</h2><span class="sec-meta" id="fleet-meta"></span></div><div id="fleet-note"></div><div class="tiles" id="tiles"></div></section>
+<section class="p fleet" aria-labelledby="h-fleet"><div class="ph"><h2 id="h-fleet">Fleet</h2><span class="sec-meta" id="fleet-meta"></span></div><div id="fleet-note"></div><div class="tiles" id="tiles"></div><div class="nowq"><div class="nowr" id="nowr" role="list" aria-label="Now rendering: each machine's running job, under its card"></div></div></section>
 <section class="p time" aria-labelledby="h-time"><div class="ph"><h2 id="h-time">The last hours</h2><span class="sec-meta" id="time-meta"></span><div class="tl-ctl" id="tl-ctl"></div></div><div class="agents" id="agents" role="group" aria-label="Agents: click to dim or show"></div><div class="tl" id="tl"></div></section>
 <section class="side">
   <div class="p outs" aria-labelledby="h-outs"><div class="ph"><h2 id="h-outs">Latest outputs</h2><span class="sec-meta">click one to open it</span></div><div class="thumbs" id="outs"></div></div>
@@ -609,7 +610,7 @@ function tile(m, d) {
 
   // 1. head
   h += `<header class="r-head"><div class="t-name"><h3 title="${esc(m.name)}"><i class="live-dot${/^rendering/.test(m.badge) ? ' on' : ''}" aria-hidden="true"></i>${esc(name)}${self ? '<span class="tag">this Mac</span>' : tag ? `<span class="tag">${esc(tag)}</span>` : ''}</h3>`;
-  h += `<div class="t-sub" title="${esc(subTip)}">${sub.map(esc).join('<span class="sep">·</span>')}</div></div><div class="t-chips">${chip(m.badge, badgeTip, true)}${self ? '' : farmChip(m)}</div></header>`;
+  h += `<div class="t-sub" title="${esc(subTip)}">${sub.map(esc).join('<span class="sep">·</span>')}</div></div><div class="t-chips">${chip(m.badge, badgeTip, true)}${!self || m.farmWorker ? farmChip(m) : ''}</div></header>`;
 
   // 2. metrics: GPU · Temp · Power · CPU · RAM, in every tile (the Mac reports no temperature; its power is AC/battery)
   const load = mc?.load?.[0];
@@ -654,7 +655,11 @@ function tile(m, d) {
     const waiting = d.slots?.waiting?.length ?? 0;
     // (a slot job: its own progress; the newest frame for the first only, previewOf's)
     // (the jobs waiting for a slot: "+n waiting" beside the last held job's count, a line of their own when none runs)
-    const blocks = held.slice(0, 2).map((s, k, a) => jobLines({ name: humanJob(s.cmd || s.label), tip: `slot ${s.slot}: ${s.cmd || s.label}`, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, lanes: lanesOf(s.cmd, s.last), queue: waiting && k === a.length - 1 ? `+${waiting} waiting` : '' }, k === 0 ? pv : nopv));
+    // (a farm job this Mac's worker runs: shown as on a box, with its preview; its slot is not listed again)
+    const fj = m.farm;
+    const local = held.filter((s) => !FARM_SLOT.test(s.cmd || s.label || ''));
+    const blocks = fj ? [jobLines({ name: humanJob(fj.argv?.length ? fj.argv : fj.label), tip: `farm ${shortId(fj.id)}: ${fj.label}`, done: fj.progress?.done, total: fj.progress?.total, unit: fj.progress?.unit, rate: fin(fj.progress?.fps) && fj.progress.fps > 0 ? fj.progress.fps : null, etaS: fj.progress?.etaS, lanes: lanesOf(fj.argv?.length ? fj.argv : fj.label, fj.last) }, pv)] : [];
+    blocks.push(...local.slice(0, 2 - blocks.length).map((s, k, a) => jobLines({ name: humanJob(s.cmd || s.label), tip: `slot ${s.slot}: ${s.cmd || s.label}`, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, lanes: lanesOf(s.cmd, s.last), queue: waiting && k === a.length - 1 ? `+${waiting} waiting` : '' }, k === 0 && !fj ? pv : nopv)));
     const procs = macProcs(mc.top).filter((p) => !/render\)$/.test(p.name)).map((p) => ({ id: p.name, v: p.cpu, name: `${p.name}${p.n > 1 ? ` ×${p.n}` : ''}`, memMB: p.memMB }));
     const { rows, total } = stableTop(`procs:${m.key}`, procs, LIST_LINES, 8, 0.5, now);
     const lines = rows.map((r) => ({ ...r, a: `${Math.round(r.avg)}%`, b: r.memMB >= 1024 ? `${gb(r.memMB / 1024)} GB` : `${r.memMB} MB`, tip: `${r.name}: ${Math.round(r.avg)}% CPU (30 s average), ${r.memMB} MB` }));
@@ -684,7 +689,7 @@ function tile(m, d) {
   if (m.lastRun) bits.push(`last run ${m.lastRun.job ?? 'a job'} ${m.lastRun.state}${m.lastRun.seen ? ` ${durCoarse((now - m.lastRun.seen) / 1000)} ago` : ''}`);
   if (m.commit) bits.push(`at ${m.commit}`);
   const err = m.agentError ? `agent: ${m.agentError}` : m.error ? `error: ${m.error}` : '';
-  h += `<footer class="r-foot">${self ? '' : farmControls(m)}<span class="src one${err ? ' err' : ''}" title="${esc([...bits, err].filter(Boolean).join(', '))}">${esc([err, ...bits].filter(Boolean).join(', '))}</span></footer>`;
+  h += `<footer class="r-foot">${!self || m.farmWorker ? farmControls(m) : self && m.farmState ? MAC_WORKER_OFF : ''}<span class="src one${err ? ' err' : ''}" title="${esc([...bits, err].filter(Boolean).join(', '))}">${esc([err, ...bits].filter(Boolean).join(', '))}</span></footer>`;
   return h + '</article>';
 }
 
@@ -1028,11 +1033,22 @@ let CONFIRM = null;
 /** actions sent and not yet seen in the data: by key, { value, inflight, at } — shown over the server's state */
 const PENDING = new Map();
 
+/**
+ * THIS MAC IN THE FARM (the user, 2026-11-02: "should we add for my local machine also accept, drain, pause and remove
+ * toggles in the dashboard, so we can join in or out of the render farm"): the Mac's card gets the boxes' chip and
+ * controls once its studio-farm worker runs (Machine.farmWorker: the hub heard it), and this hint when it does not.
+ * The worker keeps the user's own drift-slot jobs first and claims on AC power only; why it holds back is in the chip.
+ */
+const MAC_WORKER_OFF = '<span class="fhint one" title="this Mac’s farm worker is not running; from the shiver-me-timbers checkout: sh ../studio-farm/examples/drift/worker/mac-worker.sh start (stop: … stop). It starts paused: accept it here to join the farm">Farm worker off · <code>mac-worker.sh start</code></span>';
+/** a slot this Mac's farm worker holds for its job ("farm <id> <label>", studio-farm's slots.mjs) */
+const FARM_SLOT = /^farm \S+ /;
+
 function farmChip(m) {
   const st = m.farmState;
   if (!st) return '<span class="fchip nil" title="the dashboard server does not report farm states yet">Farm: —</span>';
   const p = PENDING.get(`node:${m.key}`);
-  return `<span class="fchip f-${esc(st)}" title="${esc(`farm: ${FARM_STATES[st]?.[2] ?? st}`)}">${p?.inflight ? '<span class="spin" aria-hidden="true"></span>' : icon(FARM_STATES[st]?.[1] ?? 'dot')}${esc(FARM_CHIP[st] ?? st)}</span>`;
+  const held = m.self && m.farmWorker?.why ? `; holding back: ${m.farmWorker.why}` : '';
+  return `<span class="fchip f-${esc(st)}" title="${esc(`farm: ${FARM_STATES[st]?.[2] ?? st}${held}`)}">${p?.inflight ? '<span class="spin" aria-hidden="true"></span>' : icon(FARM_STATES[st]?.[1] ?? 'dot')}${esc(FARM_CHIP[st] ?? st)}</span>`;
 }
 
 function farmControls(m) {
@@ -1416,6 +1432,8 @@ function view(i) {
   const o = outputs[i];
   if (!o) return;
   viewingPath = o.path;
+  LIVE = null;
+  $('viewer').classList.remove('v-live');
   const u = fileUrl(o.path, o.mtime);
   $('viewer-cap').textContent = `${o.dir}/${o.name}`;
   $('viewer-open').href = u;
@@ -1426,6 +1444,8 @@ function view(i) {
 $('viewer').addEventListener('close', () => {
   $('viewer-stage').innerHTML = ''; // (stops a playing clip)
   viewingPath = null;
+  LIVE = null;
+  $('viewer').classList.remove('v-live');
 });
 $('viewer-close').addEventListener('click', () => $('viewer').close());
 $('viewer').addEventListener('click', (e) => {
@@ -1481,6 +1501,8 @@ document.addEventListener('click', (e) => {
   }
   const v = e.target.closest('[data-view]');
   if (v) return view(Number(v.dataset.view));
+  const nw = e.target.closest('[data-now]');
+  if (nw) return viewLive(nw.dataset.now);
   const t = e.target.closest('[data-tab]');
   if (t) {
     TAB = t.dataset.tab;
@@ -1521,8 +1543,8 @@ $('tabs').addEventListener('keydown', (e) => {
  */
 function previewOf(m, d) {
   if (MOCK !== null) return mockMod?.mockPreview?.(m, d) ?? null;
-  if (m.self) {
-    const h = d.slots?.held?.[0];
+  if (m.self && !m.farm) {
+    const h = (d.slots?.held ?? []).find((x) => !FARM_SLOT.test(x.cmd || x.label || ''));
     const out = h ? flagOf(h.cmd, 'out') : null;
     if (!out || isMedia(out)) return null;
     const rel = out.replace(/^\.\//, '').replace(/\/+$/, '');
@@ -1532,6 +1554,100 @@ function previewOf(m, d) {
   const j = m.farm;
   return j?.previewAt ? `/farm/jobs/${encodeURIComponent(j.id)}/preview.jpg?v=${Math.round(j.previewAt)}` : null;
 }
+/**
+ * NOW RENDERING (the user, 2026-11-02: "I liked having a bit of a bigger preview for the currently rendering frame,
+ * when we have a preview. That felt useful. Can we make this a bit bigger, wider again?"): under the fleet's compact
+ * tiles (5d4aa3e made them a fixed 236 px, with a 53 px thumb in the job line) a row ON THE TILES' OWN GRID (the user,
+ * the same day: "the currently rendering stuff is not really aligned with its machine card"): each machine's running
+ * job right under its card, as wide as the card, its column empty while it renders nothing. The frame is the tile's
+ * thumb (previewOf) at the column's width, letterboxed inside a row of fixed height (a 16:9 view fills the width, a
+ * dome master's square is as tall as the row, centred). A job shows from its start, before its first frame: the
+ * placeholder carries its name and progress. Two jobs on one machine (this Mac: a farm job beside a slot job): the
+ * first, with "+1". The row is always there (an idle machine's column a quiet placeholder), so nothing moves as
+ * jobs start and stop. Over the frame's foot:
+ * the job's name, its box, its frames or stills and rate, the time left, and a progress hairline. A click opens the
+ * frame full-size in the viewer, where it keeps following the job (viewLive). The frames crossfade like the thumbs
+ * (syncPreviews): the old one stays until the new one has loaded.
+ */
+/** a machine's running jobs, the one with a frame first: [{ key, src, box, name, tip, done, total, unit, fps, etaS, wait }] */
+function nowOf(m, d) {
+  const box = splitName(m.name).name;
+  const wait = m.badge === 'waiting-foreign';
+  const out = [];
+  const fj = m.farm && ['preparing', 'running'].includes(m.farm.state) ? m.farm : null;
+  if (fj) {
+    const cmd = fj.argv?.length ? fj.argv : fj.label;
+    out.push({ key: `f:${fj.id}`, box, name: humanJob(cmd), tip: `farm ${shortId(fj.id)} on ${box}: ${fj.label}`, done: fj.progress?.done, total: fj.progress?.total, unit: fj.progress?.unit, fps: fj.progress?.fps, etaS: fj.progress?.etaS, wait });
+  }
+  if (m.self) {
+    for (const h of (d.slots?.held ?? []).filter((x) => !FARM_SLOT.test(x.cmd || x.label || ''))) out.push({ key: `s:${h.slot}:${h.started}`, box, name: humanJob(h.cmd || h.label), tip: `slot ${h.slot} on ${box}: ${h.cmd || h.label}`, done: h.done, total: h.total, unit: h.unit, fps: slotFps(h).now, etaS: h.etaS });
+  } else if (!fj && m.job) {
+    const j = m.job;
+    out.push({ key: `n:${m.key}:${j.name}:${j.chunk ?? ''}`, box, name: humanJob(j.name), tip: `${box}: ${j.name}${j.chunks ? `, chunk ${j.chunk}/${j.chunks}` : ''}`, done: j.frames, total: j.framesTotal, unit: 'frames', fps: fin(j.fps) ? +j.fps : null, etaS: j.etaS, wait });
+  }
+  // (previewOf's frame belongs to the farm job, else this Mac's first slot job: the first of the list either way)
+  if (out.length) out[0].src = previewOf(m, d);
+  return out;
+}
+/** "312/600 frames · 4.2 fps", "3/8 stills" */
+const nowCount = (j) => joinDot(fin(j.total) ? `${num(j.done ?? 0)}/${num(j.total)} ${j.unit === 'stills' ? 'stills' : j.unit ?? ''}`.trim() : fin(j.done) && j.done > 0 ? `${num(j.done)} ${j.unit ?? ''}`.trim() : '', fin(j.fps) && j.fps > 0 ? `${j.fps.toFixed(j.fps < 10 ? 2 : 1)} fps` : '');
+const nowEta = (j) => (j.wait ? 'yielding' : fin(j.etaS) ? `${dur(j.etaS)} left` : fin(j.total) && (j.done ?? 0) >= j.total ? 'finishing' : 'starting');
+function renderNow(d) {
+  const ms = machinesOf(d);
+  const per = ms.map((m) => ({ m, js: nowOf(m, d) }));
+  NOW = new Map(per.flatMap(({ js }) => js.filter((j) => j.src).map((j) => [j.key, j])));
+  // (the row is always there, an idle machine's column a quiet placeholder: nothing below moves as jobs come and go —
+  // the user, 2026-11-02: "the layout is shifting when these previews come in and out")
+  $('nowr').classList.toggle('has', per.length > 0);
+  morph($('nowr'), per.map(({ m, js }) => {
+    const j = js[0];
+    if (!j) return `<div class="nwc nw-none" data-key="${esc(`e:${m.key}`)}" role="listitem" aria-label="${esc(`${splitName(m.name).name}: nothing of ours running`)}"><span>${esc(splitName(m.name).name)}: nothing of ours running</span></div>`;
+    const p = fin(j.total) && j.total > 0 ? pct(j.done ?? 0, j.total) : null;
+    const more = js.length > 1 ? `<span class="nw-more" title="${esc(js.slice(1).map((x) => x.name).join('\n'))}">+${js.length - 1}</span>` : '';
+    const tip = [j.tip, nowCount(j), nowEta(j), ...js.slice(1).map((x) => `also: ${x.name}`), j.src ? 'click: full size' : 'no frame yet'].filter(Boolean).join('\n');
+    return `<button class="nwc nw${j.src ? '' : ' nopv'}" type="button" role="listitem" data-key="${esc(`${m.key}|${j.key}`)}"${j.src ? ` data-now="${esc(j.key)}"` : ' aria-disabled="true"'} title="${esc(tip)}" aria-label="${esc(`${j.name} on ${j.box}${j.src ? ': open the frame full size' : ''}`)}">`
+      + `<div class="pv nw-pv" data-own="1" data-src="${esc(j.src ?? '')}" aria-hidden="true"></div>${j.src ? '' : '<span class="nw-wait">first frame soon</span>'}${more}`
+      + `<span class="nw-cap"><span class="nw-1"><span class="one nw-name">${esc(j.name)}</span><span class="nw-eta">${esc(nowEta(j))}</span></span>`
+      + `<span class="nw-2 one"><b>${esc(j.box)}</b>${nowCount(j) ? `<span class="sep">·</span>${esc(nowCount(j))}` : ''}</span></span>`
+      + `<span class="pbar nw-bar${p == null ? ' idle' : ''}"><b style="transform:scaleX(${((p ?? 0) / 100).toFixed(4)})"></b></span></button>`;
+  }).join(''));
+  syncLive();
+}
+/** the running jobs of the strip, by key (the viewer follows one of them) */
+let NOW = new Map();
+/** the strip's job the viewer shows, live: { key, src } — null while the viewer shows an output, or is closed */
+let LIVE = null;
+function viewLive(key) {
+  const j = NOW.get(key);
+  if (!j) return;
+  LIVE = { key, src: j.src };
+  viewingPath = null;
+  $('viewer').classList.add('v-live');
+  $('viewer-stage').innerHTML = `<img alt="${esc(j.name)}" src="${esc(j.src)}">`;
+  $('viewer-open').href = j.src;
+  syncLive();
+  const dlg = $('viewer');
+  if (!dlg.open) dlg.showModal();
+}
+/** the open live view: its caption now, and the job's newest frame once it has loaded (never a blank in between) */
+function syncLive() {
+  if (!LIVE || !$('viewer').open) return;
+  const j = NOW.get(LIVE.key);
+  $('viewer-cap').textContent = j ? `Now rendering · ${j.name} · ${j.box} · ${joinDot(nowCount(j), nowEta(j))}` : `${$('viewer-cap').textContent.replace(/ · (finished|ended)$/, '')} · finished`;
+  if (!j || j.src === LIVE.src) return;
+  const want = j.src;
+  LIVE.src = want;
+  const pre = new Image();
+  pre.onload = () => {
+    const img = $('viewer-stage').querySelector('img');
+    if (LIVE?.src === want && img) {
+      img.src = want;
+      $('viewer-open').href = want;
+    }
+  };
+  pre.src = want;
+}
+
 /** each preview slot shows its data-src: the new frame loads unseen, then fades in over the old one */
 function syncPreviews() {
   for (const pv of document.querySelectorAll('.pv[data-own]')) {
@@ -2230,6 +2346,7 @@ function render(d) {
   const shows = showGroups(d);
   renderHero(d, jobs, shows);
   renderFleet(d);
+  renderNow(d);
   syncGpuPop(d);
   renderTimeline(d, jobs);
   renderJobs(d);
