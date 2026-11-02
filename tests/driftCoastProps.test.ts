@@ -9,6 +9,10 @@
  *   - THE WANDERERS NEVER COME AT THE EYE. The stand-ins stepped into frame from behind it 2–3 m off and filled a third
  *     of it. On the coast's own ground they walk the wet sand at the water's edge, never nearer the eye than
  *     WALK_CLEAR at any instant of w5–w6, and walk on away from it, small, into the dusk.
+ *   - THE WANDERERS NEVER WALK THROUGH ONE ANOTHER (the 2026-11-02 note: "one person is glitching through the other").
+ *     Each keeps its own pace, stops and lanes, so one came by another standing or stooping 0.2–0.5 m off, centre to
+ *     centre: bodies and arms in one another. Any two stay MIN_APART apart at every instant of w5–w6 — a body's width
+ *     with its arms swinging, or a stoop's reach — and the one who steps round does it at a walk, not in a jump.
  */
 import { describe, expect, it } from 'vitest';
 import { float, vec3 } from 'three/tsl';
@@ -17,6 +21,8 @@ import { BEATS, C1_FOLLOW, beatStarts, beatSun, beatsAt, coastEye, spec } from '
 import { WALK_CLEAR, fieldOnCoast, fieldWeight, wanderer, wetSand } from '../src/drift/wandering/props';
 
 const c1End = 21 + C1_FOLLOW;
+/** s before w5 the wanderers are drawn (props.ts WALK_LEAD) */
+const WALK_LEAD_S = 1;
 const { starts, total } = beatStarts(c1End);
 
 /** the sky's darkness a pass is drawn under, as sea.ts hands it to the props (from its Sun's height) */
@@ -107,6 +113,21 @@ describe('the wanderers', () => {
     }
     expect(apart).toBeGreaterThan(2.5);
     expect(together).toBeLessThan(1.2);
+  });
+
+  it('never walk through one another: any two stay apart at every instant of w5 and w6, a stoop and an arm\'s swing clear', () => {
+    /** m, centre to centre (two bodies 0.45 m across at the shoulders, a swinging arm ~0.1 m out) */
+    const MIN_APART = 0.6;
+    let nearest = Infinity;
+    let when = 0;
+    for (let t = starts.w5 - WALK_LEAD_S; t < total; t += 0.05) {
+      const w = [0, 1, 2].map((i) => at(i, t));
+      for (const [a, b] of [[0, 1], [0, 2], [1, 2]]) {
+        const d = Math.hypot(w[a].x - w[b].x, w[a].z - w[b].z);
+        if (d < nearest) [nearest, when] = [d, t - starts.w5];
+      }
+    }
+    expect(nearest, `${nearest.toFixed(2)} m apart at ${when.toFixed(2)} s into w5`).toBeGreaterThanOrEqual(MIN_APART);
   });
 
   it('walk on away from the eye, small, by the end of w5 — at a walk, without a jump', () => {

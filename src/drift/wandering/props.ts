@@ -161,8 +161,8 @@ function wanderLane(i: number, walked: number, along: number): number {
 /** s of the walk's integration steps (midpoint: every frame the same sum for the same t) */
 const WALK_STEP = 0.05;
 
-export function wanderer(i: number, t: number, w5: number, edge: (along: number) => number): { along: number; off: number; walked: number; phase: number; amp: number; stoop: number; look: number; heading: number } {
-  const tau = t - w5;
+/** wanderer i's walk τ s into w5: m walked, strides taken (cycles), and its pace now (m/s) */
+function walkOf(i: number, tau: number): { walked: number; phase: number; v: number } {
   const start = -WALK_LEAD + i * WALK_FILE[0];
   // the distance walked and the strides taken, summed from the start: a slower walk takes shorter strides
   const height = WALKERS[i].height;
@@ -177,17 +177,129 @@ export function wanderer(i: number, t: number, w5: number, edge: (along: number)
     phase += (v / strideOf(v)) * WALK_STEP;
   }
   const rest = span - n * WALK_STEP;
-  const vNow = span > 0 ? wanderPace(i, tau) : 0;
   if (rest > 0) {
     const v = wanderPace(i, start + n * WALK_STEP + rest / 2);
     walked += v * rest;
     phase += (v / strideOf(v)) * rest;
   }
-  const along = WALK_FROM + walked - i * WALK_FILE[1];
-  const offAt = (w: number): number => edge(WALK_FROM + w - i * WALK_FILE[1]) + wanderLane(i, w, WALK_FROM + w - i * WALK_FILE[1]);
-  const off = offAt(walked);
-  // facing its way: the path's turn per metre walked (defined standing still too)
-  const heading = Math.atan2(offAt(walked + 0.5) - offAt(walked - 0.5), 1);
+  return { walked, phase, v: span > 0 ? wanderPace(i, tau) : 0 };
+}
+/** m up the beach wanderer i is, `walked` m into its walk */
+const alongOf = (i: number, walked: number): number => WALK_FROM + walked - i * WALK_FILE[1];
+
+/**
+ * PASSING, NOT THROUGH (the 2026-11-02 note: "one person is glitching through the other"). Their paces, stops and
+ * lanes are each their own, so one walked on through another where it had stopped: the third through the hat stooping
+ * for its shell at 9.5 s (0.5 m apart, centre to centre), through the first as it stood looking out at 18.5 s (0.2 m),
+ * the first through the third at 31.5 s (0.4 m) — bodies, arms and the stoop's reach in one another. Now two within
+ * SEPARATION.along m of each other up the beach keep SEPARATION.across m apart across it, and further apart up it the
+ * gap they need narrows by SEPARATION.slope m a metre (none past ~2.7 m): the one coming up steps round the other at a
+ * walker's veer (~27°), not in a jump. The side-step is split by their paces (averaged over a second either side), so
+ * the one walking goes round the one standing, which stays where it is. Each meeting is passed on ONE side, the one
+ * that needs the least stepping aside over the whole of it (`passingSides`, from their own paths, which depend on
+ * nothing but these tables), so no one swaps sides through the other mid-pass. A pure function of t, as the walk is.
+ */
+const SEPARATION = { across: 0.9, along: 0.9, slope: 0.4, rounds: 3, paceOver: 1 };
+const PAIRS: Array<[number, number]> = [
+  [0, 1],
+  [0, 2],
+  [1, 2],
+];
+/** m: how far apart across the beach two this far apart up it (m) must be (negative: any way round) */
+const gapNeeded = (dAlong: number): number => SEPARATION.across - SEPARATION.slope * Math.max(0, Math.abs(dAlong) - SEPARATION.along);
+/** s into w5 their meetings are looked for over (past w6's end), and the step */
+const MEET_SPAN: [number, number, number] = [-WALK_LEAD - 1, 200, 0.1];
+let sides: Array<Array<[number, number, number]>> | null = null;
+/** each pair's meetings: [from, to (s into w5, a second's margin each side), the side j passes i on (+1: to sea)] */
+function passingSides(): Array<Array<[number, number, number]>> {
+  if (sides) return sides;
+  const out: Array<Array<[number, number, number]>> = PAIRS.map(() => []);
+  const cost = PAIRS.map(() => [0, 0]);
+  const walked = WALKERS.map(() => 0);
+  const [from, to, dt] = MEET_SPAN;
+  for (let tau = from; tau < to; tau += dt) {
+    walked.forEach((_, i) => (walked[i] += wanderPace(i, tau + dt / 2) * dt * (tau + dt / 2 > -WALK_LEAD + i * WALK_FILE[0] ? 1 : 0)));
+    PAIRS.forEach(([i, j], k) => {
+      const ai = alongOf(i, walked[i]);
+      const aj = alongOf(j, walked[j]);
+      const need = gapNeeded(aj - ai);
+      const gap = wanderLane(j, walked[j], aj) - wanderLane(i, walked[i], ai);
+      // (a meeting: where either side could need a step aside, with 0.3 m to spare for the shore's curve between them)
+      if (need + Math.abs(gap) + 0.3 <= 0) return;
+      const last = out[k][out[k].length - 1];
+      if (!last || tau - 1 > last[1]) {
+        out[k].push([tau - 1, tau + 1, 1]);
+        cost[k] = [0, 0];
+      }
+      const m = out[k][out[k].length - 1];
+      m[1] = tau + 1;
+      cost[k][0] += Math.max(0, need - gap);
+      cost[k][1] += Math.max(0, need + gap);
+      m[2] = cost[k][0] <= cost[k][1] ? 1 : -1;
+    });
+  }
+  sides = out;
+  return out;
+}
+/** m/s: wanderer i's pace averaged over SEPARATION.paceOver s either side of τ — what splits a side-step between two
+ * (by the pace now, the one setting off from a stop took its share within a step). Continuous in τ */
+const paceAround = (i: number, tau: number): number => {
+  let sum = 0;
+  for (let k = -4; k <= 4; k++) {
+    const at = tau + (k / 4) * SEPARATION.paceOver;
+    // (its setting off eased over half a second: a hard start stepped the share as each sample passed it)
+    const start = -WALK_LEAD + i * WALK_FILE[0];
+    sum += wanderPace(i, at) * smoothRamp(start - 0.25, start + 0.25, at);
+  }
+  return sum / 9;
+};
+/** m across the beach each wanderer steps aside by (SEPARATION), given where each is (m up the beach, m to sea), τ s
+ * into w5 */
+function stepAside(tau: number, along: number[], off: number[]): number[] {
+  const meetings = passingSides();
+  const push = along.map(() => 0);
+  const v = along.map((_, i) => paceAround(i, tau));
+  for (let round = 0; round < SEPARATION.rounds; round++) {
+    PAIRS.forEach(([i, j], k) => {
+      const m = meetings[k].find(([a, b]) => tau >= a && tau <= b);
+      if (!m) return;
+      const side = m[2];
+      const short = Math.max(0, gapNeeded(along[j] - along[i]) - side * (off[j] + push[j] - off[i] - push[i]));
+      const share = (v[i] + 0.03) / (v[i] + v[j] + 0.06);
+      push[i] -= side * short * share;
+      push[j] += side * short * (1 - share);
+    });
+  }
+  return push;
+}
+
+/** all three at τ (their walks, and where they stand once stepped aside — now and DT s either side, at their paces
+ * now), kept for the last τ asked: each wanderer of a frame asks for the same */
+const DT = 0.25;
+let together: { tau: number; edge: (along: number) => number; walks: ReturnType<typeof walkOf>[]; off: number[]; before: number[]; after: number[] } | null = null;
+function allAt(tau: number, edge: (along: number) => number): NonNullable<typeof together> {
+  if (together && together.tau === tau && together.edge === edge) return together;
+  const walks = WALKERS.map((_, k) => walkOf(k, tau));
+  const offAt = (k: number, w: number): number => edge(alongOf(k, w)) + wanderLane(k, w, alongOf(k, w));
+  const placed = (dt: number): number[] => {
+    const o = walks.map((w, k) => offAt(k, w.walked + w.v * dt));
+    const p = stepAside(tau + dt, walks.map((w, k) => alongOf(k, w.walked + w.v * dt)), o);
+    return o.map((x, k) => x + p[k]);
+  };
+  together = { tau, edge, walks, off: placed(0), before: placed(-DT), after: placed(DT) };
+  return together;
+}
+
+export function wanderer(i: number, t: number, w5: number, edge: (along: number) => number): { along: number; off: number; walked: number; phase: number; amp: number; stoop: number; look: number; heading: number } {
+  const tau = t - w5;
+  const all = allAt(tau, edge);
+  const { walked, phase, v: vNow } = all.walks[i];
+  const along = alongOf(i, walked);
+  const offAt = (w: number): number => edge(alongOf(i, w)) + wanderLane(i, w, alongOf(i, w));
+  const off = all.off[i];
+  // facing its way: the path's turn per metre walked (defined standing still too), with the side-step's per metre
+  const asideTurn = Math.max(-1.2, Math.min(1.2, (all.after[i] - offAt(walked + vNow * DT) - (all.before[i] - offAt(walked - vNow * DT))) / Math.max(2 * vNow * DT, 0.25)));
+  const heading = Math.atan2(offAt(walked + 0.5) - offAt(walked - 0.5) + asideTurn, 1);
   let stoop = 0;
   let look = 0;
   for (const st of WANDER[i].stops) {
@@ -273,6 +385,9 @@ export interface Props {
    * beams would reflect in the real sea, but high in the sky as they are, at the steep angles their reflections are
    * seen at near the eye, the water returns 2–3% of them: nothing beside the stars' glitter.) */
   readonly glows: THREE.Object3D[];
+  /** the wanderers as the water's mirror reads them (mirror.ts setFigures): x, the ground's y, z, height (m; 0 while
+   * they are not drawn) — so their reflections in the swash and the wet sand meet their feet */
+  readonly figures: ReadonlyArray<THREE.Vector4>;
   /** resolves once the Rose's towers are built */
   readonly ready: Promise<void>;
   update(s: PropsState): void;
@@ -755,9 +870,11 @@ export function createProps(): Props {
     return new THREE.Vector3(x, ys.length ? Math.max(...ys) : 0.6, z);
   };
   const raftOf: { current: THREE.Object3D | null } = { current: null };
+  const figures = WALKERS.map(() => new THREE.Vector4());
   return {
     group,
     glows: [beams, fieldGroup, stations],
+    figures,
     ready: Promise.all(ring.map((r) => r.tower.ready)).then(() => undefined),
     setPixelAngle(rad) {
       fieldU.pixelAngle.value = rad;
@@ -1034,6 +1151,7 @@ export function createProps(): Props {
 
       // THE WALKERS: from behind the eye on its left, along the wet sand at the water's edge, the way the flock went
       walkers.visible = world === 'coast' && t > starts.w5 - WALK_LEAD;
+      figures.forEach((f) => f.set(0, 0, 0, 0));
       if (walkers.visible) {
         const edge = wetSand(s.ground, s.beach);
         walkerShapes.forEach((w, i) => {
@@ -1042,6 +1160,7 @@ export function createProps(): Props {
           const z = s.beach.z - p.along;
           // facing along their way (−z, with its turns: wanderer), turned a little more as they look round
           w.group.position.set(x, Math.max(-0.05, s.ground(x, z)), z);
+          figures[i].set(x, w.group.position.y, z, WALKERS[i].height);
           w.group.rotation.y = p.heading + 0.25 * p.look;
           w.pose(p);
           // the contact shade under the body and each planted foot (CONTACT)

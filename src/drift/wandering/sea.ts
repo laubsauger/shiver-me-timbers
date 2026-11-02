@@ -1354,6 +1354,8 @@ export function createSea(
         (U.sunLight.value as THREE.Vector3).copy(fu.sunLight.value);
         (U.skyLight.value as THREE.Vector3).copy(fu.skyLight.value);
       }
+      // (the wanderers' reflections read where the rays meet them: mirror.ts, the 2026-11-02 note)
+      mirror.setFigures(props && world === 'coast' ? props.figures : []);
       mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
     },
   };
