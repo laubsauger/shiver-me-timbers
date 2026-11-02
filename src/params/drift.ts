@@ -195,6 +195,25 @@ export interface DriftParams {
   seaAo: number;
   /** m — how far an occluder reaches in the sea acts (contact and crevice scale: a log's girth, a trunk's foot) */
   seaAoRadius: number;
+  /**
+   * THE RADIO STORY IN ACT 3, three pieces, each OFF by default so a master render is unchanged until the user has
+   * seen it (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; switched for a review with
+   * `--setup 'd.params.radioCall = true'`, read every frame):
+   *
+   *   radioCall      move 1, c4: the dial wakes, our masthead lamp calls and nothing answers, ~8 s of stars and surf,
+   *                  a second, shorter call, and one lamp low ahead answers the same rhythm on the music's step
+   *                  (447.93 s); the raft turns its bow toward it and the Rose wakes outward from it, high overhead
+   *                  (roseTraffic.ts CALL, ANSWER, CASCADE; props.ts)
+   *   radioOperator  open question 6, a prototype: one of the three kneels at the dial on deck, lit by it (crew.ts
+   *                  'kneel')
+   *   radioEnding    move 7, w6, a prototype (it commits the game's lore): our island's dark mast lights, the far
+   *                  rafts' lanterns drift in toward our beach, the Rose's traffic turns seaward and falls quiet, and
+   *                  on the music's decay one faint pulse in Act 1's two colours climbs from the sea to the one place;
+   *                  every lamp flares once in answer and gets nothing back (roseTraffic.ts ENDING)
+   */
+  radioCall: boolean;
+  radioOperator: boolean;
+  radioEnding: boolean;
 }
 
 export const driftParams: DriftParams = registerParams(
@@ -293,6 +312,9 @@ export const driftParams: DriftParams = registerParams(
     // (1.8 m, not the 1 m it was built at: at 1 m it darkened by at most 20/255, and the trees and the raft still
     // read "pasted on" — the reach of a crown's or a cabin's shade is metres, 2026-10-29)
     seaAoRadius: 1.8,
+    radioCall: false,
+    radioOperator: false,
+    radioEnding: false,
   },
   {
     first: { min: 0, max: 60, step: 0.5 },

@@ -21,7 +21,7 @@
 import * as THREE from 'three/webgpu';
 import { float, positionLocal, sin, vec3 } from 'three/tsl';
 
-export type CrewPose = 'hug' | 'lean' | 'stand';
+export type CrewPose = 'hug' | 'lean' | 'stand' | 'kneel';
 
 export interface CrewLook {
   /** sRGB hex: shirt, shorts, skin, hair */
@@ -55,6 +55,11 @@ const sym = (p: V): [V, V] => [p, [-p[0], p[1], p[2]]];
  * THE POSES (m). `hug`: sitting on the deck, knees up, forearms over the knees, leaning a little into them — how people
  * sit on a raft's deck for hours. `lean`: sitting with the legs out, one knee drawn up a little, leaning back on the
  * hands. `stand`: the weight on one leg, the other knee eased, the right hand on the hip, the left arm hanging.
+ * `kneel` (the 2026-11-02 next-level review, open question 6: "one figure at the dial, lit by it"; props.ts
+ * THE OPERATOR): on both knees, sitting half back on the heels with the feet flat behind, the body bent forward over
+ * something on the deck ~0.5 m ahead — the right hand on it (a dial: the wrist ~0.3 m over the deck, the case's top
+ * at 0.22), the left braced on the left thigh, the head bowed to it. Lengths as the others': thigh ~0.5 m, shin ~0.48,
+ * pelvis to neck ~0.53.
  */
 const POSES: Record<CrewPose, Skeleton> = {
   hug: {
@@ -80,6 +85,18 @@ const POSES: Record<CrewPose, Skeleton> = {
     shoulder: sym([0.18, 0.59, 0.15]),
     elbow: sym([0.25, 0.33, 0.25]),
     wrist: sym([0.25, 0.05, 0.32]),
+  },
+  kneel: {
+    pelvis: [0, 0.45, 0.05],
+    neck: [0, 0.92, -0.2],
+    head: [0, 1.0, -0.32],
+    hip: sym([0.09, 0.43, 0.06]),
+    knee: sym([0.12, 0.07, -0.3]),
+    ankle: sym([0.1, 0.07, 0.18]),
+    toe: sym([0.1, 0.03, 0.33]),
+    shoulder: sym([0.18, 0.87, -0.17]),
+    elbow: [[0.21, 0.6, -0.3], [-0.24, 0.62, -0.27]],
+    wrist: [[0.07, 0.31, -0.48], [-0.17, 0.42, -0.36]],
   },
   stand: {
     pelvis: [0, 0.95, 0],

@@ -25,6 +25,9 @@
  * frame renders on its own.
  */
 
+import { driftParams } from '../../params/drift';
+import { ANSWER_AT, ANSWER_TURN } from './roseTraffic';
+
 export type BeatName = 'c1' | 'c2' | 'c3' | 'c4' | 'w1' | 'w2' | 'w3' | 'w4' | 'w5' | 'w6';
 export type WorldName = 'flood' | 'open' | 'coast';
 
@@ -233,6 +236,22 @@ const POSE_KEYS: PoseKey[] = [
   // w1: under sail along the coast, as in c2
   { beat: 'w1', at: 6, pose: { bearing: SAILING.bearing, distance: SAILING.distance, height: SAILING.height } },
 ];
+/**
+ * THE SAME UNDER radioCall (params/drift.ts; the 2026-11-02 next-level review, move 1: "The raft slowly swings its bow
+ * toward it. The eye does not turn"): c4's swing back onto the course is held until the answer (roseTraffic.ts
+ * ANSWER_AT, the raft still broadside from c3, bow left), then the bow comes round toward the lamp that answered
+ * (ANSWER_TURN.heading, 40° left, by ANSWER_TURN.to s into c4) — and back onto the coast's course in w1's dark, after
+ * its pose key, before first light. The eye's own keys are untouched.
+ */
+const POSE_KEYS_CALL: PoseKey[] = POSE_KEYS.flatMap((k): PoseKey[] => {
+  if (k.beat === 'c4' && k.pose.heading !== undefined)
+    return [
+      { beat: 'c4', at: ANSWER_AT, pose: {} },
+      { beat: 'c4', at: ANSWER_TURN.to, pose: { heading: ANSWER_TURN.heading * D } },
+    ];
+  if (k.beat === 'w1') return [k, { beat: 'w1', at: ANSWER_TURN.back, pose: { heading: SAILING.heading } }];
+  return [k];
+});
 
 /** s into c4 the sail is struck over, as the night falls */
 const SAIL_STRIKE: [number, number] = [10, 17];
@@ -304,10 +323,17 @@ export function travelled(from: number, t: number, c1End: number): number {
  * a dissolve both beats draw the raft here, so it never jumps; past w2's step-off the eye leaves it (coast()).
  */
 export function raftPose(t: number, c1End: number, rest: RaftPose): RaftPose {
+  const pose = posed(POSE_KEYS, t, c1End, rest);
+  // (radioCall turns the bow alone: the eye's bearing, distance and height ease between their own keys as before)
+  return driftParams.radioCall ? { ...pose, heading: posed(POSE_KEYS_CALL, t, c1End, rest).heading } : pose;
+}
+
+/** the pose at t eased along `keys` from `rest` */
+function posed(keys: PoseKey[], t: number, c1End: number, rest: RaftPose): RaftPose {
   const { starts } = beatStarts(c1End);
   let from: RaftPose = { ...rest };
   let fromT = -Infinity;
-  for (const k of POSE_KEYS) {
+  for (const k of keys) {
     const at = starts[k.beat] + k.at;
     const to = { ...from, ...k.pose };
     if (t <= at) {

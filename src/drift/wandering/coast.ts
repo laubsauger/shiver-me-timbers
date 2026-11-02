@@ -506,7 +506,7 @@ export interface FilmCoast {
   /** the network's stations that stand on this coast: each one's id and its lamp (world) — the Rose's beams run to
    * them in w6 (props.ts) */
   /** (each with its lamp's answer flare: the Rose's traffic reaches the coast's stations in w6, props.ts) */
-  readonly towers: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare(f: number): void }>;
+  readonly towers: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare(f: number): void; lit(k: number): void }>;
   /** per frame: the terrain's light, haze, swash and the live sea level at our beach, and the towers' lamps */
   update(frame: Omit<IslandFrame, 'waterLevel'>, waterLevelAt: WaterLevelFn): void;
   /** the far islands: each one's world centre, its height function and its rough reach (m) — forest.ts grows
@@ -739,7 +739,7 @@ export function createFilmCoast(at: [number, number], hooks: TerrainBlendHooks, 
     seabed,
     materials,
     ready: Promise.all(towers.map((t) => t.tower.ready)).then(() => undefined),
-    towers: towers.map((t) => ({ id: t.id, lamp: t.tower.lamp, flare: (f: number) => t.tower.setFlare(f) })),
+    towers: towers.map((t) => ({ id: t.id, lamp: t.tower.lamp, flare: (f: number) => t.tower.setFlare(f), lit: (k: number) => t.tower.setLit(k) })),
     islands: [
       // (the plan's: the spit reaching ~250 m out at +700, the lobe ~440 m in at −660)
       { name: 'ours', box: { x: [bx - 270, bx + 460], z: [bz - 720, bz + 1005] }, heightAt: oursAt, inland: oursInland },

@@ -29,17 +29,42 @@ import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
-import { CASE_FROM, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, caseAfloat, caseOnDeck, createDolphin, flipThrow } from './dolphin';
+import { C3_RAFT, CASE_FROM, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, caseAfloat, caseOnDeck, createDolphin, flipThrow } from './dolphin';
 import { createHardCase } from './hardCase';
 import { dolphinPose } from './dolphin';
 import { CREW, createCrewFigure, createCrewWalker, strideLength } from './crew';
-import { FILM_COAST, FILM_RING, createRadioTower, type RadioTower } from './radioTower';
+import { FILM_COAST, FILM_RING, createRadioTower, nightStep, type RadioTower } from './radioTower';
 import { createFarMotu, farMotuMaterial, type FarMotu } from './farMotu';
 import { farAir } from './farAir';
 import { hash2Cpu } from '../../terrain/noiseCpu';
 import { stationOf, type MastLamp } from '../../radio/network';
 import { beaconLevelNode } from '../../radio/mast';
-import { chatterTraffic, dialFlare, roseLinks, stationFlare, wakeTraffic, type RoseMessage } from './roseTraffic';
+import {
+  CALL,
+  CASCADE,
+  ENDING,
+  WAKE,
+  WAKE_FROM,
+  answerFlare,
+  callLamp,
+  callPulses,
+  cascadeTraffic,
+  chatterTraffic,
+  dialFlare,
+  endingRose,
+  endingTraffic,
+  lastFlare,
+  oursLit,
+  roseLinks,
+  stationFlare,
+  strangerPulse,
+  wakeTraffic,
+  type RoseMessage,
+} from './roseTraffic';
+import { createSignal } from './radioSignal';
+import { createFarLantern } from './farRafts';
+import { lanternNight } from '../../ship/raftLanterns';
+import { domeAhead } from '../undertime/timeline';
 import type { AerialUniforms } from '../../terrain/aerialPerspective';
 
 const smooth = (x: number): number => {
@@ -389,7 +414,7 @@ export interface PropsState {
   /** the sea's height (m) at a world x, z now: what the floating case rides (sea.ts heightAt) */
   water?: (x: number, z: number) => number;
   /** the network's stations that stand on the coast and their lamps (coast.ts): the Rose answers from them in w6 */
-  towers?: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare?(f: number): void }>;
+  towers?: ReadonlyArray<{ id: string; lamp: [number, number, number]; flare?(f: number): void; lit?(k: number): void }>;
 }
 
 export interface Props {
@@ -478,29 +503,73 @@ const ARC_LAMP: [number, number, number] = [1, 0.3, 0.12];
 /** the dial's crackle as the network first answers: × its glow at the peak (roseTraffic.ts dialFlare) */
 const DIAL_FLARE = 2.2;
 
+/**
+ * THE RADIO STORY (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; what is said when:
+ * roseTraffic.ts CALL, CASCADE, ENDING), each piece behind its film param (params/drift.ts), read every frame:
+ *
+ *   radioCall      c4: our masthead lamp (a signal lamp at the raft's truck, dark but for the calls: roseTraffic.ts
+ *                  callLamp) and its calls' pulses (radioSignal.ts) out to the lamp ahead (WAKE_FROM), which answers
+ *                  the same rhythm (answerFlare); the Rose's wake becomes the cascade (cascadeTraffic) over arches
+ *                  raised high (CASCADE.lift), and goes quiet later (CASCADE.quiet)
+ *   radioOperator  c1–w2: the crew's third kneels at the case's spot on the fore-deck, facing the eye across it, so the
+ *                  case lands at their knees and the dial lights them from c4 on (THE OPERATOR)
+ *   radioEnding    w6: our island's mast dark until it lights (oursLit), w6's traffic turned seaward and quiet
+ *                  (endingTraffic, endingRose), the far rafts' lanterns drifting in (HOMECOMING), the stranger's pulse
+ *                  (STRANGER) and every lamp's last flare (lastFlare)
+ */
+/** m over the main mast's top (raft-local: the bounds of its 'mast-main' piece) the signal lamp hangs; and its level
+ * against a far raft's 25 cd lantern (farRafts.ts LANTERN_CD) — at 1, 12 m off, it bloomed into a second Moon over the
+ * sail (the first look, out/drift/review/radio-1102/r1, 438 s) */
+const MAST_LAMP_UP = 0.25;
+const MAST_LAMP_LEVEL = 0.2;
+/** the calls' pulses: × (CALL_NIGHT[0] + CALL_NIGHT[1] · night) — the first call goes out in the dusk (434 s, the Sun
+ * ~2.5° down, the night's own measure near 0, where the Rose's × night would hide it) */
+const CALL_NIGHT: [number, number] = [0.35, 0.65];
+/** THE OPERATOR: m from the case's resting place to the kneeler's, away from the eye (the case between them, so the
+ * dial's light falls on their front as the eye sees it); and × the dial's point light while they are there (×5, the
+ * first look at 448 s, out/drift/review/radio-1102/operator_440-452: the face and shirt burnt to a pale glow, a ghost
+ * rather than a person lit by a dial) */
+const OPERATOR = { off: 0.6, light: 2.5 };
+/** THE FAR RAFTS COME IN (w6, radioEnding): each lantern's beach coordinates (along, off m: beats.ts COAST) at
+ * ENDING.rafts' start and end — across the lagoon in front and to the left, 400–840 m off the eye, each ~60 m nearer
+ * our beach by the end (~1.2 m/s, a raft on a light air), so they close on it rather than sit — and its height (m) */
+const HOMECOMING: Array<{ from: [number, number]; to: [number, number] }> = [
+  { from: [260, 420], to: [225, 360] },
+  { from: [120, 600], to: [100, 530] },
+  { from: [380, 300], to: [340, 250] },
+  { from: [500, 650], to: [450, 570] },
+];
+const HOMECOMING_Y = 1.6;
+/** THE STRANGER (w6, radioEnding): m from the eye its two ends are drawn at (inside the faces' far plane, sea.ts FAR,
+ * 12 km), its start's elevation over the horizon (deg) at ENDING.bearing, and its gain — faint, under a Rose pulse */
+const STRANGER = { dist: 6000, el: 0.4, gain: 0.6 };
+
 /** THE ARC'S PATH (CPU mirror of `arcPath` in createProps): from lamp `a` to lamp `b` (m from the eye) at `u` 0 … 1 — the
  * STRAIGHT CHORD between them as the dome's fisheye draws the sky about the zenith (equidistant: the zenith at 0, the
  * horizon at 1), so the 21 make the rose's figure overhead (a neighbour's an arch ~10° up, the widest pass ~20° from the
- * zenith), at a distance log-interpolated between the lamps' own (so it ends IN each lamp, depth-tested) */
-export function arcPoint(a: THREE.Vector3, b: THREE.Vector3, u: number): THREE.Vector3 {
+ * zenith), at a distance log-interpolated between the lamps' own (so it ends IN each lamp, depth-tested).
+ * RAISED by `lift` 0 … 1 (the 2026-11-02 next-level review: the c4 cascade "passing high overhead"; roseTraffic.ts
+ * CASCADE.lift): the chord's point pulled toward the zenith by lift · 4u(1 − u) of its distance from it, so the ends
+ * stay in their lamps and the middle rises — at 0.5 a neighbour's apex ~50° up, the widest ~80° */
+export function arcPoint(a: THREE.Vector3, b: THREE.Vector3, u: number, lift = 0): THREE.Vector3 {
   const flatOf = (d: THREE.Vector3): THREE.Vector2 => {
     const n = d.clone().normalize();
     const r = Math.acos(Math.min(1, Math.max(-1, n.y))) / (Math.PI / 2);
     const l = Math.max(Math.hypot(n.x, n.z), 1e-9);
     return new THREE.Vector2((n.x / l) * r, (n.z / l) * r);
   };
-  const q = flatOf(a).lerp(flatOf(b), u);
+  const q = flatOf(a).lerp(flatOf(b), u).multiplyScalar(1 - lift * 4 * u * (1 - u));
   const l = Math.max(q.length(), 1e-9);
   const th = (l * Math.PI) / 2;
   const r = a.length() * Math.pow(b.length() / a.length(), u);
   return new THREE.Vector3((q.x / l) * Math.sin(th), Math.cos(th), (q.y / l) * Math.sin(th)).multiplyScalar(r);
 }
 /** deg: the arc's length as the eye sees it */
-export function arcDegrees(a: THREE.Vector3, b: THREE.Vector3): number {
+export function arcDegrees(a: THREE.Vector3, b: THREE.Vector3, lift = 0): number {
   let deg = 0;
-  let p = arcPoint(a, b, 0).normalize();
+  let p = arcPoint(a, b, 0, lift).normalize();
   for (let i = 1; i <= 128; i++) {
-    const q = arcPoint(a, b, i / 128).normalize();
+    const q = arcPoint(a, b, i / 128, lift).normalize();
     deg += (p.angleTo(q) * 180) / Math.PI;
     p = q;
   }
@@ -520,6 +589,11 @@ export function createProps(): Props {
     f.rotation.y = c.rot;
     people.add(f);
   }
+  // THE OPERATOR (radioOperator): the third of them, kneeling at the case's spot instead of standing aft
+  const standing = people.children[2];
+  const kneeler = createCrewFigure('kneel', CREW[2].look);
+  kneeler.visible = false;
+  people.add(kneeler);
   let deckY: number | null = null;
 
   // THE DOLPHIN and THE CASE
@@ -676,13 +750,15 @@ export function createProps(): Props {
   });
   type F = THREE.Node<'float'>;
   type V3 = THREE.Node<'vec3'>;
+  /** the arcs' raise toward the zenith (arcPoint `lift`): 0 but in c4 under radioCall (roseTraffic.ts CASCADE.lift) */
+  const arcLift = uniform(0);
   /** the arc from A to B at u (TSL mirror of `arcPoint`) */
   const arcPath = (A: V3, B: V3, u: F): V3 => {
     const flatOf = (d: V3) => {
       const n = d.normalize();
       return n.xz.div(n.xz.length().max(1e-6)).mul(acos(n.y.clamp(-1, 1)).div(Math.PI / 2));
     };
-    const q = mix(flatOf(A), flatOf(B), u);
+    const q = mix(flatOf(A), flatOf(B), u).mul(float(1).sub(arcLift.mul(u.mul(float(1).sub(u)).mul(4))));
     const l = q.length().max(1e-6);
     const th = l.mul(Math.PI / 2);
     const ra = A.length();
@@ -809,6 +885,28 @@ export function createProps(): Props {
    * window's first; and all of them by time, for the flares */
   let traffic: { all: RoseMessage[]; byLink: RoseMessage[][] } | null = null;
   const lampsFrom = beaconAt.map(() => new THREE.Vector3());
+  /** the arcs' lengths raised for the cascade (CASCADE.lift: its pulses' travel) */
+  const arcDegLift = LINKS.map(([a, b]) => arcDegrees(beaconAt[a].clone().setY(beaconAt[a].y - 2.2), beaconAt[b].clone().setY(beaconAt[b].y - 2.2), CASCADE.lift));
+  /** which params the traffic was laid for (it is laid again when they change: a review's --setup) */
+  let trafficFor = '';
+
+  // THE RADIO STORY (see its constants): our signal lamp, our calls' pulses, the stranger, the far rafts coming in
+  const mastLamp = createFarLantern();
+  beams.add(mastLamp.mesh);
+  const callSignal = createSignal({ core: ARC_CORE, halo: ARC_HALO });
+  beams.add(callSignal.mesh);
+  const matter = new THREE.Color(driftParams.matterColor);
+  const anti = new THREE.Color(driftParams.antimatterColor);
+  const stranger = createSignal({ core: [matter.r, matter.g, matter.b], pair: [anti.r, anti.g, anti.b], halo: [(matter.r + anti.r) / 2, (matter.g + anti.g) / 2, (matter.b + anti.b) / 2] });
+  beams.add(stranger.mesh);
+  // (in the beams' group, which the water's mirror leaves out with every other added light: Props.glows; each lantern
+  // is placed in the world by its own shader, whatever group holds it)
+  const homecoming = HOMECOMING.map(() => createFarLantern());
+  for (const h of homecoming) beams.add(h.mesh);
+  /** raft-local: the signal lamp (found from the mast's piece once the raft is in) */
+  let mastTop: THREE.Vector3 | null = null;
+  const mastAt = new THREE.Vector3();
+  const callA = new THREE.Vector3();
 
   // THE FIELD (Drift 3): Act 1's grammar on the beach, at a breath of its energy
   const P = driftParams;
@@ -917,8 +1015,28 @@ export function createProps(): Props {
           return new THREE.Vector3(x, 0.6, z);
         };
         people.children.forEach((f) => {
-          f.position.copy(footing(f.position.x, f.position.z));
+          if (f !== kneeler) f.position.copy(footing(f.position.x, f.position.z));
         });
+        // the kneeler: where the case comes to rest (its deck spot, skidded on along its flight: CASE_SKID), OPERATOR.off
+        // further from the eye as it stood at the throw (c3's pose, dolphin.ts C3_RAFT; the raft holds it into c4
+        // under radioCall), facing the eye across the case
+        {
+          const { spot, dir } = caseOnDeck();
+          const dl = Math.hypot(dir[0], dir[1]) || 1;
+          const rest: [number, number] = [spot[0] + (dir[0] / dl) * CASE_SKID, spot[1] + (dir[1] / dl) * CASE_SKID];
+          const h = C3_RAFT.heading * (Math.PI / 180);
+          const b = C3_RAFT.bearing * (Math.PI / 180);
+          // (the eye from the raft, in the raft's frame: x across, z toward the bow — dolphin.ts caseOnDeck's axes)
+          const rel: [number, number] = [-Math.sin(b) * C3_RAFT.distance, -Math.cos(b) * C3_RAFT.distance];
+          const side: [number, number] = [-Math.cos(h), -Math.sin(h)];
+          const bow: [number, number] = [-Math.sin(h), Math.cos(h)];
+          const ex = rel[0] * side[0] + rel[1] * side[1];
+          const ez = rel[0] * bow[0] + rel[1] * bow[1];
+          const el = Math.hypot(ex, ez) || 1;
+          kneeler.position.copy(footing(rest[0] - (ex / el) * OPERATOR.off, rest[1] - (ez / el) * OPERATOR.off));
+          // (a figure faces its −z: turned so that points at the eye)
+          kneeler.rotation.y = Math.atan2(-ex, -ez);
+        }
         deckAt.copy(footing(deckAt.x, deckAt.z)).add(new THREE.Vector3(0, 0.11, 0));
         deckY = deckAt.y;
         raft.add(people);
@@ -927,6 +1045,11 @@ export function createProps(): Props {
       // raft in plain view as it ran in)
       const aboard = t < starts.w3 + 25;
       people.visible = world !== 'test' && aboard;
+      const callOn = driftParams.radioCall;
+      const operatorOn = driftParams.radioOperator;
+      const endOn = driftParams.radioEnding;
+      standing.visible = !operatorOn;
+      kneeler.visible = operatorOn;
 
       // THE DOLPHIN (dolphin.ts), in the eye's level frame: x right, z ahead
       const c3 = t - starts.c3;
@@ -1026,10 +1149,11 @@ export function createProps(): Props {
       const radio = smooth((t - starts.c4 + 2) / 4) * (1 - smooth((t - starts.w1 - 22) / 10));
       // …and it CRACKLES as the network first answers (roseTraffic.ts dialFlare: the static rises, holds while the
       // station ahead answers, settles), its flicker deeper while it does — but slow, no flashing
-      const crackle = dialFlare(t, starts.c4);
+      // (under radioCall it wakes before our calls, not as the Rose answers: roseTraffic.ts CALL.dial)
+      const crackle = dialFlare(t, starts.c4, callOn ? CALL.dial : WAKE.dial);
       const flicker = 0.85 + (0.15 + 0.25 * crackle) * Math.sin(t * 7.3) * Math.sin(t * 2.1);
       dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle) * 6;
-      radioLight.intensity = (dialGlow.value / 6) * 0.08;
+      radioLight.intensity = (dialGlow.value / 6) * 0.08 * (operatorOn ? OPERATOR.light : 1);
 
       // THE BEAMS: about the eye, in c4's night
       beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
@@ -1048,14 +1172,23 @@ export function createProps(): Props {
       // (and c4's goes quiet over its last seconds, gone before w1's dissolve: the dissolve changes the world in the dark
       // and the night lifts into the morning after it — beams on one side and none on the other crossfaded, the
       // network fading out as the island faded in, the 2026-11-01 review: "abrupt and blendy")
-      const roseIn = world === 'coast' ? smooth((t - (starts.w6 - 6)) / BEAM_RETURN) : 1 - smooth((t - (starts.w1 - 17)) / BEAM_QUIET);
+      // (under radioCall c4's goes quiet later, after the cascade's ring has closed behind us: CASCADE.quiet; under
+      // radioEnding w6's falls quiet before the title: roseTraffic.ts endingRose)
+      const [q0, q1] = callOn ? CASCADE.quiet : [17, 17 - BEAM_QUIET];
+      const roseIn = world === 'coast' ? smooth((t - (starts.w6 - 6)) / BEAM_RETURN) * (endOn ? endingRose(t, starts.w6) : 1) : 1 - smooth((t - (starts.w1 - q0)) / (q0 - q1));
       beamGain.value = world === 'coast' ? 0.4 * roseIn : roseIn;
+      arcLift.value = callOn && world === 'open' ? CASCADE.lift : 0;
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
       // THE TRAFFIC (roseTraffic.ts), once: c4's wake and w6's chatter, pure in the beats' starts
-      if (!traffic) {
-        const wake = wakeTraffic(starts.c4, LINKS, arcDeg, STATIONS.length).messages;
-        const chatter = chatterTraffic(starts.w6 - 6, starts.w6 + spec('w6')!.length + 10, LINKS, arcDeg);
+      // (laid again if a review switches the radio story's params: trafficFor)
+      const want = `${callOn}|${endOn}`;
+      if (!traffic || trafficFor !== want) {
+        trafficFor = want;
+        const wake = (callOn ? cascadeTraffic(starts.c4, LINKS, arcDegLift, STATIONS.length) : wakeTraffic(starts.c4, LINKS, arcDeg, STATIONS.length)).messages;
+        const chatter = endOn
+          ? endingTraffic(starts.w6, LINKS, arcDeg, FILM_RING.indexOf('lagoon'), FILM_RING.indexOf('treetops'), STATIONS.length)
+          : chatterTraffic(starts.w6 - 6, starts.w6 + spec('w6')!.length + 10, LINKS, arcDeg);
         const all = [...wake, ...chatter].sort((x, y) => x.t0 - y.t0);
         traffic = { all, byLink: LINKS.map((_, k) => all.filter((m) => m.link === k)) };
       }
@@ -1071,12 +1204,18 @@ export function createProps(): Props {
       }
       // each station's answer flare: its lamp (on the ring and on the coast), its road, its arcs' ends — c4's quiet
       // and w6's return fade them with the arcs
+      // (and under radioCall the lamp ahead's answer, our call sign back, before the Rose wakes from it; under
+      // radioEnding every lamp's last flare, after the Rose has gone quiet)
+      const last = endOn && world === 'coast' ? lastFlare(t, starts.w6) : 0;
       ring.forEach((r, i) => {
-        const f = stationFlare(t, i, traffic!.all, LINKS) * roseIn;
+        const answer = callOn && world === 'open' && i === WAKE_FROM ? answerFlare(t, starts.c4) : 0;
+        const f = stationFlare(t, i, traffic!.all, LINKS) * roseIn + answer + last;
         flareU[i].value = f;
         r.tower.setFlare(f);
         s.towers?.find((x) => x.id === r.id)?.flare?.(f);
       });
+      // OUR ISLAND'S MAST (radioEnding): dark from w1 until it lights at w6's nightfall
+      s.towers?.find((x) => x.id === 'lagoon')?.lit?.(endOn ? oursLit(t, starts.w6) : 1);
       if (beams.visible) {
         ring.forEach((r, i) => {
           const at = fromCoast ? s.towers!.find((x) => x.id === r.id) : undefined;
@@ -1102,6 +1241,78 @@ export function createProps(): Props {
           (l.first.value as THREE.Vector3).set(f ? f.t0 : NONE, f ? f.dur : 1, f ? dirOf(f) : 1);
         });
       }
+      // OUR CALLS (radioCall, c4): the signal lamp at the masthead flashing them, and each call's pulse from it out to
+      // the lamp ahead — the last to have left (or about to: its head glows a moment before)
+      const calling = callOn && world === 'open' && beams.visible;
+      if (calling && !mastTop) {
+        // (the main mast's piece, raft-local: its top, over its middle — found once the raft is in)
+        const mast = raft.getObjectByName('mast-main');
+        if (mast) {
+          raft.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(mast);
+          mastTop = raft.worldToLocal(new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y + MAST_LAMP_UP, (box.min.z + box.max.z) / 2));
+        }
+      }
+      if (calling && mastTop) {
+        raft.updateWorldMatrix(true, false);
+        mastAt.copy(mastTop).applyMatrix4(raft.matrixWorld);
+        mastLamp.update(mastAt, s.eye, MAST_LAMP_LEVEL * callLamp(t, starts.c4));
+        const pulse = callPulses(starts.c4).filter((p) => p.t0 <= t + 1).pop();
+        const aLamp = callA.copy(mastAt).sub(s.eye);
+        const bLamp = lampsFrom[WAKE_FROM];
+        callSignal.set({
+          path: (u) => arcPoint(aLamp, bLamp, u),
+          t,
+          t0: pulse ? pulse.t0 : 1e7,
+          dur: pulse ? pulse.dur : 1,
+          gain: pulse && t < pulse.t0 + pulse.dur + 8 ? CALL_NIGHT[0] + CALL_NIGHT[1] * s.night : 0,
+        });
+      } else {
+        mastLamp.update(mastAt, s.eye, 0);
+        callSignal.set({ path: () => mastAt, t, t0: 0, dur: 1, gain: 0 });
+      }
+      // THE ENDING (radioEnding, w6): the stranger from the sea's horizon at ENDING.bearing up to the one place (Act
+      // 1's hero grain: front, heroGrainEl up the dome tilted domeTilt — undertime/timeline.ts domeAhead), with a faint
+      // glow on the horizon where it will come from, and at the one place as it arrives; and the far rafts' lanterns
+      // coming in across the lagoon
+      const ending = endOn && world === 'coast' && beams.visible;
+      if (ending) {
+        const w6 = starts.w6;
+        const sp = strangerPulse(w6);
+        const b = (ENDING.bearing * Math.PI) / 180;
+        const e = (STRANGER.el * Math.PI) / 180;
+        const from = new THREE.Vector3(Math.sin(b) * Math.cos(e), Math.sin(e), -Math.cos(b) * Math.cos(e)).applyAxisAngle(UP, s.yaw).multiplyScalar(STRANGER.dist);
+        const spot = new THREE.Vector3(...domeAhead(driftParams.heroGrainEl, driftParams.domeTilt)).applyAxisAngle(UP, s.yaw).multiplyScalar(STRANGER.dist);
+        const arrive = sp.t0 + sp.dur;
+        stranger.set({
+          path: (u) => arcPoint(from, spot, u),
+          t,
+          t0: sp.t0,
+          dur: sp.dur,
+          gain: STRANGER.gain * s.night,
+          // (the horizon's glow from 9 s before it leaves, gone over 3 s after; the one place's as it arrives)
+          // (0.5 was not to be seen at 756 s: the third look, out/drift/review/radio-1102/r3 end_glow_7560)
+          startGlow: 1.5 * smooth((t - (sp.t0 - 9)) / 9) * (1 - smooth((t - sp.t0) / 3)),
+          // (×1.5 at first: at 764.5 s the arrival was a dot among the field's pairs, out/drift/review/radio-1102 ending)
+          endGlow: t > arrive ? 4 * Math.exp(-(t - arrive) / 2.5) * smooth((t - arrive) / 0.6) : 0,
+        });
+      } else {
+        stranger.set({ path: () => mastAt, t, t0: 0, dur: 1, gain: 0 });
+      }
+      {
+        const sunEl = (Math.asin(Math.min(1, Math.max(-1, s.sun.y))) * 180) / Math.PI;
+        const lum = 0.2126 * s.horizon.r + 0.7152 * s.horizon.g + 0.0722 * s.horizon.b;
+        const lit = ending ? lanternNight(sunEl) * nightStep(lum) * (1 + 2 * last) : 0;
+        const k = smooth((t - starts.w6 - ENDING.rafts[0]) / (ENDING.rafts[1] - ENDING.rafts[0]));
+        homecoming.forEach((h, i) => {
+          const { from, to } = HOMECOMING[i];
+          const along = from[0] + (to[0] - from[0]) * k;
+          const off = from[1] + (to[1] - from[1]) * k;
+          tmp.set(s.beach.x - off, HOMECOMING_Y, s.beach.z - along);
+          h.update(tmp, s.eye, lit);
+        });
+      }
+
       // the far islands' air, from this eye under this Sun (farAir.ts; the coast's own update asks the same)
       if (stations.visible) farAir.update(s.eye, s.sun);
 

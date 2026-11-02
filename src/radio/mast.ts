@@ -142,6 +142,9 @@ export interface MastLampOptions {
   /** a level added to the blink, 0 … ~1.5: the film's answer flare, as a message of the Rose reaches the station
    * (props.ts, roseTraffic.ts; absent: none — the game's lamps only blink) */
   flare?: F;
+  /** × the lamp's light, 0 dark … 1 (absent: 1): the film's own island mast, dark until it lights in w6 (props.ts, the
+   * 2026-11-02 next-level review's ending: "at nightfall our island's dark mast lights") */
+  gain?: F;
 }
 
 /**
@@ -496,7 +499,7 @@ export function buildMast(root: THREE.Object3D, site: MastSite, spec: MastSpec, 
       const glowL = float(L.glow.share * I).mul(float(1).sub(T)).div(lampDist.mul(lampDist)).div(vGlow.mul(vGlow).mul(GLOW_AREA));
       light = light.add(glowL.mul(float(1).sub(across.mul(across)).max(0).pow(3))) as F;
     }
-    lm.colorNode = vec4(vec3(...RED).mul(light.mul(L.flare ? level.add(L.flare) : level).mul(L.step ?? float(1))), 1);
+    lm.colorNode = vec4(vec3(...RED).mul(light.mul(L.flare ? level.add(L.flare) : level).mul(L.step ?? float(1)).mul(L.gain ?? float(1))), 1);
     lm.name = 'mast-beacon';
     const beacon = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), lm);
     beacon.name = 'mast-beacon';

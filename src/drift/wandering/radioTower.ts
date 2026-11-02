@@ -185,6 +185,9 @@ export interface RadioTower {
   setTime(t: number): void;
   /** the lamp's answer flare, 0 … ~1.5, added to its blink (the Rose's traffic: roseTraffic.ts) */
   setFlare(f: number): void;
+  /** × the lamp's light, 0 dark … 1 lit (default 1): our island's mast under the ending's prototype (roseTraffic.ts
+   * oursLit) */
+  setLit(k: number): void;
 }
 
 /**
@@ -196,9 +199,10 @@ export function createRadioTower(site: MastSite, spec: MastSpec, o: { air: MastA
   group.name = 'drift-radio-tower';
   const time = uniform(0);
   const flare = uniform(0);
+  const lit = uniform(1);
   const lamp: [number, number, number] = [site.at[0], site.ground(site.at[0], site.at[1]) - MAST.sink + lampOverFoot(spec), site.at[1]];
   const ready = loadMastKit(MAST_KIT_URL).then((root) => {
-    group.add(buildMast(root, site, spec, { time, air: o.air, luxPerUnit: LUX_PER_UNIT, lod: o.lod, lamp: { ...filmLamp(o.haze), flare: flare as unknown as F } }).group);
+    group.add(buildMast(root, site, spec, { time, air: o.air, luxPerUnit: LUX_PER_UNIT, lod: o.lod, lamp: { ...filmLamp(o.haze), flare: flare as unknown as F, gain: lit as unknown as F } }).group);
   });
   return {
     group,
@@ -209,6 +213,9 @@ export function createRadioTower(site: MastSite, spec: MastSpec, o: { air: MastA
     },
     setFlare(f) {
       flare.value = f;
+    },
+    setLit(k) {
+      lit.value = k;
     },
   };
 }
