@@ -13,7 +13,7 @@ import type { SeaDrive } from '../wandering/sea';
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
-import { createLamp, lampState } from './lamp';
+import { LO_PULSES, createLamp, lampState } from './lamp';
 import { frontArrival } from './lifeLayers';
 import { OUR_LOOK, createGalaxies, type GalaxyAtlas, type GalaxySpec } from './galaxies';
 import { diveGalaxies } from './webGalaxies';
@@ -154,6 +154,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   const L0 = lifeState(0, p).frontOrigin;
   const lampFromOrigin = Math.acos(Math.min(1, lampGeo[0] * L0[0] + lampGeo[1] * L0[1] + lampGeo[2] * L0[2])) / D2R;
   const lampPassed = starts.flood + p.loFront + frontArrival(lampFromOrigin, p.loFrontLen) + 0.5;
+  // its blinks, act s: on the score's pulses in the dip, then on the hit that starts the dawn (lamp.ts LO_PULSES)
+  const lampBeats = [...LO_PULSES, p.loDawnAt].map((s) => starts.flood + s);
   const lampAt = new THREE.Vector3();
   const lampN = new THREE.Vector3();
   const lampToEye = new THREE.Vector3();
@@ -280,7 +282,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
         lampToEye.subVectors(eye, lampAt).normalize();
         const above = smoothstep01(lampN.dot(lampToEye) / 0.003);
         const sunEl = Math.asin(Math.max(-1, Math.min(1, lampN.dot(sun)))) / D2R;
-        const ls = lampState(t, { from: starts.overshoot, passed: lampPassed, period: p.loBlink, sunEl, gone: hi - 2 });
+        const ls = lampState(t, { from: starts.overshoot, passed: lampPassed, beats: lampBeats, period: p.loBlink, sunEl, gone: hi - 2 });
         lamp.update(lampAt, centre, ls.gain * above * s.earth, pixelAngle);
       }
       // the pieces: where the gathering point is now (the planet only translates), turning with the field, lit by

@@ -782,6 +782,28 @@ export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
       break;
     }
   }
+  // (LIGHTS OUT's dawn, the 2026-11-02 review, round 2: the pre-dawn after the black was ~18 s of the lamp alone, the
+  // glow over the limb only coming up in its last 4 s. "Let the 252.3 s hit start the limb's dawn glow growing": two
+  // keys between the set and the rise put the Sun `loDawnDepth` behind the limb — where its glow first lifts off the
+  // black — on the score's hit (`loDawnAt` s into the flood), and ON the limb at `loRiseAt` (the next hit, 262.8 s,
+  // where the first Lights Out clip had it clear the limb too), so the glow grows through the whole pre-dawn and the
+  // Sun comes up on the score. With the dawn key alone the monotone curve carried the Sun's fast run behind the planet
+  // on past the hit and it cleared the limb 2 s early, at 261 s. Behind the planet the Sun's own pace does not show;
+  // only the glow it makes does)
+  const depthAt = (t: number, deg: number, from: number, to: number): number => {
+    const g = earthPlace(t, p, tiltDeg);
+    const radius = Math.asin(Math.min(1, EARTH_RADIUS / g.distance));
+    // (searched back from the rise: behind the planet the circle is deepest midway, and as shallow near the set as
+    // near the rise)
+    for (let th = to; th > from; th -= step / 4) if (radius - Math.acos(Math.min(1, dot(at(th), g.centreDir))) >= (deg * Math.PI) / 180) return th;
+    return -1;
+  };
+  const tDawn = starts.flood + p.loDawnAt;
+  const tLimb = starts.flood + p.loRiseAt;
+  const lo = p.lightsOut > 0 && tSet < tDawn && tDawn < tLimb && tLimb < tRise;
+  const limb = lo ? depthAt(tLimb, 0, set, rise + 4 * (Math.PI / 180)) : -1;
+  const dawn = lo && limb > 0 ? depthAt(tDawn, p.loDawnDepth, set, limb) : -1;
+  const keyed = dawn > set + 4 * (Math.PI / 180);
   // its highest point
   let top = 0;
   for (let th = 0; th < set; th += step) if (dot(at(th), up) > dot(at(top), up)) top = th;
@@ -797,8 +819,8 @@ export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
   return {
     pole: sign > 0 ? pole : (pole.map((x) => -x) as Vec3),
     start,
-    times: [starts.earth + ARRIVED * p.earthApproach, starts.timewave + 6, tSet, tRise, starts.landing + p.landing],
-    angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, rise + 4 * D, morning],
+    times: [starts.earth + ARRIVED * p.earthApproach, starts.timewave + 6, tSet, ...(keyed ? [tDawn, tLimb] : []), tRise, starts.landing + p.landing],
+    angles: [0, Math.min(top + 25 * D, (top + set) / 2), set + 4 * D, ...(keyed ? [dawn, limb] : []), rise + 4 * D, morning],
   };
 }
 

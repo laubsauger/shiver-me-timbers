@@ -15,7 +15,7 @@
  */
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import { beatStarts } from './timeline';
-import { FRONT_EDGE_DEG, frontArrival } from './lifeLayers';
+import { FRONT_EDGE_DEG, LO_CLUSTER, frontArrival } from './lifeLayers';
 
 export interface LifeState {
   /** 0..1 how far each time-wave front has travelled (from the limb toward the audience) */
@@ -36,6 +36,8 @@ export interface LifeState {
   front: number;
   frontLen: number;
   frontOrigin: [number, number, number];
+  /** 0..1 the night side's moonlight (earth.ts): 1 but in Lights Out's black, which takes `loMoonDim` of it */
+  moon: number;
 }
 
 /** LIGHTS OUT: s the overshoot's push takes to come in, ending where the front reaches the dome's front edge
@@ -62,6 +64,15 @@ export function lifeState(t: number, p: GetTheDriftParams): LifeState {
   // its default curve is all but flat from ~238 s, ~3 s before the flood; here it is still climbing when the water comes)
   const pushEnd = front + frontArrival(FRONT_EDGE_DEG, p.loFrontLen);
   const push = lo ? p.loPush * smooth((t - (pushEnd - PUSH_S)) / PUSH_S) : 0;
+  // (the moonlight the black takes, the 2026-11-02 review, round 2: "the black is blacker and the lamp is the one thing
+  // left" — from the seat the moonlit ground and clouds of the planet's cap were all that was left to see beside the
+  // lamp. It goes with the cities, from the front leaving the limb to the last cluster out, and comes back with the
+  // dawn: from the score's hit that starts the limb's glow (loDawnAt) to the Sun clearing the limb (loRiseAt; timeline.ts
+  // sunDay))
+  const dark = smooth((t - front) / (p.loFrontLen + LO_CLUSTER));
+  const dawn = starts.flood + p.loDawnAt;
+  const rise = starts.flood + p.loRiseAt;
+  const moon = lo ? 1 - p.loMoonDim * dark * (1 - smooth((t - dawn) / Math.max(1e-6, rise - dawn))) : 1;
   const la = (p.loOriginLat * Math.PI) / 180;
   const lo2 = (p.loOriginLon * Math.PI) / 180;
   return {
@@ -81,5 +92,6 @@ export function lifeState(t: number, p: GetTheDriftParams): LifeState {
     front: lo ? t - front : -1e4,
     frontLen: p.loFrontLen,
     frontOrigin: [Math.cos(la) * Math.cos(lo2), Math.cos(la) * Math.sin(lo2), Math.sin(la)],
+    moon,
   };
 }

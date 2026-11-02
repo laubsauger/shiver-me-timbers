@@ -105,15 +105,30 @@ export interface GetTheDriftParams {
   /** deg, where on Earth the front starts from (latitude, longitude): east of the limb ahead, so it comes over it */
   loOriginLat: number;
   loOriginLon: number;
-  /** deg, where the surviving lamp is (latitude, longitude): on the drowned Po delta's new sea, ~30 km beyond the
-   * debris spiral's centre on the descent's heading — the one place the camera path keeps at a fixed place on the
-   * dome (az 0 ± 0.1°, 20–26° up from 225 s to the sea's hand-over; lamp.ts) */
+  /** deg, where the surviving lamp is (latitude, longitude): on the drowned Po delta's new sea, ~33 km from the raft,
+   * 40° left of the landing's front as seen from it — where c4's answering lamp is (wandering/props.ts STATIONS'
+   * −40°; the 2026-11-02 review, round 2: "it ties into Act 3"). Through the black it holds still ~0.5° left of
+   * straight ahead, 20° up; it swings out with the lit ground to ~−40° as the eye comes down (lamp.ts) */
   loLampLat: number;
   loLampLon: number;
-  /** s, one slow blink of the lamp (lamp.ts) */
+  /** s, one slow blink of the lamp where the score sets none (lamp.ts: before its first pulse, after the dawn's hit) */
   loBlink: number;
   /** s the Sun rises later than the approved flood's (timeline.ts sunDay) */
   loSunLate: number;
+  /** s from the flood's start of the score's hit that starts the dawn (252.3 s of the show), and how far (deg) the
+   * Sun is behind the limb then: the limb's glow comes up out of nothing from it (timeline.ts sunDay; the 2026-11-02
+   * review, round 2: "let the 252.3 s hit start the limb's dawn glow growing"). Measured on the first Lights Out clip
+   * (2048² dome): the glow first lifts off the black with the Sun ~6° behind the limb (at 9° nothing; 4.6° faint; at
+   * the limb bright). Checked from row 8 (the round-2 seat clips, 250–255 s): at 6.5° on the hit a thin arc starts
+   * on it (none at 250.5 s, a faint line at 252.3 s, clear by 254 s); at 5.5° it was already there at 250.5 s, 2 s
+   * before the hit. So 6.5° */
+  loDawnAt: number;
+  loDawnDepth: number;
+  /** s from the flood's start the Sun clears the limb: on the score's next hit (262.8 s of the show) */
+  loRiseAt: number;
+  /** 0..1 how much of the night side's moonlight the black takes (earth.ts; life.ts moon): the ground goes black
+   * behind the front with the cities, so the lamp is the one thing left — given back from the dawn's hit to the rise */
+  loMoonDim: number;
   /** how much further the overshoot pushes past its balance (1 = its full overshoot again) while the front comes */
   loPush: number;
   galaxyRadiance: number;
@@ -170,10 +185,14 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     loFrontLen: 4.3,
     loOriginLat: 45,
     loOriginLon: 30,
-    loLampLat: 45.03,
-    loLampLon: 12.3,
+    loLampLat: 45.22,
+    loLampLon: 12.24,
     loBlink: 3.2,
     loSunLate: 15,
+    loDawnAt: 11.3,
+    loDawnDepth: 6.5,
+    loRiseAt: 21.8,
+    loMoonDim: 0.75,
     loPush: 0.4,
     galaxyRadiance: 1.2,
     volumeRadiance: 0.2,
@@ -228,6 +247,10 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     loLampLon: { min: 11, max: 14, step: 0.01 },
     loBlink: { min: 1.5, max: 8, step: 0.1 },
     loSunLate: { min: 0, max: 30, step: 0.5 },
+    loDawnAt: { min: 0, max: 25, step: 0.1 },
+    loDawnDepth: { min: 0, max: 30, step: 0.5 },
+    loRiseAt: { min: 0, max: 30, step: 0.1 },
+    loMoonDim: { min: 0, max: 1, step: 0.05 },
     loPush: { min: 0, max: 1, step: 0.05 },
     galaxyRadiance: { min: 0, max: 10, step: 0.05 },
     volumeRadiance: { min: 0, max: 10, step: 0.05 },

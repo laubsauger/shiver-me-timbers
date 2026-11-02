@@ -262,6 +262,8 @@ export function createEarth(): Earth {
     waveOrigin: uniform(new THREE.Vector3(0, 0, 1)),
     // (Lights Out's front, lifeLayers.ts floodFront: off, its clock never reaches anything)
     frontClock: uniform(-1e4), frontLen: uniform(4.3), frontOrigin: uniform(new THREE.Vector3(1, 0, 0)),
+    // (and the moonlight its black takes: life.ts moon, 1 but in Lights Out's black)
+    moon: uniform(1),
   };
   const L: LifeUniforms = {
     fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
@@ -497,7 +499,7 @@ export function createEarth(): Earth {
     // the night side is not black: a faint moonlit ambient (the ISS night photographs show the ground and
     // the clouds dimly, cool grey)
     const night = float(1).sub(smoothstep(-0.2, 0.03, muS));
-    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT).mul(night);
+    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT).mul(night).mul(lu.moon);
     const lit = albedo.mul(sun.mul(diffuse).mul(shade).add(sky)).mul(SUN_E / Math.PI);
     // (moonlit, colour goes: the eye's night vision sees the albedo's luminance, not its hue — MOONLIGHT's own cool
     // tint is the night's colour; moonGrey)
@@ -611,7 +613,7 @@ export function createEarth(): Earth {
     // the light falls off as the Sun gets low: the terminator a soft ramp, not a gold-edged line
     const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
     // (the clouds a little dimmer than the ground's moonlight would make them: they read as cut-outs otherwise)
-    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT * 0.25).mul(float(1).sub(smoothstep(-0.2, 0.03, muS)));
+    const moon = vec3(0.5, 0.55, 0.7).mul(MOONLIGHT * 0.25).mul(float(1).sub(smoothstep(-0.2, 0.03, muS))).mul(lu.moon);
     const col = sunlight(float(rc), muS).mul(wrap.add(fwd)).mul(low).add(sky).mul((0.9 * SUN_E) / Math.PI).mul(thick).add(glow).mul(T)
       .add(moon.mul((0.9 * SUN_E) / Math.PI).mul(thick).mul(moonGrey(T)));
     // while the planet is small the shell is left out: its shading is unreliable at those distances (and a
@@ -796,6 +798,7 @@ export function createEarth(): Earth {
       lu.frontClock.value = l?.front ?? -1e4;
       lu.frontLen.value = l?.frontLen ?? 4.3;
       if (l) lu.frontOrigin.value.set(...l.frontOrigin);
+      lu.moon.value = l?.moon ?? 1;
       u.centre.value.copy(o.centre);
       u.sun.value.copy(o.sun).normalize();
       u.presence.value = o.presence;
