@@ -20,24 +20,24 @@ const DEG = 180 / Math.PI;
 const PIXEL_4K = Math.PI / 4096;
 
 /** the ground under the dome's directions over act time, as act.ts places the planet and turns the eye */
-function groundViews(t0: number, t1: number, dt: number, visit: (v: { t: number; lat: number; lon: number; fp: number; night: boolean }) => void): void {
-  const gf = gatherFrame(p, tilt);
+function groundViews(t0: number, t1: number, dt: number, visit: (v: { t: number; lat: number; lon: number; fp: number; night: boolean }) => void, params = p): void {
+  const gf = gatherFrame(params, tilt);
   const up = new THREE.Vector3(...gf.up);
   const levelFront = new THREE.Vector3(...gf.front);
   const level = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(levelFront, up), up, levelFront.clone().negate()));
   const front = new THREE.Vector3(...domeDir(0, 0, tilt));
   front.addScaledVector(up, -front.dot(up)).normalize();
   const rgt = new THREE.Vector3().crossVectors(front, up);
-  const h = (p.heading * Math.PI) / 180;
-  const G0 = geoFrameAt(p.gatherLat, p.gatherLon, up, front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h)));
+  const h = (params.heading * Math.PI) / 180;
+  const G0 = geoFrameAt(params.gatherLat, params.gatherLon, up, front.clone().multiplyScalar(Math.cos(h)).addScaledVector(rgt, -Math.sin(h)));
   // (the map turned by the glide through the lights, as act.ts turns it)
-  const axis = new THREE.Vector3(...glideAxis(p, tilt));
+  const axis = new THREE.Vector3(...glideAxis(params, tilt));
   for (let t = t0; t <= t1; t += dt) {
-    const spin = new THREE.Quaternion().setFromAxisAngle(axis, glideSpin(t, p));
+    const spin = new THREE.Quaternion().setFromAxisAngle(axis, glideSpin(t, params));
     const G = { north: G0.north.clone().applyQuaternion(spin), zero: G0.zero.clone().applyQuaternion(spin), east: G0.east.clone().applyQuaternion(spin) };
-    const pose = earthPose(t, p, tilt);
+    const pose = earthPose(t, params, tilt);
     const c = new THREE.Vector3(...pose.centreDir).multiplyScalar(pose.distance);
-    const lt = landingTurn(t, p, tilt);
+    const lt = landingTurn(t, params, tilt);
     const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -lt.look).slerp(level, lt.k);
     const sun = new THREE.Vector3(...pose.sun);
     for (let el = 0; el <= 90; el += 2) {
@@ -91,11 +91,32 @@ describe('the Earth map levels', () => {
     // views are the flood's last twilight, ~269–273 s, 100–80 m a 4096 pixel, where the flood has put out all but
     // the brightest cores (life.ts); their look under the texel is the shader's (lifeLayers.ts nightLights). A camera
     // change that brings the night closer than this needs that look judged again (docs/drift/earth-data.md)
+    // (on the approved flood: Lights Out off, ?lightsOut=0)
     let closest = Infinity;
-    groundViews(starts.lights, low, 1, (v) => {
-      if (v.night) closest = Math.min(closest, v.fp);
-    });
+    groundViews(
+      starts.lights,
+      low,
+      1,
+      (v) => {
+        if (v.night) closest = Math.min(closest, v.fp);
+      },
+      { ...p, lightsOut: 0 },
+    );
     expect(closest).toBeGreaterThan(70);
+  });
+
+  it('under Lights Out (on by default) the night comes closer only once its lights are all out', () => {
+    // Lights Out holds the Sun back ~15 s (getTheDriftLightsOut.test.ts), so the dive sees the night side closer than
+    // the approved flood ever did (~58 m a 4096 pixel). There are no city lights left to judge there: every light in
+    // view is out by the score's dip, 240.7 show s (159.7 s of the act; getTheDriftLightsOut.test.ts holds that) and
+    // the lamp is lamp.ts's own point, not the Black Marble's texels
+    expect(getTheDriftParams.lightsOut).toBe(1);
+    const DIP_ACT = 240.7 - 81;
+    let closestLit = Infinity;
+    groundViews(starts.lights, low, 1, (v) => {
+      if (v.night && v.t < DIP_ACT) closestLit = Math.min(closestLit, v.fp);
+    });
+    expect(closestLit).toBeGreaterThan(70);
   });
 
   it('the bake builds the boxes the shader reads', () => {

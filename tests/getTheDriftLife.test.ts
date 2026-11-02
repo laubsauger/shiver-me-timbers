@@ -25,7 +25,10 @@ describe("Get the Drift, the planet's life", () => {
     expect(mid('lights', 0.1).lights).toBeLessThan(0.05);
     expect(mid('lights', 1).dusk).toBeCloseTo(1, 6);
     expect(mid('lights', 1).lights).toBeGreaterThan(2.9);
-    expect(mid('overshoot', 1).overshoot).toBeCloseTo(1, 6);
+    // (and under Lights Out, on by default, it pushes on past its balance into the flood's front by loPush: life.ts)
+    expect(p.lightsOut).toBe(1);
+    expect(mid('overshoot', 1).overshoot).toBeCloseTo(1 + p.loPush, 6);
+    expect(lifeState(starts.overshoot + p.overshoot, { ...p, lightsOut: 0 }).overshoot).toBeCloseTo(1, 6);
     // the sea only rises in the flood, and the day comes back with it
     expect(mid('overshoot', 1).sea).toBe(0);
     expect(mid('flood', 1).sea).toBeCloseTo(1, 6);
@@ -57,7 +60,8 @@ describe("Get the Drift, the planet's life", () => {
     };
     const camps = (t: number): number => {
       const s = lifeState(t, p);
-      return smooth(0, 1, s.lights) * (1 - smooth(1.5, 2.5, s.lights)) * (1 - s.overshoot);
+      // (the overshoot held at 1 as the shader holds it, lifeLayers.ts nightLights: Lights Out pushes it past 1)
+      return smooth(0, 1, s.lights) * (1 - smooth(1.5, 2.5, s.lights)) * (1 - Math.min(s.overshoot, 1));
     };
     let back = false;
     for (let t = starts.overshoot; t < starts.drift2 + p.drift2; t += h) {

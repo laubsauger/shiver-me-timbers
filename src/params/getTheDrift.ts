@@ -91,9 +91,11 @@ export interface GetTheDriftParams {
   sunRise: number;
   /**
    * LIGHTS OUT (the 2026-11-02 next-level review, move 2, "the flood as Act 1's wave"; lifeLayers.ts floodFront,
-   * lamp.ts): 1 = on, 0 = the approved flood as it was. Off by default until the user has seen it in a seat-view clip;
-   * `drift.html?lightsOut` turns it on for a page (the review scripts and drift-render.mjs pass it with
-   * `--query lightsOut`). On: the overshoot pushes on into the front, a ragged front of water crosses the lit night
+   * lamp.ts): 1 = on, 0 = the approved flood as it was. ON by default since the 2026-11-02 spine review (it was off
+   * until the user had seen it in seat-view clips; the spine "everything lost, a few remain, they find each other" was
+   * approved that day with it in); `drift.html?lightsOut=0` turns it off for a page, the approved flood for an A/B (the
+   * review scripts and drift-render.mjs pass it with `--query lightsOut=0`). On: the overshoot pushes on into the
+   * front, a ragged front of water crosses the lit night
    * side toward the audience and the cities go out behind it in clusters, 4–5 s of near-black sit in the score's dip,
    * one warm lamp stays lit, blinking slowly, low in front — and only then does the Sun rise, `loSunLate` s later.
    */
@@ -179,8 +181,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     dawnSink: 5,
     orbitLook: 16,
     sunRise: 38,
-    // (?lightsOut: the review switch, read once at load — as wandering/raft.ts reads ?raftplain)
-    lightsOut: typeof location !== 'undefined' && new URLSearchParams(location.search).has('lightsOut') ? 1 : 0,
+    // (?lightsOut=0: the review switch, read once at load — as wandering/raft.ts reads ?raftplain; the lamp is built
+    // only when it is on, act.ts. A bare ?lightsOut, the switch while it was off by default, still means on)
+    lightsOut: typeof location !== 'undefined' && new URLSearchParams(location.search).get('lightsOut') === '0' ? 0 : 1,
     loFront: -5.9,
     loFrontLen: 4.3,
     loOriginLat: 45,

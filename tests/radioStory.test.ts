@@ -14,6 +14,7 @@
  *   - the cascade puts one pulse in flight a side, every crossing ≥ 5 s, reaches every station, and has closed before
  *     c4's Rose starts going quiet (else the ring closes in the fade, unseen); the paths it and our call ran along
  *     keep faint trails through that quiet, gone as the dissolve begins;
+ *   - w6's chatter keeps the same trails, no brighter than c4's, building link by link and gone before the title;
  *   - the raft's bow comes round to the station that answered while the eye's own pose is untouched;
  *   - the ending: our station speaks only once it is lit, the traffic ends converging on one station before the title,
  *     Act 1's pairs leave w6's sky with the Rose (the stranger's braid is the only thing in their colours), and the
@@ -36,8 +37,11 @@ import {
   callPulses,
   callSwell,
   TRAIL,
+  TRAIL_W6,
   trailLevel,
   trailOut,
+  trailOutW6,
+  chatterTraffic,
   cascadeTraffic,
   endingTraffic,
   lastFlare,
@@ -203,12 +207,67 @@ describe('move 1: the paths keep faint trails (radioCall)', () => {
   });
 });
 
+describe('w6: the chatter keeps the same faint trails, and lets them go before the title', () => {
+  // (the 2026-11-02 spine round: c4's trails carried on into w6 — the network's figure builds slowly through w6 too,
+  // "much more faint than we used to have. Otherwise, it's like very empty"; the light is c4's, props.ts ARC_L.trail)
+  const W6 = starts.w6;
+  /** main-drift.ts endTitle: w6 + 38 */
+  const TITLE = W6 + 38;
+  // (as props.ts lays w6's traffic: from 6 s before w6, each link's first message of that window lights its path)
+  const ms = chatterTraffic(W6 - 6, W6 + 70, links, arcFlat);
+  const lit = links.map((_, k) => {
+    const m = ms.find((x) => x.link === k)!;
+    return m.t0 + m.dur;
+  });
+  const at = (t: number, l: number): number => trailLevel(t - l) * trailOutW6(t, W6);
+  const drawn = (t: number): number => lit.filter((l) => at(t, l) > 0.3).length;
+  it('builds the figure link by link over w6, never all at once', () => {
+    // a few strokes as the Rose comes back, most of the figure some 25 s in
+    // (and never brighter than c4's: the low coast arcs run through thicker air, roseTraffic.ts TRAIL_W6.gain)
+    expect(TRAIL_W6.gain).toBeGreaterThan(0);
+    expect(TRAIL_W6.gain).toBeLessThanOrEqual(1);
+    expect(drawn(W6 + 2)).toBeLessThan(links.length / 4);
+    expect(drawn(W6 + 25)).toBeGreaterThan(links.length * 0.7);
+    // never more than a handful of new strokes in any 2 s
+    for (let t = W6 - 6; t < TITLE; t += 0.5) expect(lit.filter((l) => l >= t && l < t + 2).length, `${t - W6}`).toBeLessThanOrEqual(5);
+  });
+  it('is gone before the end title, and so before every one of radioEnding’s moments that follow it', () => {
+    expect(trailOutW6(W6 + TRAIL_W6.out[0], W6)).toBe(1);
+    for (let t = W6 + TRAIL_W6.out[1]; t < W6 + 60; t += 0.5) for (const l of lit) expect(at(t, l)).toBe(0);
+    // gone 3 s or more before the title rises, and with radioEnding's quiet (its Rose out by ENDING.quiet[1])
+    expect(W6 + TRAIL_W6.out[1]).toBeLessThanOrEqual(TITLE - 3);
+    expect(TRAIL_W6.out[1]).toBeLessThanOrEqual(ENDING.quiet[1]);
+    expect(W6 + TRAIL_W6.out[1]).toBeLessThan(strangerPulse(W6).t0);
+    // a fade, not a cut: several seconds long, never faster than ~1/4 of the trails' light a second
+    expect(TRAIL_W6.out[1] - TRAIL_W6.out[0]).toBeGreaterThanOrEqual(6);
+    for (let t = W6 + TRAIL_W6.out[0]; t < W6 + TRAIL_W6.out[1]; t += 0.1) expect(Math.abs(trailOutW6(t + 0.1, W6) - trailOutW6(t, W6)) / 0.1).toBeLessThan(0.25);
+  });
+  it('holds the figure long enough to be seen before it goes', () => {
+    // at least ~10 s with most of it drawn before the fade begins
+    const full = Array.from({ length: 400 }, (_, i) => W6 + i * 0.1).filter((t) => drawn(t) > links.length * 0.6);
+    expect(full.length * 0.1).toBeGreaterThan(10);
+  });
+});
+
 describe('move 1: the raft turns its bow toward the answer, the eye does not turn', () => {
   const rest: RaftPose = { bearing: 0.26, distance: 18, heading: -1.5, height: 3 };
+  // (radioCall is on by default since the 2026-11-02 spine review: each test leaves it as shipped)
+  const shipped = driftParams.radioCall;
   afterEach(() => {
+    driftParams.radioCall = shipped;
+  });
+  it('is in the film by default; off (?radioCall=0), the raft swings as it did in the old c4', () => {
+    expect(shipped).toBe(true);
     driftParams.radioCall = false;
+    // the old c4: broadside (70°) through c3's swing, round onto the coast's course (0) by c4 + 30 s, never held for
+    // an answer (beats.ts POSE_KEYS)
+    const D = 180 / Math.PI;
+    expect(raftPose(C4 + 30, c1End, rest).heading * D).toBeCloseTo(0, 3);
+    driftParams.radioCall = true;
+    expect(raftPose(C4 + 30, c1End, rest).heading * D).toBeGreaterThan(30);
   });
   it('points its bow at the station that answered, then back onto the course before first light', () => {
+    driftParams.radioCall = false;
     const off = (t: number): RaftPose => raftPose(t, c1End, rest);
     const offPoses = Array.from({ length: 2000 }, (_, i) => off(starts.c3 + i * 0.1));
     driftParams.radioCall = true;

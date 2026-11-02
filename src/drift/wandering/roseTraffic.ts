@@ -20,11 +20,13 @@
  *                           its traffic, not all at once.
  *   w6, THE STEADY STATE     the memory of c4's: the quieter chatter of a network long awake — every link a message
  *                           every CHATTER.period s or so (in w6's minute, about one call and its answer each), each
- *                           answered, the first of each link in the window lighting its path.
+ *                           answered, the first of each link in the window lighting its path and leaving a faint
+ *                           trail along it (TRAIL_W6).
  *
  * THE RADIO STORY (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md: "what remained, calls,
  * and is answered" — the user that day: "it's apocalyptic, right? Everyone is wiped out. Only the few rafters
- * remain"). Two of its moves are timed here, each behind a film param (params/drift.ts), off by default:
+ * remain"). Two of its moves are timed here, each behind a film param (params/drift.ts): radioCall ON by default since
+ * the spine review of 2026-11-02, radioEnding off:
  *
  *   c4, CALL, WAIT, ANSWER   (radioCall) the review's diagnosis: "in c4 the radio is answered 1.5 s after it is
  *                           called" — the wake above had no doubt in it. Now the dial wakes, our masthead sends a
@@ -356,6 +358,28 @@ export const trailLevel = (tau: number): number => {
 /** × every trail at sea s `t` (w1: sea s w1 starts): 1, then out over TRAIL.out */
 export const trailOut = (t: number, w1: number): number => {
   const k = Math.min(1, Math.max(0, (t - (w1 - TRAIL.out[0])) / (TRAIL.out[0] - TRAIL.out[1])));
+  return 1 - k * k * (3 - 2 * k);
+};
+/**
+ * W6'S CHATTER KEEPS THE SAME TRAILS (by default; the 2026-11-02 spine round, after the c4 trails: the network's
+ * figure builds slowly through w6 too — "much more faint than we used to have. Otherwise, it's like very empty"). The
+ * same line (props.ts ARC_L.trail, at `gain` of its light) and the same in-and-decay (trailLevel), behind each link's first
+ * message of w6's window: CHATTER.firstOver spreads those over w6's first ~45 s (with this seed 17 of the 21 leave
+ * within its first 14 s, the last at ~37 s), so the figure stands by ~25 s into w6 and its oldest strokes are already
+ * fading. `out` (s into w6, start and end): they go well before the end title (main-drift.ts endTitle, w6 + 38) and
+ * so before every one of radioEnding's moments after it (the stranger at ENDING.stranger.at, the last flare) — and
+ * before that ending's own quiet has ended (ENDING.quiet: the Rose's light out by 38), so the title rises over a sky of
+ * pulses and stars alone, never over the network's drawn figure.
+ *
+ * `gain`: × the trails' light (props.ts ARC_L.trail), against c4's 1. At c4's own light the w6 figure stood as clear
+ * lines from row 8 (the first stills, 728 and 735 s): the coast's arcs run low, through the dense marine air (the full
+ * scatter, props.ts ARC.floor's 0.3 of it aloft, where c4's raised arches carry theirs), so the same core drew ~3×
+ * brighter than c4's trails do from the same seat. ×0.3 brings w6's down to c4's faintness: sensed, not drawn.
+ */
+export const TRAIL_W6 = { out: [26, 34] as [number, number], gain: 0.3 };
+/** × every trail at sea s `t` in w6 (w6: sea s w6 starts): 1, then out over TRAIL_W6.out */
+export const trailOutW6 = (t: number, w6: number): number => {
+  const k = Math.min(1, Math.max(0, (t - w6 - TRAIL_W6.out[0]) / (TRAIL_W6.out[1] - TRAIL_W6.out[0])));
   return 1 - k * k * (3 - 2 * k);
 };
 export const cascadeTravel = (arcDeg: number): number => Math.max(CASCADE.min, TRAVEL.base + arcDeg / CASCADE.speed);

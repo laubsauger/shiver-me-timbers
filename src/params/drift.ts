@@ -196,9 +196,12 @@ export interface DriftParams {
   /** m — how far an occluder reaches in the sea acts (contact and crevice scale: a log's girth, a trunk's foot) */
   seaAoRadius: number;
   /**
-   * THE RADIO STORY IN ACT 3, three pieces, each OFF by default so a master render is unchanged until the user has
-   * seen it (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; switched for a review with
-   * `--setup 'd.params.radioCall = true'`, read every frame):
+   * THE RADIO STORY IN ACT 3, three pieces (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md),
+   * read every frame. radioCall is ON by default since the spine review of 2026-11-02 ("everything lost, a few remain,
+   * they find each other", approved with it in); the other two stay OFF, so a master render leaves them out until the
+   * user has chosen them. Switched for a review with `--setup 'd.params.radioCall = false'` (or `= true` for the
+   * others), or for a page and a render lane with `drift.html?radioCall=0` (the review scripts' and drift-render.mjs's
+   * `--query radioCall=0`: c4's old wake, the one the approved cut had):
    *
    *   radioCall      move 1, c4: the dial wakes, our masthead lamp calls and nothing answers, ~8 s of stars and surf,
    *                  a second, shorter call, and one lamp low ahead answers the same rhythm on the music's step
@@ -312,7 +315,9 @@ export const driftParams: DriftParams = registerParams(
     // (1.8 m, not the 1 m it was built at: at 1 m it darkened by at most 20/255, and the trees and the raft still
     // read "pasted on" — the reach of a crown's or a cabin's shade is metres, 2026-10-29)
     seaAoRadius: 1.8,
-    radioCall: false,
+    // (?radioCall=0: c4's old wake for a page or a render lane, which take no --setup — read once at load, as
+    // getTheDrift.ts reads ?lightsOut=0; a --setup may still switch it either way after boot)
+    radioCall: typeof location === 'undefined' || new URLSearchParams(location.search).get('radioCall') !== '0',
     radioOperator: false,
     radioEnding: false,
   },

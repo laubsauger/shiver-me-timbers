@@ -4,7 +4,8 @@
  * cities go out behind it, the dome goes nearly black in the score's dip, and one warm lamp is still lit, low in
  * front, held at one place on the dome all the way down; only then does the Sun rise. These tests hold what that
  * rests on, measured on the approved camera path (commit 367627d), which Lights Out does not touch:
- *   - off by default, it changes nothing (the next master render is the approved flood);
+ *   - on by default since the spine review of 2026-11-02 (the next master render has it); off (?lightsOut=0), it
+ *     changes nothing (the approved flood);
  *   - the black falls in the score's dip: drift_audio.wav (offset 0) is quietest over 240.2–245.2 s (−28 dB RMS over
  *     5 s, ~11 dB under the 229–237 s plateau; the hit before it at 235.0 s, the next at 252.2 s) — every light in
  *     view is out by DIP_FROM, and none went out before the front left the limb;
@@ -94,8 +95,9 @@ const reaches = (g: THREE.Vector3, ragged: number): number => ACT2 + starts.floo
 const RAG = LO_RAGGED[0] + LO_RAGGED[1];
 
 describe('Lights Out', () => {
-  it('is off by default, and off it is the approved flood: no front, no push, the Sun on its old day', () => {
-    expect(getTheDriftParams.lightsOut).toBe(0);
+  it('is on by default (the spine approved 2026-11-02), and off (?lightsOut=0) it is the approved flood: no front, no push, the Sun on its old day', () => {
+    // (the next master render has it; ?lightsOut=0 is the A/B back to the approved flood: params/getTheDrift.ts)
+    expect(getTheDriftParams.lightsOut).toBe(1);
     // (Lights Out's own tunables turned hard: off, none of them may reach the picture)
     const late = { ...off, loSunLate: 25, loPush: 1, loFront: -9, loDawnAt: 5, loDawnDepth: 20, loRiseAt: 12, loMoonDim: 1 };
     const times: number[] = [];

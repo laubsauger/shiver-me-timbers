@@ -13,8 +13,9 @@
  *             will live), then every settlement grows from its brightest core out to its dim edges; in the
  *             overshoot they brighten, whiten (LED) and run together; under the risen sea they go dark
  *   sea       metres the sea has risen: the measured elevation floods to it
- *   front     LIGHTS OUT (params lightsOut, off by default): the flood as a ragged front of water that crosses the
- *             lit night side toward the audience, the cities going out behind it in clusters (floodFront)
+ *   front     LIGHTS OUT (params lightsOut, on by default; ?lightsOut=0 off): the flood as a ragged front of water
+ *             that crosses the lit night side toward the audience, the cities going out behind it in clusters
+ *             (floodFront)
  */
 import * as THREE from 'three/webgpu';
 import { abs, acos, float, floor, hash, max, min, mix, mx_noise_float, select, smoothstep, step, vec3 } from 'three/tsl';

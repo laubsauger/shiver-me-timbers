@@ -24,6 +24,25 @@ the sea's scene from 313.9 s (a 3 s crossfade during the landing), fade to black
 | Seat check | a seat's view can be reprojected (`drift-seat-view.py`); a check of rough-cut chunks in studio-world's virtual Horizon 18 from audience seats is still to do |
 | Sound | not in the repo: Mark's music sets the beat lengths; Alan Watts over W3–W4 (rights to clear) |
 
+## The spine (2026-11-02)
+
+The story spine was approved on 2026-11-02: **everything lost, a few remain, they find each other**
+(`../drift-narrative/next-level-2026-11-02.md`). Two of its moves are now in the film by default, so the next master
+render has them:
+
+- **Lights Out** (Act 2, ~235–275 s; `getTheDriftParams.lightsOut`): the flood comes as a front across the night
+  side, the cities go out behind it, near-black in the score's dip, one warm lamp stays lit low in front, the Sun
+  rises ~15 s later. The lamp sits 40° left of the landing's front, on the bearing of c4's answering station.
+  `drift.html?lightsOut=0` (`--query lightsOut=0`) gives back the approved flood.
+- **Call, wait, answer** (c4, ~430–485 s; `driftParams.radioCall`): our masthead's pulses go out unanswered, a second
+  shorter call, the lamp ahead (−40°) answers the call sign on the music's step (447.93 s), the raft's bow turns to
+  it, the Rose wakes from it as a raised cascade, and every path keeps a faint trail until the dissolve.
+  `drift.html?radioCall=0` (`--query radioCall=0`) or `--setup 'd.params.radioCall = false'` gives back the old wake.
+- **w6's trails**: the w6 Rose's chatter keeps the same faint trails (`roseTraffic.ts` TRAIL_W6), the figure building
+  link by link over w6's first ~25 s and gone by 744 s, before the end title (748 s).
+
+Still off, prototypes: `radioOperator`, `radioEnding`, `?drownedstub`, `?powerline`, `?linedown`.
+
 ## Act 1, Undertime (0–86 s)
 
 Built (direction v2). Beats: first 0, arise 7, cool 18, wave 38, remain 45, zoom 55, gather 73 s.
@@ -59,7 +78,7 @@ Parts A (galaxies → Milky Way → Earth at dawn) and B (time wave, overshoot, 
 | C1 a raft | 313.9 s | morning (Act 2's) | one continuous descent into a slow follow; the sea's scene takes over in a 3 s crossfade | a small brightness step at the hand-over; the sea too flat on the approach |
 | C2 seafaring | 355 s | sunset | far rafts on the horizon; the sail set | debris at sea reads as black slabs at sunset; near debris reads as plain boxes |
 | C3 the dolphin | 385 s | last light | the dolphin (real outline and motion, wet skin) on the stage left of the sail, in the Sun's road: leaps across the Sun, circles the blue case afloat, noses it, flips it over the horizon onto the bow; the 16:9 turns 10° left for it (2026-11-01) | people on the raft are capsule stand-ins |
-| C4 the network | 430 s | night | night falls in a 22 s time-lapse (was a dissolve the user found too fast); beams between island stations | verify the fall into night; raft lights a touch dimmer |
+| C4 the network | 430 s | night | night falls in a 22 s time-lapse (was a dissolve the user found too fast); the call, the wait and the answer, then the Rose's cascade with faint trails (the spine, above) | verify the fall into night; raft lights a touch dimmer |
 
 The raft throughout: CC0 props and the hard case are in; open are its wake and contact (a collar, bow heap and eddies
 were added; the contact line reads too bright and grey, its shadow on the water is missing, streaks remain), the foam
@@ -75,7 +94,7 @@ and lapping at its sides, the walls' cold repeating weave, the cabin interior, s
 | W3 the field | 590 s | golden hour | Act 1's pairs in balance, faint | none noted |
 | W4 the sandpipers | 635 s | sunset | seventh flock bake: in over the forest, a low pass, the vortex overhead, away over the forest ahead | verify the new bake in a render |
 | W5 wandering on | 675 s | dusk | three walkers (stand-ins) along the waterline | check they walk on after a flock now gone into the trees |
-| W6 the outro | 710 s | night | Milky Way, beams, the field's flicker among the stars, the end title, fade to black | none noted |
+| W6 the outro | 710 s | night | Milky Way, the Rose's chatter with faint trails (gone before the title), the field's flicker among the stars, the end title, fade to black | none noted |
 
 ## Across the film
 

@@ -60,7 +60,9 @@ import {
   stationFlare,
   strangerPulse,
   TRAIL,
+  TRAIL_W6,
   trailOut,
+  trailOutW6,
   wakeTraffic,
   type RoseMessage,
 } from './roseTraffic';
@@ -501,8 +503,9 @@ const PULSE = { head: 0.35, trail: 0.6, trailK: 0.35, long: 4, longK: 0.12 };
  * glow about it, the faint glow a lit path keeps between messages (halo only: no line), a lamp's flare in the haze */
 // (rest 0.0022, then 0.0015: under w6's and c4's night exposure every lit path stayed a soft full line converging on its
 // lamp — the drawn Rose again; at 0.0004 a path is barely sensed between its messages)
-// THE TRAIL (`trail`, radioCall's c4 only: roseTraffic.ts TRAIL; the user, 2026-11-02: "keeping faint lines of where
-// the lines traveled … but like much more faint than we used to have"): a line where a pulse has run, at a twelfth of
+// THE TRAIL (`trail`, radioCall's c4 and w6's chatter: roseTraffic.ts TRAIL, TRAIL_W6; the user, 2026-11-02:
+// "keeping faint lines of where the lines traveled … but like much more faint than we used to have"): a line where a
+// pulse has run, at a twelfth of
 // a pulse's core and an eighth of the drawn tubes' 0.025 the client found "pasted on", with twice the rest's glow (at
 // 0.004 the whole ring stood as clear thin lines at 476 s from row 8, the first round-3 stills: more drawn than sensed)
 const ARC_L = { core: 0.035, halo: 0.01, rest: 0.0004, flare: 0.012, trail: { core: 0.003, halo: 0.0008 } };
@@ -518,7 +521,8 @@ const RADIO_REACH = 7;
 
 /**
  * THE RADIO STORY (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; what is said when:
- * roseTraffic.ts CALL, CASCADE, ENDING), each piece behind its film param (params/drift.ts), read every frame:
+ * roseTraffic.ts CALL, CASCADE, ENDING), each piece behind its film param (params/drift.ts), read every frame —
+ * radioCall on by default since the 2026-11-02 spine review, the other two off:
  *
  *   radioCall      c4: our calls, pulses from our masthead out along the sky to the lamp ahead (WAKE_FROM), and its
  *                  answer, the same rhythm flared on its lamp (answerFlare) and run back to us as pulses (roseTraffic.ts
@@ -778,8 +782,8 @@ export function createProps(): Props {
   /** × a pulse's light, its core and its haze (not a lit path's rest, not a lamp's flare): 1 but in c4 under radioCall
    * (roseTraffic.ts CASCADE.gain: the raised arches run through thin air) */
   const pulseGain = uniform(1);
-  /** × the trails (ARC_L.trail): 0 but in c4 under radioCall (roseTraffic.ts TRAIL, trailOut) — so the default Rose
-   * draws exactly what it drew */
+  /** × the trails (ARC_L.trail): in c4 under radioCall (roseTraffic.ts TRAIL, trailOut) and in w6 (TRAIL_W6,
+   * trailOutW6); 0 in c4's old wake (radioCall off), so that Rose draws exactly what it drew */
   const trailGain = uniform(0);
   /** the arc from A to B at u (TSL mirror of `arcPoint`) */
   const arcPath = (A: V3, B: V3, u: F): V3 => {
@@ -1218,7 +1222,14 @@ export function createProps(): Props {
       beamGain.value = world === 'coast' ? 0.4 * roseIn : roseIn;
       arcLift.value = callOn && world === 'open' ? CASCADE.lift : 0;
       pulseGain.value = callOn && world === 'open' ? CASCADE.gain : 1;
-      trailGain.value = callOn && world === 'open' ? trailOut(t, starts.w1) : 0;
+      // (w6's trails come in with its Rose's return and go before the end title, roseTraffic.ts TRAIL_W6 — and under
+      // radioEnding with its quiet too — at TRAIL_W6.gain of c4's light: the coast's arcs run low, through thick air)
+      trailGain.value =
+        world === 'open'
+          ? callOn
+            ? trailOut(t, starts.w1)
+            : 0
+          : TRAIL_W6.gain * smooth((t - (starts.w6 - 6)) / BEAM_RETURN) * trailOutW6(t, starts.w6) * (endOn ? endingRose(t, starts.w6) : 1);
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
       // THE TRAFFIC (roseTraffic.ts), once: c4's wake and w6's chatter, pure in the beats' starts
