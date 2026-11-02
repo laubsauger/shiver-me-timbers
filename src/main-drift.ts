@@ -39,6 +39,7 @@ import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 import { createSea } from './drift/wandering/sea';
+import { LINE_DOWN_ON, createLineDown } from './drift/wandering/lineDown';
 import { C1_FOLLOW, beatStarts as seaBeats, type BeatName } from './drift/wandering/beats';
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
@@ -158,6 +159,27 @@ async function boot(): Promise<void> {
         c1End: arrival.total - arrival.seaFrom + C1_FOLLOW,
       });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
+  // "THE LINE DOWN", LOOK-DEV ONLY (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option, behind
+  // its gates): with ?linedown the eye goes under the water for its moment in c2–c3. Off, nothing is built. The eye is
+  // put under through the sea's eye hook (`reviewEye`, run once update has placed the eye and the raft, before
+  // anything reads the eye — the ocean decides top or underside from it); the review scripts set that hook too, so it
+  // is wrapped here: the look-dev's eye first, then the review's.
+  const lineDown = LINE_DOWN_ON && !seaTest ? createLineDown(renderer, sea.scene, seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts) : undefined;
+  let lineClock = 0;
+  if (lineDown) {
+    sea.scene.add(lineDown.group);
+    let review = sea.reviewEye;
+    Object.defineProperty(sea, 'reviewEye', {
+      configurable: true,
+      get: () => (eye: THREE.Object3D, raft: { x: number; z: number; heading: number }) => {
+        lineDown.place(lineClock, eye, raft);
+        review?.(eye, raft);
+      },
+      set: (f: typeof review) => {
+        review = f;
+      },
+    });
+  }
   // the sea's clouds in the descent's sky before the hand-over (sea.ts descentSky): the one field, coming in
   if (sea.descentSky) arrival.group.add(sea.descentSky.mesh);
   const total = seaStart + sea.total;
@@ -360,11 +382,13 @@ async function boot(): Promise<void> {
     // each of the sea's beats (a dissolve draws two), put in its state just before it is drawn
     let clear = first && seaK >= 1;
     for (const ps of seaPasses) {
+      lineClock = seaT;
       sea.update(seaT, seaEye, renderer, ps.beat);
+      lineDown?.update(seaT, seaEye);
       dome.setNear(0.05);
       dome.setFar(sea.far);
       dome.setAmbientOcclusion(seaAo());
-      dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * ps.weight * endFade * sea.exposure, clear);
+      dome.accumulate(renderer, sea.scene, seaEye, p.domeTilt, masterSize, weight * seaK * ps.weight * endFade * sea.exposure * (lineDown?.exposure ?? 1), clear);
       clear = false;
     }
   };
@@ -474,6 +498,7 @@ async function boot(): Promise<void> {
   // the Earth's maps (~150 MB of satellite data) load in the background; nothing may be captured before
   await arrival.ready;
   await sea.ready;
+  await lineDown?.ready;
   (window as unknown as Record<string, unknown>).__drift = {
     app,
     /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */

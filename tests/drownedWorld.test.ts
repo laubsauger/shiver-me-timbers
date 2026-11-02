@@ -13,8 +13,11 @@
  *     stands in the swash sim's water, which knows nothing of them;
  *   - the boulevard is one broken line of a few trees — living, dead, snapped, one fallen across it — never a grid
  *     (the user, from the air, 2026-10-30: "the super regular grid"), clear of the raft, the eye and the houses;
- *   - the power line at sea is a straight row running off toward c2's sunset, its nearest pylon a few hundred metres
- *     off, one pylon fallen with its neighbours' conductors hanging toward where it stood;
+ *   - the power line at sea is SHORT (the 2026-11-02 next-level review, move 3: "four or five half-drowned pylons march
+ *     out of the swell toward the sun … the last tower leans", "not a road to the horizon"): five, one span crossing
+ *     the eye's way ahead (the wires sweep overhead), then a straight row seen ACROSS the front, spread out and not
+ *     stacked end-on, each further and nearer the Sun's bearing, the last beside it, leaning, its far conductors
+ *     hanging into the sea; and its wires clear the raft's masthead where it sails under them;
  *   - the kit builds with the buried parts dropped, and every material compiles (real TSL codegen, no GPU).
  */
 import { readFileSync } from 'node:fs';
@@ -22,11 +25,11 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { float, vec3 } from 'three/tsl';
 import { createFilmCoast } from '../src/drift/wandering/coast';
-import { BOULEVARD, CHURCH, LOTS, POWER_LINE, RAFT_CLEAR, SWASH_EDGE, drownedLayout, seaPowerLine } from '../src/drift/wandering/drowned';
+import { BOULEVARD, CABLE_MIN_ANGLE, CHURCH, LOTS, RAFT_CLEAR, SWASH_EDGE, cableGoldSheen, drownedLayout, seaPowerLine } from '../src/drift/wandering/drowned';
 import { beatStarts, coastEye, coastLook, landfall, raftPose } from '../src/drift/wandering/beats';
 import { BUILDING_DIMS, BURIED, buildTown, buildingMatrix, loadTownKit, type BuildingSpec } from '../src/drowned/town';
 import { LEAF, buildFanPalms, crownOf, leafGeometry, trunkAxis, type FanPalmSpec } from '../src/drowned/fanPalm';
-import { buildPowerLine, loadPylonKit } from '../src/drowned/powerLine';
+import { attachAt, buildPowerLine, loadPylonKit } from '../src/drowned/powerLine';
 import { beatSun } from '../src/drift/wandering/beats';
 
 const coast = createFilmCoast([-40000, 0], { ground: () => ({ albedo: vec3(0.5), roughness: float(1) }) } as never);
@@ -181,27 +184,77 @@ describe('the power line at sea', () => {
     return [(Math.atan2(dx * r[0] + dz * r[1], dx * f[0] + dz * f[1]) * 180) / Math.PI, Math.hypot(dx, dz)];
   };
 
-  it('marches off in a straight row toward c2\'s sunset, its nearest pylon a few hundred metres off', () => {
-    expect(line.pylons).toHaveLength(POWER_LINE.count - 1);
+  it('is short: five pylons, one behind, four ahead marching across the front toward c2\'s sunset, spread out', () => {
+    expect(line.pylons).toHaveLength(5);
     const views = line.pylons.map((p) => seen(p.x, p.z));
-    expect(Math.min(...views.map((v) => v[1]))).toBeGreaterThan(300);
-    // (its far end within 10° of the setting Sun's bearing: beats.ts c2, x right of the front, z back)
+    // (one behind us, on the dome's back; the rest ahead)
+    expect(Math.abs(views[0][0])).toBeGreaterThan(90);
+    const ahead = views.slice(1);
+    for (const [bearing] of ahead) expect(Math.abs(bearing)).toBeLessThan(60);
+    expect(ahead[0][1]).toBeGreaterThan(40);
+    expect(ahead[0][1]).toBeLessThan(120);
+    // not a road to the horizon: the last within ~700 m
+    expect(Math.max(...ahead.map((v) => v[1]))).toBeLessThan(700);
+    // marching toward the Sun: each further and further left, the last within 3° of the Sun's bearing (beats.ts c2,
+    // x right of the front, z back)
     const [sx, , sz] = beatSun('c2', starts.c2, c1End);
     const sunBearing = (Math.atan2(sx, -sz) * 180) / Math.PI;
-    expect(Math.abs(views[views.length - 1][0] - sunBearing)).toBeLessThan(10);
-    // straight: every pylon within a few metres of the line through the first and last
-    const a = line.pylons[0];
+    for (let i = 1; i < ahead.length; i++) {
+      expect(ahead[i][1]).toBeGreaterThan(ahead[i - 1][1]);
+      expect(ahead[i][0]).toBeLessThan(ahead[i - 1][0]);
+    }
+    expect(Math.abs(ahead[ahead.length - 1][0] - sunBearing)).toBeLessThan(3);
+    // a row seen across, not stacked end-on in the Sun's glare (the r1 stills): the near three ahead ≥ 2.5° apart
+    for (let i = 1; i < ahead.length - 1; i++) expect(ahead[i - 1][0] - ahead[i][0]).toBeGreaterThan(2.5);
+    // the row is straight: pylons 1.. within a metre of the line through the angle tower and the last
+    const a = line.pylons[1];
     const b = line.pylons[line.pylons.length - 1];
     const L = Math.hypot(b.x - a.x, b.z - a.z);
-    for (const p of line.pylons) expect(Math.abs(((p.x - a.x) * (b.z - a.z) - (p.z - a.z) * (b.x - a.x)) / L)).toBeLessThan(1);
+    for (const p of line.pylons.slice(1)) expect(Math.abs(((p.x - a.x) * (b.z - a.z) - (p.z - a.z) * (b.x - a.x)) / L)).toBeLessThan(1);
   });
 
-  it('has its fallen pylon\'s neighbours\' conductors hanging toward where it stood, no span across the gap', () => {
-    expect(line.snapped).toHaveLength(2);
-    const [s0, s1] = line.snapped!;
-    expect(s0.toward).toEqual(s1.toward);
-    for (const s of line.spans) expect(Math.abs(s.to - s.from)).toBe(1);
-    expect(line.spans.some((s) => s.from === s0.at && s.to === s1.at)).toBe(false);
+  it('crosses the eye\'s way ahead with its first span, so the eye passes under it as it sails on', () => {
+    // the eye sails along its front (beats.ts: the raft's heading 0 through c2): the first span's track must cut the
+    // front axis ahead of it
+    const p0 = line.pylons[0];
+    const p1 = line.pylons[1];
+    const f = [-Math.sin(yaw), -Math.cos(yaw)];
+    const r = [Math.cos(yaw), -Math.sin(yaw)];
+    const side = (p: { x: number; z: number }): number => (p.x - eye.x) * r[0] + (p.z - eye.z) * r[1];
+    const fwd = (p: { x: number; z: number }): number => (p.x - eye.x) * f[0] + (p.z - eye.z) * f[1];
+    expect(Math.sign(side(p0))).toBe(-Math.sign(side(p1)));
+    const k = side(p0) / (side(p0) - side(p1));
+    const crossing = fwd(p0) + (fwd(p1) - fwd(p0)) * k;
+    // within c2's ~45 m of way (beats.ts speedAt: 1.2–1.5 m/s for 30 s), not at its very start
+    expect(crossing).toBeGreaterThan(10);
+    expect(crossing).toBeLessThan(40);
+    // and the row beyond the angle tower lies wholly to the other side (its first span, tower 1 to 2, meets the front
+    // axis ~150 m ahead: past where the eye gets before the coast, ~100 m by c4's end)
+    for (const p of line.pylons.slice(2)) expect(Math.sign(side(p))).toBe(Math.sign(side(line.pylons[2])));
+  });
+
+  it('leans its last tower and hangs its far conductors into the sea beyond it, every span between neighbours', () => {
+    const last = line.pylons[line.pylons.length - 1];
+    expect(Math.abs(last.lean![1])).toBeGreaterThan((5 * Math.PI) / 180);
+    for (const p of line.pylons.slice(0, -1)) expect(Math.abs(p.lean![1])).toBeLessThan(0.02);
+    expect(line.snapped).toHaveLength(1);
+    expect(line.snapped![0].at).toBe(line.pylons.length - 1);
+    const [first] = line.pylons;
+    // (toward the Sun, past the last: further from the first than the last is)
+    const d = (p: [number, number]): number => Math.hypot(p[0] - first.x, p[1] - first.z);
+    expect(d(line.snapped![0].toward)).toBeGreaterThan(d([last.x, last.z]));
+    for (const s of line.spans) expect(s.to - s.from).toBe(1);
+    expect(line.spans).toHaveLength(line.pylons.length - 1);
+  });
+
+  it('hangs its lowest wires clear of the raft\'s masthead (~7 m) over the span we sail under', async () => {
+    const pb = readFileSync(new URL('../assets/models/course_pylon.glb', import.meta.url));
+    const kit = await loadPylonKit(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength) as ArrayBuffer);
+    const [A, B] = line.pylons;
+    const span = Math.hypot(A.x - B.x, A.z - B.z);
+    // the lowest phase at mid-span, as powerLine.ts hangs it (its sag × DEFAULT_SLACK 1.3)
+    const low = Math.min(...[0, 1].map((k) => (attachAt(kit, A, k).y + attachAt(kit, B, k).y) / 2)) - kit.cable.sagPerSpan * span * 1.3;
+    expect(low).toBeGreaterThan(9.5);
   });
 });
 
@@ -306,7 +359,8 @@ describe('the builders, built', async () => {
     const kit = await loadPylonKit(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength) as ArrayBuffer);
     expect(kit.attach).toHaveLength(8);
     const spec = seaPowerLine({ x: 0, z: 0 }, 0);
-    const { group } = buildPowerLine(kit, spec, { origin: [0, 0] });
+    // (with the film's cables: the angular floor and the gold sheen, drowned.ts)
+    const { group } = buildPowerLine(kit, spec, { origin: [0, 0], cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen });
     const meshes: THREE.Mesh[] = [];
     group.traverse((o) => void ((o as THREE.Mesh).isMesh && meshes.push(o as THREE.Mesh)));
     expect(meshes.some((m) => m.name === 'drowned-cables')).toBe(true);

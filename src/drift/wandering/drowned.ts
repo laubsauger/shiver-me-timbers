@@ -46,7 +46,7 @@
  * Every frame a pure function of t: nothing moves but the palms in the wind (`setTime`).
  */
 import * as THREE from 'three/webgpu';
-import { uniform } from 'three/tsl';
+import { cameraPosition, max, positionWorld, pow, uniform } from 'three/tsl';
 import { BUILDING_DIMS, TOWN_KIT_URL, buildTown, loadTownKit, type BuildingKind, type BuildingSpec } from '../../drowned/town';
 import { buildFanPalms, type FanPalms, type FanPalmSpec, type FanPalmState } from '../../drowned/fanPalm';
 import { PYLON_KIT_URL, buildPowerLine, loadPylonKit, type PowerLineSpec, type PylonSpec, type SpanSpec } from '../../drowned/powerLine';
@@ -63,8 +63,16 @@ type Node = any;
  * cluster of thin poles on the horizon); the town's pieces OFF (from the raft's path they did not read at all, from the
  * air as seaweed); the church and the power line at sea OFF until the user has seen them (no new features in
  * tonight's full render). Each one line; the code and its tests stay.
+ *
+ * THE POWER LINE BACK IN, FOR REVIEW (the 2026-11-02 next-level review, move 3, approved as part of the spine: "four
+ * or five half-drowned pylons march out of the swell toward the sun. Their sagging wires are gold threads; the last
+ * tower leans"): switched by `drift.html?powerline` — the review scripts' `--query powerline` — and still OUT of the
+ * cut by default, so the next master draws as the last one did until the user has seen it. A URL switch and not a
+ * live `__drift.params` field because the line is built (its kit loaded, its geometry merged) once, as the sea is
+ * built; the review scripts pass a query before boot and `--setup` only after it (raft.ts `?raftplain` is the same).
  */
-export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: false };
+const QUERY = typeof location !== 'undefined' ? new URLSearchParams(location.search) : undefined;
+export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: QUERY?.has('powerline') ?? false };
 
 /** m: the raft's logs reach this far from its centre, and a little more — the clearance kept round its way */
 export const RAFT_CLEAR = 9;
@@ -191,9 +199,6 @@ export function drownedLayout(beach: { x: number; z: number }, sand: (x: number,
   return { buildings, above, palms };
 }
 
-/** a number in [a0, a1] from `r` */
-const within = (r: () => number, a: [number, number]): number => a[0] + (a[1] - a[0]) * r();
-
 export interface DrownedShallows {
   /** the submerged houses: under the water, out of the water's mirror (sea.ts `underwater`) */
   readonly under: THREE.Group;
@@ -245,61 +250,81 @@ export function createDrownedShallows(
 
 /**
  * THE POWER LINE AT SEA (cue 3: "the top of a pylon line marching out of the water in a straight row with its sagging
- * wires … seen at sunset or against the night sky as a silhouette"). Nine pylons of the circuit's 230 kV kit
- * (powerLine.ts), one missing — fallen, its neighbours' conductors snapped and hanging into the sea toward where it
- * stood — and one leaning on its footing.
+ * wires … seen at sunset or against the night sky as a silhouette"). Five pylons of the circuit's 230 kV kit
+ * (powerLine.ts), each the top 26 m of a tower drowned to its waist.
  *
- * WHERE: laid from where the eye is as c2 begins (sea.ts sailingEye), from POWER_LINE.from (deg right of the front, m)
- * to POWER_LINE.to: the nearest 330 m ahead-left, a pylon 5° tall on the dome; the line running off to the horizon
- * 16° left of the front, into c2's sunset (beats.ts: the Sun 22° left, 3° up) and c3's afterglow, and black against
- * c4's night sky. It stands in the world, not in the debris field's slow turn: the eye drifts past it with the current,
- * the near pylons swinging a little against the far ones. Clear of the far rafts (FAR_RAFTS, sea.ts) and of the ring's
- * stations on the horizon (props.ts: −40°, 10°).
+ * RESTAGED SHORT (the 2026-11-02 next-level review, move 3: "four or five half-drowned pylons march out of the swell
+ * toward the sun. Their sagging wires are gold threads; the last tower leans" — and the contrarian's "short and
+ * partial, not a road to the horizon"). The first staging (2026-10-30, never in a cut) ran nine pylons from 330 m out
+ * to 3.2 km on the horizon: from the eye the nearest stood 5° tall at the far left and the rest were specks in the
+ * glare — a road to the horizon nobody could read. Now five, laid in the eye's level frame at c2's start
+ * (POWER_LINE.pylons: m right, m ahead):
+ *
+ *   - THE SPAN OVER US. The line comes from behind on the left (one pylon, on the dome's back) and crosses the eye's way
+ *     POWER_LINE.cross m ahead to an angle tower ahead-right, so as the eye sails on (~1.5 m/s, beats.ts speedAt) it
+ *     passes under that span ~15 s into c2 (~370 s): the wires come over from ahead, cross the zenith and go down
+ *     behind (the dome lens: "the raft passes under one span, so the wires sweep overhead"). The raft, 15 m
+ *     ahead-right of the eye, sails under the same span within a few seconds of it, its mast under the wires in view.
+ *     No timing or path changed for it: the line stands where the existing way runs.
+ *   - THE MARCH TOWARD THE SUN. At the angle tower the line turns (~78°, a dead-end tower's turn; its cross-arms on the
+ *     bisector) and runs off across the front toward c2's Sun (beats.ts: 22° left, 3° up): ~37° right at 76 m, 10°
+ *     left at 230 m, 18° at 410, the last, leaning, 21° left at 600 m — beside the Sun, its far conductors snapped and
+ *     hanging into the sea where the line ran on. A row seen across, each tower smaller, not one end-on stack: the
+ *     first try ran the line straight through our crossing along the Sun's bearing, and from beside it the four ahead
+ *     stood within 2° of each other inside the Sun's glare, read as one pylon (the 2026-11-02 r1 stills).
+ *   - CLEAR OVER THE RAFT. The lowest conductors hang from 11.35 m on the kit's towers and sag 0.012 × 1.3 of a span
+ *     (powerLine.ts DEFAULT_SLACK): 2.4 m on the 156 m span over us. The raft's masthead stands ~7 m (measured off the
+ *     c2 stills: its yard 14.6° over the eye from 16 m off), so the two towers of that span stand 2 m HIGHER than the
+ *     kit (a drowned ridge under them; sink −2): the lowest wire ~11 m over the sea.
+ *   - THE 15° TILT (the dome rim rule: ahead, nothing more than 0.27× its distance under the eye is on the dome): the
+ *     towers' feet are in the water and their tops 9–24 m up, all far above that line ahead. The one behind stands at
+ *     the back rim, by design: the span over us rises from behind the audience.
+ *
+ * It stands in the world, not in the debris field's slow turn: the eye drifts past it with the current, the near pylons
+ * swinging against the far ones — the parallax that says how big they are. Through c3 the angle tower is abeam to the
+ * right and the row ahead-left; no wire is overhead when the dolphin comes.
  */
 export const POWER_LINE = {
-  from: [-62, 330] as [number, number],
-  to: [-16, 3200] as [number, number],
-  count: 9,
-  /** the fallen one */
-  missing: 5,
-  /** the one leaning on its footing: index, deg */
-  leaning: [3, 5] as [number, number],
-  /** m: how much lower each stands than the kit (the valley under it deepening and shoaling) */
-  sink: [0, 3] as [number, number],
+  /** m ahead of the eye at c2's start where the span over us crosses the eye's way (between pylons 0 and 1) */
+  cross: 22,
+  /** m right and m ahead of the eye at c2's start: behind-left; the angle tower; the march toward the Sun */
+  pylons: [[-91.9, -55.1], [46, 60.6], [-41, 227.1], [-128, 393.6], [-215, 560.1]] as Array<[number, number]>,
+  /** m each stands lower than the kit (− higher): the span over us on a ridge, the rest deepening */
+  sink: [-2, -2, 0.5, 1.5, 3],
+  /** the one leaning on its footing (the last): index, deg */
+  leaning: [4, 9] as [number, number],
+  /** the conductors snapped at the last tower and hanging into the sea beyond it (the kit's attach indices: the far
+   * side's three phases and earth wire) */
+  snapped: [0, 2, 4, 6],
 };
 
 /** the line from the eye at c2's start (world x, z) and the eye's heading (sea.ts `yaw`: 0 looks toward −z) */
 export function seaPowerLine(eye: { x: number; z: number }, yaw: number): PowerLineSpec {
   const front = [-Math.sin(yaw), -Math.cos(yaw)];
   const right = [Math.cos(yaw), -Math.sin(yaw)];
-  const at = ([bearing, dist]: [number, number]): [number, number] => {
-    const b = (bearing * Math.PI) / 180;
-    return [eye.x + (front[0] * Math.cos(b) + right[0] * Math.sin(b)) * dist, eye.z + (front[1] * Math.cos(b) + right[1] * Math.sin(b)) * dist];
-  };
-  const a = at(POWER_LINE.from);
-  const b = at(POWER_LINE.to);
-  const along = Math.atan2(b[0] - a[0], b[1] - a[1]);
+  const world = ([r, a]: [number, number]): [number, number] => [eye.x + right[0] * r + front[0] * a, eye.z + right[1] * r + front[1] * a];
+  const at = POWER_LINE.pylons.map(world);
+  const n = at.length;
+  /** rad: the kit's +z along world (dx, dz) */
+  const way = (dx: number, dz: number): number => Math.atan2(dx, dz);
   const r = createRng(2100 + 63);
-  const pylons: PylonSpec[] = [];
-  const n = POWER_LINE.count;
-  for (let i = 0; i < n; i++) {
-    const k = i / (n - 1);
+  const pylons: PylonSpec[] = at.map(([x, z], i) => {
+    // each tower's cross-arms square to the line, an angle tower's on the bisector of its two spans
+    const inW = i > 0 ? way(x - at[i - 1][0], z - at[i - 1][1]) : way(at[1][0] - x, at[1][1] - z);
+    const outW = i + 1 < n ? way(at[i + 1][0] - x, at[i + 1][1] - z) : inW;
+    const yaw = Math.atan2(Math.sin(inW) + Math.sin(outW), Math.cos(inW) + Math.cos(outW));
     const lean = i === POWER_LINE.leaning[0] ? (POWER_LINE.leaning[1] * Math.PI) / 180 : (r() - 0.5) * 0.02;
-    pylons.push({ x: a[0] + (b[0] - a[0]) * k, z: a[1] + (b[1] - a[1]) * k, yaw: along + (r() - 0.5) * 0.03, lean: [(r() - 0.5) * 0.01, lean], sink: within(r, POWER_LINE.sink) });
-  }
-  const m = POWER_LINE.missing;
+    return { x, z, yaw: yaw + (r() - 0.5) * 0.03, lean: [(r() - 0.5) * 0.01, lean], sink: POWER_LINE.sink[i] };
+  });
   const spans: SpanSpec[] = [];
-  for (let i = 0; i + 1 < n; i++) if (i !== m && i + 1 !== m) spans.push({ from: i, to: i + 1 });
-  const gone: [number, number] = [pylons[m].x, pylons[m].z];
+  for (let i = 0; i + 1 < n; i++) spans.push({ from: i, to: i + 1 });
+  const [lx, lz] = at[n - 1];
+  const [px, pz] = at[n - 2];
   return {
-    // (the fallen one is not drawn: its place is only where its neighbours' broken conductors point)
-    pylons: pylons.map((p, i) => (i === m ? null : p)).filter((p): p is PylonSpec => p !== null),
-    // (indices shift past the missing one)
-    spans: spans.map((s) => ({ from: s.from - (s.from > m ? 1 : 0), to: s.to - (s.to > m ? 1 : 0) })),
-    snapped: [
-      { at: m - 1, toward: gone, attach: [1, 3, 6] },
-      { at: m, toward: gone, attach: [0, 4] },
-    ],
+    pylons,
+    spans,
+    // (the line ran on toward the Sun: the next tower is gone under the water, its conductors hang toward it)
+    snapped: [{ at: n - 1, toward: [lx + (lx - px), lz + (lz - pz)], attach: POWER_LINE.snapped }],
   };
 }
 
@@ -308,6 +333,32 @@ export interface SeaPowerLine {
   readonly ready: Promise<void>;
   readonly spec: PowerLineSpec;
 }
+
+/**
+ * THE WIRES AS GOLD THREADS (the 2026-11-02 next-level review, move 3: "their sagging wires are gold threads"; "the
+ * wires must stay at least 2 px at 4096²").
+ *
+ * WIDTH. A 3.6 cm conductor is 0.3 px of the 4096² master at 150 m and 0.1 px at 600 m: the pixel floor every thin
+ * thing has (core/minWidth.ts, 1.25 face px) would draw it ~1.1 master px, and the review asks 2. So the cables are
+ * never narrower than CABLE_MIN_ANGLE — 2 px of the master's 180° over 4096 — resolved in each face's own pixels
+ * (powerLine.ts `cableMinAngle`), the widening paid back as coverage as always: a span fades with distance evenly,
+ * a line, never a dotted one, and a far span is fainter than a near one, as it should be. Overhead (the span we pass
+ * under, ~10 m up) a wire is ~3 px wide on its own.
+ *
+ * LIGHT. Against the sunset a dull grey wire at a fraction of a pixel's coverage is nothing. What makes real wires
+ * read as threads of light at sunset is the Sun scattered forward off them, toward an eye looking into the light —
+ * blazing near the Sun, dark lines away from it. SHEEN is that: the Sun's light (the scene's own sun, as sea.ts sets
+ * it each frame) × a forward lobe about the Sun's direction (SHEEN_POWER: half at ~14° off it), added as emission. At
+ * the pixel floor's coverage (~0.15 at 150 m) a sheen ~SHEEN × the Sun's radiance-per-steradian stands a little over
+ * the glowing sky round the Sun, so the spans toward it read gold and the far ones fade; overhead and behind, away
+ * from the Sun, the lobe is ~0 and the wires are what they are — dark lines on the sky.
+ */
+/** rad: 2 px of the 4096² dome master (180° over 4096 px) */
+export const CABLE_MIN_ANGLE = (2 * Math.PI) / 4096;
+/** × the Sun's light (its colour × SUN_E / π): the forward sheen's peak, toward the Sun */
+const SHEEN = 6;
+/** the forward lobe's power on cos(angle off the Sun) */
+const SHEEN_POWER = 30;
 
 /** the line at sea, melting into `horizon` (seaSky.ts: the sky's radiance at the horizon, updated per frame) over the
  * high island's air (coast.ts HIGH_AIR: the open sea's own marine haze) */
@@ -319,7 +370,28 @@ export function createSeaPowerLine(renderer: THREE.WebGPURenderer, o: { eye: { x
   const ready = !SUNKEN_SET.powerLine
     ? Promise.resolve()
     : loadPylonKit(PYLON_KIT_URL, renderer).then((kit) => {
-        group.add(buildPowerLine(kit, spec, { origin: [o.eye.x, o.eye.z], air: expAir(haze as never, HIGH_AIR) }).group);
+        group.add(buildPowerLine(kit, spec, { origin: [o.eye.x, o.eye.z], air: expAir(haze as never, HIGH_AIR), cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen }).group);
       });
   return { group, ready, spec };
+}
+
+/**
+ * The cables' forward sheen (see CABLE_MIN_ANGLE): the Sun's direction and light read off the scene's sun (sea.ts
+ * `sky.sunLight`, set from t before anything draws: a pure function of t) as the cables are drawn, so nothing in the
+ * sea's own wiring changes for it.
+ */
+export function cableGoldSheen(m: THREE.MeshStandardNodeMaterial, mesh: THREE.Mesh): void {
+  const sunDir = uniform(new THREE.Vector3(0, 1, 0));
+  const sunLight = uniform(new THREE.Color(0, 0, 0));
+  const view = positionWorld.sub(cameraPosition).normalize();
+  const lobe = pow(max(view.dot(sunDir), 0), SHEEN_POWER);
+  m.emissiveNode = sunLight.mul(lobe.mul(SHEEN));
+  let sun: THREE.DirectionalLight | null = null;
+  mesh.onBeforeRender = (_r, scene) => {
+    if (!sun) scene.traverse((x) => void (!sun && (x as THREE.DirectionalLight).isDirectionalLight && x.castShadow && (sun = x as THREE.DirectionalLight)));
+    if (!sun) return;
+    const s = sun as THREE.DirectionalLight;
+    sunDir.value.copy(s.position).sub(s.target.position).normalize();
+    sunLight.value.copy(s.color).multiplyScalar(s.intensity / Math.PI);
+  };
 }

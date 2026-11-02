@@ -212,11 +212,15 @@ const instanceLinear = Fn((builder: TSLNode) => {
  * Put minimum projected width on a node material whose geometry carries `thinAxis` ({@link computeThinAxes}).
  * `hash`: opaque, coverage as a per-frame hashed discard. `blend`: the caller's transparent material, coverage as
  * opacity. A vertex with no member (w = 0) is untouched and fully covered.
+ *
+ * `minWidthPx` may be a float NODE as well as a number (The Drift's power line, the 2026-11-02 next-level review: its
+ * wires must stay at least ~2 px of the 4096² dome master, an ANGLE, which in a cube face's own pixels depends on the
+ * face size the take draws at — src/drowned/powerLine.ts `cableMinAngle`). A number compiles exactly as it always did.
  */
 export function applyMinWidth(
   material: { positionNode: TSLNode; maskNode?: TSLNode; opacityNode: TSLNode },
   mode: 'hash' | 'blend',
-  minWidthPx: number = THIN_MIN_WIDTH_PX,
+  minWidthPx: number | TSLNode = THIN_MIN_WIDTH_PX,
 ): void {
   const vCoverage = varyingProperty('float', 'vThinCoverage');
   material.positionNode = Fn(() => {
@@ -226,7 +230,7 @@ export function applyMinWidth(
     const world = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
     // a non-member is given a huge radius, so it resolves to widen 1 / coverage 1 with no branch in the maths
     const widthPx = projectedWidthPx(world, select(member, axis.w, float(1e6)));
-    const { widen, coverage } = minWidthWiden(widthPx, float(minWidthPx));
+    const { widen, coverage } = minWidthWiden(widthPx, typeof minWidthPx === 'number' ? float(minWidthPx) : minWidthPx);
     vCoverage.assign(coverage);
     return positionLocal.add(offset.mul(widen.sub(1)));
   })();

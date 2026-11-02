@@ -27,7 +27,7 @@
  * Positions are kept LOCAL to `origin` (the group stands there), as town.ts's are.
  */
 import * as THREE from 'three/webgpu';
-import { float, mix, normalMap, normalWorldGeometry, positionLocal, positionWorld, texture, uniform, vec2 } from 'three/tsl';
+import { cameraProjectionMatrix, float, max, mix, normalMap, normalWorldGeometry, positionLocal, positionWorld, texture, uniform, vec2, vec4, viewport } from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { applyMinWidth, computeThinAxes, THIN_AXIS_ATTRIBUTE, THIN_BLEND_RENDER_ORDER, THIN_MIN_WIDTH_PX } from '../core/minWidth';
 import { SPRAY_OVER_WATER_ORDER } from '../foam/sprayPool';
@@ -89,6 +89,16 @@ export interface PowerLineOptions {
   origin: [number, number];
   /** the air it is seen through (radio/mast.ts MastAir's output) */
   air?: { output(material: THREE.NodeMaterial): void };
+  /**
+   * rad: the cables are never drawn narrower than this ANGLE (and never under THIN_MIN_WIDTH_PX), the widening paid
+   * back as coverage as always — so a far span fades out evenly instead of thinning to nothing. The Drift's: the
+   * 2026-11-02 next-level review asks that its wires "stay at least 2 px at 4096²" of the dome master, an angle
+   * (2 px of the master's 180° over 4096), which in a cube face's own pixels depends on the size the take draws its
+   * faces at — so it is resolved per pass, from the pass's projection and viewport. Unset: the pixel floor alone.
+   */
+  cableMinAngle?: number;
+  /** the caller's last word on the cables' material (The Drift's gold sheen toward a low Sun, drift/wandering/drowned.ts) */
+  cableLook?: (material: THREE.MeshStandardNodeMaterial, mesh: THREE.Mesh) => void;
 }
 
 /** m: the footing a pylon leans on, under its still-water origin (pylon.py: "footings 40 m down") */
@@ -209,13 +219,17 @@ export function buildPowerLine(kit: PylonKit, line: PowerLineSpec, o: PowerLineO
     // (weathered aluminium conductor steel-reinforced: dull grey, dark against an evening sky)
     const cm = new THREE.MeshStandardNodeMaterial({ color: 0x4a4e50, roughness: 0.5, metalness: 0.7 });
     cm.name = 'drowned-cables';
-    applyMinWidth(cm, 'blend', THIN_MIN_WIDTH_PX);
+    // (an angle's width in this pass's pixels at the view's centre: α·P₀₀·viewport.z/2, as projectedWidthPx measures
+    // a member — core/minWidth.ts)
+    const floor = o.cableMinAngle ? max(float(THIN_MIN_WIDTH_PX), float(o.cableMinAngle).mul(cameraProjectionMatrix.mul(vec4(1, 0, 0, 0)).x.abs()).mul(viewport.z).mul(0.5)) : THIN_MIN_WIDTH_PX;
+    applyMinWidth(cm, 'blend', floor);
     cm.transparent = true;
     cm.depthWrite = false;
     o.air?.output(cm);
     const cables = new THREE.Mesh(merged, cm);
     cables.name = 'drowned-cables';
     cables.renderOrder = SPRAY_OVER_WATER_ORDER;
+    o.cableLook?.(cm, cables);
     group.add(cables);
   }
   return { group };
