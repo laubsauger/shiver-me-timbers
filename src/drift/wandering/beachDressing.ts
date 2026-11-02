@@ -4,10 +4,10 @@
  * tropical-coast-lagoon): pale coral pebbles and rubble, shells, a few bleached sticks, and at the highest tides'
  * reach a wrack line of dried seagrass, leaves and twigs. Dark basalt pebbles would be another beach. Scanned CC0
  * pieces (fetched by scripts/drift-pbr-fetch.py, cut down by scripts/drift-prop-export.py and
- * scripts/drift-shell-export.py), instanced, seeded, each turned to lie as such a thing lies and sunk into the sand:
+ * scripts/drift-shell-export.py), instanced, seeded, each laid as such a thing lies and sunk into the sand:
  *
  *   pebble, cobble  Poly Haven namaqualand_boulder_05, a rounded stone: worn coral pebbles (5–12 cm) and a few
- *                   cobbles (8–18 cm), tumbled every way, squashed and stretched, taken to coral's cream-white
+ *                   cobbles (8–18 cm), flattened and stretched, taken to coral's cream-white
  *   stick           Poly Haven dead_quiver_branch_01: a rare bleached stick (8–24 cm)
  *   shell           ambientCG ShellSet001: nine scanned scallops (5–9 cm), most cup-down, some cup-up
  *   conch           Poly Haven lambis_shell, a spider conch (11–15 cm): a few along the walk
@@ -33,6 +33,19 @@
  * wide, with a faint lighter lip round it (the sand it pushed up as it settled); and the piece's own foot takes the
  * sand's colour for a few millimetres over its burial line (sand clinging to it).
  *
+ * LYING AS GRAVITY LEAVES THEM (the user, 2026-11-02, at the sunset walk: "a bunch of weirdly positioned rocks,
+ * stones and pebbles on the beach, sticking up in a weird way, not really lying there as one would expect with
+ * gravity"). The pebbles and cobbles were tumbled uniformly over every turn and squashed along their file's y before
+ * it: a squashed pebble came out a slab, and turned at random most slabs stood on an edge or an end — the fins of the
+ * frames — and the rest leaned any way; each was then dropped by its lowest point under the ground at its middle, so
+ * on the slope the low side of a leaning one hung over the sand. Now every piece is laid AT REST (`restPiece`): its
+ * scan turned so its thinnest principal axis is up (its flattest face down) and its longest along x, the wider of its
+ * two faces down (a scallop's rim on the sand, its cup over it: concave side down), and only then flattened along
+ * that up; placed (`poseOf`) on the ground's normal with a turn about it, a lean of at most LEAN, a share turned
+ * over (`flip`: a shell cup-up, a pebble on its other face); and SEATED as the plants are (seat.ts): the points of
+ * its underside, its footprint, each sunk under the ground beneath it by `sink` of its height — 15–30 % for a stone
+ * or a shell, up to WET_SINK more on the wet sand the waves reach, where the sand builds up round what lies there.
+ *
  * WHAT IS DRAWN: never a speck (the same review: "our sub-pixel rendering is horrendous: I'd much rather have stuff
  * disappear than look like that"; "it just adds noise at the far end"). A piece is drawn only where it spans at
  * least COVERAGE.gone from the eye — 4.5 mrad, ~4.4 px of the 16:9 review at 1280 px over 75° and ~6 of a 4K dome
@@ -52,6 +65,7 @@ import { attribute, exp, float, mix, positionLocal, positionWorld, smoothstep, t
 import { fbm2Cpu } from '../../terrain/noiseCpu';
 import { rng } from '../undertime/web';
 import { beatStarts, coastEye } from './beats';
+import { seatDrop } from './seat';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
@@ -103,10 +117,18 @@ const LIMIT = { height: 0.62, wander: 0.06, half: 0.07 };
 const SWASH: [number, number] = [0.4, 0.52];
 /** m inland (coast.ts `inland`: the vegetation line's own wander included) over which the scrub's litter takes over */
 const VEG: [number, number] = [14, 22];
+/** (deg) the most a piece leans off the ground's normal: settled on its flattest face, a few degrees off it */
+const LEAN = 8;
+/** share of its height a piece is sunk the more on the wet sand, where the swash builds the sand up round it: all of
+ * it under WET[0] m over the sea (the swash and its upper limit, LIMIT), none from WET[1] */
+const WET_SINK = 0.15;
+const WET: [number, number] = [0.55, 0.85];
+/** share of a piece's height (from its lowest point, lying) its underside's footprint is taken over (seat.ts uses 3 %
+ * for a stem: on a scan of ~120 vertices that is one or two points of a pebble's belly) */
+const SEAT_BAND = 0.15;
 
 
 type Name = 'pebble' | 'cobble' | 'stick' | 'shell' | 'conch' | 'leaf' | 'twig';
-type Pose = 'tumble' | 'flat' | 'lie';
 interface Kind {
   file: string;
   /** m: the instance's largest extent */
@@ -116,13 +138,12 @@ interface Kind {
   /** pieces in a group, least and most, within `spread` m of the first */
   group: [number, number];
   spread: number;
-  /** share of its own height sunk into the sand */
+  /** share of its own height (lying at rest: its thinnest extent) sunk into the sand, on the dry sand */
   sink: [number, number];
-  pose: Pose;
-  /** for 'tumble': its height squashed by (and its width stretched by up to 1/squash^0.4) */
+  /** its height (at rest, along the ground's normal) squashed by (and its length stretched by up to 1/squash^0.4) */
   squash?: [number, number];
-  /** for 'flat': the share turned over (a shell cup-up) */
-  flip?: number;
+  /** the share turned over onto its other face (a shell cup-up, a pebble or a leaf on its other side) */
+  flip: number;
   /** the scan's colour taken toward its luminance (0 grey … 1 its own) and normalised by its mean luminance, then
    * one of `tints` (linear albedo, weighted) per instance, varied ±`vary` */
   sat: number;
@@ -152,9 +173,11 @@ const KINDS: Record<Name, Kind> = {
     per: { open: 0.08, limit: 6, wrack: 1.5 },
     group: [1, 5],
     spread: 0.45,
-    sink: [0.3, 0.55],
-    pose: 'tumble',
-    squash: [0.45, 0.95],
+    sink: [0.15, 0.3],
+    // (flattened along its thinnest axis now, which the scan already has at 0.38 of its length: at the tumble's
+    // 0.45 the flattest were 0.17, wafers)
+    squash: [0.6, 1],
+    flip: 0.5,
     // (the scan's mean linear luminance, 0.288: the colour normalised to it before the coral tint)
     sat: 0.2,
     lum: 0.288,
@@ -168,9 +191,9 @@ const KINDS: Record<Name, Kind> = {
     per: { open: 0.006, limit: 0.06, wrack: 0.06 },
     group: [1, 2],
     spread: 0.5,
-    sink: [0.35, 0.55],
-    pose: 'tumble',
-    squash: [0.5, 0.85],
+    sink: [0.15, 0.3],
+    squash: [0.65, 1],
+    flip: 0.5,
     sat: 0.2,
     lum: 0.288,
     tints: CORAL,
@@ -184,7 +207,7 @@ const KINDS: Record<Name, Kind> = {
     group: [1, 1],
     spread: 0,
     sink: [0.2, 0.4],
-    pose: 'lie',
+    flip: 0.5,
     // (weathered grey-brown, not bone: the first pass's bone-white Y shapes read as bones)
     sat: 0.25,
     lum: 0.174,
@@ -201,9 +224,8 @@ const KINDS: Record<Name, Kind> = {
     per: { open: 0.04, limit: 4, wrack: 1 },
     group: [1, 4],
     spread: 0.4,
-    sink: [0.1, 0.45],
-    pose: 'flat',
-    flip: 0.25,
+    sink: [0.15, 0.3],
+    flip: 0.2,
     sat: 1,
     lum: 1,
     tints: [[1, 1, 1, 1]],
@@ -217,8 +239,7 @@ const KINDS: Record<Name, Kind> = {
     group: [1, 1],
     spread: 0,
     sink: [0.15, 0.3],
-    pose: 'flat',
-    flip: 0.3,
+    flip: 0.25,
     sat: 1,
     lum: 1,
     tints: [[1, 1, 1, 1]],
@@ -232,7 +253,7 @@ const KINDS: Record<Name, Kind> = {
     group: [1, 3],
     spread: 0.35,
     sink: [0.1, 0.3],
-    pose: 'lie',
+    flip: 0.5,
     // (dried leaves and seagrass at the tide line: brown-grey, darker than the scan's karoo tan)
     sat: 0.6,
     lum: 1,
@@ -250,7 +271,7 @@ const KINDS: Record<Name, Kind> = {
     group: [1, 2],
     spread: 0.4,
     sink: [0.15, 0.35],
-    pose: 'flat',
+    flip: 0.5,
     // (sun-greyed: the scan's forest-floor twigs are near black, 0.07)
     sat: 0.7,
     lum: 1,
@@ -302,8 +323,9 @@ export interface DressingSite {
 }
 export type DressingKind = Name;
 /** one thing on the sand: world x, z; its largest extent s (m); `fade`, its own share of COVERAGE (1 … FADE_SPREAD:
- * it leaves at that many times the coverage of the least); which piece of its file (0..1); its turn before the
- * slope's; its squash and stretch; the share of its height sunk; its tint (linear) */
+ * it leaves at that many times the coverage of the least); which piece of its file (0..1); its turn from its rest
+ * (`restPiece`) before the slope's (a turn about the up, a small lean, perhaps turned over); its squash and stretch;
+ * the share of its height sunk; its tint (linear) */
 export interface DressingPlace {
   x: number;
   z: number;
@@ -440,19 +462,12 @@ export function placeBeachDressing(o: DressingSite): Record<DressingKind, Dressi
         const al = beach.z - z;
         if (s > 0.06 && al > 3 && off > -6.6 && off < -4) continue;
         if (o.palms.some(([px, pz]) => (px - x) ** 2 + (pz - z) ** 2 < 0.7 * 0.7)) continue;
-        // its turn: tumbled any way, or lying on its belly (turned over, a share), or a long thing laid on its side
+        // its turn from its rest (lying on its flattest face, `restPiece`): a share turned over onto its other face
+        // (about its length), a small lean any way, then any turn about the up
         const q = new THREE.Quaternion();
-        if (k.pose === 'tumble') {
-          // (uniform over all turns, Shoemake)
-          const ua = r();
-          const ub = 2 * Math.PI * r();
-          const uc = 2 * Math.PI * r();
-          q.set(Math.sqrt(1 - ua) * Math.sin(ub), Math.sqrt(1 - ua) * Math.cos(ub), Math.sqrt(ua) * Math.sin(uc), Math.sqrt(ua) * Math.cos(uc));
-        } else if (k.pose === 'lie') {
-          // (the scan stands along y: laid along z, rolled about its length)
-          q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), 2 * Math.PI * r()).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2));
-          q.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), (r() - 0.5) * 0.5));
-        } else if (r() < (k.flip ?? 0)) q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+        if (r() < k.flip) q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+        const la = 2 * Math.PI * r();
+        q.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(Math.cos(la), 0, Math.sin(la)), ((LEAN * Math.PI) / 180) * r()));
         q.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), 2 * Math.PI * r()));
         const squash = k.squash ? k.squash[0] + (k.squash[1] - k.squash[0]) * r() : 1;
         let pick = r() * tw;
@@ -467,13 +482,140 @@ export function placeBeachDressing(o: DressingSite): Record<DressingKind, Dressi
           q,
           squash,
           stretch: 1 / Math.sqrt(squash) ** (r() * 0.8),
-          sink: k.sink[0] + (k.sink[1] - k.sink[0]) * r(),
+          sink: k.sink[0] + (k.sink[1] - k.sink[0]) * r() + WET_SINK * (1 - smooth(WET[0], WET[1], h)),
           tint: new THREE.Color(t[0] * g, t[1] * g, t[2] * g),
         });
       }
     }
   }
   return placed;
+}
+
+/** the principal axes of a symmetric 3×3 `c` (Jacobi): its values and their unit vectors */
+function axesOf(c: number[][]): Array<{ value: number; axis: THREE.Vector3 }> {
+  const a = c.map((row) => [...row]);
+  const v = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  for (let sweep = 0; sweep < 24; sweep++) {
+    for (const [i, j] of [
+      [0, 1],
+      [0, 2],
+      [1, 2],
+    ]) {
+      if (Math.abs(a[i][j]) < 1e-18) continue;
+      const th = 0.5 * Math.atan2(2 * a[i][j], a[j][j] - a[i][i]);
+      const cs = Math.cos(th);
+      const sn = Math.sin(th);
+      for (const m of [a, v]) {
+        for (let k = 0; k < 3; k++) {
+          const mi = m[k][i];
+          m[k][i] = cs * mi - sn * m[k][j];
+          m[k][j] = sn * mi + cs * m[k][j];
+        }
+      }
+      for (let k = 0; k < 3; k++) {
+        const ai = a[i][k];
+        a[i][k] = cs * ai - sn * a[j][k];
+        a[j][k] = sn * ai + cs * a[j][k];
+      }
+    }
+  }
+  return [0, 1, 2].map((i) => ({ value: a[i][i], axis: new THREE.Vector3(v[0][i], v[1][i], v[2][i]) }));
+}
+
+/** a scan's piece laid at rest, centred on its box: its geometry, a sample of its vertices, its largest extent (m) */
+export interface RestPiece {
+  geo: THREE.BufferGeometry;
+  verts: THREE.Vector3[];
+  extent: number;
+}
+/**
+ * `src` (the file's space) laid AT REST, as it would settle on flat sand (see the header): turned so its thinnest
+ * principal axis (of its vertices) is y and its longest x, then over (about x) if the face up is the wider — the
+ * wider face down: a pebble's flatter side, a scallop's rim (its cup over it), a curled leaf's edges. (The scans
+ * mostly come thinnest along y already, the pebble's at 0.38 of its length; the leaves stand along y, the twigs lie
+ * along z.)
+ */
+export function restPiece(src: THREE.BufferGeometry): RestPiece {
+  const geo = src.clone();
+  const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+  const n = pos.count;
+  const mean = new THREE.Vector3();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < n; i++) mean.add(v.fromBufferAttribute(pos, i));
+  mean.divideScalar(n);
+  const c = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (let i = 0; i < n; i++) {
+    const d = v.fromBufferAttribute(pos, i).sub(mean).toArray();
+    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) c[a][b] += (d[a] * d[b]) / n;
+  }
+  const ax = axesOf(c).sort((a, b) => b.value - a.value);
+  const x = ax[0].axis;
+  const y = ax[2].axis;
+  const z = new THREE.Vector3().crossVectors(x, y);
+  // (the basis takes the rest frame to the file's: its transpose the file's to the rest)
+  geo.applyMatrix4(new THREE.Matrix4().makeBasis(x, y, z).transpose());
+  // the wider face down: the spread in plan of the vertices in its lowest quarter against its highest's
+  geo.computeBoundingBox();
+  const box = geo.boundingBox!;
+  const h = box.max.y - box.min.y;
+  const cx = (box.min.x + box.max.x) / 2;
+  const cz = (box.min.z + box.max.z) / 2;
+  const spread = [0, 0];
+  const count = [0, 0];
+  for (let i = 0; i < n; i++) {
+    v.fromBufferAttribute(pos, i);
+    const band = v.y < box.min.y + 0.25 * h ? 0 : v.y > box.max.y - 0.25 * h ? 1 : -1;
+    if (band < 0) continue;
+    spread[band] += (v.x - cx) ** 2 + (v.z - cz) ** 2;
+    count[band]++;
+  }
+  if (spread[1] / Math.max(1, count[1]) > spread[0] / Math.max(1, count[0])) geo.rotateX(Math.PI);
+  geo.computeBoundingBox();
+  const mid = geo.boundingBox!.getCenter(new THREE.Vector3());
+  geo.translate(-mid.x, -mid.y, -mid.z);
+  geo.computeBoundingBox();
+  const size = geo.boundingBox!.getSize(new THREE.Vector3());
+  const verts: THREE.Vector3[] = [];
+  const step = Math.max(1, Math.floor(n / 400));
+  for (let i = 0; i < n; i += step) verts.push(new THREE.Vector3().fromBufferAttribute(pos, i));
+  return { geo, verts, extent: Math.max(size.x, size.y, size.z) };
+}
+
+/**
+ * Where piece `pc` (at rest) lies as `pl` places it on `ground`: its instance matrix — the ground's normal its up
+ * (the slope's tilt, then `pl.q`'s turn, lean and flip), and SEATED like the plants (seat.ts seatDrop): the points of
+ * its underside (its vertices within SEAT_BAND of its height over its lowest, as turned, each put down to the lowest's
+ * level) each `pl.sink` of its height under the ground beneath it. Also its turn, scale, the slope's tilt and its
+ * height (m).
+ */
+export function poseOf(pl: DressingPlace, pc: RestPiece, ground: (x: number, z: number) => number): { m: THREE.Matrix4; turn: THREE.Quaternion; scale: THREE.Vector3; tilt: THREE.Quaternion; height: number } {
+  const s = pl.s / pc.extent;
+  const scale = new THREE.Vector3(s * pl.stretch, s * pl.squash, s);
+  // on the ground's own slope
+  const e = 0.3;
+  const nrm = new THREE.Vector3(ground(pl.x - e, pl.z) - ground(pl.x + e, pl.z), 2 * e, ground(pl.x, pl.z - e) - ground(pl.x, pl.z + e)).normalize();
+  const tilt = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), nrm);
+  const turn = pl.q.clone().premultiply(tilt);
+  const own = pc.verts.map((v) => v.clone().multiply(scale).applyQuaternion(pl.q));
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const p of own) {
+    lo = Math.min(lo, p.y);
+    hi = Math.max(hi, p.y);
+  }
+  const height = hi - lo;
+  const foot = own.filter((p) => p.y <= lo + SEAT_BAND * height).map((p) => p.setY(lo));
+  const at = new THREE.Vector3(pl.x, ground(pl.x, pl.z), pl.z);
+  at.y += seatDrop(foot, new THREE.Matrix4().compose(at, tilt, new THREE.Vector3(1, 1, 1)), ground, pl.sink * height);
+  return { m: new THREE.Matrix4().compose(at, turn, scale), turn, scale, tilt, height };
 }
 
 /** the dressing of our beach (placeBeachDressing), its scans loaded from `base` and instanced, each piece with its
@@ -568,10 +710,6 @@ export function createBeachDressing(o: DressingSite & { base?: string; cloudSun?
 
   const loader = new GLTFLoader();
   const up = new THREE.Vector3(0, 1, 0);
-  const nrm = new THREE.Vector3();
-  const tilt = new THREE.Quaternion();
-  const turn = new THREE.Quaternion();
-  const scale = new THREE.Vector3();
   const p = new THREE.Vector3();
   const basis = new THREE.Matrix4();
   const files = new Map<string, Promise<THREE.Group>>();
@@ -593,38 +731,23 @@ export function createBeachDressing(o: DressingSite & { base?: string; cloudSun?
         if (!files.has(k.file)) files.set(k.file, loader.loadAsync(base + k.file).then((g) => g.scene));
         const scene = await files.get(k.file)!;
         scene.updateMatrixWorld(true);
-        // its pieces (a file of several: the nine shells, the two leaves, the three twigs), each centred on its own
-        // box, with a sample of its vertices to seat it by
-        const pieces: Array<{ geo: THREE.BufferGeometry; mat: THREE.Material; extent: number; verts: THREE.Vector3[] }> = [];
+        // its pieces (a file of several: the nine shells, the two leaves, the three twigs), each laid at rest and
+        // centred on its own box, with a sample of its vertices to seat it by
+        const pieces: Array<RestPiece & { mat: THREE.Material }> = [];
         scene.traverse((m) => {
           const mesh = m as THREE.Mesh;
           if (!mesh.isMesh) return;
-          const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-          geo.computeBoundingBox();
-          const c = geo.boundingBox!.getCenter(new THREE.Vector3());
-          geo.translate(-c.x, -c.y, -c.z);
-          geo.computeBoundingBox();
-          const size = geo.boundingBox!.getSize(new THREE.Vector3());
-          const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-          const verts: THREE.Vector3[] = [];
-          const step = Math.max(1, Math.floor(pos.count / 400));
-          for (let i = 0; i < pos.count; i += step) verts.push(new THREE.Vector3().fromBufferAttribute(pos, i));
-          pieces.push({ geo, mat: material(mesh.material as THREE.MeshStandardMaterial, k), extent: Math.max(size.x, size.y, size.z), verts });
+          pieces.push({ ...restPiece(mesh.geometry.clone().applyMatrix4(mesh.matrixWorld)), mat: material(mesh.material as THREE.MeshStandardMaterial, k) });
         });
         // the instances, by piece and tile
         const lots = new Map<string, { piece: number; m: THREE.Matrix4[]; a: number[]; t: number[] }>();
         for (const pl of placed[name]) {
           const piece = Math.floor(pl.piece * pieces.length);
           const pc = pieces[piece];
-          const s = pl.s / pc.extent;
-          scale.set(s * pl.stretch, s * pl.squash, s);
-          // on the ground's own slope
-          const e = 0.3;
-          nrm.set(ground(pl.x - e, pl.z) - ground(pl.x + e, pl.z), 2 * e, ground(pl.x, pl.z - e) - ground(pl.x, pl.z + e)).normalize();
-          tilt.setFromUnitVectors(up, nrm);
-          turn.copy(pl.q).premultiply(tilt);
-          // seated: its lowest point `sink` of its height under the sand; and its outline on the ground (the
-          // principal axes of its vertices' plan, their reach along each)
+          // at rest on the ground's normal, seated (poseOf); and its outline on the ground (the principal axes of its
+          // vertices' plan, their reach along each)
+          const pose = poseOf(pl, pc, ground);
+          const { turn, scale, tilt } = pose;
           let lo = Infinity;
           let hi = -Infinity;
           let mx = 0;
@@ -660,12 +783,11 @@ export function createBeachDressing(o: DressingSite & { base?: string; cloudSun?
           ea = Math.max(ea, 0.3 * eb);
           eb = Math.max(eb, 0.3 * ea);
           const gy = ground(pl.x, pl.z);
-          p.set(pl.x, gy - lo - pl.sink * (hi - lo), pl.z);
           const tile = Math.floor((beach.z - pl.z - ALONG[0]) / TILE);
           const key = `${piece}:${tile}`;
           if (!lots.has(key)) lots.set(key, { piece, m: [], a: [], t: [] });
           const lot = lots.get(key)!;
-          lot.m.push(new THREE.Matrix4().compose(p, turn, scale));
+          lot.m.push(pose.m);
           lot.a.push(pl.x, gy, pl.z, pl.s / pl.fade);
           lot.t.push(pl.tint.r, pl.tint.g, pl.tint.b);
           // its footprint, under its outline's middle, turned to its long axis and laid on the slope; darker the
