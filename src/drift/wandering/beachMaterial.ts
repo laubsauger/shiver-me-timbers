@@ -52,6 +52,8 @@ type Layer = keyof typeof LAYERS;
 const SAND_DRY = vec3(0.6, 0.55, 0.45);
 /** wet sand's albedo, linear: a neutral grey-beige under half the dry's (wet sand drinks the light) */
 const SAND_WET = vec3(0.3, 0.285, 0.255);
+/** m across the shore the sand's wetness is spread over, each way (NO LINE WHERE THE WATER STOPPED): its least */
+const WET_SPREAD = 0.8;
 /** m of rise above the live sea the wet band reaches: its mean, and the full swing of its wander along the beach */
 const WET_RISE = [0.6, 0.3] as const;
 /** THE SWASH'S UPPER LIMIT, beachDressing.ts LIMIT and its placement (`zones`): m over the sea of the line's middle,
@@ -290,7 +292,20 @@ export function createBeachTerrain(
       // (the sim's wetness drying unevenly where it is going: ±0.4 of what is left of it, in patches of ~0.4 m — with the
       // sim's own wicking (WICK) the line a run-up stopped at goes soft and ragged as it dries, not a crisp lobe, the
       // 2026-10-30 note: "real drying is uneven")
-      const wetLeft = leftMarks.z as F;
+      // NO LINE WHERE THE WATER STOPPED (the user, 2026-11-02, of the elevated night view down the beach at ~735 s:
+      // "it still feels like a very sharp edge … it doesn't look how a beach shore break would look"). The sim's
+      // wetness steps from the last run-ups' reach to dry within its wicking's ~0.3 m, and from the w5–w6 eye, 10–20 m
+      // up and 30–90 m off, that is two or three pixels: a crisp dark rule along the whole beach between the swash and
+      // the pale sand. On a real beach the sand above the swash is damp in a gradient — saturated and glossy at the
+      // water, mid-toned higher up, where only the bigger run-ups reached and the sand has been draining since —
+      // fraying into the dry over a metre or two. So what the water left is read as a mean over a spread across the
+      // shore (world x, the beach facing −x): taps out to ±WET_SPREAD m, wider where a pixel spans more (two and a
+      // half pixels' footprint at least, as the shoreline's own sheet is feathered), the farther taps weighted less —
+      // a soft ramp over ~1.5 m of face, irregular because the reach it averages is
+      const wetPx = (coordFilter(pP) as V2).x.max((coordFilter(pP) as V2).y) as F;
+      const spread = wetPx.mul(2.5).max(WET_SPREAD) as F;
+      const wetTaps = [[-1, 0.5], [-0.45, 0.8], [0.45, 0.8], [1, 0.5]].map(([d, w]) => (texture(swashField.marks, swashUV(leftAt.add(vec2(spread.mul(d), 0)) as V2)) as V4).z.mul(w) as F);
+      const wetLeft = wetTaps.reduce<F>((a, t) => a.add(t) as F, (leftMarks.z as F).mul(1.2) as F).div(1.2 + 2 * 0.5 + 2 * 0.8) as F;
       const wetSim = wetLeft.sub(float(1).sub(wetLeft).mul((fbm2(pP.mul(2.5).add(vec2(6.6, 3.2)), 3) as F).sub(0.5).mul(0.8))).clamp(0, 1) as F;
       // THE LAST HIGH RUN-UPS' REACH (the user, 2026-11-01, of the beach at dusk: "way too sharp all the way through, no
       // layers"): the graded band faded out smoothly to wetTop, and from the walk's eye, at this grazing, those 6 m of
@@ -322,7 +337,11 @@ export function createBeachTerrain(
       // a dry-looking strip between the sea and the wet sand — "a band in between where there's no water … very ugly
       // and unlikely", the 2026-10-29 review of the 568 s view. The sand nearest the sea is the wettest, never paler)
       const submerged = smoothstep(0.25, 1.2, float(ctx.sand.depthBelow)) as F;
-      const sandA0 = mix(mix(dryA.mul(float(1).sub(margin)), wetA, damp), wetA.mul(1.3), submerged) as V3;
+      // (darkened by how wet it is on a curve, damp·(0.5 + 0.5·damp): damp sand is mid-toned, only the saturated sand at
+      // the water as dark as wet sand gets — the band grades up the face instead of standing as one even dark strip
+      // with a line along its top, NO LINE WHERE THE WATER STOPPED)
+      const dampK = damp.mul(damp.mul(0.5).add(0.5)) as F;
+      const sandA0 = mix(mix(dryA.mul(float(1).sub(margin)), wetA, dampK), wetA.mul(1.3), submerged) as V3;
       // THE SWASH'S UPPER LIMIT (the dressing's recommendation, 2026-10-29): where the last waves dropped what they
       // carried, a faint band of shell grit and dried foam along the line beachDressing.ts lays its pebbles and
       // shells on — the same height, wander and clumps as its placement (SWASH_LIMIT), so the decal carries the line

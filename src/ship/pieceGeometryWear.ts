@@ -35,6 +35,7 @@ import * as THREE from 'three';
 import { mergeVertices, toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { PieceDef } from './pieceTypes';
 import { vhash } from './variation';
+import { bowClipOf, clippedSlab } from './pieceGeometryRaft';
 
 /** how worn: the scale of every term below (0 = the greybox's own shape, warped by nothing) */
 export interface WearOptions {
@@ -466,9 +467,16 @@ function slatMat(def: PieceDef, seed: number, k: number): THREE.BufferGeometry {
   const { min, max } = def.aabb;
   const top = max[1];
   const parts: THREE.BufferGeometry[] = [];
-  // the backing under the slats, a slat's depth down (soft-edged, lying on the crowns as the mat did)
-  const backing = softBox(min[0], max[0], min[1], top - SLAT_DEPTH, min[2], max[2], 0.004, 0.6).toNonIndexed();
+  // CUT TO THE BOW BOARDS where the slab says so (raftPartsHull.ts buildBambooDeck, the user's 2026-11-02 note: the fore
+  // deck poked out through them): the backing is the cut plan, each slat runs on to the board's face and is cut square
+  // to it there — every point of its section stops on the face, so its end lies flush along the board's angle
+  const clips = bowClipOf(def.shape);
+  // (clippedSlab's geometry is built non-indexed already)
+  const backing = clips.length > 0
+    ? clippedSlab({ min: [min[0], min[1], min[2]], max: [max[0], top - SLAT_DEPTH, max[2]] }, def.shape)
+    : softBox(min[0], max[0], min[1], top - SLAT_DEPTH, min[2], max[2], 0.004, 0.6).toNonIndexed();
   backing.deleteAttribute('normal');
+  if (backing.getAttribute('uv')) backing.deleteAttribute('uv');
   // (lifted with the slats on it, so no daylight shows under them)
   warp(backing, (x, y, z, out) => out.set(0, y > min[1] + 0.01 ? (0.004 + 0.004 * noise2(x * 0.9, z * 0.9, seed)) * k : 0, 0));
   parts.push(backing);
@@ -483,21 +491,29 @@ function slatMat(def: PieceDef, seed: number, k: number): THREE.BufferGeometry {
     const xc = min[0] + (i + 0.5) * DECK_SLAT_PITCH;
     const z0 = min[2] + h(0) * 0.025;
     const z1 = max[2] - h(1) * 0.025;
+    /** where this slat stops at section offset x: its own end, or the first board face it meets */
+    const zEnd = (x: number): number => {
+      let z = z1;
+      for (const [nx, nz, c] of clips) if (nz > 1e-6) z = Math.min(z, (c - nx * x) / nz);
+      return z;
+    };
+    // (a slat wholly beyond a board, or cut to a stub, is left out)
+    if (Math.min(zEnd(xc - hw), zEnd(xc + hw)) < z0 + 0.05) continue;
     const rings = Math.max(2, Math.ceil((z1 - z0) / 0.45) + 1);
     const crown = (h(2) - 0.5) * 0.002;
     const tilt = (h(3) - 0.5) * 0.05;
     const pos: number[] = [];
     const idx: number[] = [];
-    const ringPts = (z: number): void => {
-      const t = (z - z0) / Math.max(1e-3, z1 - z0);
+    const ringPts = (t: number): void => {
       // lifted on the crowns of what is under the mat, bowed a few mm between, each slat its own way
-      const lift = (0.004 + 0.004 * noise2(xc * 0.9, z * 0.9, seed) + 0.003 * Math.sin(Math.PI * t) * (h(4) * 2 - 1)) * k;
       for (const [a, d] of prof) {
         const x = a * hw;
+        const z = z0 + (zEnd(xc + x) - z0) * t;
+        const lift = (0.004 + 0.004 * noise2(xc * 0.9, z * 0.9, seed) + 0.003 * Math.sin(Math.PI * t) * (h(4) * 2 - 1)) * k;
         pos.push(xc + x, top - d + crown + tilt * x + lift, z);
       }
     };
-    for (let r = 0; r < rings; r++) ringPts(z0 + ((z1 - z0) * r) / (rings - 1));
+    for (let r = 0; r < rings; r++) ringPts(r / (rings - 1));
     const w = prof.length;
     for (let r = 0; r + 1 < rings; r++) {
       for (let j = 0; j + 1 < w; j++) {
@@ -509,7 +525,7 @@ function slatMat(def: PieceDef, seed: number, k: number): THREE.BufferGeometry {
     for (const [r, flip] of [[0, false], [rings - 1, true]] as const) {
       const base = pos.length / 3;
       const o = r * w;
-      const zEnd = pos[o * 3 + 2];
+      const zEnd = pos[(o + (w >> 1)) * 3 + 2];
       pos.push(xc, top - SLAT_DEPTH + crown + pos[(o + (w >> 1)) * 3 + 1] - (top + crown), zEnd);
       for (let j = 0; j + 1 < w; j++) idx.push(...(flip ? [base, o + j + 1, o + j] : [base, o + j, o + j + 1]));
     }

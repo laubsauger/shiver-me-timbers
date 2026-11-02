@@ -44,12 +44,14 @@ import { createArchipelago, generateIslandSites } from '../../island/archipelago
 import type { SeabedField } from '../../island/seabed';
 import { CpuOcean } from '../../sea-physics/cpuOcean';
 import { raftSeaParams } from '../../params/seaPhysics';
+import { driftParams } from '../../params/drift';
 import { weatherPresets } from '../../weather/presets';
 import { createFlock, loadFlock, type FlockUniforms } from './flock';
 import { createSeaSky, sunlightCpu } from './seaSky';
 import { bakeNightSky } from './nightSky';
 import { createRaft, raftLogsInPlan } from './raft';
 import { CIRRUS_H, CLOUD_BASE, CLOUD_TOP, loadClouds, type CloudUniforms } from './clouds';
+import { createDistantStorm } from './stormCell';
 import { EARTH_R, SUN_E } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
 import { shadowTexelSize, snapShadowCenter } from '../../sky/shadowMath';
@@ -64,9 +66,11 @@ import { createFilmCoast, type FilmCoast } from './coast';
 import { contactMask, createForest, createForestGround, litterMask, type Forest } from './forest';
 import { bindSwashToSea, createShoreline, swashLight } from './shoreline';
 import { createSwashSim, swashSeaGone, type SwashSim } from './swashSim';
+import { createBiolumPrints, type BiolumPrints } from './biolum';
 import { filmShadowFilter } from './filmShadowFilter';
 import { createGroundDebris, type GroundDebris } from './groundDebris';
 import { SAND_ALBEDO, createBeachDressing, type BeachDressing } from './beachDressing';
+import { createCrabs, type Crabs } from './crabs';
 import { createPlants } from './plants';
 import { createPalms, palmFeet } from './palms';
 import { FAR_RAFTS, createFarCraft, createFarCraftLook, createFarLantern, farRaftsIn } from './farRafts';
@@ -263,6 +267,9 @@ export interface SeaAct {
   probeWater(x: number, z: number, t: number): { sea: number; ground: number };
   /** REVIEW ONLY: the raft as the wake is shed from it at sea time t in a world (x, z m; heading rad; speed m/s) */
   probeRaft(t: number, world: 'sea' | 'coast'): { x: number; z: number; heading: number; speed: number };
+  /** the show eye's own place at sea time t on the open sea — c1's descent (the drive), then the follow and the sailing
+   * (update's placement of it, before any eye hook): what `?linedown`'s later dips (lineDown.ts) leave and come back to */
+  baseEye(t: number, out: THREE.Vector3): THREE.Vector3;
 }
 
 /** m: the coast's world, west of everything else (the islands kilometres from the flood's debris and the open
@@ -425,9 +432,12 @@ export function createSea(
    * the per-beat turn in `update`) */
   const toGalaxySea = nightSky.toGalaxy.clone();
   const toGalaxyCoast = toGalaxySea.clone().multiply(new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationY(yaw - COAST_YAW)));
+  // THE DISTANT STORM (stormCell.ts; params distantStorm, the 2026-11-02 review's move 4): built only when it is on
+  const storm = o.drive && driftParams.distantStorm ? createDistantStorm(beats.starts) : undefined;
   const seaSky = createSeaSky(FAR * 0.8, nightSky, {
     data: cloudData,
     uniforms: cu as unknown as CloudUniforms,
+    storm: storm?.uniforms,
   });
   scene.add(seaSky.mesh);
   // what floats mirrored in the water: one cube capture from the eye mirrored under it (mirror.ts); the sky in
@@ -490,10 +500,14 @@ export function createSea(
   let forest: Forest | undefined;
   let coast: FilmCoast | undefined;
   let swash: SwashSim | undefined;
+  // (the wanderers' prints in light, params biolum: built only when it is on — biolum.ts)
+  let prints: BiolumPrints | undefined;
   /** unit toward this frame's Sun, for the lagoon floor's shadow lookup (`seabedShadowAt`) */
   const seabedSun = uniform(new THREE.Vector3(0, 1, 0));
   let groundDebris: GroundDebris | undefined;
   let beachDressing: BeachDressing | undefined;
+  // (the ghost crabs on the walk beach, params beachCrabs: built only when it is on — crabs.ts)
+  let crabs: Crabs | undefined;
   const forestLight = new THREE.Color();
   /** the beach's albedo, and its bounce this frame (the hemisphere light's ground on the coast) */
   const SAND_GROUND = new THREE.Color(...SAND_ALBEDO);
@@ -545,6 +559,10 @@ export function createSea(
         cloudSun: seaSky.cloudSun,
       }).mesh,
     );
+    if (driftParams.biolum) {
+      prints = createBiolumPrints({ ground: film.ground, beach });
+      film.group.add(prints.mesh);
+    }
     forest = createForest(film.islands, { x: [beach.x + 5, beach.x + 120], z: [beach.z - 260, beach.z + 220] }, (m) => film.materials.aerialOutput(m));
     land.group.add(forest.group);
   }
@@ -596,6 +614,10 @@ export function createSea(
     // and the beach's small things (beachDressing.ts): coral pebbles and rubble, shells, the wrack line
     beachDressing = createBeachDressing({ ground, beach, inland: coast.islands[0].inland, palms: palmFeet(beach), cloudSun: seaSky.cloudSun });
     land.group.add(beachDressing.group);
+    if (driftParams.beachCrabs) {
+      crabs = createCrabs({ ground, beach, starts: beats.starts });
+      land.group.add(crabs.group);
+    }
   }
 
   // a calm sea, near glass (the v6 notes; the game's default is a working sea, Hs ~2.8 m): the game's glass
@@ -760,6 +782,8 @@ export function createSea(
     return (LAPSE_CLOUDS - 1) * span * (u / 2 - Math.sin(2 * Math.PI * u) / (4 * Math.PI));
   };
   const sea1End = beats.starts.w1;
+  // (the storm cell stands where c2's eye sees it, fixed in the world from then on: stormCell.ts place)
+  storm?.place(sailingEye(beats.starts.c2, new THREE.Vector3()), yaw);
   // none of the debris in the raft's berth, nor along the way it sails (in the field's frame: the debris turns)
   const lane: THREE.Vector3[] = [];
   if (o.drive) {
@@ -840,7 +864,8 @@ export function createSea(
   }
 
   // the sandpipers (W4), startled FLOCK_START s into the test act; the bake's front turned to the dome's front
-  const flockData = loadFlock();
+  // (flockSilence, params/drift.ts: the eighth bake's alternate keys, the flock lifting in the score's silence)
+  const flockData = loadFlock(undefined, o.drive && driftParams.flockSilence ? 'flock-keys-silence' : 'flock-keys');
   const fu = {
     time: uniform(0),
     origin: uniform(new THREE.Vector3(0, 0, 0)),
@@ -906,6 +931,12 @@ export function createSea(
     }
     return { x: c.x + wakeAcross.x * pose.distance, z: c.z + wakeAcross.z * pose.distance, heading: COAST_YAW + pose.heading + Math.PI, speed: travelled(t - 0.5, t + 0.5, c1End) };
   };
+  /** the raft where the follow takes it over (update's sailing placement at `followStart`), in the field's frame as it
+   * lay then: c1's raft rides the field from here, so the two meet without a step (see update's c1 branch) */
+  const raftInFollow = (() => {
+    const p = raftOn(followStart, 'sea');
+    return new THREE.Vector3(p.x, 0, p.z).applyAxisAngle(UP, -followTurn);
+  })();
   /** the world whose wake is held, and how many WAKE_DT steps it has been run from that world's start (−1: none yet,
    * or cleared before its start) */
   let wakeWorld: WakeWorld | null = null;
@@ -1002,6 +1033,7 @@ export function createSea(
     // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
     // sea's clock: clouds.ts)
     seaSky.updateClouds(renderer, t);
+    storm?.update(t);
   };
   const descentSky = o.drive && seaSky.cloudsOver
     ? (() => {
@@ -1054,6 +1086,13 @@ export function createSea(
     raftWater,
     probeWater: (x, z, t) => ({ sea: heightAt(x, z, t), ground: ground(x, z) }),
     probeRaft: (t, world) => raftOn(t, world),
+    baseEye(t, out) {
+      if (!o.drive) return out.set(0, EYE_HEIGHT, 0);
+      if (t < followStart) return out.copy(o.drive(t).eye);
+      sailingEye(t, out);
+      out.y = raftPose(t, c1End, restPose).height;
+      return out;
+    },
     get exposure() {
       return seaSky.exposure;
     },
@@ -1122,10 +1161,15 @@ export function createSea(
         eye.position.copy(d.eye);
         eye.quaternion.copy(d.turn);
         sun.copy(d.sun);
-        raftNow.copy(raftInField).applyAxisAngle(UP, turn);
+        // (THE SEAM INTO THE FOLLOW, the 2026-11-02 review of `?linedown=a3`: "the boat, everything swaps over a little in
+        // one frame". c1's raft rides the field from where it lies at c1's END (c2's start, `restTurn`), but at 335 s the
+        // follow takes it over from the sailing pose — and the field turns DEBRIS_SPIN × 20 s between: the raft stepped
+        // ~7 cm and 0.23° in that frame. It rides the field from where the follow takes it over instead (raftInFollow):
+        // the same place to the millimetre through c1 — and no step at the seam)
+        raftNow.copy(raftInFollow).applyAxisAngle(UP, turn);
         raftX = raftNow.x;
         raftZ = raftNow.z;
-        raftHeading = yaw + raftPose(t, c1End, restPose).heading + Math.PI + turn - restTurn;
+        raftHeading = yaw + raftPose(t, c1End, restPose).heading + Math.PI + turn - followTurn;
       } else {
         const pose = raftPose(t, c1End, restPose);
         {
@@ -1294,6 +1338,8 @@ export function createSea(
           r.lantern.update(r.lampAt, eye.position, lit * farIn);
         });
       }
+      // (the light on a white surface from the Sun and from the sky, as the flock's: their shadows' darkness)
+      crabs?.update({ t, on: world === 'coast' && driftParams.beachCrabs, sun, sunLum: (lum(seaSky.sunColour) * SUN_E) / Math.PI, skyLum: lum(seaSky.irradiance) / Math.PI });
       if (props) {
         props.update({
           t,
@@ -1314,6 +1360,7 @@ export function createSea(
           towers: coast?.towers,
         });
       }
+      prints?.update(t, beats.starts.w5, world === 'coast');
       if (debris) {
         debris.rotation.y = turn;
         du.sun.value.copy(sun);
@@ -1364,7 +1411,7 @@ export function createSea(
       }
       // (the wanderers' reflections read where the rays meet them: mirror.ts, the 2026-11-02 note)
       mirror.setFigures(props && world === 'coast' ? props.figures : []);
-      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : [])]);
+      mirror.update(renderer, scene, eye.position, [surface.group, seaSky.mesh, ...underwater, ...(props ? props.glows : []), ...(prints ? [prints.mesh] : [])]);
     },
   };
   return act;

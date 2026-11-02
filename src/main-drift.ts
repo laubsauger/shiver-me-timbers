@@ -160,15 +160,16 @@ async function boot(): Promise<void> {
     return d;
   };
   // the daylight Line Down's raft in Snell's window (lineDownWindow.ts): wired into the sea's surface as it is built
-  const lineDownDay = LINE_DOWN_ON && LINE_DOWN_LIGHT === 'day' && !seaTest;
+  const lineDownDay = LINE_DOWN_ON && LINE_DOWN_LIGHT !== 'sunset' && !seaTest;
   const windowRaft = lineDownDay ? createWindowRaft() : undefined;
   const sea = seaTest
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
     : createSea(renderer, { drive: seaDrive, c1End: arrival.total - arrival.seaFrom + C1_FOLLOW, windowSky: windowRaft?.sky });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
-  // "THE LINE DOWN", LOOK-DEV ONLY (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option, behind
-  // its gates): with ?linedown the eye goes under the water for its moment in c2–c3 (?linedown=day: 319–335 s, the
-  // morning landing, the brighter-water fallback). Off, nothing is built. The eye is
+  // "THE LINE DOWN" (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option): ON BY DEFAULT since
+  // the user's go on A3 (2026-11-02) — after the landing the eye sinks under the raft for ~13 s, the dolphins come, and it
+  // rises onto the follow (lineDownDive.ts DIVE_A3); `?linedown=off` draws the approved landing without it, nothing
+  // built; `?linedown=day|paced|late|sunset` the earlier variants, for comparison. The eye is
   // put under through the sea's eye hook (`reviewEye`, run once update has placed the eye and the raft, before
   // anything reads the eye — the ocean decides top or underside from it); the review scripts set that hook too, so it
   // is wrapped here: the look-dev's eye first, then the review's.
@@ -176,7 +177,9 @@ async function boot(): Promise<void> {
   // landing's rest at 335 s, its crossings timed to troughs of the sea the GPU draws — the sea's own CpuOcean)
   const lineDown =
     LINE_DOWN_ON && !seaTest
-      ? createLineDown(renderer, sea.scene, seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts, LINE_DOWN_LIGHT, lineDownDay ? { drive: seaDrive, water: (x, z, t) => sea.probeWater(x, z, t).sea, window: windowRaft } : undefined)
+      ? createLineDown(renderer, sea.scene, seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts, LINE_DOWN_LIGHT, lineDownDay
+          ? { drive: seaDrive, water: (x, z, t) => sea.probeWater(x, z, t).sea, window: windowRaft, base: (t, out) => sea.baseEye(t, out), raft: (t) => sea.probeRaft(t, 'sea') }
+          : undefined)
       : undefined;
   let lineClock = 0;
   if (lineDown) {
@@ -546,12 +549,23 @@ async function boot(): Promise<void> {
     flatMarks,
     /** offline dome-master render to the cine sink (npm run cine:sink): { size, fps, from, to, shot } */
     record,
-    /** `?linedown=day` (lineDownDive.ts): the dive's crossings in show s and its check — what a review is timed against */
+    /** the Line Down's dive (lineDownDive.ts): its crossings in show s and its check — what a review is timed against */
     lineDown: lineDown?.plan
       ? {
           down: seaStart + lineDown.plan.down,
           up: seaStart + lineDown.plan.up,
           check: lineDown.plan.check,
+          /** REVIEW ONLY: the dip's eye at sea-relative show s (x, y, z m) — what a probe checks the path for steps against */
+          eyeAt: (at: number): number[] => {
+            const ts = at - seaStart;
+            const [x, z] = lineDown.plan!.xz(ts);
+            return [x, lineDown.plan!.y(ts), z];
+          },
+          /** the raft's own place at show s (sea.ts probeRaft, the open sea) */
+          raftAt: (at: number): number[] => {
+            const r = sea.probeRaft(at - seaStart, 'sea');
+            return [r.x, r.z, r.heading];
+          },
           /** the raft's pieces traced into the window this frame (lineDownWindow.ts) */
           get windowBoxes(): number {
             return windowRaft?.boxes ?? 0;

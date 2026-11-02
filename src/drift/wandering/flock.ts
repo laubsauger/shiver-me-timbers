@@ -31,14 +31,16 @@ export interface FlockData {
   ready: Promise<void>;
 }
 
-export function loadFlock(base = `${import.meta.env.BASE_URL}drift/flock/`): FlockData {
+/** `name`: the keys' file stem — `flock-keys` (the seventh bake), or `flock-keys-silence` (the eighth bake's alternate,
+ * the flock lifting in the score's silence: params/drift.ts flockSilence, scripts/drift-flock-bake.py --silence) */
+export function loadFlock(base = `${import.meta.env.BASE_URL}drift/flock/`, name = 'flock-keys'): FlockData {
   const texture = new THREE.DataTexture(new Uint16Array(4), 1, 1, THREE.RGBAFormat, THREE.HalfFloatType);
   texture.minFilter = THREE.NearestFilter;
   texture.magFilter = THREE.NearestFilter;
   const data: FlockData = { texture, birds: 1, keys: 1, hz: 15, width: 1, rows: 1, ready: Promise.resolve() };
-  data.ready = fetch(base + 'flock-keys.json')
+  data.ready = fetch(base + name + '.json')
     .then((r) => {
-      if (!r.ok) throw new Error(`flock: ${r.status} (run scripts/drift-flock-bake.py)`);
+      if (!r.ok) throw new Error(`flock: ${name}.json ${r.status} (run scripts/drift-flock-bake.py${name.endsWith('-silence') ? ' --silence' : ''})`);
       return r.json();
     })
     .then((j: { birds: number; keys: number; hz: number; width?: number; rows?: number }) => {
@@ -47,7 +49,7 @@ export function loadFlock(base = `${import.meta.env.BASE_URL}drift/flock/`): Flo
       data.width = j.width ?? j.birds;
       data.rows = j.rows ?? 1;
       data.hz = j.hz;
-      return fetch(base + 'flock-keys.f16');
+      return fetch(base + name + '.f16');
     })
     .then((r) => r.arrayBuffer())
     .then((b) => {

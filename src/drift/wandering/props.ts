@@ -3,7 +3,9 @@
  * each a pure function of the sea's clock and placed by the beat being drawn (beats.ts):
  *
  *   people     figures on the raft (c1–w2): STAND-INS — no models yet (the user's call, 2026-10-27: crude
- *              placeholders now, real assets in a later pass), but jointed figures, sitting and standing (crew.ts)
+ *              placeholders now, real assets in a later pass), but jointed figures, sitting and standing (crew.ts),
+ *              since the 2026-11-02 review posed every frame by what they do — at the helm, on the edge with a line,
+ *              at the bow; turning to the dolphin, the case, the lamp that answers, the land (crewLife.ts)
  *   dolphin    c3: porpoising in, circling the raft, then flips the blue case onto the deck with its snout
  *              (dolphin.ts: its outline and its motion)
  *   case       the blue hard case; in c4 its radio's dial glows
@@ -29,10 +31,11 @@ import { generatePairs } from '../undertime/events';
 import { spec } from './beats';
 import { createLoopSprites, createLoopTrails, type LoopUniforms } from '../undertime/loops';
 import type { Vec3 } from '../../cine/domeMaster';
-import { C3_RAFT, CASE_FROM, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, caseAfloat, caseOnDeck, createDolphin, flipThrow } from './dolphin';
+import { CASE_FROM, DOLPHIN_SPAN, FLIP_AT_T, FLIP_RELEASE, NOSE_AT, caseAfloat, caseOnDeck, createDolphin, flipThrow } from './dolphin';
 import { createHardCase } from './hardCase';
 import { dolphinPose } from './dolphin';
-import { CREW, createCrewFigure, createCrewWalker, strideLength } from './crew';
+import { CREW, createCrewRig, createCrewWalker, solveCrew, strideLength } from './crew';
+import { ABOARD, ROLES, crewNow, crewSpots as crewSpotsOn, type CrewWorld, type V as CrewV } from './crewLife';
 import { FILM_COAST, FILM_RING, createRadioTower, nightStep, type RadioTower } from './radioTower';
 import { createFarMotu, farMotuMaterial, type FarMotu } from './farMotu';
 import { farAir } from './farAir';
@@ -49,6 +52,7 @@ import {
   answerFlare,
   callPulses,
   callSwell,
+  callsDone,
   cascadeTraffic,
   chatterTraffic,
   dialFlare,
@@ -67,6 +71,7 @@ import {
   type RoseMessage,
 } from './roseTraffic';
 import { createSignal } from './radioSignal';
+import { dialStutter, stormFlashes, type Flash } from './stormCell';
 import { createFarLantern } from './farRafts';
 import { lanternNight } from '../../ship/raftLanterns';
 import { domeAhead } from '../undertime/timeline';
@@ -396,6 +401,9 @@ export const fieldOnCoast = (t: number, starts: { w3: number; w5: number; w6: nu
   t > starts.w3 - 3 && t < starts.w5 ? fieldWeight(night) : t > starts.w6 - 3 ? fieldWeight(night) * (ending ? endingRose(t, starts.w6) : 1) : 0;
 /** m: no pair is born nearer the eye than this (a 0.5 m loop at 7 m spans 8°; at 2.5 m it was a 23° ring) */
 const FIELD_CLEARANCE = 7;
+/** rad: w6's night pairs are born only this far above the eye's horizon or higher (25°), so they live among the stars
+ * and never over the beach or the treeline */
+const SKY_ONLY = (25 * Math.PI) / 180;
 
 export interface PropsState {
   /** sea s, and the beat's start times it is placed by */
@@ -448,7 +456,18 @@ export interface Props {
  * (1.0 m: it stayed under the horizon line, in the glitter, and read as a dark dot; 2026-11-01) — and m/s² */
 const CASE_LOB = 1.5;
 /** m it skids on along the deck once it lands */
-const CASE_SKID = 0.35;
+export const CASE_SKID = 0.35;
+/**
+ * WHERE IT COMES TO REST (raft-local x, z): on the fore-deck's mat, flat on the planks. The throw had come down on
+ * dolphin.ts's deck spot at the bow's very tip (CASE_ON_DECK, 5 m along), which is not deck but the V of the bow boards
+ * over the log ends: the case lay up on the boards' rim, and whoever knelt at it knelt in the gap between them (the
+ * user, 2026-11-02: "The blue box and the dude are in a bit of a weird position, on the edge there. It should be
+ * somewhere on the deck"). The dolphin's throw is as it was — along its line, from its snout — and lands CASE_SKID
+ * short of here, skidding on to it: ~1.7 m shorter than it was, on the mat on its +x side, 1.3 m clear of the sail's
+ * sweep, 0.7 m in front of the one sitting at the bow (crewLife.ts CREW_AT: there, no lantern hangs in front of his face
+ * from the eye as he kneels to it)
+ */
+export const CASE_REST: [number, number] = [0.95, 3.3];
 const G_CASE = 9.81;
 /** the beams: stations' bearings (deg right of the front), and which answer which, when (s into c4: LINKS). Each
  * station is a radio tower on a far motu on the horizon (STATION_*; farMotu.ts; which station of the network:
@@ -527,9 +546,11 @@ const RADIO_REACH = 7;
  *   radioCall      c4: our calls, pulses from our masthead out along the sky to the lamp ahead (WAKE_FROM), and its
  *                  answer, the same rhythm flared on its lamp (answerFlare) and run back to us as pulses (roseTraffic.ts
  *                  callPulses; radioSignal.ts) — no lamp on our raft (round 3: the masthead's signal lamp is gone);
- *                  the Rose's wake becomes the cascade (cascadeTraffic) over arches raised high (CASCADE.lift), its
+ *                  the Rose's wake becomes the cascade (cascadeTraffic: round the six stations whose lamps stand clear
+ *                  of our raft, CASCADE_HIDDEN) over arches raised high (CASCADE.lift), its
  *                  pulses brighter for the thin air up there (CASCADE.gain), it goes quiet later (CASCADE.quiet), and
- *                  every path a pulse has run along keeps a faint line until the dissolve (TRAIL, ARC_L.trail)
+ *                  every link of the Rose a pulse has run along keeps a faint line until the dissolve (TRAIL,
+ *                  ARC_L.trail) — our call's path keeps none
  *   radioOperator  c1–w2: the crew's third kneels at the case's spot on the fore-deck, facing the eye across it, so the
  *                  case lands at their knees and the dial lights them from c4 on (THE OPERATOR); under radioCall too
  *                  the dial swells as each call leaves (callSwell, CALL_SWELL)
@@ -541,13 +562,15 @@ const RADIO_REACH = 7;
  * antenna would be. (A signal lamp hung there in the first two looks, flashing the calls: the user, 2026-11-02, "blinking
  * light on the topmast of the raft is not doing it for me at all"; the light is the pulses' own now, none on the raft) */
 const MAST_TOP_UP = 0.25;
+/** s after the answer's last pulse has wholly reached us (roseTraffic.ts callsDone) over which our call's path goes
+ * dark: its pulses' afterglow in the haze (radioSignal.ts PULSE.long, 4 s) gone by then, no line left */
+const CALL_AFTER = 6;
 /** × the dial's glow at the height of a call's swell (roseTraffic.ts callSwell), under radioOperator */
 const CALL_SWELL = 0.8;
 /** the calls' pulses: × (CALL_NIGHT[0] + CALL_NIGHT[1] · night) — the first call goes out in the dusk (434 s, the Sun
  * ~2.5° down, the night's own measure near 0, where the Rose's × night would hide it) */
 const CALL_NIGHT: [number, number] = [0.35, 0.65];
-/** THE OPERATOR: m from the case's resting place to the kneeler's, away from the eye (the case between them, so the
- * dial's light falls on their front as the eye sees it); and × the dial's point light while they are there (×5, the
+/** THE OPERATOR: × the dial's point light while they are there (×5, the
  * first look at 448 s, out/drift/review/radio-1102/operator_440-452: the face and shirt burnt to a pale glow, a ghost
  * rather than a person lit by a dial). And the light's pool while they are there: m its reach (the point light's
  * cut-off distance; 7 m without them, which lights the deck and the sails about it), and its colour, sRGB — the
@@ -555,7 +578,7 @@ const CALL_NIGHT: [number, number] = [0.35, 0.65];
  * dial (the bowed head, the hands, the case) it is as bright as before; it is gone by ~2 m, so the figure stands in
  * its own pool against a dark deck, and a deeper amber (the dial's own, its glow 1 : 0.62 : 0.25) than the 7 m
  * light's paler one */
-const OPERATOR = { off: 0.6, light: 2.5, reach: 2.2, color: 0xff8a3c };
+const OPERATOR = { light: 2.5, reach: 2.2, color: 0xff8a3c };
 /** THE FAR RAFTS COME IN (w6, radioEnding): each lantern's beach coordinates (along, off m: beats.ts COAST) at
  * ENDING.rafts' start and end — across the lagoon in front and to the left, 400–840 m off the eye, each ~60 m nearer
  * our beach by the end (~1.2 m/s, a raft on a light air), so they close on it rather than sit — and its height (m) */
@@ -609,18 +632,17 @@ export function createProps(): Props {
 
   // PEOPLE on the raft (raft-local: deck height found below, by a ray onto its planks)
   const people = new THREE.Group();
-  // (crew.ts: jointed figures sitting and standing — the capsules were the 2026-10-29 notes' "capsule people")
-  for (const c of CREW) {
-    const f = createCrewFigure(c.pose, c.look);
-    f.position.set(c.x, 0, c.z);
-    f.rotation.y = c.rot;
-    people.add(f);
-  }
-  // THE OPERATOR (radioOperator): the third of them, kneeling at the case's spot instead of standing aft
-  const standing = people.children[2];
-  const kneeler = createCrewFigure('kneel', CREW[2].look);
-  kneeler.visible = false;
-  people.add(kneeler);
+  // (crew.ts: jointed figures sitting and standing — the capsules were the 2026-10-29 notes' "capsule people"; since the
+  // 2026-11-02 review rigs, posed every frame by what they do: crewLife.ts — the helm, the bow, the edge with his line,
+  // and THE OPERATOR (radioOperator), the helm's look kneeling at the case's spot instead of standing aft)
+  const crewRigs = ROLES.map((role) => {
+    const who = CREW[role === 'kneeler' ? ABOARD.helm : ABOARD[role]];
+    const rig = createCrewRig(who.look, who.height, { line: role === 'edge' });
+    people.add(rig.group);
+    return rig;
+  });
+  /** where each sits or stands (raft-local, found once by a ray onto the raft: CrewWorld spots) */
+  let crewSpots: CrewWorld['spots'] | null = null;
   let deckY: number | null = null;
 
   // THE DOLPHIN and THE CASE
@@ -630,6 +652,8 @@ export function createProps(): Props {
   // (a moulded hard case, hardCase.ts: 0.55 × 0.22 × 0.40 m about its centre, as the blue box it was)
   const caseMesh = createHardCase(0x1f5fa8);
   const dialGlow = uniform(0);
+  /** the distant storm's flashes (stormCell.ts; params distantStorm), laid once from c4's start */
+  let sferics: Flash[] | undefined;
   const dialMat = new THREE.MeshBasicNodeMaterial({ fog: false });
   dialMat.colorNode = vec3(1, 0.62, 0.25).mul(dialGlow);
   const dial = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.07), dialMat);
@@ -1053,28 +1077,25 @@ export function createProps(): Props {
           }
           return new THREE.Vector3(x, 0.6, z);
         };
-        people.children.forEach((f) => {
-          if (f !== kneeler) f.position.copy(footing(f.position.x, f.position.z));
-        });
-        // the kneeler: where the case comes to rest (its deck spot, skidded on along its flight: CASE_SKID), OPERATOR.off
-        // further from the eye as it stood at the throw (c3's pose, dolphin.ts C3_RAFT; the raft holds it into c4
-        // under radioCall), facing the eye across the case
+        // THE CREW'S SPOTS (crewLife.ts crewSpots): the top of what is under each — the mat, a log's crown — by a ray
+        // straight down that passes through the rigging and the sails (a rope or a sail's foot over a spot is not where
+        // anyone sits); the bow's place at the case where it comes to rest (CASE_REST) — the kneeler's too, under
+        // radioOperator — and his way there
         {
-          const { spot, dir } = caseOnDeck();
-          const dl = Math.hypot(dir[0], dir[1]) || 1;
-          const rest: [number, number] = [spot[0] + (dir[0] / dl) * CASE_SKID, spot[1] + (dir[1] / dl) * CASE_SKID];
-          const h = C3_RAFT.heading * (Math.PI / 180);
-          const b = C3_RAFT.bearing * (Math.PI / 180);
-          // (the eye from the raft, in the raft's frame: x across, z toward the bow — dolphin.ts caseOnDeck's axes)
-          const rel: [number, number] = [-Math.sin(b) * C3_RAFT.distance, -Math.cos(b) * C3_RAFT.distance];
-          const side: [number, number] = [-Math.cos(h), -Math.sin(h)];
-          const bow: [number, number] = [-Math.sin(h), Math.cos(h)];
-          const ex = rel[0] * side[0] + rel[1] * side[1];
-          const ez = rel[0] * bow[0] + rel[1] * bow[1];
-          const el = Math.hypot(ex, ez) || 1;
-          kneeler.position.copy(footing(rest[0] - (ex / el) * OPERATOR.off, rest[1] - (ez / el) * OPERATOR.off));
-          // (a figure faces its −z: turned so that points at the eye)
-          kneeler.rotation.y = Math.atan2(-ex, -ez);
+          const aloft = (o: THREE.Object3D | null): boolean => {
+            for (; o; o = o.parent) if (o === people || o.name === 'drift-raft-rig-lines' || /^(sail|yard|flag)-/.test(o.name)) return true;
+            return false;
+          };
+          const top = (x: number, z: number): number => {
+            ray.set(new THREE.Vector3(x, 6, z).applyMatrix4(raft.matrixWorld), new THREE.Vector3(0, -1, 0).transformDirection(raft.matrixWorld));
+            const ys = ray
+              .intersectObject(raft, true)
+              .filter((h) => !aloft(h.object))
+              .map((h) => raft.worldToLocal(h.point.clone()).y)
+              .filter((y) => y < 1.3);
+            return ys.length ? Math.max(...ys) : -Infinity;
+          };
+          crewSpots = crewSpotsOn(top, CASE_REST);
         }
         deckAt.copy(footing(deckAt.x, deckAt.z)).add(new THREE.Vector3(0, 0.11, 0));
         deckY = deckAt.y;
@@ -1087,8 +1108,6 @@ export function createProps(): Props {
       const callOn = driftParams.radioCall;
       const operatorOn = driftParams.radioOperator;
       const endOn = driftParams.radioEnding;
-      standing.visible = !operatorOn;
-      kneeler.visible = operatorOn;
 
       // THE DOLPHIN (dolphin.ts), in the eye's level frame: x right, z ahead
       const c3 = t - starts.c3;
@@ -1150,11 +1169,11 @@ export function createProps(): Props {
         const toWorld = (x: number, y: number, z: number): THREE.Vector3 =>
           new THREE.Vector3(x, 0, -z).applyAxisAngle(new THREE.Vector3(0, 1, 0), s.yaw).add(new THREE.Vector3(s.eye.x, y, s.eye.z));
         const from = toWorld(...throwAt.from);
-        // the spot in the raft's own frame and its flight's direction there (for the skid), from c3's pose
-        // (dolphin.ts caseOnDeck), and the deck's top there (pure in t: the raft's pose now)
+        // the spot in the raft's own frame — CASE_SKID short of its rest (CASE_REST) along its flight's direction there
+        // (dolphin.ts caseOnDeck, from c3's pose) — and the deck's top there (pure in t: the raft's pose now)
         const onDeck = caseOnDeck();
-        const spot = new THREE.Vector3(onDeck.spot[0], 0, onDeck.spot[1]);
         const spotDir = new THREE.Vector3(onDeck.dir[0], 0, onDeck.dir[1]).normalize();
+        const spot = new THREE.Vector3(CASE_REST[0], 0, CASE_REST[1]).addScaledVector(spotDir, -CASE_SKID);
         const end = raft.localToWorld(deckTop(spot.x, spot.z).add(new THREE.Vector3(0, 0.11, 0)));
         const apex = Math.max(from.y, end.y) + CASE_LOB;
         const vy0 = Math.sqrt(2 * G_CASE * (apex - from.y));
@@ -1194,9 +1213,49 @@ export function createProps(): Props {
       // (and under radioCall with the operator at it, it swells as each call goes out: one swell a call)
       const swell = callOn && operatorOn ? CALL_SWELL * callSwell(t, starts.c4) : 0;
       dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle + swell) * 6;
+      // (under distantStorm each of the far cell's flashes spits into the radio and the glow stutters with it, where it
+      // is lit: stormCell.ts dialStutter — the 2026-11-02 review's move 4, "Each flash spits sferics into the dial's static")
+      if (driftParams.distantStorm) dialGlow.value *= dialStutter(t, (sferics ??= stormFlashes(starts.c4)));
       radioLight.intensity = (dialGlow.value / 6) * 0.08 * (operatorOn ? OPERATOR.light : 1);
       radioLight.distance = operatorOn ? OPERATOR.reach : RADIO_REACH;
       radioLight.color.setHex(operatorOn ? OPERATOR.color : RADIO_COLOR);
+
+      // THE CREW (crewLife.ts): what each is doing now, from where the things they react to are in the raft's own frame —
+      // the dolphin, the case once thrown, the Sun, the lamp that answers (WAKE_FROM's, where the stations are laid about
+      // the eye below), the beach, the world's up as the deck tilts (all pure in t: the raft's pose is)
+      if (people.visible && crewSpots) {
+        raft.updateMatrixWorld(true);
+        const inv = raft.getWorldQuaternion(new THREE.Quaternion()).invert();
+        const local = (p: THREE.Vector3): CrewV => {
+          const q = raft.worldToLocal(p.clone());
+          return [q.x, q.y, q.z];
+        };
+        const dirOf = (d: THREE.Vector3): CrewV => {
+          const q = d.clone().applyQuaternion(inv).normalize();
+          return [q.x, q.y, q.z];
+        };
+        const lamp = beaconAt[WAKE_FROM].clone().applyAxisAngle(UP, s.yaw).add(new THREE.Vector3(s.eye.x, 0, s.eye.z));
+        const now = crewNow({
+          t,
+          starts,
+          operator: operatorOn,
+          dolphin: fish.visible ? local(fish.position) : null,
+          caseAt: caseMesh.visible && !afloat ? local(caseMesh.position) : null,
+          lamp: world === 'open' ? local(lamp) : null,
+          land: world === 'coast' ? local(new THREE.Vector3(s.beach.x, 1.5, s.beach.z)) : null,
+          sun: dirOf(s.sun),
+          up: dirOf(UP),
+          spots: crewSpots,
+        });
+        now.forEach((c, i) => {
+          const g = crewRigs[i].group;
+          g.visible = c.visible;
+          if (!c.visible) return;
+          g.position.set(...c.root);
+          g.rotation.set(0, c.rot, 0);
+          crewRigs[i].set(solveCrew(c.act), c.held);
+        });
+      }
 
       // THE BEAMS: about the eye, in c4's night
       beams.visible = (world === 'open' && t > starts.c4 - 6) || (world === 'coast' && t > starts.w6 - 6);
@@ -1294,7 +1353,7 @@ export function createProps(): Props {
         });
       }
       // OUR CALLS (radioCall, c4): their pulses from the masthead out to the lamp ahead, and the answer's back, on the
-      // one path between them (roseTraffic.ts callPulses), and the path's faint trail from the first call on
+      // one path between them (roseTraffic.ts callPulses); no trail on it, dark once the answer is in (CALL_AFTER)
       const calling = callOn && world === 'open' && beams.visible;
       if (calling && !mastTop) {
         // (the main mast's piece, raft-local: its top, over its middle — found once the raft is in)
@@ -1316,11 +1375,12 @@ export function createProps(): Props {
           t,
           t0: 0,
           dur: CALL.travel,
-          // (from a second before the first call; its trail goes with the Rose's, roseTraffic.ts trailOut)
-          gain: t > pulses[0].t0 - 1 ? (CALL_NIGHT[0] + CALL_NIGHT[1] * s.night) * trailOut(t, starts.w1) : 0,
+          // (from a second before the first call to the answer's afterglow gone: CALL_AFTER. No trail — the path ends
+          // in the air over our mast, and a line left there read as one "that terminates seemingly in the topmast of
+          // the boat … ends mid-air", the user, 2026-11-02)
+          gain: t > pulses[0].t0 - 1 ? (CALL_NIGHT[0] + CALL_NIGHT[1] * s.night) * (1 - smooth((t - callsDone(starts.c4)) / CALL_AFTER)) : 0,
           // (each beat one of the Rose's pulse heads, the long one drawn out by what it is held beyond a short one)
           pulses: pulses.map((p) => ({ ...p, hold: p.hold - CALL_RHYTHM[0][1] })),
-          trail: 1,
         });
       } else {
         callSignal.set({ path: () => mastAt, t, t0: 0, dur: 1, gain: 0 });
@@ -1407,7 +1467,17 @@ export function createProps(): Props {
             loopTime: [1.6, 3.2],
           },
           25,
-        ).filter((e) => e.meets === 1);
+        ).filter((e) => {
+          if (e.meets !== 1) return false;
+          // only in the open sky: a pair born lower than SKY_ONLY above the eye's horizon hung over the beach and
+          // the palms (the 2026-11-02 review of the night beach: Act 1's rings "do look a little bit lost over the
+          // beach")
+          const eye = s.coastEyeAt(e.birth);
+          const dx = e.vertex[0] - eye.x;
+          const dy = e.vertex[1] - eye.y;
+          const dz = e.vertex[2] - eye.z;
+          return Math.atan2(dy, Math.hypot(dx, dz)) >= SKY_ONLY;
+        });
         events.push(...night);
         for (const e of events) {
           // no creation burst; and under the energy that draws photons and gammas (loops.ts: rays only above 0.45)

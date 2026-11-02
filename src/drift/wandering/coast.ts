@@ -250,8 +250,16 @@ const OURS: MotuShape = {
   back: OURS_BACK,
   detail: (along, off, sf, sb) => {
     let h = 0;
-    // BEACH CUSPS: the swash scallops the face every ~24 m, the waterline wandering a metre in and out
-    h += 0.11 * Math.sin((2 * Math.PI * along) / 24 + 0.35 * Math.sin(along / 57)) * bell(sf - 3.5, 5);
+    // BEACH CUSPS: the swash scallops the face, the waterline wandering a metre in and out — irregularly. They had
+    // been one sine every 24 m (its phase barely warped), and the waterline and the wet sand's edge followed it as a
+    // regular zigzag the length of the beach: "too wonky, too wobbly … more drawn out and not so regular … different
+    // rhythms and intervals", the user, 2026-11-02, a zigzag drawn over the 735 s view; the 24 m line held 53–60 % of
+    // the waterline's wander over 4–80 m (tests/driftCoastPlan.test.ts measures it now). Real cusps come and go along a
+    // beach, their spacing drifting: here a ~26 m scallop whose phase wanders by several radians over ~55 m (spacing
+    // ~15–40 m) and that fades out in stretches, on long drawn-out lobes of tens of metres and a finer irregular wander
+    const cuspWarp = 9 * (fbm2Cpu(along / 55, 13.1, 3) - 0.5);
+    const cuspOn = smooth(0.3, 0.7, fbm2Cpu(along / 80 + 4, 2.2, 2));
+    h += (0.08 * cuspOn * Math.sin((2 * Math.PI * along) / 26 + cuspWarp) + 0.12 * (fbm2Cpu(along / 38 + 3, 5.5, 3) - 0.5) + 0.08 * (fbm2Cpu(along / 13 + 7, 0.4, 3) - 0.5)) * bell(sf - 3.5, 5);
     // the berm's crest wanders along the beach
     h += 0.22 * (fbm2Cpu(along / 45, 3.7, 3) - 0.5) * bell(sf - 19, 7);
     // the island's hummocks, under its trees

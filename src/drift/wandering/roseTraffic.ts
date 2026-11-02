@@ -90,6 +90,9 @@ export interface WakeOptions {
   chords?: boolean;
   /** false: a station reached does not send an answer back along the link (it flares, and calls on) */
   answerBack?: boolean;
+  /** the ring's stations in order round it (default every station, 0 … n − 1): a station left out is never called,
+   * and its two neighbours are each other's (the link between them, a chord of the full figure) */
+  ring?: number[];
 }
 
 /**
@@ -107,11 +110,16 @@ export function wakeTraffic(c4: number, links: Array<[number, number]>, arcDeg: 
   // THE RING, outward both ways from the first to answer: a lit station calls each neighbour whose link has not yet
   // carried anything; the neighbour is lit when the call reaches it (or already was, from the other side: the last
   // link closes the ring behind the eye), answers, and calls on
+  const ring = o.ring ?? Array.from({ length: n }, (_, i) => i);
+  const around = (s: number): number[] => {
+    const i = ring.indexOf(s);
+    return [ring[(i + 1) % ring.length], ring[(i + ring.length - 1) % ring.length]];
+  };
   let frontier = [WAKE_FROM];
   while (frontier.length) {
     const next: number[] = [];
     for (const s of frontier) {
-      for (const m of [(s + 1) % n, (s + n - 1) % n]) {
+      for (const m of around(s)) {
         const k = linkOf(s, m);
         if (k < 0 || carried.has(k)) continue;
         carried.add(k);
@@ -287,6 +295,8 @@ export function callPulses(c4: number): CallPulse[] {
   const answer = CALL_RHYTHM.map(([at, hold]) => ({ t0: c4 + ANSWER_AT - FLASH.rise + at, hold, back: true }));
   return [...calls, ...answer];
 }
+/** sea s the last of callPulses has wholly reached its far end (the answer's long one, at us: 454.0 show s) */
+export const callsDone = (c4: number): number => Math.max(...callPulses(c4).map((p) => p.t0 + p.hold + FLASH.fall + CALL.travel));
 /** the dial as each call leaves (under radioOperator, props.ts): 0 … 1, swelling over the second before the call's
  * first pulse, held through its last, settling over 1.5 s — one swell a call, not a blink a pulse */
 export function callSwell(t: number, c4: number): number {
@@ -312,19 +322,20 @@ export function answerFlare(t: number, c4: number): number {
  * flight a side: no answer sent back along a link (the station reached flares, and calls on), no chords — at WAKE's
  * pace the ring and the chords filled 23 s with up to ten pulses at once, the "fireworks problem" the review warns of.
  * One pulse at a time round all seven links would take ~40 s and end after the dissolve; one a side closes the ring
- * behind us at ~474.1 s (the left side, three hops, has reached the back at ~468.6; the right's fourth arrives), on
- * the score's last swell before its dip (476–479 s), where c4's Rose goes quiet (`quiet`: s before w1 its fade starts
- * and ends; WAKE's own runs 17 → 7, through the closing). Measured on the ring's own arcs (tests/radioStory.test.ts):
- * calls leave 452.0, the hops land 457.1/457.2, 462.7/462.9, 468.4/468.6 and 474.1 show s (lift 0.6, speed 34).
+ * behind us at ~474.1 s, on the score's last swell before its dip (476–479 s), where c4's Rose goes quiet (`quiet`: s
+ * before w1 its fade starts and ends; WAKE's own runs 17 → 7, through the closing). The ring is six now, the station
+ * behind our raft passed over (CASCADE_HIDDEN): three hops a side, −40° → −95° → −150° → 160° on the left and
+ * −40° → +55° → 105° → 160° on the right, meeting behind us. Measured on the ring's own arcs (tests/radioStory.test.ts):
+ * calls leave 452.0, the hops land 458.7/459.7, 465.9/466.8 and 473.1/474.1 show s (lift 0.6, speed 24).
  *
  *   lead    s the answering station waits after its answer's first flash before it calls on (the raft has begun to
  *           turn toward it: ANSWER_TURN) — with `call`, its first calls leave at 452.0 s, the review's cue list
  *           "452–490: the cascade"
  *   call    s a reached station waits before it calls on
- *   speed   deg/s along the raised arch (and TRAVEL.base s): a neighbour's ~120° arch in ~5.1 s (at 24 the ring
- *           closed at 477.9 s, in the fade; the Rose's own 16 would take ~8 s a hop). 30 at lift 0.5; 34 at 0.6, so
- *           the longer arches keep the same hops (at 30 they ran 5.4–5.7 s and the ring closed at 476.0, on the
- *           quiet's first second)
+ *   speed   deg/s along the raised arch (and TRAVEL.base s): a neighbour's ~120° arch in ~6.5 s, the chord past the
+ *           hidden station in ~7.7 s (the Rose's own 16 would take ~9 s a hop). 30 at lift 0.5 and 34 at 0.6 for the
+ *           ring of seven (four hops on one side); 24 for the ring of six, so its three hops a side close it on the
+ *           same swell (at 34 it closed at 469.3, five seconds early, the crossings 5.0–5.9 s)
  *   min     s: no crossing shorter (the review: "each crossing taking 5 s or more")
  *   lift    the arches raised toward the zenith (props.ts arcPoint `lift`): a neighbour's apex ~58° up instead of ~9°,
  *           so the ring stands high over the dome — and behind us, where the 15° tilt puts the dome's rim 15° up,
@@ -336,14 +347,26 @@ export function answerFlare(t: number, c4: number): number {
  *           about half a low one's light (it had 0.3 of it), still a pulse in the haze and no flash; the ring's rest
  *           and the lamps are as they were
  */
-export const CASCADE = { lead: 3.5, call: 0.6, speed: 34, min: 5, lift: 0.6, gain: 1.8, quiet: [14, 6] as [number, number] };
+export const CASCADE = { lead: 3.5, call: 0.6, speed: 24, min: 5, lift: 0.6, gain: 1.8, quiet: [14, 6] as [number, number] };
+/**
+ * THE STATIONS THE CASCADE PASSES OVER (indices into props.ts STATIONS): those whose lamp stands behind our raft from
+ * the show's eye while the cascade runs (tests/radioStory.test.ts measures it from beats.ts raftPose and the raft's
+ * silhouette). The one at +10° is: its link from the answering lamp came down out of the sky and stopped in our
+ * rigging, its lamp hidden by the cabin and the mast — the user, 2026-11-02: "one line that terminates seemingly in the
+ * topmast of the boat … It looks like it ends mid-air and doesn't read well. That line we need to get rid of". So the
+ * ring runs round the other six (CASCADE_RING): from the answering lamp at −40° its right-hand pulse crosses straight to
+ * the one at +55° (a chord of the full figure) and on round, closing behind us at 160° as before.
+ */
+export const CASCADE_HIDDEN: readonly number[] = [3];
+/** the cascade's ring: every station but CASCADE_HIDDEN, in order round the horizon */
+export const cascadeRing = (n: number): number[] => Array.from({ length: n }, (_, i) => i).filter((i) => !CASCADE_HIDDEN.includes(i));
 
 /**
  * THE TRAILS (radioCall's c4; round 3, the user, 2026-11-02, of the cascade: "keeping faint lines of where the lines
  * traveled … this interesting pattern, but like much more faint than we used to have. Otherwise, it's like very
- * empty"). Once a pulse has run along a path — the Rose's arcs (props.ts) and our call's (radioSignal.ts) — the path
- * keeps a faint line: it comes in behind the pulse over `in` s and decays over tens of seconds (`decay`, s, e-folding),
- * so over the cascade the sky builds the network's figure link by link, the oldest fading first. It outlasts the
+ * empty"). Once a pulse has run along one of the Rose's arcs (props.ts) the path keeps a faint line (not our call's:
+ * its path ends in the air over our mast, radioSignal.ts): it comes in behind the pulse over `in` s and decays over
+ * tens of seconds (`decay`, s, e-folding), so over the cascade the sky builds the network's figure link by link, the oldest fading first. It outlasts the
  * pulses' quiet (CASCADE.quiet: the Rose's light goes 476 → 484) — still faintly there over the quiet — and goes over
  * `out` (s before w1, start and end), gone as w1's dissolve begins (5 s before it), so the dissolve never crossfades a
  * lit sky into an empty one (the 2026-11-01 review: "abrupt and blendy"). Its light: props.ts ARC_L.trail.
@@ -391,6 +414,7 @@ export function cascadeTraffic(c4: number, links: Array<[number, number]>, arcDe
     lead: CASCADE.lead,
     chords: false,
     answerBack: false,
+    ring: cascadeRing(n),
   });
 }
 

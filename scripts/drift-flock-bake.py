@@ -38,7 +38,23 @@ Ten thousand birds, a metre apart, each heeding its 7 nearest (StarDisplay: Hild
 the turn; nothing steers them but an area of air that wanders over the beach (free within it, drawn back from
 beyond). The vortex comes once, for ~10 s; before and after it the shapes are the flock's own.
 
+Eighth bake, an ALTERNATE (2026-11-02, the next-level review, move 5: "the flock rises in the score's silence"):
+`--silence` writes flock-keys-silence.* beside the seventh bake's keys, which it leaves as they are; the film reads it
+under `flockSilence` (params/drift.ts, default off). The score's one real hole is ~650–677 s (the show's WAV at
+offset 0, 0.5 s RMS: down from ~−20 dBFS to −28 at 650 s, its deepest −36 at 652 s, −25…−34 to 676.5 s, and the
+music back at 677.0 s at −15). The flock's clock starts at w4 + 2 s (show 637 s, sea.ts), so: the seventh bake's way
+in over the forest and its low pass across the front, unchanged, to 13 s; then the flock hangs low over the surf
+ahead and to the left (~14 m up, ~13° over the horizon) and at SILENCE_LIFT (15 s: show 652 s) the whole of it lifts
+AT ONCE — every bird climbs in the same second, no wave along it — and is routed up and round to the FRONT RIGHT, the
+darker east sky out of the low Sun's glare (the Sun ~4° up, 68° left of the front: in the seventh bake the flock
+wheeled over the sea right under it, where it read as a smudge), wheels there, ~45° up and ~50 m off, for ~10 s, and
+gathers into the vortex there, whose axis then climbs slowly over the audience to the dome's zenith (the H18 dome's
+zenith is 15° ahead of true up) as the music comes back (~676 s), and holds it there for the vortex's last seconds:
+the crossing of the top of the dome takes ~10 s, not the ~3 s a flock flying straight over at 40 m would (11 m/s
+over 40 m is 16°/s). After it, the seventh bake's way out down the beach and over the trees, later by 8 s.
+
   out/drift/data/.venv/bin/python -I scripts/drift-flock-bake.py public/drift/flock
+  out/drift/data/.venv/bin/python -I scripts/drift-flock-bake.py public/drift/flock --silence
 """
 
 import os
@@ -48,8 +64,11 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-OUT = Path(sys.argv[1])
+OUT = Path([a for a in sys.argv[1:] if not a.startswith('--')][0])
 OUT.mkdir(parents=True, exist_ok=True)
+# (the eighth bake, an alternate beside the seventh's keys: see the header)
+SILENCE = '--silence' in sys.argv
+SUFFIX = '-silence' if SILENCE else ''
 
 # (FLOCK_N: a smaller flock for a quick look while tuning)
 N = int(os.environ.get('FLOCK_N', 10000))
@@ -122,9 +141,17 @@ K_ALT = 1.6
 # them be organic"): s it holds (eased in and out over V_EASE), its axis (vertical, through this point: just ahead
 # of the audience, overhead), the arms' reach (m), their pitch, the rim's airspeed (m/s), the core's share of the
 # birds and its reach (m), and the funnel: the height at the arms' inner end (m) and its rise per metre out
-VORTEX = (28.0, 38.0)
+VORTEX = (34.0, 46.0) if SILENCE else (28.0, 38.0)
 V_EASE = 3.0
 V_AXIS = np.array([-2.0, 0.0, -8.0])
+# THE SILENCE (eighth bake): s of the lift, how long its climb pushes, and how hard (m/s², up and to the right); the
+# vortex axis's climb from the front right to the zenith (s, from where to where: x, z m), over V_AXIS at its end
+SILENCE_LIFT = 15.0
+SILENCE_PUSH = 1.6
+SILENCE_UP = 16.0
+SILENCE_RIGHT = 8.0
+V_CLIMB = (VORTEX[0], VORTEX[0] + 6.0)
+V_FROM = np.array([16.0, 0.0, -30.0])
 V_R = (13.0, 30.0)
 V_CORE = 0.12
 V_CORE_R = (3.0, 11.0)
@@ -137,6 +164,14 @@ V_RISE = 0.55
 def smooth(x):
     x = np.clip(x, 0, 1)
     return x * x * (3 - 2 * x)
+
+
+def vortex_axis(t: float) -> np.ndarray:
+    """the vortex's axis at t: fixed (V_AXIS), or under --silence climbing from the front right to the zenith"""
+    if not SILENCE:
+        return V_AXIS
+    k = smooth((t - V_CLIMB[0]) / (V_CLIMB[1] - V_CLIMB[0]))
+    return V_FROM * (1 - k) + V_AXIS * k
 
 
 def vortex_weight(t: float) -> float:
@@ -197,6 +232,32 @@ def area_centre(t: float) -> np.ndarray:
                 return np.array(a) * (1 - k) + np.array(b) * k
         return np.array(ks[-1][1])
 
+    if SILENCE:
+        # (the eighth bake: low over the surf ahead left until the lift, then up and round to the front right, a
+        # wheel there against the east sky, and into the vortex where it forms; the way out as before, 8 s later)
+        # (out of the pass it turns back right and hangs low ahead, ~15 m up and 50 m off (the soft floor holds it there) — 60° from the Sun, not out
+        # over the sea under it — then the lift, already turning right, and on up round to the front right)
+        keys_ = keys_[:3] + [
+            (12.5, (2.0, 14.0, -44.0)),
+            (SILENCE_LIFT, (6.0, 13.0, -50.0)),
+            (SILENCE_LIFT + 2, (8.0, 26.0, -52.0)),
+            (SILENCE_LIFT + 6, (8.0, 42.0, -44.0)),
+            (SILENCE_LIFT + 9, (10.0, 47.0, -42.0)),
+        ]
+        # (the wheel ~50 m off, ~45° up and 20–35° right: the open sky between the Sun's side and the forest. At ~100 m
+        # and 25–35° up, 45–55° right — the first silence bake — it sank behind the palms on the right and thinned to the
+        # same faint smudge it had been in the glare: the 2048 dome clip of 2026-11-02; and held ~6 m higher than the
+        # second try's, whose sag after the climb dropped it behind the palms again for ~3 s at 659–662 s)
+        w = 2 * np.pi / 14
+        u = t - (SILENCE_LIFT + 9)
+        wheel = np.array([10 + np.sin(w * u) * 8, 44 + np.sin(w * 2 * u + 1) * 3, -36 - np.cos(w * u) * 6])
+        ax = vortex_axis(t)
+        over = np.array([ax[0], V_BASE + 4, ax[2]])
+        after = [(VORTEX[1] + 2, (-16.0, 23.0, -20.0)), (VORTEX[1] + 8, (-14.0, 20.0, -55.0)), (VORTEX[1] + 14, (6.0, 20.0, -110.0)),
+                 (VORTEX[1] + 21, (70.0, 18.0, -160.0)), (DURATION, (120.0, 18.0, -200.0))]
+        c = path(keys_, t) if t < SILENCE_LIFT + 9 else wheel
+        c = c * (1 - smooth((t - VORTEX[0] + 4) / 5)) + over * smooth((t - VORTEX[0] + 4) / 5)
+        return c * (1 - smooth((t - VORTEX[1]) / 3)) + path(after, t) * smooth((t - VORTEX[1]) / 3)
     c = path(keys_, t) if t < 17 else wheel
     c = c * (1 - smooth((t - VORTEX[0] + 9) / 6)) + over * smooth((t - VORTEX[0] + 9) / 6)
     return c * (1 - smooth((t - VORTEX[1]) / 3)) + path(after, t) * smooth((t - VORTEX[1]) / 3)
@@ -227,7 +288,7 @@ for step in range(n_steps + 1):
     idx = np.nonzero(flying)[0]
     vw = vortex_weight(t)
     if v_r is None and t >= VORTEX[0]:
-        rel = pos - V_AXIS
+        rel = pos - vortex_axis(t)
         dist0 = np.hypot(rel[:, 0], rel[:, 2])
         rank = np.argsort(np.argsort(dist0)) / (N - 1)
         core = rank < V_CORE
@@ -267,6 +328,10 @@ for step in range(n_steps + 1):
         hd = np.hypot(to[:, 0], to[:, 2])[:, None] + 1e-6
         # (held tighter through the pass across the front, so the body comes by as one, not spread toward us)
         r_area = R_AREA - 11.0 * smooth((t - 4) / 2) * smooth((12 - t) / 2)
+        # (--silence: held tighter through the wheel at the front right too, so it stays ~50 m off as one body instead
+        # of roaming out to 100 m and more)
+        if SILENCE:
+            r_area -= 8.0 * smooth((t - SILENCE_LIFT - 4) / 3) * smooth((VORTEX[0] - t) / 2)
         pull = np.minimum((hd - r_area).clip(0) * K_AREA * (1 + 1.5 * (R_AREA - r_area) / 11.0), 6.0) * (1 - vw)
         F[:, [0, 2]] += to[:, [0, 2]] / hd * pull
         dy = to[:, 1:2]
@@ -276,15 +341,23 @@ for step in range(n_steps + 1):
         if vw > 0:
             rad = v_r[idx] * vortex_squeeze(t)
             th = v_theta0[idx] - V_SPEED / V_R[1] * v_phase
-            goal = np.stack([V_AXIS[0] + rad * np.cos(th), V_BASE + (rad - V_R[0]) * V_RISE, V_AXIS[2] - rad * np.sin(th)], -1)
-            # d(goal)/dθ · dθ/dt: the tangent, at the pattern's speed there
+            ax = vortex_axis(t)
+            goal = np.stack([ax[0] + rad * np.cos(th), V_BASE + (rad - V_R[0]) * V_RISE, ax[2] - rad * np.sin(th)], -1)
+            # d(goal)/dθ · dθ/dt: the tangent, at the pattern's speed there (and the axis's own drift, --silence)
             gvel = np.stack([np.sin(th), np.zeros_like(th), np.cos(th)], -1) * (V_SPEED * v_r[idx] / V_R[1])[:, None]
+            gvel += (vortex_axis(t + 0.05) - vortex_axis(t - 0.05)) / 0.1
             F += ((goal - p) * 1.1 + (gvel - v) * 1.6) * vw
         # KEEP OFF THE AUDIENCE: within EYE_CLEAR of the eye a bird is pushed away from it, hard (a flock that came
         # at the eye was the review's complaint, and in the vortex overhead the core's lowest birds came near)
         to_eye = p - np.array([0.0, 1.6, 0.0])
         de = np.linalg.norm(to_eye, axis=1, keepdims=True) + 1e-6
         F += to_eye / de * (np.clip(EYE_CLEAR - de, 0, None) * 14.0)
+        # THE LIFT (--silence): every bird at once, up and to the right, for SILENCE_PUSH s — no startle wave along the
+        # body: the move asks for the whole flock lifting in the same second of the silence
+        if SILENCE:
+            push = smooth((t - SILENCE_LIFT) / 0.25) * smooth((SILENCE_LIFT + SILENCE_PUSH - t) / 0.5)
+            F[:, 1] += SILENCE_UP * push
+            F[:, 0] += SILENCE_RIGHT * push
         # each its own turbulence (small: a murmuration is very nearly all one heading)
         F += NOISE * np.sin(nf[idx] * t * 2 * np.pi + nph[idx]) * np.array([1.0, 0.45, 1.0])
         # lift off the sand for the first seconds of flight; then a soft lift, rising as they near the sand
@@ -345,9 +418,9 @@ rows = ROWS
 data = np.zeros((keys.shape[0], rows * TEX_W, 4), np.float32)
 data[:, :N] = np.concatenate([keys, flyingK[..., None]], -1)
 data = data.astype('<f2')
-data.tofile(OUT / 'flock-keys.f16')
-(OUT / 'flock-keys.json').write_text(f'{{"birds": {N}, "keys": {keys.shape[0]}, "hz": {KEY_HZ}, "duration": {DURATION}, "width": {TEX_W}, "rows": {rows}}}')
-print(OUT / 'flock-keys.f16', data.nbytes / 1e6, 'MB')
+data.tofile(OUT / f'flock-keys{SUFFIX}.f16')
+(OUT / f'flock-keys{SUFFIX}.json').write_text(f'{{"birds": {N}, "keys": {keys.shape[0]}, "hz": {KEY_HZ}, "duration": {DURATION}, "width": {TEX_W}, "rows": {rows}}}')
+print(OUT / f'flock-keys{SUFFIX}.f16', data.nbytes / 1e6, 'MB')
 
 # a CPU preview in dome space: equidistant fisheye, zenith at the centre, the front at the bottom
 from PIL import Image, ImageDraw  # noqa: E402
@@ -355,7 +428,7 @@ from PIL import Image, ImageDraw  # noqa: E402
 eye = np.array([0, 1.6, 0])
 S = 360
 frames = []
-for t in (2, 5, 9, 13, 18, 24, 30, 36, 42, 50, 60, 74):
+for t in ((2, 9, 14, 16, 20, 26, 32, 36, 40, 45, 55, 74) if SILENCE else (2, 5, 9, 13, 18, 24, 30, 36, 42, 50, 60, 74)):
     f = keys[min(len(keys) - 1, int(t * KEY_HZ))] - eye
     d = f / (np.linalg.norm(f, axis=1, keepdims=True) + 1e-9)
     el = np.degrees(np.arcsin(np.clip(d[:, 1], -1, 1)))
@@ -374,4 +447,4 @@ for t in (2, 5, 9, 13, 18, 24, 30, 36, 42, 50, 60, 74):
 sheet = Image.new('L', (S * 6, S * 2))
 for i, im in enumerate(frames):
     sheet.paste(im, ((i % 6) * S, (i // 6) * S))
-sheet.save(OUT / 'flock-preview.png')
+sheet.save(OUT / f'flock-preview{SUFFIX}.png')

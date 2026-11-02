@@ -25,12 +25,14 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { vec3 } from 'three/tsl';
-import { DAY_DOLPHIN, DAY_DOLPHIN_GONE, LINE_DOWN, LINE_DOWN_DAY, LINE_DOWN_LIGHT, LINE_DOWN_ON, LINE_DOWN_SUN_EL, createLineDown, lineDownLight, raiseSun } from '../src/drift/wandering/lineDown';
+import { A3_BREATHE, A3_CIRCLER, A3_LEAD, A3_UNDER, DAY_DOLPHIN, DAY_DOLPHIN_GONE, LINE_DOWN, LINE_DOWN_DAY, LINE_DOWN_LIGHT, LINE_DOWN_ON, LINE_DOWN_SUN_EL, createLineDown, lineDownLight, lineDownOn, raiseSun } from '../src/drift/wandering/lineDown';
 import { SUNKEN_SET } from '../src/drift/wandering/drowned';
-import { C1_FOLLOW, beatStarts } from '../src/drift/wandering/beats';
-import { BAND, DIVE, adaptAt, heightOn, planDive, veilAt } from '../src/drift/wandering/lineDownDive';
+import { swimEnvelope } from '../src/drift/wandering/dolphin';
+import { thingsAt } from '../src/drift/getTheDrift/debrisField';
+import { C1_FOLLOW, beatStarts, raftPose } from '../src/drift/wandering/beats';
+import { ADAPT_IN, BAND, DIVE, DIVE_A3, DIVE_LATE, DIVE_PACED, adaptAt, foamAt, heightOn, planDive } from '../src/drift/wandering/lineDownDive';
 import { WINDOW_DEBUG, boxRows, createWindowRaft } from '../src/drift/wandering/lineDownWindow';
-import { createLineDownVeil } from '../src/drift/wandering/lineDownVeil';
+import { SNOW, WET_LENS, createLineDownVeil, dropsAt } from '../src/drift/wandering/lineDownVeil';
 
 const c1End = 41.1;
 const { starts } = beatStarts(c1End);
@@ -55,8 +57,13 @@ function fragmentOf(mesh: THREE.Mesh, scene: THREE.Scene): string {
 }
 
 describe('the Line Down look-dev', () => {
-  it('is off by default, and so is the c2 power line (and the window trace\'s red debug paint)', () => {
-    expect(LINE_DOWN_ON).toBe(false);
+  it('is ON by default as A3 (the user, 2026-11-02), with a switch to turn it off; the c2 power line and the window trace\'s red debug paint stay off', () => {
+    expect(LINE_DOWN_ON).toBe(true);
+    expect(LINE_DOWN_LIGHT).toBe('a3');
+    expect(lineDownOn('off')).toBe(false);
+    expect(lineDownOn('0')).toBe(false);
+    expect(lineDownOn(null)).toBe(true);
+    expect(lineDownOn('')).toBe(true);
     expect(WINDOW_DEBUG).toBe(false);
     expect(SUNKEN_SET.powerLine).toBe(false);
   });
@@ -99,11 +106,11 @@ describe('the Line Down look-dev', () => {
   });
 
   describe('the day fallback', () => {
-    it('is asked for by name; a bare ?linedown keeps the sunset, and no Sun is raised unless asked', () => {
+    it('is asked for by name; a bare ?linedown is A3, the sunset by its name, and no Sun is raised unless asked', () => {
       expect(lineDownLight('day')).toBe('day');
-      expect(lineDownLight('')).toBe('sunset');
-      expect(lineDownLight(null)).toBe('sunset');
-      expect(LINE_DOWN_LIGHT).toBe('sunset');
+      expect(lineDownLight('sunset')).toBe('sunset');
+      expect(lineDownLight('')).toBe('a3');
+      expect(lineDownLight(null)).toBe('a3');
       expect(LINE_DOWN_SUN_EL).toBeUndefined();
     });
 
@@ -214,24 +221,55 @@ describe('the Line Down look-dev', () => {
       expect(heightOn(plan.keys, plan.down)).toBeCloseTo(y(plan.down), 9);
     });
 
-    it('eases the eye\'s adaptation in after the entry and out before the surfacing (no flash), under a veil each time', () => {
+    it('opens the eye quickly under the water and closes it before the surfacing (no flash); foam only at the waterline', () => {
       const under = 2.1;
       expect(adaptAt(plan.down, plan.down, plan.up, under)).toBe(1);
-      expect(adaptAt(plan.up, plan.down, plan.up, under)).toBe(1);
-      expect(adaptAt((plan.down + plan.up) / 2, plan.down, plan.up, under)).toBeCloseTo(under, 6);
-      // (just before the air comes back the eye is nearly at the air's exposure already)
-      expect(adaptAt(plan.up - 0.15, plan.down, plan.up, under)).toBeLessThan(1.05);
-      // (and it never jumps: a frame's change at 30 fps stays small)
-      for (let t = plan.down - 1; t < plan.up + 1; t += 1 / 30) expect(Math.abs(adaptAt(t + 1 / 30, plan.down, plan.up, under) - adaptAt(t, plan.down, plan.up, under))).toBeLessThan(0.08);
-      // the veil: up over each crossing, gone between them and outside
-      expect(veilAt(plan.down + 0.05, plan.down, plan.up)).toBeGreaterThan(0.95);
-      expect(veilAt(plan.up, plan.down, plan.up)).toBeGreaterThan(0.95);
-      expect(veilAt((plan.down + plan.up) / 2, plan.down, plan.up)).toBe(0);
-      expect(veilAt(plan.down - 1, plan.down, plan.up)).toBe(0);
-      expect(veilAt(plan.up + 1.5, plan.down, plan.up)).toBe(0);
+      // (the water at its beauty "pretty immediately" — the user, 2026-11-02, round 2: within ADAPT_IN ≤ 0.6 s)
+      expect(ADAPT_IN).toBeLessThanOrEqual(0.6);
+      expect(adaptAt(plan.down + ADAPT_IN, plan.down, plan.up, under)).toBeCloseTo(under, 6);
+      // AT EACH CROSSING the exposure meets the scene's step half way (the water is darker than the air): up a little
+      // going in, and coming up the air is let in at less than the water's exposure, never more — never a flash
+      expect(adaptAt(plan.down + 1e-3, plan.down, plan.up, under)).toBeGreaterThan(1);
+      const lastUnder = adaptAt(plan.up - 1e-3, plan.down, plan.up, under);
+      const firstAir = adaptAt(plan.up + 1e-3, plan.down, plan.up, under);
+      expect(firstAir).toBeLessThan(1);
+      expect(lastUnder).toBeGreaterThan(firstAir);
+      expect(adaptAt(plan.up + 1.5, plan.down, plan.up, under)).toBeCloseTo(1, 6);
+      // (and away from the crossings it never jumps: a frame's change at 30 fps stays small)
+      for (let t = plan.down - 1; t < plan.up + 2; t += 1 / 30) {
+        if (Math.abs(t - plan.down) < 0.05 || Math.abs(t - plan.up) < 0.05) continue;
+        expect(Math.abs(adaptAt(t + 1 / 30, plan.down, plan.up, under) - adaptAt(t, plan.down, plan.up, under))).toBeLessThan(0.2);
+      }
+      // the waterline's foam: up only for a moment round each crossing — nothing in the air before the entry (the
+      // first build's veil: "a gray screen with snow on it"), nothing a half-second into the water
+      expect(foamAt(plan.down, plan.down, plan.up)).toBe(1);
+      expect(foamAt(plan.up, plan.down, plan.up)).toBe(1);
+      expect(foamAt(plan.down - 0.15, plan.down, plan.up)).toBe(0);
+      expect(foamAt(plan.down + 0.5, plan.down, plan.up)).toBe(0);
+      expect(foamAt(plan.up + 0.5, plan.down, plan.up)).toBe(0);
+      expect(foamAt((plan.down + plan.up) / 2, plan.down, plan.up)).toBe(0);
     });
 
-    it('builds its veil, bubbles and snow face-safe (world places, eye-facing quads, no screen space)', () => {
+    it('keeps the marine snow sparse, and the wet lens few, small, ahead, and gone within ~1.5 s', () => {
+      expect(SNOW).toBeLessThanOrEqual(260);
+      // (the wet lens is off unless asked for: the user, 2026-11-02 — "spot on, not some janky blob", or not at all)
+      expect(WET_LENS).toBe(false);
+      const front: [number, number] = [0, -1];
+      expect(dropsAt(-0.1, front)).toHaveLength(0);
+      expect(dropsAt(1.3, front)).toHaveLength(0);
+      const at = dropsAt(0.3, front);
+      expect(at.length).toBeGreaterThan(4);
+      expect(at.length).toBeLessThanOrEqual(30);
+      for (const [dir, r] of at) {
+        expect(r).toBeLessThanOrEqual((3.5 * Math.PI) / 180 + 1e-9);
+        // (ahead: within ~100° of the front)
+        expect(dir.x * front[0] + dir.z * front[1]).toBeGreaterThan(-0.2);
+      }
+      // (sliding down: a drop is lower later in its life; and the same t gives the same drops)
+      expect(dropsAt(0.3, front)[0][0].y).toBeCloseTo(at[0][0].y, 12);
+    });
+
+    it('builds its foam, wet lens, bubbles and snow face-safe (world places, eye-facing quads, no screen space)', () => {
       const v = createLineDownVeil({ down: { t: plan.down, x: 0, z: 0, v: DIVE.vDown, vx: 0.5, vz: 0 }, up: { t: plan.up, x: 0, z: 0 } });
       const sc = new THREE.Scene();
       sc.add(v.group);
@@ -338,5 +376,156 @@ describe('the Line Down look-dev', () => {
       expect(inside).toBeGreaterThanOrEqual(3);
       expect(nearest).toBeGreaterThan(3);
     });
+  });
+
+  it('the things set by the eye float as wreckage does: nothing upright riding high, the wood low in the water', () => {
+    // (the user, 2026-11-02, on the upturned picnic table beside the raft: "it wouldn't float like this")
+    const d = thingsAt(Array.from({ length: 30 }, (_, i) => [i * 3, 0] as [number, number]));
+    const TABLE = 16;
+    const BUOY = 11;
+    const WOOD = new Set([4, 8, 17]);
+    for (let n = 0; n < d.count; n++) {
+      expect([TABLE, BUOY]).not.toContain(d.kind[n]);
+      if (WOOD.has(d.kind[n])) expect(d.extra[n * 4]).toBeLessThanOrEqual(0.3);
+    }
+  });
+
+  describe('the later dips: A2 paced, B late (2026-11-02)', () => {
+    it('are asked for by name, and none of them moves a beat', () => {
+      expect(lineDownLight('paced')).toBe('paced');
+      expect(lineDownLight('late')).toBe('late');
+      // (the beats the music is cut to: c2 at 355 s, c3 at 385 s — the same with or without them)
+      expect(show(starts.c2)).toBeCloseTo(355, 6);
+      expect(show(starts.c3)).toBeCloseTo(385, 6);
+    });
+
+    it('A2 shows the raft from the air first, then ~12 s of calm under it, and is back on the follow before c2', () => {
+      // (the approach to ~327 s is the approved descent's: the raft in view from ~321 s, slowing onto it)
+      expect(355 + DIVE_PACED.from).toBeGreaterThanOrEqual(327);
+      expect(DIVE_PACED.up - DIVE_PACED.down).toBeGreaterThanOrEqual(12);
+      expect(DIVE_PACED.to).toBeLessThanOrEqual(0);
+      // (no plunge in, no rip out)
+      expect(Math.abs(DIVE_PACED.vDown)).toBeLessThanOrEqual(2);
+      expect(DIVE_PACED.vUp).toBeLessThanOrEqual(2);
+    });
+
+    it('B keeps the landing whole and dips while the Sun is still ≥ ~6° (blue water), leaving c3 its surface scene', () => {
+      // (the follow starts at 335 s: the approved landing is untouched)
+      expect(355 + DIVE_LATE.from).toBeGreaterThanOrEqual(335 + 5);
+      // (the Sun time-lapsed from the landing's 11° to c2's 3° over 338–375 s: ≥ 6° until ~360 s)
+      expect(355 + DIVE_LATE.up).toBeLessThanOrEqual(360);
+      expect(355 + DIVE_LATE.to).toBeLessThan(385);
+    });
+
+    it('leave the sailing path and come back to it matched, crossing the drawn sea once each way, gently', () => {
+      // a sailing eye: 3 m up, under way along the raft's course at up to 1.2 m/s, eased on (sea.ts WAY)
+      const c2 = 355;
+      const base = (t: number): [number, number, number] => {
+        const k = Math.min(1, Math.max(0, (t - 342) / 9));
+        const along = t < 342 ? 0.48 * (t - 335) : 0.48 * 7 + 1.2 * (9 * (k * k * k - 0.5 * k * k * k * k) + Math.max(0, t - 351)) + 0.48 * (t - 342);
+        return [0.3 * along, 3, -along];
+      };
+      const sea = (x: number, z: number, t: number): number => 0.15 * Math.sin(0.063 * x - 0.63 * t) + 0.08 * Math.sin(0.4 * z - 1.9 * t + 1);
+      for (const spec of [DIVE_PACED, DIVE_LATE, DIVE_A3]) {
+        const p = planDive(c2, base, sea, 0, { ...spec, glide: [2, 6] });
+        expect(p.check.down).toBe(true);
+        expect(p.check.up).toBe(true);
+        for (const t of [p.from + 0.03, p.to - 0.03]) {
+          const v = (f: (t: number) => number, x: number): number => (f(x + 0.01) - f(x - 0.01)) / 0.02;
+          expect(p.y(t)).toBeCloseTo(base(t)[1], 2);
+          expect(v(p.y, t)).toBeCloseTo(0, 1);
+          expect(p.xz(t)[0]).toBeCloseTo(base(t)[0], 2);
+          expect(p.xz(t)[1]).toBeCloseTo(base(t)[2], 2);
+        }
+        let vMax = 0;
+        for (let t = p.from; t < p.to; t += 0.05) vMax = Math.max(vMax, Math.abs((p.y(t + 0.01) - p.y(t - 0.01)) / 0.02));
+        expect(vMax).toBeLessThan(2.6);
+        // (A3's rest at the bottom: ~still for its length — the user, "rest for a second or two at the bottom")
+        if (spec.rest) {
+          const r0 = c2 + spec.bottom;
+          for (let t = r0; t <= r0 + spec.rest; t += 0.05) expect(Math.abs((p.y(t + 0.01) - p.y(t - 0.01)) / 0.02)).toBeLessThan(0.05);
+        }
+      }
+    });
+  });
+
+  describe('A3: the raft held in view, a shorter dip under A\'s framing, two dolphins (2026-11-02)', () => {
+    it('gives the raft ~15 s above the water, then sinks slowly to a shallow, unhurried hang, and rises back to the follow', () => {
+      expect(lineDownLight('a3')).toBe('a3');
+      // (the raft ahead from ~321 s of the approved descent, the eye at rest from 335 s: the entry no sooner than ~336 s)
+      expect(355 + DIVE_A3.down - 321).toBeGreaterThanOrEqual(15);
+      // (round 2, the user: "way too hectic, way too fast … no reason to be like 'oh, it's down 10 metres'")
+      // (slow before and after; through the surface itself quick enough not to linger with it at the lens)
+      expect(Math.abs(DIVE_A3.vDown)).toBeLessThanOrEqual(1.3);
+      expect(DIVE_A3.vUp).toBeLessThanOrEqual(1.3);
+      expect(DIVE_A3.depth).toBeGreaterThanOrEqual(2);
+      expect(DIVE_A3.depth).toBeLessThanOrEqual(4);
+      // (time to breathe, then the dolphins, then the rise: ~11–14 s under)
+      expect(DIVE_A3.up - DIVE_A3.down).toBeGreaterThanOrEqual(11);
+      expect(DIVE_A3.up - DIVE_A3.down).toBeLessThanOrEqual(14);
+      expect(A3_BREATHE).toBeGreaterThanOrEqual(2.5);
+      // (back on the follow's path a moment into c2: the follow and c2 are one shot of one sea, no beat moves)
+      expect(DIVE_A3.to).toBeLessThanOrEqual(2);
+    });
+
+    it('fills its time with the dolphins: a close pass over the eye with a roll, a circle, both up before the eye', () => {
+      const at = (keys: Array<[number, number, number, number]>, k: number): [number, number, number] => {
+        let i = 0;
+        while (i < keys.length - 2 && k > keys[i + 1][0]) i++;
+        const u = (k - keys[i][0]) / (keys[i + 1][0] - keys[i][0]);
+        return [1, 2, 3].map((j) => keys[i][j] + (keys[i + 1][j] - keys[i][j]) * u) as [number, number, number];
+      };
+      // (the eye's shallow hang in A's frame: ~6 m short of the raft's centre at (4.7, 17.4), 3.5 m down)
+      const eye: [number, number, number] = [3.1, 11.6, -3.5];
+      let nearest = Infinity;
+      for (let k = 0; k < A3_LEAD.gone; k += 0.02) {
+        const [x, z, y] = at(A3_LEAD.keys, k);
+        nearest = Math.min(nearest, Math.hypot(x - eye[0], z - eye[1], y - eye[2]));
+      }
+      // (closer than A2's pass, never so close it fills the dome)
+      expect(nearest).toBeGreaterThan(2.8);
+      expect(nearest).toBeLessThan(5);
+      // (its roll falls while it is over the eye)
+      const [rx, rz] = at(A3_LEAD.keys, (A3_LEAD.roll[0] + A3_LEAD.roll[1]) / 2);
+      expect(Math.hypot(rx - eye[0], rz - eye[1])).toBeLessThan(4);
+      // both break the surface before the eye comes up, and clear of the raft (its centre at (4.7, 17.4), 2.7 m half-beam)
+      for (const tr of [A3_LEAD, A3_CIRCLER]) {
+        const up = tr.keys.find(([, , , y]) => y > 0)!;
+        expect(up[0]).toBeLessThan(A3_UNDER);
+        expect(Math.hypot(up[1] - 4.7, up[2] - 17.4)).toBeGreaterThan(4.5);
+      }
+    });
+
+    it('swims: tail beats in bursts and glides, ~1–2 Hz', () => {
+      let lo = 1;
+      let hi = 0;
+      for (let t = 0; t < 10; t += 0.05) {
+        lo = Math.min(lo, swimEnvelope(t));
+        hi = Math.max(hi, swimEnvelope(t));
+        expect(Math.abs(swimEnvelope(t + 1 / 30) - swimEnvelope(t))).toBeLessThan(0.1);
+      }
+      expect(lo).toBeLessThan(0.3);
+      expect(hi).toBeGreaterThan(0.9);
+      for (const tr of [A3_LEAD, A3_CIRCLER]) {
+        expect(tr.hz).toBeGreaterThanOrEqual(1);
+        expect(tr.hz).toBeLessThanOrEqual(2);
+      }
+    });
+  });
+
+  it('leaves the raft\'s own pose alone: no frame-to-frame step in it through every variant\'s window (300–365 s)', () => {
+    // (the user, 2026-11-02, on A3: "the boat is hitching and jumping". The dips move the EYE only — the raft's pose is
+    // beats.ts raftPose's, the same for every variant; held here to no step beyond its smooth eased keys)
+    const rest = { bearing: 0.26, distance: 18, heading: -1.6, height: 3 };
+    const f = 1 / 30;
+    const at = (t: number) => raftPose(t - 355 + starts.c2, c1End, rest);
+    for (let t = 300; t < 365; t += f) {
+      const [a, b, c] = [at(t - f), at(t), at(t + f)];
+      for (const k of ['bearing', 'distance', 'heading', 'height'] as const) {
+        // (velocity per frame small, and no kink: the second difference tiny)
+        expect(Math.abs(c[k] - b[k])).toBeLessThan(0.05);
+        expect(Math.abs(c[k] - 2 * b[k] + a[k])).toBeLessThan(0.002);
+      }
+    }
   });
 });

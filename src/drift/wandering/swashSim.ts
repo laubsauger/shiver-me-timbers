@@ -62,6 +62,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { fbm2 } from '../../terrain/noise';
+import { driftParams } from '../../params/drift';
 import { Fn, float, instanceIndex, int, ivec2, max, min, mix, select, sin, smoothstep, sqrt, textureLoad, textureStore, uniform, vec2, vec3, vec4 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
@@ -187,6 +188,25 @@ const DISS: [number, number] = [0.15, 0.6];
  * over (surfaceMaterial shoreSim: faded out 4–6 m in) and has none to match. A safeguard: with WAVES as they are the
  * first fronts steepen into bores 7–15 m in (the CPU reference), the biggest sets' just inside it */
 export const SWASH_CALM: [number, number] = [6, 9];
+/**
+ * THE GLOW (params biolum, off by default; wandering/biolum.ts — the user, 2026-11-02: glowing plankton for "the rather
+ * dark beach section at the end"). Dinoflagellates (Noctiluca, Lingulodinium) flash when the water shears them: a
+ * breaking face, the roller's turbulence, the run-up's thin fast froth — where this sim makes foam (`made`), but for
+ * the backwash: it is as thin and as fast as the uprush, and in the night footage it drains dark (only the uprush's
+ * froth lights). So the glow is an EXCITATION carried with the water, as the foam is: made at GLOW_GAIN × that rate
+ * (saturating at 1), carried upwind, and going out over GLOW_LIFE s once the shearing stops — a breaking wave's line
+ * flashes and fades behind it over a second or two (in the Maldives' and San Diego's night footage the white water's
+ * glow is gone within ~1–2 s of the break), where the foam it made lingers for FOAM_LIFE. Where the water drains off
+ * the sand it goes out over GLOW_DRY s: stranded plankton glow only when something stirs them (the footprints,
+ * biolum.ts). Kept in the aux state's spare channel (w), published to `swashField.glow`; only stepped when biolum is
+ * on (stepSwashCpu: when the grid carries `glow`), so the approved swash is untouched */
+const GLOW_GAIN = 1;
+/** the run-up's share of it, against the breaking face's: the swash's thin tip runs up all along the beach within a
+ * second or two of itself, and at the whole gain it lit as one thin neon line the length of the shore (the 2026-11-02
+ * round's 735 s still); the slap of each bore and its face carry the light, the run-up's froth a fainter share */
+const GLOW_RUSH = 0.5;
+const GLOW_LIFE = 0.8;
+const GLOW_DRY = 0.25;
 
 /**
  * THE INCOMING WAVES at the seaward edge: η (m over the still water) at sea time t s, z m along (world z from the
@@ -228,8 +248,27 @@ export const SWASH_CALM: [number, number] = [6, 9];
 const SWELL_N = 6;
 const SWELL_T: [number, number] = [8, 11];
 const SWELL_DIR: [number, number] = [5, 40];
-/** m²: Σa², the swell's height (its variance at the edge is half of it) */
+/** m²: Σa², the swell's height (its variance at the edge is half of it) — the swell and its chop together */
 const SWELL_VAR = 0.0065;
+/**
+ * SHORT-CRESTED, NOT ONE FRONT (the user, 2026-11-02, a line drawn the length of the 735 s view: "there is this
+ * continuous line, this wave front, and that's not how it looks, ever"; and of the wet line, "different rhythms and
+ * intervals"). The swell alone, refracted nearly square to the shore, came in as crests whole for hundreds of metres:
+ * the largest crest at the edge over 12 s varied by only 7–16 % rms along the beach (under 150 m; sea 400–440 s), so
+ * every run-up reached its line at once and the swash's edge was one smooth curve along the whole bay. A real beach
+ * also takes the local wind's chop: short waves (CHOP_T) from every way across the wind (CHOP_DIR offshore, either
+ * side of the normal — Snell keeps their alongshore wavenumber, up to ~0.2 rad/m: crests tens of metres long, crossing),
+ * which ride the swell into the face and break and run up here and not there. CHOP_SHARE of the variance, taken from
+ * the swell, so the sea's energy is what it was and the sets keep their timing (SET_PHASE: the swell's own phases are
+ * untouched, only scaled). Measured (a 2D CPU run of this scheme over 120 m of our profile, sea 425–440 s): the run-up
+ * edge's wander along the shore at an instant 0.29 m rms against 0.16, and no longer one smooth curve — its strongest
+ * alongshore wavelength holds 40 % of it against 80 %; the crests' heights at the edge vary 14–27 % rms along the beach
+ * against 7–16 %. (0.3 of the variance bought little more, 0.32 m, for bigger peaks)
+ */
+const CHOP_N = 6;
+const CHOP_T: [number, number] = [3.4, 5.6];
+const CHOP_DIR = 55;
+const CHOP_SHARE = 0.2;
 const WAVES: Array<[number, number, number, number]> = (() => {
   let seed = 20261030;
   const rnd = (): number => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
@@ -244,8 +283,20 @@ const WAVES: Array<[number, number, number, number]> = (() => {
     out.push([T, peak, ((w * w) / G) * Math.sin(dir), 2 * Math.PI * rnd()]);
   }
   const sum = out.reduce((s, w) => s + w[1] * w[1], 0);
-  for (const w of out) w[1] *= Math.sqrt(SWELL_VAR / sum);
-  return out;
+  for (const w of out) w[1] *= Math.sqrt((SWELL_VAR * (1 - CHOP_SHARE)) / sum);
+  // THE LOCAL CHOP on the swell (see CHOP_N): its own generator, so the swell's components, their phases and its sets
+  // are what they were, a little lower
+  let seedC = 20261102;
+  const rndC = (): number => (seedC = (Math.imul(seedC, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const chop: Array<[number, number, number, number]> = [];
+  for (let k = 0; k < CHOP_N; k++) {
+    const T = CHOP_T[0] + (CHOP_T[1] - CHOP_T[0]) * ((k + rndC()) / CHOP_N);
+    const dir = ((rndC() * 2 - 1) * CHOP_DIR * Math.PI) / 180;
+    const w = (2 * Math.PI) / T;
+    chop.push([T, 1, ((w * w) / G) * Math.sin(dir), 2 * Math.PI * rndC()]);
+  }
+  for (const c of chop) c[1] = Math.sqrt((SWELL_VAR * CHOP_SHARE) / CHOP_N);
+  return [...out, ...chop];
 })();
 /** s the sets are shifted by: their big waves reach the face through the show's 640–655 s (sea 326–341 s), the
  * walk's look along the beach in w4; a lull there read as "a calm lake" (the v2 clips). (Scanned: the largest
@@ -289,6 +340,8 @@ export interface SwashGrid {
   wet: Float64Array;
   glaze: Float64Array;
   strand: Float64Array;
+  /** the plankton's excitation 0..1 (THE GLOW, at SWASH_CALM): stepped only when present */
+  glow?: Float64Array;
   /** rows of their own widths (m along, per row; default `dx`), shifted across by whole cells (per row; default 0),
    * their centres m along for the forcing (default `z0` + j·dx): SWASH_LAYOUT's, swashShifts' */
   dz?: Float64Array;
@@ -432,6 +485,23 @@ export function stepSwashCpu(g: SwashGrid, out: SwashGrid, t: number, dt: number
       const settled = f1 * drying * Math.min(1, SETTLE * dt);
       out.strand[k] = Math.min(1, g.strand[k] * Math.exp(-dt / STRAND) + settled);
       out.foam[k] = f1 - settled;
+      // THE GLOW (see GLOW_GAIN): carried upwind as the foam is, made where it is made, going out after (faster on
+      // the drained sand)
+      if (g.glow && out.glow) {
+        const e = g.glow[k];
+        const eAt = (ii: number, jj: number): number => g.glow![at(ii, jj)];
+        const eW = i > 0 ? eAt(i - 1, j) : o.seaward === 'generate' ? 0 : e;
+        const eE = i < nx - 1 ? eAt(i + 1, j) : e;
+        const eS = j > 0 && iS >= 0 && iS < nx ? eAt(iS, j - 1) : e;
+        const eN = j < nz - 1 && iN >= 0 && iN < nx ? eAt(iN, j + 1) : e;
+        const ea = e - (dt / dx) * (Math.max(u, 0) * (e - eW) + Math.min(u, 0) * (eE - e)) - (dt / dzj) * (Math.max(v, 0) * (e - eS) + Math.min(v, 0) * (eN - e));
+        // (the run-up's froth only while it runs UP the sand: the backwash, as thin and as fast, drains dark)
+        const rushUp = smoothstepCpu(RUSH_SPEED[0], RUSH_SPEED[1], Math.max(u, 0)) * (h > RUSH_DEPTH[0] && h < RUSH_DEPTH[1] ? 1 : 0) * RUSH_RATE;
+        const rushAll = smoothstepCpu(RUSH_SPEED[0], RUSH_SPEED[1], Math.hypot(u, v)) * (h > RUSH_DEPTH[0] && h < RUSH_DEPTH[1] ? 1 : 0) * RUSH_RATE;
+        const stir = made - rushAll + rushUp * GLOW_RUSH;
+        const e1 = Math.min(1, Math.max(0, ea + dt * stir * GLOW_GAIN * (1 - ea)));
+        out.glow[k] = e1 * Math.exp(-dt / GLOW_LIFE) * (h1 > H_WET ? 1 : Math.exp(-dt / GLOW_DRY));
+      }
       // (the dry sand's wetness spreading through it, WICK: the four neighbours' Laplacian, the grid's edges mirrored)
       const wk = (ii: number, jj: number): number => g.wet[at(Math.min(nx - 1, Math.max(0, ii)), Math.min(nz - 1, Math.max(0, jj)))];
       const lapX = wk(i - 1, j) + wk(i + 1, j) - 2 * g.wet[k];
@@ -492,6 +562,9 @@ const ROW_LUT_N = Math.ceil((SWASH_LAYOUT.zHi - SWASH_LAYOUT.zLo) / ROW_LUT_STEP
 export const swashField = {
   water: makeStateTexture(true),
   marks: makeStateTexture(true),
+  /** (the plankton's excitation, 0, 0, 0): written only under params biolum (THE GLOW) — never bound, never allocated
+   * on the GPU otherwise */
+  glow: makeStateTexture(true),
   rect: uniform(new THREE.Vector4(0, 0, 1, 1)),
   rows: (() => {
     const t = new THREE.DataTexture(new Float32Array(ROW_LUT_N * 4), ROW_LUT_N, 1, THREE.RGBAFormat, THREE.FloatType);
@@ -653,6 +726,8 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
   ];
   /** s: sea time of the chunk being stepped */
   const uTime = uniform(0);
+  /** THE GLOW stepped and published (params biolum, read once here: off, the kernels are the approved swash's) */
+  const glowOn = driftParams.biolum;
 
   const velN = (h: F, q: F): F => select(h.lessThan(H_DRY), float(0), h.mul(q).mul(Math.SQRT2).div(sqrt(h.mul(h).mul(h).mul(h).add(max(h.mul(h).mul(h).mul(h), EPS ** 4))))) as F;
   /** the HLL face of `face` above: vec3 flux and the two sides' momentum corrections */
@@ -766,7 +841,26 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
       const lapX = wetAt(i.sub(1).max(int(0)), j).add(wetAt(i.add(1).min(int(nx - 1)), j)).sub((a.x as F).mul(2));
       const lapZ = wetAt(iS.clamp(int(0), int(nx - 1)), j.sub(1).max(int(0))).add(wetAt(iN.clamp(int(0), int(nx - 1)), j.add(1).min(int(nz - 1)))).sub((a.x as F).mul(2));
       const wetDry = (a.x as F).add(lapX.mul((dt * WICK) / (cell * cell)).add(lapZ.mul(dt * WICK).div(dzj.mul(dzj)))).clamp(0, 1).mul(Math.exp(-dt / DRY)) as F;
-      textureStore(dst.aux, ivec2(i, j), vec4(select(wetNow, float(1), wetDry), select(wetNow, float(1), (a.y as F).mul(Math.exp(-dt / FRESH))), strand, 0)).toWriteOnly();
+      // THE GLOW (params biolum; as stepSwashCpu): its neighbours' excitation at the same ghosts as the foam's — none
+      // seaward, the cell's own at the wall and the open ends
+      const glowNow = (() => {
+        if (!glowOn) return 0;
+        const eAt = (ii: unknown, jj: unknown): F => (textureLoad(src.aux, ivec2(ii as never, jj as never)) as V4).w as F;
+        const e = a.w as F;
+        const eW = select(atSea, float(0), eAt(i.sub(1).max(int(0)), j)) as F;
+        const eE = select(atLand, e, eAt(i.add(1).min(int(nx - 1)), j)) as F;
+        const eS = select(atS, e, eAt(iS.clamp(int(0), int(nx - 1)), j.sub(1).max(int(0)))) as F;
+        const eN = select(atN, e, eAt(iN.clamp(int(0), int(nx - 1)), j.add(1).min(int(nz - 1)))) as F;
+        const ea = e.sub(max(u, 0).mul(e.sub(eW)).add(min(u, 0).mul(eE.sub(e))).mul(k).add(max(v, 0).mul(e.sub(eS)).add(min(v, 0).mul(eN.sub(e))).mul(kz))) as F;
+        // (the run-up's froth only while it runs UP the sand: the backwash, as thin and as fast, drains dark)
+        const thin = select(h.greaterThan(RUSH_DEPTH[0]).and(h.lessThan(RUSH_DEPTH[1])), float(1), float(0));
+        const stir = made
+          .sub(smoothstep(RUSH_SPEED[0], RUSH_SPEED[1], vec2(u, v).length()).mul(thin).mul(RUSH_RATE))
+          .add(smoothstep(RUSH_SPEED[0], RUSH_SPEED[1], max(u, 0)).mul(thin).mul(RUSH_RATE * GLOW_RUSH)) as F;
+        const e1 = ea.add(stir.mul(dt * GLOW_GAIN).mul(float(1).sub(ea))).clamp(0, 1) as F;
+        return e1.mul(Math.exp(-dt / GLOW_LIFE)).mul(select(wetNow, float(1), float(Math.exp(-dt / GLOW_DRY)))) as F;
+      })();
+      textureStore(dst.aux, ivec2(i, j), vec4(select(wetNow, float(1), wetDry), select(wetNow, float(1), (a.y as F).mul(Math.exp(-dt / FRESH))), strand, glowNow)).toWriteOnly();
     })() as unknown as { compute(n: number): unknown }).compute(nx * nz);
 
   // a chunk: SUB substeps, ping-pong A → B → A … (even, so the state ends in set 0)
@@ -791,6 +885,7 @@ export function createSwashSim(o: { ground: (x: number, z: number) => number; be
     const h = c.x as F;
     textureStore(swashField.water, ivec2(i, j), vec4(h.add(b), h, velN(h, c.y as F), velN(h, c.z as F))).toWriteOnly();
     textureStore(swashField.marks, ivec2(i, j), vec4(c.w, a.z, a.x, a.y)).toWriteOnly();
+    if (glowOn) textureStore(swashField.glow, ivec2(i, j), vec4(a.w, 0, 0, 0)).toWriteOnly();
   })() as unknown as { compute(n: number): unknown }).compute(nx * nz);
 
   let at: number | null = null;

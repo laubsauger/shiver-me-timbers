@@ -28,9 +28,21 @@ const DEPTH = 1.3;
 const ROLL_TOP = -0.05;
 /** s a roll takes, from going up to going down again (at ~3.5 m/s its nose rises ~24°: a dolphin's roll) */
 const ROLL = 2.4;
-/** Hz the tail beats at under water, m it swings at the flukes */
-const BEAT = 2.2;
-const BEAT_AMP = 0.12;
+/** Hz the tail beats at under water, m it swings at the flukes. (2.2 Hz until 2026-11-02: the user on the dive's
+ * dolphin, "a bit too stiff … It doesn't really look like a swimming dolphin" — a bottlenose cruises at ~1–2 Hz, faster
+ * only when it accelerates; at 2.2 the whole body buzzed) */
+const BEAT = 1.6;
+const BEAT_AMP = 0.14;
+/**
+ * BURSTS AND GLIDES (the same review): a dolphin cruising does not beat steadily — a few strokes, then a coast with the
+ * flukes held, then strokes again. The beat's swing over time (0.2 … 1 of BEAT_AMP), a pure function of t; `seed`
+ * staggers two dolphins.
+ */
+export function swimEnvelope(t: number, seed = 0): number {
+  const u = 0.5 + 0.5 * Math.sin((2 * Math.PI * (t + seed * 1.7)) / 3.4);
+  const k = Math.min(1, Math.max(0, (u - 0.25) / 0.45));
+  return 0.2 + 0.8 * k * k * (3 - 2 * k);
+}
 
 export type SurfacingKind = 'roll' | 'leap' | 'flip' | 'swim';
 /** s into c3 (a roll: its top; a leap or the flip: where it leaves the water), m right of the eye and m ahead
@@ -469,7 +481,7 @@ export function dolphinPose(t: number): DolphinPose {
   const bank = Math.max(-0.6, Math.min(0.6, Math.atan((a.vh * a.vh * turn) / G)));
   // the tail beats under water, stills as the body leaves it
   const wet = 1 - smoothstep01((y + 0.6) / 0.5);
-  return { x: p.x, y, z: p.z, heading: a.heading, pitch: a.pitch, bend, turn, bank, beat: BEAT_AMP * wet, phase: 2 * Math.PI * BEAT * t, speed: a.vh, dry: outOfWaterFor(t) };
+  return { x: p.x, y, z: p.z, heading: a.heading, pitch: a.pitch, bend, turn, bank, beat: BEAT_AMP * wet * swimEnvelope(t), phase: 2 * Math.PI * BEAT * t, speed: a.vh, dry: outOfWaterFor(t) };
 }
 
 function smoothstep01(x: number): number {
@@ -614,11 +626,21 @@ export function createDolphin(o: { water?: DolphinWater } = {}): Dolphin {
     mat.clearcoatNode = float(1);
     mat.clearcoatRoughnessNode = mix(float(0.09), float(0.02), sheet.mul(streak.mul(0.7).add(0.3)));
   }
-  // the arch (nose and tail toward the arc's centre) and, under water, the tail's beat, a wave running to the
-  // flukes, growing toward them
+  // the arch (nose and tail toward the arc's centre) and, under water, THE SWIM: a wave running from mid-body to the
+  // flukes, up and down (a dolphin's stroke is dorsoventral, never side to side), its swing growing toward the tail —
+  // the head all but still, the peduncle and flukes swinging most; a wavelength of about the body (2.4 m: in the first
+  // build, 2.86 m on a 2.6 m body, the body swung as one board — "too stiff", 2026-11-02); the FLUKES PITCHING through
+  // each stroke a quarter-beat behind the peduncle (their angle follows the wave's slope, a cosine, past zAt(0.88)); and
+  // the head bobbing a little against the tail
   const z = positionLocal.z;
-  const tail = smoothstep(-0.2, LENGTH / 2, z);
-  const dy = uBend.mul(z.mul(z)).mul(-0.5).add(uBeat.mul(tail.mul(tail)).mul(sin(uPhase.sub(z.mul(2.2)))));
+  const K = (2 * Math.PI) / 2.4;
+  const tail = smoothstep(-0.25, LENGTH / 2, z);
+  const fluke = smoothstep(zAt(0.86), zAt(0.97), z);
+  const head = smoothstep(zAt(0.35), zAt(0.05), z);
+  const wave = sin(uPhase.sub(z.mul(K)));
+  const lag = uPhase.sub(z.mul(K)).cos();
+  const swim = tail.mul(tail).mul(wave).add(fluke.mul(z.sub(zAt(0.88))).mul(lag).mul(1.4)).sub(head.mul(sin(uPhase)).mul(0.12));
+  const dy = uBend.mul(z.mul(z)).mul(-0.5).add(uBeat.mul(swim));
   // …and into a turn: both ends toward the turn's centre (local +x is the dolphin's right)
   const dx = uTurn.mul(z.mul(z)).mul(0.5);
   mat.positionNode = positionLocal.add(vec3(dx, dy, float(0)));

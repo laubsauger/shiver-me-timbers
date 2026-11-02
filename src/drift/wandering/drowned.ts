@@ -74,11 +74,12 @@ type Node = any;
  *
  * THE STUB NEAR LAND, FOR REVIEW (2026-11-02, after the power line at sea was parked — the user: "Somewhere nearer to
  * land, that would work for me. But we have to see where we position it so that we don't … screw up existing shots
- * that work"; then "yes lets do it, try stuff, lets see"): `drift.html?drownedstub` (POWER_STUB), OUT of the cut by
- * default, as the line at sea is.
+ * that work"; then "yes lets do it, try stuff, lets see"): POWER_STUB, IN the cut since the 2026-11-02 render (the
+ * user: the storm and the drowned line "go in"); `drift.html?drownedstub=0` leaves it out. (Outside a page — the tests —
+ * it stays off, as the line at sea does.)
  */
 const QUERY = typeof location !== 'undefined' ? new URLSearchParams(location.search) : undefined;
-export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: QUERY?.has('powerline') ?? false, stub: QUERY?.has('drownedstub') ?? false };
+export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: QUERY?.has('powerline') ?? false, stub: QUERY ? QUERY.get('drownedstub') !== '0' : false };
 
 /** m: the raft's logs reach this far from its centre, and a little more — the clearance kept round its way */
 export const RAFT_CLEAR = 9;

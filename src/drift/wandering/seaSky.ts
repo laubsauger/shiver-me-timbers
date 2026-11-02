@@ -14,6 +14,7 @@ import type { NightSky } from './nightSky';
 import { STAR_SIGMA } from '../getTheDrift/milkyWay';
 import { CLOUD_BASE, CLOUD_TOP, FULL, REFLECTED, SEA_UP, cirrus, cloudMarch, createCloudLight, type CloudData, type CloudQuality, type CloudUniforms } from './clouds';
 import { airTo, shafts } from './cloudAir';
+import { STORM_FULL, STORM_REFLECTED, stormMarch, type StormUniforms } from './stormCell';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
   GROUND, chapmanColumn, ozoneColumnCpu, scatter, sunDisc, sunGlare, sunlight, type Air,
@@ -289,7 +290,7 @@ export function cloudBath(sun: THREE.Vector3): { above: Rgb; below: Rgb } {
   return { above, below };
 }
 
-export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms }): SeaSky {
+export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms; storm?: StormUniforms }): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R), pixelAngle: uniform(0.0015) };
   const S = u.sun as unknown as V3;
   const eyeR = u.eyeR as unknown as THREE.Node<'float'>;
@@ -332,8 +333,16 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
       });
       return out as unknown as V3;
     };
-    // the cirrus first (it is behind the cumulus), then the cumulus over it
-    const sky = over(behind, cirrus(cameraPosition, d, clouds.data, clouds.uniforms), Math.max(2, quality.airSteps >> 1));
+    // THE DISTANT STORM (stormCell.ts; params distantStorm, built only when it is on): the cell first, ~55–90 km off —
+    // behind the cumulus, which end at 45 km; the cirrus over it only where its sheet is the nearer (above ~6° of
+    // elevation, where the ray meets 8 km short of the cell), hidden behind it elsewhere. The water's mirror takes it
+    // too, at its own cheaper march (a rough sea blurs it)
+    const storm = clouds.storm;
+    const st = storm ? stormMarch(cameraPosition, d, clouds.data, clouds.uniforms, storm, { quality: quality === FULL ? STORM_FULL : STORM_REFLECTED, sunAt, jitter: cloudLight.jitter }) : undefined;
+    const ci = cirrus(cameraPosition, d, clouds.data, clouds.uniforms);
+    const veiled = st ? { ...ci, alpha: ci.alpha.mul(select(ci.dist.greaterThan(st.dist), st.alpha.oneMinus(), float(1))), light: ci.light.mul(select(ci.dist.greaterThan(st.dist), st.alpha.oneMinus(), float(1))) as V3 } : ci;
+    // the cirrus (it is behind the cumulus), then the cumulus over it
+    const sky = over(st ? over(behind, st, quality.airSteps) : behind, veiled, Math.max(2, quality.airSteps >> 1));
     const c = cloudMarch(cameraPosition, d, clouds.data, clouds.uniforms, { quality, light: cloudLight, sunAt });
     const lit = over(sky, c, quality.airSteps);
     if (quality !== FULL) return lit;

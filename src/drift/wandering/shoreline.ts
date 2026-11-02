@@ -51,6 +51,8 @@ import type { ReflectionShadeInput } from '../../reflection/reflectionShading';
 import { reflectionSkyVisibilityNode } from '../../ocean/surfaceFiltering';
 import { SWASH, SWASH_CALM, SWASH_LAYOUT, swashField, swashFromSea, swashIn, swashRowWidth, swashSeaGone, swashUV } from './swashSim';
 import { texture } from 'three/tsl';
+import { driftParams } from '../../params/drift';
+import { biolumDark, biolumLight, biolumSparkle } from './biolumGlow';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -78,7 +80,9 @@ const FOAM = 0.8;
 /** the most radiance (linear) the layer gives back: a Sun glint on the sheet, not a firefly (see THE SHEET) */
 const SHEET_MAX = 2.5;
 /** m: the sim sheet's edge feathered across the shore over ± this, its least and most (THE SHEET'S EDGE, FEATHERED) */
-const FEATHER: [number, number] = [0.3, 2];
+const FEATHER: [number, number] = [0.5, 2.5];
+/** m of water by which the sheet is a whole mirror (THE LAST METRE IS A BROKEN MIRROR) */
+const THIN_MIRROR = 0.012;
 /** WET SAND'S SHEEN (see there): the share of the water's mirror the sand keeps where the film has just left it
  * (glazed), where it is still saturated from the swash, and at the water table along the still waterline; m of rise
  * over the still water that last band reaches */
@@ -204,6 +208,12 @@ export interface SwashState {
   solid: F;
   /** m: the bores' height over the still water here */
   bore: F;
+  /** 0..1: how stirred the water is for the plankton's light (params biolum, biolumGlow.ts): a bore's spilling face,
+   * the white tip of a run-up while it runs — where the events make white water, now, with no memory (the face's
+   * coverage kept as it is widened to a pixel and a half, not its value: widened whole, the far beach's bores were one
+   * fat bright stroke, "too intense … too cheap … kind of bulky", the user, 2026-11-02) — the sim's
+   * glow field (swashSim.ts THE GLOW) is the one that fades behind the break; these are the far fallback beyond it */
+  glow: F;
 }
 
 // (the project's sin-free hash of the event's whole index: fract(sin(n)·43758) came out different on Apple's GPU and on
@@ -300,7 +310,7 @@ export function swashAt(rise: F, xz: V2, time: F, px: F = float(0) as F): SwashS
     const reached = mix(R, front, up) as F;
     const wet = rise.lessThan(reached).select(float(1), float(0)).mul(exp(tb.div(-DRY))).mul(live) as F;
     const glazed = rise.lessThan(reached).select(float(1), float(0)).mul(exp(tb.div(-FRESH))).mul(live) as F;
-    return { top, dTop, depth: depth.add(lip) as F, moving: tip.max(film).max(white) as F, carry: front.max(tau.mul(BORE_RISE).sub(0.05)).mul(RUN) as F, still: stranded, stillFresh: fresh, wet, glazed, tip, solid: lipLine.mul(0.85).max(spill.mul(0.7)) as F, bore };
+    return { top, dTop, depth: depth.add(lip) as F, moving: tip.max(film).max(white) as F, carry: front.max(tau.mul(BORE_RISE).sub(0.05)).mul(RUN) as F, still: stranded, stillFresh: fresh, wet, glazed, tip, solid: lipLine.mul(0.85).max(spill.mul(0.7)) as F, bore, glow: spill.mul(float(0.18).div(px.mul(1.5).max(0.18))).max(tip.mul(0.6)) as F };
   };
   const evs = [event(k0.sub(1)), event(k0), event(k0.add(1))];
   // where the next bore meets the last backwash: a line of white water, and a small heave
@@ -329,6 +339,7 @@ export function swashAt(rise: F, xz: V2, time: F, px: F = float(0) as F): SwashS
     bore: evs[0].bore.max(evs[1].bore).max(evs[2].bore) as F,
     wet: evs[0].wet.max(evs[1].wet).max(evs[2].wet) as F,
     fresh: evs[0].glazed.max(evs[1].glazed).max(evs[2].glazed) as F,
+    glow: evs[0].glow.max(evs[1].glow).max(evs[2].glow).max(collide) as F,
   };
 }
 
@@ -545,13 +556,20 @@ export function createShoreline(o: {
   // its water went from nothing to its full mirror within ~15 cm: one crisp line, and from the walk's 10–60 m, where
   // a pixel spans 0.2–1.5 m across the shore at this grazing, a hard step between the sky in the water and the dark
   // sand. A real run-up's last metre is a film thinning to nothing, its edge lacy and wandering. So: the sheet's
-  // cover is the mean of five taps across the shore over ±FEATHER m — at least 0.3 m, and two and a half pixels'
+  // cover is the mean of five taps across the shore over ±FEATHER m — at least 0.5 m (0.3 until the 2026-11-02 "razor-sharp
+  // edge" note), and two and a half pixels'
   // footprint beyond that, so it is as soft in the wide shots as at the eye's feet — each tap's threshold wandering
   // over 0.3–5 mm (the film's own unevenness: grains, bubbles, the last drops at the tip)
   const featherK = footprint.mul(2.5).clamp(FEATHER[0], FEATHER[1]) as F;
   const TAPS = [-1, -1 / 3, 1 / 3, 1];
-  const tapW = TAPS.map((d) => texture(swashField.water, simUV(xz.add(vec2(featherK.mul(d), 0)) as V2)) as unknown as THREE.Node<'vec4'>);
-  const tapM = TAPS.map((d) => texture(swashField.marks, simUV(xz.add(vec2(featherK.mul(d), 0)) as V2)) as unknown as THREE.Node<'vec4'>);
+  // (each tap's offset wandering by up to half the taps' spacing, slowly over the sand, ~0.3–1 m: at fixed offsets the
+  // mean of five shifted copies of one edge stepped in five plateaus, and anything drawn on the cover's edge band — the
+  // run-up's lace, its glow — came out as two or three parallel copies of the same curve a fraction of a metre apart:
+  // "way too close to each other, and they're perfect clones in their shape", the user, 2026-11-02)
+  const tapJ = fbm2(xzP.mul(vec2(1.1, 3.3)).add(vec2(7.7, 1.9)), 2).sub(0.5).mul(2 / 3) as F;
+  const tapAt = (d: number): V2 => xz.add(vec2(featherK.mul(tapJ.add(d)), 0)) as V2;
+  const tapW = TAPS.map((d) => texture(swashField.water, simUV(tapAt(d))) as unknown as THREE.Node<'vec4'>);
+  const tapM = TAPS.map((d) => texture(swashField.marks, simUV(tapAt(d))) as unknown as THREE.Node<'vec4'>);
   const edgeThr = mix(float(0.0008), float(0.0032), fbm2(xzP.mul(3.1).add(vec2(2.7, 5.2)), 2)) as F;
   const sheetOf = (h: F): F => smoothstep(edgeThr.mul(0.4), edgeThr.mul(1.6), h) as F;
   const sheetC = sheetOf(hS);
@@ -580,7 +598,11 @@ export function createShoreline(o: {
   const wPh = ph0.fract().sub(0.5).abs().mul(2) as F;
   // (its holes never closing: the dense foam behind a bore drawn solid lay along the water as one smooth pale band,
   // the tower agent's beach_650 still, 2026-10-29)
-  const foamDS = mix(mS.x as F, foamMean, farTaps).clamp(0, 0.75) as F;
+  // (thinning out with the sheet over its feathered edge: the foam the water carries had its full density up to the
+  // last cell of water and none past it, and at night that drew the sheet's edge as one step from the pale lace to the
+  // dark wet sand — a 10–22 level step in one pixel along most of the beach from the w6 eye, the 2026-11-02 "find the
+  // line" check of the 735 s view. A swash's foam thins as its film does)
+  const foamDS = mix(mS.x as F, foamMean, farTaps).clamp(0, 0.75).mul(smoothstep(0.05, 0.75, waterS)) as F;
   // (drawn out across the shore, 1.8× its width: the foam a bore leaves smears into streaks behind it as it runs up
   // and back, the 2026-10-30 note)
   const smear = (q: V2): V2 => vec2(q.x.mul(0.55), q.y) as V2;
@@ -621,7 +643,14 @@ export function createShoreline(o: {
   // running up, a third of it as it stalls and drains (the bubbles it leaves). Its width is the feather's, so it holds
   // as a line of a pixel or two in the wide shots rather than going out
   const edgeBand = smoothstep(0.04, 0.35, waterS).mul(smoothstep(0.92, 0.5, waterS)) as F;
-  const frontD = edgeBand.mul(mix(float(0.3), float(1), smoothstep(0.05, 0.5, uRun))) as F;
+  // (only while the water runs up, and in stretches: with a third of it kept as the water stalled and drained, the
+  // lace stood all along the sheet's edge at once, every run-up's and every still one's — one pale line the length of
+  // the beach at night, "still pretty much one razor-sharp edge going all the way around", the user, 2026-11-02; found
+  // by hiding the layers one by one: the ocean's surface hidden changed nothing, this layer hidden took the line away.
+  // A real swash front is a froth while it runs, its bubbles gone a moment after it stops, and it runs in one stretch
+  // and not the next)
+  const runStretch = smoothstep(0.3, 0.6, fbm2(vec2(xzP.y.mul(0.11), xzP.x.mul(0.05)).add(vec2(sw.carry.mul(0.02), 4.7)), 2)) as F;
+  const frontD = edgeBand.mul(smoothstep(0.05, 0.5, uRun)).mul(runStretch) as F;
   const frontLace = laceAt(xzP.add(warp).mul(1.4).add(vec2(4.6, 8.1)) as V2, frontD.mul(0.8) as F, frontD.mul(1.1).clamp(0, 0.9) as F, frontD) as F;
   // THE BACKWASH'S STREAKS: draining water a centimetre or two thin, running back fast, draws the bubbles and the
   // foam it carries into streaks down the face — ~2 m long across the shore, ~12 cm apart along it — carried with
@@ -795,7 +824,14 @@ export function createShoreline(o: {
   const shoreBody = smoothstep(float(0), (seaWater.shoreFade as unknown as F).max(1e-3), hS) as F;
   const transmitted = mix(behind, throughBody, shoreBody) as V3;
   const fresnelRaw = float(r0F).add(float(1 - r0F).mul(float(1).sub(cosI).pow(5))) as F;
-  const reflW = fresnelRaw.mul(seaWater.reflStrength as unknown as F).min(float(1).sub((seaWater.transFloor as unknown as F).clamp(0, 0.9).mul(trans.y))).clamp(0, 1) as F;
+  // (THE LAST METRE IS A BROKEN MIRROR: a film of a few mm over sand is not one flat surface — the grains, the bubbles
+  // and the drops at the tip break it, and the sand shows through between the bright bits — so its mirror comes in with
+  // its depth, a third of it at a millimetre, whole by THIN_MIRROR m. From the w5–w6 eye at night the whole sheet up to
+  // its tip mirrored the black sky at full Fresnel and stood as one dark strip ending on a line at the pale sand: "still
+  // feels like a very sharp edge … it doesn't look how a beach shore break would look", the user, 2026-11-02; the
+  // references, drift-narrative/references/shore-swash: the sheet thins to nothing, the sand seen through it)
+  const thinMirror = smoothstep(0.0005, THIN_MIRROR, hS).mul(0.67).add(0.33) as F;
+  const reflW = fresnelRaw.mul(seaWater.reflStrength as unknown as F).mul(thinMirror).min(float(1).sub((seaWater.transFloor as unknown as F).clamp(0, 0.9).mul(trans.y))).clamp(0, 1) as F;
   const compS = mix(transmitted, reflectedG, reflW) as V3;
   const cHi = compS.x.max(compS.y).max(compS.z) as F;
   const chroma = cHi.sub(compS.x.min(compS.y).min(compS.z)).div(cHi.max(1e-4)) as F;
@@ -844,13 +880,23 @@ export function createShoreline(o: {
   // unevenly, in patches of a metre or so
   const cosFlat = viewDir.y.max(0) as F;
   const fresnelFlat = float(r0F).add(float(1 - r0F).mul(float(1).sub(cosFlat).pow(5))).mul(oceanSurfaceParams.reflectionStrength).min(1 - oceanSurfaceParams.transmissionFloor) as F;
-  const filmOf = (glazed: F, wet: F): F => glazed.mul(SHEEN.glazed).max(smoothstep(0.15, 0.9, wet).mul(SHEEN.wet)) as F;
+  // (the saturated sand's mirror grades with how wet it still is — wet², not a step at 0.15–0.9 — so it is glossiest at
+  // the water and thins up the face to the damp sand; with the sim's wetness near 1 everywhere a run-up had been in the
+  // last few seconds, the step made one flat band of mirror, black under the night sky, ending on a line: "still feels
+  // like a very sharp edge", the user, 2026-11-02)
+  const filmOf = (glazed: F, wet: F): F => glazed.mul(SHEEN.glazed).max(wet.clamp(0, 1).mul(wet.clamp(0, 1)).mul(SHEEN.wet)) as F;
   // (over the sim the seep is the beach's own, beachMaterial.ts: ~0.05 m of rise, not the fixed 0.12 — its sheen sat
   // over a metre of face above the run-ups' reach, the 2026-11-01 note on the 705 s view)
   const table = smoothstep(mix(float(SHEEN.tableRise), float(0.05), sIn), 0, heightAbove).mul(smoothstep(-0.01, 0, heightAbove)).mul(SHEEN.table) as F;
   const drains = fbm2(xzP.mul(0.9).add(vec2(7.3, 1.9)), 2).mul(0.7).add(0.65).clamp(0, 1) as F;
   // (none under the sea's own water beyond the sim, where the events' wetness runs on below the still line)
-  const film = mix(filmOf(sw.fresh, sw.wet), filmOf(mS.w as F, mS.z as F), sIn).max(table).mul(drains).mul(smoothstep(-0.02, 0, heightAbove).max(sIn)) as F;
+  // (the sim's wetness and glaze as the mean over the feather's taps, not the point under the fragment: their edge,
+  // the last run-up's reach, stepped within ~0.3 m and drew the sheen's upper limit as one crisp line along the beach
+  // from the w5–w6 eye — "still feels like a very sharp edge", the user, 2026-11-02; the sand under it is spread the
+  // same way, beachMaterial.ts NO LINE WHERE THE WATER STOPPED)
+  const wetMean = tapM.reduce<F>((a, m) => a.add(m.z as F) as F, mS.z as F).div(5) as F;
+  const glazeMean = tapM.reduce<F>((a, m) => a.add(m.w as F) as F, mS.w as F).div(5) as F;
+  const film = mix(filmOf(sw.fresh, sw.wet), filmOf(glazeMean, wetMean), sIn).max(table).mul(drains).mul(smoothstep(-0.02, 0, heightAbove).max(sIn)) as F;
   const sheenA = fresnelFlat.mul(film).mul(float(1).sub(waterNew)).mul(float(1).sub(foamAll)).clamp(0, 1) as F;
   // (foam OVER the water: the water's share already leaves the foam's out, waterS2 and waterEv. Their max instead
   // let half-foamed deep water go half transparent, and the sand under the sea's hand-over showed through as a dark
@@ -863,7 +909,90 @@ export function createShoreline(o: {
   m.roughnessNode = mix(float(0.06), float(0.85), shareNew);
   m.specularIntensityNode = shareNew;
   const foamGlow = (swashLight.sun as unknown as V3).mul(FOAM_SUN).mul(cloudV).add(swashLight.sky as unknown as V3).mul(FOAM * 0.6) as V3;
-  m.emissiveNode = mix(reflectedG, colourS, sIn).mul(waterNew).add(reflectedG.mul(sheenA)).div(alphaNew.max(1e-4)).add(foamGlow.mul(shareNew));
+  // THE PLANKTON'S LIGHT (params biolum, off by default — built only when it is on; biolumGlow.ts, swashSim.ts THE
+  // GLOW; the user, 2026-11-02, after the spine review: glowing plankton for "the rather dark beach section at the
+  // end"). How stirred the water is here, 0..1: the sim's glow field — made where its bores break and where its run-up
+  // runs up the sand, carried with the water, gone a second or so after (over the feather's taps where a pixel spans
+  // more than a few cm, as the foam is: a line a cell or two wide, point-sampled, broke into dashes) — and beyond the
+  // sim the events' white water (swashAt `glow`), the far fallback. Nothing in calm water: the first round lit a few
+  // sparks anywhere in the shallows and a band along the sheet's feathered edge, and from the wide shots that was a
+  // uniform glitter over the whole of the shallows (the user, 2026-11-02: "a uniform cyan glitter field"; the
+  // references: calm water between the breakers is dark). Drawn as a soft wash with fine grain (biolumSparkle), by the
+  // darkness of this pass's Sun (biolumDark): added light, so over the layer's own share (`alphaNew`) it is divided
+  // back out
+  const glowL = (() => {
+    if (!driftParams.biolum) return null;
+    const glowAt = (q: V2): F => (texture(swashField.glow, q) as unknown as THREE.Node<'vec4'>).x as F;
+    const gMean = TAPS.reduce<F>((a, d) => a.add(glowAt(simUV(tapAt(d)))) as F, glowAt(suv)).div(5) as F;
+    // THE WHOLE SHEET CARRIES LIGHT, both ways (the user, 2026-11-02: "after it breaks and goes onto the sand, it
+    // suddenly becomes this sine front that is only lit up, and on the way back, when the water pulls back, it doesn't
+    // show at all"). The sim's glow field is the break's and the bore's; on top of it, read from the water itself:
+    //   · the sheet while it runs — its turbulence by its speed, more in its foam, a share more running up (SHEET_GLOW,
+    //     up and back) — so a run-up lights through its body, softly, thinning where it slows and stops, and the
+    //     backwash streams back fainter (where it meets the next bore the sim's own collision makes foam, and light);
+    //   · the run-up's leading edge, a share (FRONT_GLOW: at 0.45, alone, every run-up's edge was one bright band along
+    //     the beach, the close v3 clip), broken along the shore and in time into stretches that come and go
+    //     (`flicker`: the stir is uneven, one stretch of a front churns and the next slides);
+    //   · and for a moment after the water drains, where it left its foam, a few stranded sparks (STRANDED_GLOW, by
+    //     the sand's glaze: FRESH s).
+    // Each run-up over the same sand lights again: plankton do not run out after a flash ("at the end of the test clip
+    // it kind of goes missing in the following wave", the same day)
+    // (the user's target, 2026-11-02, a long exposure of a swash at night "just so you understand what I'm after": the
+    // whole sheet filled with fine grain, its leading edge a crisp lacy scalloped line, the wet sand it just left
+    // faintly sparkling — and this round's beach-level still at 728 s had nearly none of it: the sheet at 0.32 lit only
+    // where it ran fast. Now the sheet glows wherever it moves at all, more running up; its edge is the run-up's own
+    // lace (`frontLace`, lacy and broken in stretches) over a softer band; the sand it left keeps a few sparks by its
+    // glaze, foam or no foam)
+    const SHEET_GLOW: [number, number] = [0.55, 0.32];
+    const FRONT_GLOW = 0.25;
+    const LACE_GLOW = 0.8;
+    const STRANDED_GLOW = 0.15;
+    const speedS = vec2(wS.z, wS.w).length() as F;
+    // (only the swash's own sheet, centimetres thin, running: the shallows behind it, deeper and calmer, stay dark — at
+    // any speed over 4 cm/s the whole of the shallows glowed evenly, the 2026-11-02 interim close frame)
+    const sheetStir = waterS
+      .mul(smoothstep(0.07, 0.03, hS))
+      .mul(smoothstep(0.25, 0.9, speedS))
+      .mul(mix(float(SHEET_GLOW[1]), float(SHEET_GLOW[0]), smoothstep(-0.1, 0.1, uRun)))
+      .mul(foamDS.mul(1.2).add(0.5)) as F;
+    const flicker = smoothstep(0.32, 0.62, fbm2(vec2(xzP.y.mul(0.17), (o.shore.time as unknown as F).mul(0.45)).add(vec2(1.9, xzP.x.mul(0.1))), 2)) as F;
+    const frontRun = edgeBand.mul(smoothstep(0.1, 0.6, uRun)).mul(flicker).mul(FRONT_GLOW) as F;
+    // (the sim's glow field over the deeper shallows only where something stirs it: its breaking faces and bores)
+    const stranded = strandD.mul(0.6).add(0.4).mul(glazeMean).mul(float(1).sub(waterS)).mul(STRANDED_GLOW) as F;
+    const laceEdge = frontLace.mul(LACE_GLOW) as F;
+    // (FROM AFAR, IN PIECES: the swash runs up all along the beach within a second or two of itself, so from the w6
+    // eye, 30–100 m off, its sheet's light joined into one stroke the length of the bay — the connected-edge check of
+    // the 735 s view found one lit edge 168 px long, 2026-11-02, "never a connected stroke". Each run-up's tongue churns
+    // in its own stretch and moment: with distance the swash's light is gated along the shore in pieces of ~6–15 m
+    // that come and go over a second or two (SWASH_PIECES: from, to m off the eye), and only where a run-up is in it;
+    // near the eye, all of it)
+    const SWASH_PIECES: [number, number] = [25, 90];
+    const pieceT = (o.shore.time as unknown as F).mul(0.55) as F;
+    const pieces = smoothstep(0.44, 0.6, fbm2(vec2(xzP.y.mul(0.1).add(pieceT.mul(0.3)), pieceT).add(vec2(2.3, xzP.x.mul(0.04))), 2)) as F;
+    const piecesGate = mix(float(1), pieces, smoothstep(SWASH_PIECES[0], SWASH_PIECES[1], camDist)) as F;
+    const swashLit = sheetStir.max(frontRun).max(laceEdge).max(stranded).mul(piecesGate) as F;
+    const gSim = mix(glowAt(suv), gMean, farTaps).max(swashLit) as F;
+    // THE BLOOM IS PATCHY (the references: every night shot of it shows the breakers' lines broken — lit here, dark
+    // there, in stretches of a few metres to a few tens — and the 2026-11-02 stills of this showed why it matters: the
+    // sim breaks all along the beach at once, and lit everywhere its glow was one unbroken neon rule along the whole
+    // shore). The plankton lie in patches ~30 m and ~6 m along the shore, drifting along it with the longshore
+    // current (BLOOM_DRIFT m/s) — denser here, thinner there, but some everywhere (BLOOM_FLOOR): every wave that breaks
+    // or slaps the sand lights where it does, brighter in a patch. (At a floor of 0.12 whole stretches of the beach
+    // never glowed: "too-big swaths where it doesn't happen. It should happen on every crashing wave in some way", the
+    // user, 2026-11-02; at 0.45, with the run-up's tip at its whole gain, the swash's edge was one neon line)
+    const BLOOM_DRIFT = 0.25;
+    const BLOOM_FLOOR = 0.3;
+    const alongB = xzP.y.add((o.shore.time as unknown as F).mul(BLOOM_DRIFT)) as F;
+    const bloom = smoothstep(0.36, 0.62, fbm2(vec2(alongB.mul(0.033), xzP.x.mul(0.04)).add(vec2(3.7, 8.1)), 3))
+      .mul(smoothstep(0.3, 0.6, fbm2(vec2(alongB.mul(0.16), xzP.x.mul(0.12)).add(vec2(9.2, 2.4)), 2)).mul(0.6).add(0.4)) as F;
+    const excite = mix(sw.glow, gSim, sIn).mul(mix(float(BLOOM_FLOOR), float(1), bloom)) as F;
+    const sunY = normalize(swashLight.dir as unknown as V3).y as F;
+    return biolumLight.mul(biolumSparkle(xzP, excite, footprint, o.shore.time as unknown as F, 0, camDist).mul(biolumDark(sunY))) as V3;
+  })();
+  const emissiveWater = mix(reflectedG, colourS, sIn).mul(waterNew).add(reflectedG.mul(sheenA));
+  const emissiveBase = emissiveWater.div(alphaNew.max(1e-4)).add(foamGlow.mul(shareNew));
+  // (the glow over at least a twentieth of a pixel's cover: on the layer's faintest edges it is cut back, not blown up)
+  m.emissiveNode = glowL ? emissiveBase.add(glowL.div(alphaNew.max(0.05))) : emissiveBase;
   m.opacityNode = alphaNew;
   if (o.cloudSun) (m as unknown as { receivedShadowNode: unknown }).receivedShadowNode = (sh: F) => sh.mul(cloudV);
   // (the shading normal, view space: the water's own surface; foam lit as a rough white surface on the same normal)

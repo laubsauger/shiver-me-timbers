@@ -139,8 +139,10 @@ export const enum DebrisKind {
 /** the things people owned, by share of the relics (the rest of a relic draw), their real size (m: length along the
  * piece, width, height as it floats) and freeboard range (share of the height above the water) */
 const THINGS: Array<{ kind: DebrisKind; share: number; size: [number, number, number]; freeboard: [number, number] }> = [
-  { kind: DebrisKind.CrateLong, share: 0.1, size: [1.17, 0.53, 0.47], freeboard: [0.3, 0.45] },
-  { kind: DebrisKind.Crate, share: 0.08, size: [0.83, 0.41, 0.35], freeboard: [0.3, 0.45] },
+  // (wooden crates waterlogged: a fifth to a third out, not half — the 2026-11-02 review's check of the flotsam's draft:
+  // heavy wood sits 70–90% under, plastics ride higher)
+  { kind: DebrisKind.CrateLong, share: 0.1, size: [1.17, 0.53, 0.47], freeboard: [0.18, 0.3] },
+  { kind: DebrisKind.Crate, share: 0.08, size: [0.83, 0.41, 0.35], freeboard: [0.18, 0.3] },
   // (a plastic drum lying on its side, its bung up: it floats high)
   { kind: DebrisKind.Barrel, share: 0.1, size: [0.88, 0.49, 0.49], freeboard: [0.4, 0.55] },
   // (closed-cell foam: a ring lying flat rides most of its thickness out of the water)
@@ -160,16 +162,20 @@ const THINGS: Array<{ kind: DebrisKind; share: number; size: [number, number, nu
   { kind: DebrisKind.Door, share: 0.04, size: [2.4, 1.08, 0.3], freeboard: [0.2, 0.35] },
   // (a picnic table upside down, its top awash and its legs in the air: the flood's own picture)
   { kind: DebrisKind.Table, share: 0.04, size: [3.02, 2.24, 0.74], freeboard: [0.8, 0.88] },
-  { kind: DebrisKind.Box, share: 0.05, size: [0.52, 0.39, 0.34], freeboard: [0.3, 0.45] },
+  // (a cardboard box, sodden: barely awash)
+  { kind: DebrisKind.Box, share: 0.05, size: [0.52, 0.39, 0.34], freeboard: [0.12, 0.22] },
   // (a suitcase lying flat)
   { kind: DebrisKind.Suitcase, share: 0.05, size: [0.44, 0.35, 0.15], freeboard: [0.4, 0.6] },
 ];
-/** the things set where the eye will be (`thingsAt`), in this order: the most legible first — a table upside down, a
- * chair, a tyre, a drum, a door — then round the rest */
+/** the things set where the eye will be (`thingsAt`), in this order: the most legible first — a chair, a tyre, a drum,
+ * a door — then round the rest. NOT the upturned picnic table nor the navigation buoy (the user, 2026-11-02, on the
+ * table beside the raft at the c1 rest: "It looks strange; it wouldn't float like this" — a rigid frame of beams riding
+ * 80–88% out of the water like a toy; the buoy, 2.65 m upright, the same): the things near the eye ride as the flood's
+ * wreckage does, low and awash. (Both stay among the far field's relics, a pixel or two each.) */
 const PLACED: DebrisKind[] = [
-  DebrisKind.Table, DebrisKind.Chair, DebrisKind.Tyre, DebrisKind.Barrel, DebrisKind.Door, DebrisKind.Lifebuoy,
-  DebrisKind.Buoy, DebrisKind.Suitcase, DebrisKind.CrateLong, DebrisKind.Tank, DebrisKind.PlasticCrate, DebrisKind.Box,
-  DebrisKind.Jerrycan, DebrisKind.PlasticCan, DebrisKind.Crate,
+  DebrisKind.Chair, DebrisKind.Tyre, DebrisKind.Barrel, DebrisKind.Door, DebrisKind.Lifebuoy, DebrisKind.Jerrycan,
+  DebrisKind.Suitcase, DebrisKind.CrateLong, DebrisKind.Tank, DebrisKind.PlasticCrate, DebrisKind.Box,
+  DebrisKind.PlasticCan, DebrisKind.Crate,
 ];
 
 // weathered wood (grey, brown, sun-bleached), the odd painted plank or barrel

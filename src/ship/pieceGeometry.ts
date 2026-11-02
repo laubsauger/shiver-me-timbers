@@ -68,6 +68,7 @@ import {
   buildPoleGeometry,
   buildGuaraCollarGeometry,
   buildRaftSlabGeometry,
+  clippedSlab,
   buildRadioGeometry,
   buildRoofLathsGeometry,
   buildRopeRailGeometry,
@@ -257,7 +258,8 @@ export function buildPieceGeometry(
       return buildRopeRailGeometry(aabb, shape ?? {});
     case 'bamboo-deck':
       // a bamboo member that is a set of LATHS rather than a panel (the roof)
-      return (shape?.laths ?? 0) > 0 ? buildRoofLathsGeometry(aabb, shape!) : buildRaftSlabGeometry(aabb);
+      // (the fore deck cut to the bow boards: clippedSlab, the box itself where a slab has no clip)
+      return (shape?.laths ?? 0) > 0 ? buildRoofLathsGeometry(aabb, shape!) : clippedSlab(aabb, shape);
     case 'guara':
     case 'splashboard':
       // §T.144: a splashboard is a plank, but the guara COLLAR is a slotted

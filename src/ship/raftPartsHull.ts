@@ -93,15 +93,20 @@ export function buildLogs(p: RaftParams, L: RaftLayout): PieceDef[] {
  * are a LOW BULWARK down the fore-body, standing ~0.5 m over the logs, not a
  * pair of boards at the tips). Four planks, lashed through the logs.
  */
-export function buildSplashboards(p: RaftParams, L: RaftLayout): PieceDef[] {
+/** a bow board's line (its plank's centre plane, in plan): from the centre log's end `a` out to the outer log's `b` */
+function bowBoardLine(p: RaftParams, L: RaftLayout, sign: -1 | 1): { a: Vec3; b: Vec3 } {
   const centre = L.logs.find((l) => l.i === 0)!;
+  const outer = L.logs[sign < 0 ? 0 : L.logs.length - 1];
+  return { a: [centre.x, 0, centre.zBow - p.splashboardInset], b: [outer.x, 0, outer.zBow - p.splashboardInset] };
+}
+
+export function buildSplashboards(p: RaftParams, L: RaftLayout): PieceDef[] {
   const out: PieceDef[] = [];
   const h = p.splashboardHeight;
   const t = p.splashboardThickness;
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
     const outer = L.logs[sign < 0 ? 0 : L.logs.length - 1];
-    const a: Vec3 = [centre.x, 0, centre.zBow - p.splashboardInset];
-    const b: Vec3 = [outer.x, 0, outer.zBow - p.splashboardInset];
+    const { a, b } = bowBoardLine(p, L, sign);
     const dx = b[0] - a[0];
     const dz = b[2] - a[2];
     const len = Math.hypot(dx, dz);
@@ -261,21 +266,49 @@ export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
   // mats on into the taper
   const zFull = Math.max(L.cabinFrontZ + 0.5,
     Math.min(zA, Math.min(outerP.zBow, outerS.zBow) - p.logTaperLength));
+  /**
+   * CUT TO THE BOW BOARDS (the user, 2026-11-02, of the fore-deck at the bow: "Is it possible that there's deck poking
+   * out through the sidewall? That should actually be cut: it should follow the shape of the sidewall, this triangular
+   * shape … so it doesn't poke through, doesn't z-fight, and is flush with the angle of this wall"). The fore slabs are
+   * rectangles as wide as the logs under them; the two bow boards run in a V across their outer corners, and the
+   * corners stood out through the boards — `deck-fore-tip` 0.5 m out at its forward edge, `deck-fore-taper` 0.45 m.
+   * Each fore slab now carries the boards' inner faces as clip planes (`bowClip`, pieceGeometryRaft.ts): in plan, the
+   * outward normal (nx, nz) of each face and its offset c in the slab's own frame — the slab keeps nx·x + nz·z ≤ c —
+   * set 2 mm inside the face, so the cut edge meets the board without touching it. Its geometry, the game's and the
+   * film's, is cut to them; its box (aabb) is as it was.
+   */
+  const bowClip = (x0: number, x1: number, z0: number, z1: number): Record<string, number> => {
+    const cx = (x0 + x1) / 2;
+    const cz = (z0 + z1) / 2;
+    const out: Record<string, number> = {};
+    for (const [key, sign] of [['P', -1], ['S', 1]] as const) {
+      const { a, b } = bowBoardLine(p, L, sign);
+      const len = Math.hypot(b[0] - a[0], b[2] - a[2]);
+      const d = [(b[0] - a[0]) / len, (b[2] - a[2]) / len];
+      // the normal toward the bow (out of the deck through the board)
+      const n = d[1] > 0 === d[0] > 0 ? [-d[1], d[0]] : [d[1], -d[0]];
+      const nn = n[1] > 0 ? n : [-n[0], -n[1]];
+      out[`clip${key}nx`] = nn[0];
+      out[`clip${key}nz`] = nn[1];
+      out[`clip${key}c`] = nn[0] * (a[0] - cx) + nn[1] * (a[2] - cz) - p.splashboardThickness / 2 - 0.002;
+    }
+    return out;
+  };
   const fore = slab('deck-fore', outerP.x - outerP.r, outerS.x + outerS.r, L.cabinFrontZ, zFull, y0, y1, [
     // the halyard is hauled at the mast foot, where it comes down the leg
     // (§V84 — every sailing action has a place to stand). §B104 took the two
     // SHEET stations off this slab; §T.149 put them on the bipod legs beside
     // this one, on the pins their sheets belay to (see `buildBipodMast`).
     { id: 'station-halyard', type: 'fixture', position: [-0.8, (y1 - y0) / 2, L.mastZ - (L.cabinFrontZ + zFull) / 2] },
-  ]);
-  const taper = slab('deck-fore-taper',
-    outerP.x - logHalfAt(p, outerP, zA), outerS.x + logHalfAt(p, outerS, zA), zFull, zA, y0, y1);
+  ], { mat: 1, ...bowClip(outerP.x - outerP.r, outerS.x + outerS.r, L.cabinFrontZ, zFull) });
+  const taperX: [number, number] = [outerP.x - logHalfAt(p, outerP, zA), outerS.x + logHalfAt(p, outerS, zA)];
+  const taper = slab('deck-fore-taper', taperX[0], taperX[1], zFull, zA, y0, y1, [], { mat: 1, ...bowClip(taperX[0], taperX[1], zFull, zA) });
   // the tip slab reaches as far as the next log pair in allows
   const tipP = outermostLogAt(L, zA + 0.6, -1);
   const tipS = outermostLogAt(L, zA + 0.6, 1);
   const zB = Math.min(tipP.zBow, tipS.zBow) - 0.2;
-  const tip = slab('deck-fore-tip',
-    tipP.x - logHalfAt(p, tipP, zB), tipS.x + logHalfAt(p, tipS, zB), zA, zB, y0, y1);
+  const tipX: [number, number] = [tipP.x - logHalfAt(p, tipP, zB), tipS.x + logHalfAt(p, tipS, zB)];
+  const tip = slab('deck-fore-tip', tipX[0], tipX[1], zA, zB, y0, y1, [], { mat: 1, ...bowClip(tipX[0], tipX[1], zA, zB) });
   // the strip's forward edge is at the cabin front, well abaft any taper
   const strip = slab('deck-starboard', halfW + 0.03,
     outerS.x + logHalfAt(p, outerS, L.cabinFrontZ), L.cabinAftZ, L.cabinFrontZ, y0, y1);

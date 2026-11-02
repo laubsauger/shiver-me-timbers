@@ -217,6 +217,56 @@ export interface DriftParams {
   radioCall: boolean;
   radioOperator: boolean;
   radioEnding: boolean;
+  /**
+   * BIOLUMINESCENT SURF on the dark beach at the end (the user, 2026-11-02, after the spine review: glowing plankton
+   * "could be a nice thing for maybe when they walk also through the rather dark beach section at the end";
+   * wandering/biolum.ts). OFF by default, so a master leaves it out until the user has chosen it. It is BUILT or not
+   * at load — the swash sim's glow field, the shoreline's glow and the footprints' mesh exist only when it is on, so
+   * off, every shader is the one the approved cut drew — so it is switched by the page's query alone: `drift.html?biolum=1`
+   * (the review scripts' and drift-render.mjs's `--query biolum=1`); a --setup after boot cannot build it.
+   *
+   * It comes up with the dark (biolum.ts BIOLUM_DARK: from the Sun at −5° to −12°, so in w6's night, through its
+   * dissolve, and never in w5's dusk): each breaking wave's face and its foam flash and fade over a second or two,
+   * the run-up's leading edge sparkles as it runs and goes out as it drains, sparse points twinkle in the shallows,
+   * and where the wanderers step on the wet sand or in the shallows, their prints and small splashes glow and fade
+   * over a few seconds
+   */
+  biolum: boolean;
+  /** linear radiance of the glow at full excitation: a breaking lip's soft wash (its grain's points, up close, a few
+   * times it) */
+  biolumRadiance: number;
+  /** its colour, sRGB (dinoflagellates' light, ~475–490 nm: cyan to blue-green, out of sRGB's gamut — this its edge) */
+  biolumColor: number;
+  /**
+   * THE DISTANT STORM, move 4 phase 1 of the 2026-11-02 next-level review ("The near miss: weather as radio
+   * interference"; wandering/stormCell.ts): a cumulonimbus on the horizon from c2, 40° right, that flickers silently
+   * inside itself from c3's last light into c4 (each flash stuttering the dial's glow, props.ts) and dies away before the
+   * dial wakes. OFF by default, so a master leaves it out until the user has chosen it. BUILT or not at load (its march
+   * is in the sky's shader only when it is on: off, the sky is the one the approved cut drew), so switched by the page's
+   * query: `drift.html?distantStorm=1` (the review scripts' and drift-render.mjs's `--query distantStorm=1`); once built,
+   * `d.params.distantStorm = false` in a --setup hides it again
+   */
+  distantStorm: boolean;
+  /**
+   * TWO PIECES TO MAKE THE BEACH "FEEL MORE ALIVE … WITHOUT ADDING A WHOLE LOT OF ACTUAL ACTION" (the user, 2026-11-02,
+   * after the spine review). Both OFF by default, so a master leaves them out until the user has chosen them; both
+   * BUILT or not at load (their keys and meshes exist only when on), so switched by the page's query —
+   * `drift.html?flockSilence=1&beachCrabs=1` (the review scripts' and drift-render.mjs's `--query …`):
+   *
+   *   flockSilence  move 5 of the next-level review: the flock lifts at once in the score's one silence (~652 s) and
+   *                 is routed to the front right, against the darker east sky out of the Sun's glare, and over the
+   *                 dome's zenith as the music comes back (~676 s) — the eighth bake's alternate keys
+   *                 (scripts/drift-flock-bake.py --silence, flock-keys-silence.*), and the eye holds through w4
+   *                 instead of turning left after the flock (beats.ts coastLook). Read once at load: the keys are
+   *                 loaded by it, so a --setup cannot switch it
+   *   beachCrabs    ghost crabs on the walk beach (wandering/crabs.ts, the user's idea: "a walking crab on the beach
+   *                 once they land could be interesting"): one that comes out of its burrow in w3, scuttles down to
+   *                 the wet sand, raises its claws and runs back in as a wave comes up; a few at the waterline from w4
+   *                 on, running in and out with the swash, that scatter as the wanderers come up the beach in w5.
+   *                 Once built, `d.params.beachCrabs = false` in a --setup hides them
+   */
+  flockSilence: boolean;
+  beachCrabs: boolean;
 }
 
 export const driftParams: DriftParams = registerParams(
@@ -320,6 +370,18 @@ export const driftParams: DriftParams = registerParams(
     radioCall: typeof location === 'undefined' || new URLSearchParams(location.search).get('radioCall') !== '0',
     radioOperator: false,
     radioEnding: false,
+    // (on in the film since the 2026-11-02 render (the user: "bioluminescence … needs to be in"); ?biolum=0 leaves it
+    // out — read once at load, as ?radioCall=0 is: the glow's materials are only built when it is on)
+    biolum: typeof location === 'undefined' || new URLSearchParams(location.search).get('biolum') !== '0',
+    biolumRadiance: 0.25,
+    biolumColor: 0x38ccf5,
+    // (on in the film since the 2026-11-02 render (the user: the storm and the drowned line "go in"); ?distantStorm=0
+    // leaves it out — read once at load: the cell's march is only built into the sky when it is on)
+    distantStorm: typeof location === 'undefined' || new URLSearchParams(location.search).get('distantStorm') !== '0',
+    // (the flock's lift in the silence is in the film since the 2026-11-02 render, ?flockSilence=0 leaves it out; the
+    // crabs stay out, ?beachCrabs=1 — both read once at load)
+    flockSilence: typeof location === 'undefined' || new URLSearchParams(location.search).get('flockSilence') !== '0',
+    beachCrabs: typeof location !== 'undefined' && ['1', ''].includes(new URLSearchParams(location.search).get('beachCrabs') ?? 'off'),
   },
   {
     first: { min: 0, max: 60, step: 0.5 },
@@ -391,5 +453,6 @@ export const driftParams: DriftParams = registerParams(
     domeTilt: { min: 0, max: 30, step: 0.5 },
     seaAo: { min: 0, max: 1, step: 0.01 },
     seaAoRadius: { min: 0.1, max: 4, step: 0.05 },
+    biolumRadiance: { min: 0, max: 2, step: 0.005 },
   },
 );

@@ -12,8 +12,8 @@
  *     pulses along the sky, one a beat — no lamp blinks on our raft;
  *   - nothing flashes faster than about once a second, and no flash edge is a cut (comfort);
  *   - the cascade puts one pulse in flight a side, every crossing ≥ 5 s, reaches every station, and has closed before
- *     c4's Rose starts going quiet (else the ring closes in the fade, unseen); the paths it and our call ran along
- *     keep faint trails through that quiet, gone as the dissolve begins;
+ *     c4's Rose starts going quiet (else the ring closes in the fade, unseen); the links it ran along keep faint
+ *     trails through that quiet, gone as the dissolve begins — our call's path keeps none (it ends mid-air);
  *   - w6's chatter keeps the same trails, no brighter than c4's, building link by link and gone before the title;
  *   - the raft's bow comes round to the station that answered while the eye's own pose is untouched;
  *   - the ending: our station speaks only once it is lit, the traffic ends converging on one station before the title,
@@ -29,6 +29,7 @@ import {
   CALLS,
   CALL_RHYTHM,
   CASCADE,
+  CASCADE_HIDDEN,
   ENDING,
   FLASH,
   WAKE_FROM,
@@ -36,6 +37,7 @@ import {
   callLamp,
   callPulses,
   callSwell,
+  callsDone,
   TRAIL,
   TRAIL_W6,
   trailLevel,
@@ -160,7 +162,9 @@ describe('move 1: call, wait, answer (c4)', () => {
     expect(Math.min(...messages.map((m) => m.t0))).toBeGreaterThanOrEqual(C4 + ANSWER_AT + CASCADE.lead);
     for (const m of messages) expect(m.dur).toBeGreaterThanOrEqual(5);
     for (let t = C4 + ANSWER_AT; t < C4 + 60; t += 0.1) expect(messages.filter((m) => m.t0 <= t && t < m.t0 + m.dur).length).toBeLessThanOrEqual(2);
-    expect(litAt.every(Number.isFinite)).toBe(true);
+    // (every station but the one behind our raft, which is passed over: CASCADE_HIDDEN)
+    litAt.forEach((at, i) => expect(Number.isFinite(at)).toBe(!CASCADE_HIDDEN.includes(i)));
+    for (const m of messages) for (const i of CASCADE_HIDDEN) expect(sender(m, links) !== i && receiver(m, links) !== i).toBe(true);
     for (const m of messages) expect(m.t0).toBeGreaterThanOrEqual(litAt[sender(m, links)]);
     const closed = Math.max(...messages.map((m) => m.t0 + m.dur));
     const w1 = C4 + BEATS.find((b) => b.name === 'c4')!.length;
@@ -177,6 +181,47 @@ describe('move 1: call, wait, answer (c4)', () => {
   });
 });
 
+describe('move 1: no link of the cascade ends behind our raft', () => {
+  // (the user, 2026-11-02: "one line that terminates seemingly in the topmast of the boat … It looks like it ends mid-air
+  // … That line we need to get rid of" — the link to the lamp at +10°, hidden by our cabin and mast.) THE RAFT'S
+  // SILHOUETTE ON THE HORIZON from the show's eye, measured in the scene (the farm, eeg-msi, 2026-11-02: every mesh of
+  // `drift-raft` whose bounding box reaches above the eye's height, its corners' bearings, deg right of the eye's front):
+  // what of the raft stands above the eye hides the horizon there, the lamps' line (they stand ~0.03° over it at 7 km).
+  // Measured on the bounding boxes, so a little wider than the raft truly is. Re-measure with a --post probe in
+  // scripts/drift-review-stills.mjs if the raft, its dress or c4's poses change.
+  const SILHOUETTE: Array<[number, [number, number]]> = [
+    [452, [-21.9, 49]],
+    [458, [-20.8, 48.8]],
+    [464, [-18, 47.6]],
+    [470, [-13.1, 45.9]],
+    [476, [-10, 47.2]],
+    [482, [-5.7, 48.2]],
+  ];
+  /** deg: a lamp nearer a silhouette's edge than this reads as ending at it */
+  const MARGIN = 3;
+  const rest: RaftPose = { bearing: 0.26, distance: 18, heading: -1.5, height: 3 };
+  it('the measured silhouette is the raft where the pose puts it (the fixture still fits beats.ts)', () => {
+    const was = driftParams.radioCall;
+    driftParams.radioCall = true;
+    try {
+      for (const [t, [lo, hi]] of SILHOUETTE) {
+        const p = raftPose(C4 + t - C4_SHOW, c1End, rest);
+        const b = (p.bearing * 180) / Math.PI;
+        expect(b).toBeGreaterThan(lo);
+        expect(b).toBeLessThan(hi);
+      }
+    } finally {
+      driftParams.radioCall = was;
+    }
+  });
+  it('passes over exactly the stations whose lamp the raft hides, and every link it runs ends clear of it', () => {
+    const inside = (i: number): boolean => SILHOUETTE.some(([, [lo, hi]]) => STATIONS[i] > lo - MARGIN && STATIONS[i] < hi + MARGIN);
+    expect([...CASCADE_HIDDEN].sort()).toEqual(STATIONS.map((_, i) => i).filter(inside));
+    const { messages } = cascadeTraffic(C4, links, arcRaised, N);
+    for (const m of messages) for (const i of [sender(m, links), receiver(m, links)]) expect(inside(i)).toBe(false);
+  });
+});
+
 describe('move 1: the paths keep faint trails (radioCall)', () => {
   // (the user, 2026-11-02: "keeping faint lines of where the lines traveled … but like much more faint … Otherwise, it's
   // like very empty") — the network's figure builds link by link, still there through the quiet, gone by the dissolve
@@ -187,18 +232,27 @@ describe('move 1: the paths keep faint trails (radioCall)', () => {
     expect(trailLevel(-1)).toBe(0);
     expect(trailLevel(TRAIL.in)).toBeGreaterThan(0.9);
   });
-  it('keeps every path the cascade and our first call ran along faintly lit through the quiet', () => {
+  it('keeps every link the cascade ran along faintly lit through the quiet', () => {
     const { messages } = cascadeTraffic(C4, links, arcRaised, N);
     // (a path's trail starts as the first pulse's head has run its length: its far end lit last)
-    const lit = [...messages.map((m) => m.t0 + m.dur), callPulses(C4)[0].t0 + CALL.travel];
+    const lit = messages.map((m) => m.t0 + m.dur).sort((x, y) => x - y);
     // the quiet: the Rose's pulses and flares fade over CASCADE.quiet (476 → 484 show s)
     const quiet = w1 - CASCADE.quiet[0];
     for (const l of lit) {
       expect(at(quiet, l)).toBeGreaterThan(0.3);
       expect(at(w1 - CASCADE.quiet[1], l)).toBeGreaterThan(0);
     }
-    // the oldest, the first call's, has faded most — it is the earliest stroke of the figure
-    expect(at(quiet, lit[lit.length - 1])).toBeLessThan(at(quiet, lit[0]));
+    // the oldest has faded most — the figure's first strokes
+    expect(at(quiet, lit[0])).toBeLessThan(at(quiet, lit[lit.length - 1]));
+  });
+  it('leaves no line on our call’s path: it is done, answer and all, before the cascade has closed', () => {
+    // (the user, 2026-11-02, of round 3's trail on it: "one line that terminates seemingly in the topmast of the boat …
+    // ends mid-air". radioSignal.ts keeps no trail; props.ts darkens the path CALL_AFTER s after callsDone)
+    const done = callsDone(C4);
+    for (const p of callPulses(C4)) expect(p.t0 + p.hold + FLASH.fall + CALL.travel).toBeLessThanOrEqual(done);
+    expect(show(done)).toBeCloseTo(454.0, 1);
+    const { messages } = cascadeTraffic(C4, links, arcRaised, N);
+    expect(done + 6).toBeLessThan(Math.max(...messages.map((m) => m.t0 + m.dur)));
   });
   it('is gone as the dissolve to w1 begins (5 s before it), never crossfaded', () => {
     expect(trailOut(w1 - 5, w1)).toBe(0);

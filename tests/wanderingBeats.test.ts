@@ -1,3 +1,4 @@
+import { driftParams } from '../src/params/drift';
 /**
  * Part C and Act 3 on one clock (src/drift/wandering/beats.ts). Time passes in dissolves (the user's call,
  * 2026-10-27): the light and the surroundings crossfade, the camera never stops — or, where a beat runs on in one
@@ -243,9 +244,17 @@ describe('the beats after the landing', () => {
     expect(coastLook(starts.w4, c1End)).toBeCloseTo(0, 9);
     // w4: round to the left, out over the sea where the flock wheels ("we should tilt a little to the left to watch
     // the sandpipers", the 2026-10-29 review), and back along the beach before the wanderers come past in w5
+    // (the look left exists only without the flock's lift in the silence, which is in the film since the 2026-11-02
+    // render and holds the eye on the front through w4 — tests/driftCrabs covers that side)
     const D = Math.PI / 180;
-    expect(coastLook(starts.w4 + 20, c1End) / D).toBeGreaterThan(8);
-    expect(coastLook(starts.w5, c1End)).toBeCloseTo(0, 9);
+    const was = driftParams.flockSilence;
+    driftParams.flockSilence = false;
+    try {
+      expect(coastLook(starts.w4 + 20, c1End) / D).toBeGreaterThan(8);
+      expect(coastLook(starts.w5, c1End)).toBeCloseTo(0, 9);
+    } finally {
+      driftParams.flockSilence = was;
+    }
   });
 
   it('moves the Sun within a beat as real time would, slowly', () => {

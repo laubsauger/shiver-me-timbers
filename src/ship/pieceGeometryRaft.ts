@@ -16,6 +16,97 @@ function slab(aabb: AABB): THREE.BufferGeometry {
   return new THREE.BoxGeometry(s.x, s.y, s.z).translate(c.x, c.y, c.z);
 }
 
+/**
+ * A SLAB'S BOW CLIP (raftPartsHull.ts buildBambooDeck: the fore deck cut to the bow boards' inner faces, the user's
+ * 2026-11-02 note): the half-planes nx·x + nz·z ≤ c in the slab's own plan (x, z), from its shape's `clipP*` / `clipS*`
+ * numbers — none on a slab without them.
+ */
+export function bowClipOf(shape: Record<string, number> | undefined): Array<[number, number, number]> {
+  const out: Array<[number, number, number]> = [];
+  for (const k of ['P', 'S']) {
+    const nx = shape?.[`clip${k}nx`];
+    const nz = shape?.[`clip${k}nz`];
+    const c = shape?.[`clip${k}c`];
+    if (nx !== undefined && nz !== undefined && c !== undefined) out.push([nx, nz, c]);
+  }
+  return out;
+}
+
+/** the plan of a box `aabb` (x, z: counter-clockwise seen from above) cut by `clips` (Sutherland–Hodgman) */
+export function clippedPlan(aabb: AABB, clips: Array<[number, number, number]>): Array<[number, number]> {
+  let poly: Array<[number, number]> = [
+    [aabb.min[0], aabb.min[2]],
+    [aabb.min[0], aabb.max[2]],
+    [aabb.max[0], aabb.max[2]],
+    [aabb.max[0], aabb.min[2]],
+  ];
+  for (const [nx, nz, c] of clips) {
+    const inside = (p: [number, number]): boolean => nx * p[0] + nz * p[1] <= c + 1e-9;
+    const cut = (a: [number, number], b: [number, number]): [number, number] => {
+      const da = nx * a[0] + nz * a[1] - c;
+      const db = nx * b[0] + nz * b[1] - c;
+      const t = da / (da - db);
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    };
+    const next: Array<[number, number]> = [];
+    poly.forEach((p, i) => {
+      const q = poly[(i + 1) % poly.length];
+      if (inside(p)) next.push(p);
+      if (inside(p) !== inside(q)) next.push(cut(p, q));
+    });
+    poly = next;
+  }
+  return poly;
+}
+
+/**
+ * A slab cut to its bow clip: the clipped plan stood from y0 to y1 — its top and bottom (uv the box's top's, x and z
+ * across the box) and a face on every edge of the plan, flat-shaded as the box was. Without a clip, the box.
+ */
+export function clippedSlab(aabb: AABB, shape: Record<string, number> | undefined): THREE.BufferGeometry {
+  const clips = bowClipOf(shape);
+  if (clips.length === 0) return slab(aabb);
+  const plan = clippedPlan(aabb, clips);
+  const [y0, y1] = [aabb.min[1], aabb.max[1]];
+  const sx = aabb.max[0] - aabb.min[0];
+  const sz = aabb.max[2] - aabb.min[2];
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const put = (x: number, y: number, z: number, u = (x - aabb.min[0]) / sx, v = (z - aabb.min[2]) / sz): void => {
+    pos.push(x, y, z);
+    uv.push(u, v);
+  };
+  for (let i = 1; i + 1 < plan.length; i++) {
+    const [a, b, c] = [plan[0], plan[i], plan[i + 1]];
+    // top (facing up: clockwise in x–z seen from above is counter-clockwise from +y here) and bottom
+    put(a[0], y1, a[1]);
+    put(b[0], y1, b[1]);
+    put(c[0], y1, c[1]);
+    put(a[0], y0, a[1]);
+    put(c[0], y0, c[1]);
+    put(b[0], y0, b[1]);
+  }
+  let run = 0;
+  plan.forEach((p, i) => {
+    const q = plan[(i + 1) % plan.length];
+    const l = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const u0 = run / Math.max(sx, sz);
+    const u1 = (run + l) / Math.max(sx, sz);
+    run += l;
+    put(p[0], y0, p[1], u0, 0);
+    put(q[0], y0, q[1], u1, 0);
+    put(q[0], y1, q[1], u1, 1);
+    put(p[0], y0, p[1], u0, 0);
+    put(q[0], y1, q[1], u1, 1);
+    put(p[0], y1, p[1], u0, 1);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return g;
+}
+
 /** an axis-aligned box given as min/max in the piece's own frame */
 function boxBetween(
   x0: number, x1: number, y0: number, y1: number, z0: number, z1: number,

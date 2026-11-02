@@ -55,6 +55,9 @@
  * uniforms and the sunlight as a function; the game's sky can pass its own `sunAt` (or none: the sunBase/sunTop
  * uniforms) and run `CloudLight.update` once per frame (or every few: the field only drifts). `sunThrough` is a
  * cloud shadow for any surface under the layer — the sea's and the game's water and decks.
+ *
+ * THE DISTANT STORM (stormCell.ts, params distantStorm) is lit by the same light: it takes the phase function, the
+ * octaves and the diffusion terms exported below, so the cell 55 km off and the cumulus in front of it are one sky.
  */
 import * as THREE from 'three/webgpu';
 import { Break, Fn, If, Loop, exp, float, fract, instanceIndex, mix, smoothstep, sqrt, texture3D, textureStore, uint, uniform, uvec3, vec3, vec4 } from 'three/tsl';
@@ -144,20 +147,20 @@ const G_D = 0.594;
 const ALPHA_D = 27.1;
 const W_D = 0.498;
 /** multiple scattering: octaves (a = b = c = ½) */
-const OCTAVES = 8;
+export const OCTAVES = 8;
 /** the powder effect (Schneider): light at the sunlit skin has scattered too few times to come back out — the creases
  * between the billows read dark seen with the Sun behind; none seen toward the Sun (the rims stay bright) */
-const POWDER = 0.5;
+export const POWDER = 0.5;
 /** how diffuse light fades into a cloud: a slab's diffuse transmittance, 1/(1 + ¾τ(1 − g)), with the droplets'
  * g ~0.85 (a cumulus is τ ~100 across) */
-const DIFFUSE = 0.75 * (1 - 0.85);
+export const DIFFUSE = 0.75 * (1 - 0.85);
 /** THE LIGHT THE OCTAVES LEAVE OUT: deep in a thick cloud the sunlight has scattered hundreds of times and diffuses,
  * falling off as diffusion does, not exponentially — what lights a cumulus' base and its far side (eight octaves of
  * ½ left a 1 km body ten times too dark: black undersides under a sunset sky). Its share (the light a cloud's body
  * passes on: most of it, its albedo is ~1), and the optical depth over which it takes over from the octaves at the
  * sunlit skin (where the octaves are the light, and both would count it twice) */
-const DIFFUSION = 0.5;
-const DIFFUSION_SKIN = 8;
+export const DIFFUSION = 0.5;
+export const DIFFUSION_SKIN = 8;
 /** the sea's albedo of the Sun's light, sent up onto the bases (the sky's light from below — the air under the layer,
  * the sea mirroring the sky — is CloudUniforms.skyBelow, measured; it had been this share of the sky's irradiance/π
  * too, ~6× under: see `seaUp` in cloudMarch) */
@@ -480,7 +483,7 @@ const draine = (g: number, a: number, c: F): F =>
     .mul(c.mul(c).mul(a).add(1))
     .div(float(1 + g * g).sub(c.mul(2 * g)).pow(1.5)) as F;
 /** the droplets' phase function at cos θ = c, its anisotropy scaled by k (an octave's c^i) */
-const cloudPhase = (c: F, k: number): F => mix(hg(G_HG * k, c), draine(G_D * k, ALPHA_D, c), W_D) as F;
+export const cloudPhase = (c: F, k: number): F => mix(hg(G_HG * k, c), draine(G_D * k, ALPHA_D, c), W_D) as F;
 
 export interface CloudMarchOptions {
   quality?: CloudQuality;

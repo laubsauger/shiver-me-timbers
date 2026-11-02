@@ -10,6 +10,9 @@
  *     further up the beach;
  *   - THE SEAM: a state warmed from rest SWASH_WARM s before its frame against one run on from 40 s earlier, on our
  *     beach's own profile: how much the warm start still shows 30 s later (the price of the wake's rule).
+ *   - SHORT-CRESTED (the user, 2026-11-02: "this continuous line, this wave front … not how it looks, ever"): the
+ *     incoming crests' heights vary along the beach — the swell alone came in nearly whole for hundreds of metres, so
+ *     every run-up reached its line at once and the swash's edge was one smooth curve along the bay;
  *   - ON ALONG THE BEACH (the 2026-11-01 note: the 200 m strip's edges read as "a rectangle on the shore"): the rows
  *     that coarsen along the shore and shift across it to follow its curve keep the scheme's two guarantees — mass
  *     to round-off over cells of their own widths, a lake at rest still across rows shifted by whole cells — and the
@@ -245,5 +248,28 @@ describe('swash sim scheme', () => {
     };
     console.log(`[swash seam] after 30 s: |Δη| max ${(maxD * 1000).toFixed(2)} mm, mean ${(meanD * 1000).toFixed(3)} mm over ${wetCells} wet cells; shoreline ${shore(warm).toFixed(2)} vs ${shore(long).toFixed(2)} m`);
     expect(maxD).toBeLessThan(0.02);
+  });
+
+  it('comes in short-crested: the crests\' heights vary along the beach, not one front the length of the bay', () => {
+    // the largest crest at the edge over 12 s, every metre over 500 m of beach, less its 150 m running mean: its rms
+    // against its mean, over three windows (the swell alone: 7–16 %, mean 11 %)
+    const spreads = [400, 420, 440].map((t0) => {
+      const env: number[] = [];
+      for (let z = -250; z < 250; z += 1) {
+        let m = -1;
+        for (let t = t0; t < t0 + 12; t += 0.2) m = Math.max(m, swashForcing(t, z));
+        env.push(m);
+      }
+      const n = env.length;
+      const mean = env.reduce((a, b) => a + b, 0) / n;
+      const d = env.map((x, i) => {
+        let s = 0;
+        let c = 0;
+        for (let k = Math.max(0, i - 75); k < Math.min(n, i + 75); k++) (s += env[k]), c++;
+        return x - s / c;
+      });
+      return Math.sqrt(d.reduce((s, x) => s + x * x, 0) / n) / mean;
+    });
+    expect(spreads.reduce((a, b) => a + b, 0) / spreads.length).toBeGreaterThan(0.16);
   });
 });

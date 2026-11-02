@@ -486,6 +486,10 @@ export function coastLook(t: number, c1End: number): number {
   // and in w4 round to the left, out over the sea, as the sandpipers wheel there (flock.ts: the flock's own clock
   // is w4 + 2; it crosses the front at ~9 s and wheels over the sea from ~13 s), back before the vortex overhead
   // (the 2026-10-29 review: "we should tilt a little to the left to watch the sandpipers")
-  const birds = BIRD_LOOK * (smooth((t - starts.w4 - 6) / 10) - smooth((t - starts.w4 - 26) / 10));
+  // (NOT under flockSilence, params/drift.ts: there the flock lifts in the score's silence and climbs to the FRONT
+  // RIGHT, and the move asks that "in the 650 s hole the eye holds; the clouds and the surf keep moving" — the 2026-11-02
+  // next-level review, move 5. A turn left after a flock that is going right would turn away from it; the eye stays
+  // on the front through w4, and the dome holds the low pass across the front and the wheel right without it)
+  const birds = driftParams.flockSilence ? 0 : BIRD_LOOK * (smooth((t - starts.w4 - 6) / 10) - smooth((t - starts.w4 - 26) / 10));
   return LOOK * (smooth((t - starts.w2 + 12) / 30) - smooth((t - starts.w2 - 34) / 30)) + birds;
 }
