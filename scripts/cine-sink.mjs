@@ -219,7 +219,9 @@ function openEncoder(shot, w, h, depth = 8) {
       '-f', 'rawvideo', '-pix_fmt', depth === 16 ? 'rgba64le' : 'rgba', '-s', `${w}x${h}`, '-r', String(fps),
       '-i', 'pipe:0',
       // (hevc10 at 8 bit too: its YUV is BT.709 like the 16-bit masters', not swscale's BT.601 default)
-      '-an', ...codec, ...(depth === 16 || CODEC === 'hevc10' ? REC709 : []),
+      // (and the 8-bit x264 masters: they went out BT.601 and untagged, and a player reads an untagged HD/4K clip as
+      // BT.709 — pure green 255 decoded as 216, red as (255, 24, 0) in Chrome; studio-world's dome previs, 2026-11-02)
+      '-an', ...codec, ...(depth === 16 || CODEC === 'hevc10' || CODEC === 'x264' ? REC709 : []),
       // moov at the front: one rewrite at close, and the file is seekable
       // immediately rather than only after a full read
       '-movflags', '+faststart',
