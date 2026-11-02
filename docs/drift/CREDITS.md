@@ -44,11 +44,13 @@ Further galaxy images: NASA, ESA and the Hubble Heritage Team (STScI/AURA), publ
 
 ## Notes
 
-- **Sentinel-2 cloudless 2016** (the inset, the Alps to Istria under the end of Drift-2 and the landing): CC BY 4.0;
+- **Sentinel-2 cloudless 2016** (the inset, the Alps to the Julian Alps and the Karawanks, the Po plain and Istria, under
+  the end of Drift-2 and the landing; widened east to lon ~16 on 2026-11-02, the same 2016 layer): CC BY 4.0;
   the credit line is EOX's required wording, verbatim. Only the 2016 and 2017 layers are CC BY (earth-data.md).
 - **EU-DEM** (the inset's zoom-11 terrain, through the AWS Terrain Tiles): the wording is the one Tilezen's attribution
   list gives for it (https://github.com/tilezen/joerd/blob/master/docs/attribution.md), as in earth-data.md. The
-  Austrian DGM is in the inset's north-east corner (CC BY 4.0, the same list). ETOPO1 and USGS cover the global and
+  Austrian DGM is along the inset's north-eastern edge, Tyrol to Carinthia and Styria (CC BY 4.0, the same list); Slovenia
+  and Croatia, east to lon 16, are EU-DEM. ETOPO1 and USGS cover the global and
   sea-floor terrain; Tilezen asks for each source that is used.
 - **NASA Blue Marble, Black Marble, the cloud composite, VIIRS via GIBS**: public domain or free use; a credit is
   customary (GIBS asks for an acknowledgement).

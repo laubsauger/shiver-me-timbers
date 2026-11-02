@@ -18,9 +18,11 @@ Four nested levels, all equirectangular (lon, lat), each finer one fading into t
   near     lon -12..20, lat 36..54 at 1/240 deg (~460 m): the Blue Marble's and Black Marble's own grid, uncut,
            and the terrain tiles at zoom 9 — where the lights beat, the flood and Drift-2 look closer than the
            region's kilometre (measured 2026-10-30: a 4096 master's pixel falls under 1.1 km on the ground there)
-  inset    lon 6..14, lat 43.5..47 at ~79 m (1/1000 deg of longitude, 1/1400 of latitude: square on the ground at
-           45 deg N): the western Alps to Istria, the Po plain, the northern Apennines — under the end of Drift-2 and
-           the landing, where a 4096 master's pixel comes down to 30–60 m. Sentinel-2 cloudless colour (2016, the
+  inset    lon 6..15.984, lat 43.5..47 at ~79 m (1/1000 deg of longitude, 1/1400 of latitude: square on the ground
+           at 45 deg N): the western Alps to the Julian Alps and the Karawanks, the Po plain, the northern Apennines,
+           Istria — under the end of Drift-2 and the landing, where a 4096 master's pixel comes down to 30–60 m (and
+           the left views at ~282 s look east past lon 14). Stored as two overlapping layers of 5120 columns (a
+           texture array: 9984 columns are over the 8192 a texture may be on every render box). Sentinel-2 cloudless colour (2016, the
            CC BY edition) matched to the Blue Marble below its own 460 m (so it fades into the near level with no
            seam: only the finer detail is Sentinel's), its own water line, the terrain tiles at zoom 11 (EU-DEM)
 
@@ -251,9 +253,20 @@ def near() -> None:
 # lat 43.5..46.5 under 120 m; the measurements in docs/drift/earth-data.md). No public night-lights or Blue Marble
 # data is finer than 460 m; the real colour that is, under an open licence, is Sentinel-2: EOX's cloudless mosaic of
 # 2016 (the CC BY 4.0 edition: the later years are non-commercial), 10 m, served as a WGS84 tile pyramid. Level 11 of
-# it (~38 m) is averaged down to ~79 m here: 8000 x 4900, square on the ground at 45 deg N.
-INSET = (6.0, 14.0, 43.5, 47.0)
-INSET_W, INSET_H = 8000, 4900
+# it (~38 m) is averaged down to ~79 m here: 9984 x 4900, square on the ground at 45 deg N.
+INSET = (6.0, 15.984, 43.5, 47.0)
+INSET_W, INSET_H = 9984, 4900
+# (2026-11-02: widened east from lon 14 — the left views at 282 s, yaw ~55 deg, looked past its old edge onto the
+# Julian Alps and the Karawanks, which had only the near level's 460 m and read soft. 9984 columns are over the 8192 a
+# texture can be on every render box, so the inset is stored as a two-layer texture array (no extra texture binding in
+# the earth material, ~100 MB more than the old 8000 columns): layer 0 columns 0..5120 (lon 6..11.12), layer 1
+# columns 4864..9984 (lon 10.864..15.984). They overlap by 256 columns and the shader switches at column 4992 (lon
+# 10.992), 128 columns from either layer's edge; both are cut from this one bake on one texel grid, with offsets and
+# widths that are multiples of 256, so their mips agree through mip 8 and the switch shows no seam)
+INSET_LAYERS, INSET_LAYER_W = (0, 4864), 5120
+# the bake runs to lon 16 (the Blue Marble's 15'' grid ends there on a whole texel, 2400 of them) and drops the last
+# 16 columns
+INSET_BAKE_LON1, INSET_BAKE_W = 16.0, 10000
 S2_LEVEL = 11
 # the Sentinel scenes' own Sun (the mosaic is built from summer 2016 passes at ~10:30 local solar time): a first guess
 # that the fit below refines against the terrain
@@ -327,9 +340,16 @@ def hillshade(e: np.ndarray, lat0: float, lat1: float, dlon: float, dlat: float,
     return ((-gx * s[0] - gy * s[1] + s[2]) / np.sqrt(gx * gx + gy * gy + 1)).astype(np.float32)
 
 
+def layers(a: np.ndarray) -> np.ndarray:
+    """the bake's (h, 10000, ...) grid cut to the two layers, stacked: layer 0 above layer 1 (the texture
+    array's own order: each layer's rows north to south)"""
+    return np.ascontiguousarray(np.concatenate([a[:, c:c + INSET_LAYER_W] for c in INSET_LAYERS], 0))
+
+
 def inset() -> None:
-    lon0, lon1, lat0, lat1 = INSET
-    w, h = INSET_W, INSET_H
+    lon0, _, lat0, lat1 = INSET
+    lon1, w, h = INSET_BAKE_LON1, INSET_BAKE_W, INSET_H
+    assert INSET_LAYERS[-1] + INSET_LAYER_W == INSET_W <= w
     dlon, dlat = (lon1 - lon0) / w, (lat1 - lat0) / h
     # the Blue Marble on its own grid over the box (what the near level draws there) and its water
     bw, bh = round((lon1 - lon0) * 240), round((lat1 - lat0) * 240)
@@ -461,13 +481,14 @@ def inset() -> None:
     sl[..., 2] = np.where(over, top + (sl[..., 2] - top) / 3, sl[..., 2])
     albedo = to_srgb(sl)
     del sl, top, over
-    Image.fromarray(albedo, 'RGB').save(OUT / 'inset-albedo.jpg', quality=92)
-    print(OUT / 'inset-albedo.jpg', albedo.shape)
+    # (every map as its two layers stacked: 5120 x 9800)
+    Image.fromarray(layers(albedo), 'RGB').save(OUT / 'inset-albedo.jpg', quality=92)
+    print(OUT / 'inset-albedo.jpg', layers(albedo).shape)
     # the water as an 8-bit grey PNG (earth.ts reads it into a one-channel texture)
-    Image.fromarray(water.astype(np.uint8) * 255, 'L').save(OUT / 'inset-water.png', optimize=True)
+    Image.fromarray(layers(water.astype(np.uint8) * 255), 'L').save(OUT / 'inset-water.png', optimize=True)
     print(OUT / 'inset-water.png')
-    land_sea(elev, water).tofile(OUT / 'inset-elevation.f16')
-    print(OUT / 'inset-elevation.f16', (h, w))
+    layers(land_sea(elev, water)).tofile(OUT / 'inset-elevation.f16')
+    print(OUT / 'inset-elevation.f16', (2 * h, INSET_LAYER_W))
 
 
 if __name__ == '__main__':

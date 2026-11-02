@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { getTheDriftParams } from '../src/params/getTheDrift';
 import { beatStarts, domeDir, earthPose, gatherFrame, glideAxis, glideSpin, landingTrack, landingTurn } from '../src/drift/getTheDrift/timeline';
-import { INSET, NEAR, geoFrameAt } from '../src/drift/getTheDrift/earthMaps';
+import { INSET, INSET_LAYER, NEAR, geoFrameAt } from '../src/drift/getTheDrift/earthMaps';
 
 const p = { ...getTheDriftParams };
 const tilt = 15;
@@ -106,5 +106,21 @@ describe('the Earth map levels', () => {
     expect((NEAR.lon1 - NEAR.lon0) * 240).toBe(NEAR.w);
     expect((NEAR.lat1 - NEAR.lat0) * 240).toBe(NEAR.h);
     expect(py).toMatch(new RegExp(`INSET_W, INSET_H = ${INSET.w}, ${INSET.h}`));
+    expect(py).toMatch(new RegExp(`INSET_LAYERS, INSET_LAYER_W = \\(${INSET_LAYER.cols.join(', ')}\\), ${INSET_LAYER.w}`));
+  });
+
+  it("the inset's two layers cover its box, fit a texture, and switch where both hold the same texels and mips", () => {
+    // (the inset is 9984 columns, over the 8192 a texture can be on every render box: earthMaps.ts INSET_LAYER. A
+    // lookup takes layer 0 west of `split`, layer 1 east of it; near a layer's edge its clamp and its coarser mips
+    // differ from the other's, which would draw a north–south seam through the Po plain)
+    const [c0, c1] = INSET_LAYER.cols;
+    expect(INSET_LAYER.w).toBeLessThanOrEqual(8192);
+    expect(c0).toBe(0);
+    expect(c1 + INSET_LAYER.w).toBe(INSET.w);
+    expect(INSET_LAYER.split - c1).toBeGreaterThanOrEqual(128);
+    expect(c0 + INSET_LAYER.w - INSET_LAYER.split).toBeGreaterThanOrEqual(128);
+    // the same mips through mip 8 (a ~20 km texel): offsets and width whole multiples of 256
+    expect(c1 % 256).toBe(0);
+    expect(INSET_LAYER.w % 256).toBe(0);
   });
 });

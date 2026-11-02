@@ -13,8 +13,9 @@
  *   NEAR    ~460 m: the Blue Marble's and the Black Marble's own 15″ grid, uncut, and the terrain tiles at zoom 9,
  *           lon −12..20°, lat 36..54° (fades over 1°)
  *   INSET   ~79 m: Sentinel-2 colour matched to the Blue Marble above its 460 m (only Sentinel's finer detail is its
- *           own, so the fade shows no seam), its own water line, the zoom-11 terrain (EU-DEM), lon 6..14°,
- *           lat 43.5..47°: the western Alps to Istria over the Po plain (fades over 0.35°)
+ *           own, so the fade shows no seam), its own water line, the zoom-11 terrain (EU-DEM), lon 6..15.984°,
+ *           lat 43.5..47°: the western Alps to the Julian Alps and the Karawanks over the Po plain and Istria (fades
+ *           over 0.35°; a two-layer texture array, INSET_LAYER below)
  * Why these boxes (the 2026-10-30 question "at the zoom level we end up in they look kind of low resolution … can we
  * upscale them?"): measured against a 4096 master's pixel on the ground through Act 2 (docs/drift/earth-data.md,
  * "Resolution"), the region's kilometre is too coarse from the lights beat on over lon −13.5..19.5, lat 32..57; the
@@ -28,7 +29,7 @@
  * lon 0° lat 0°, of lon 90°E) — the planet only translates, so they are fixed.
  */
 import * as THREE from 'three/webgpu';
-import { asin, atan, exp2, float, floor, fract, log2, min, mix, smoothstep, texture, vec2 } from 'three/tsl';
+import { asin, atan, exp2, float, floor, fract, log2, min, mix, smoothstep, step, texture, vec2 } from 'three/tsl';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -38,8 +39,20 @@ type V4 = THREE.Node<'vec4'>;
 export const REGION = { lon0: -25, lon1: 45, lat0: 18, lat1: 68, w: 7000, h: 5000 };
 /** scripts/drift-earth-data.py NEAR: 1/240° a texel */
 export const NEAR = { lon0: -12, lon1: 20, lat0: 36, lat1: 54, w: 7680, h: 4320 };
-/** scripts/drift-earth-data.py INSET: 1/1000° of longitude, 1/1400° of latitude a texel (~79 m both ways at 45° N) */
-export const INSET = { lon0: 6, lon1: 14, lat0: 43.5, lat1: 47, w: 8000, h: 4900 };
+/** scripts/drift-earth-data.py INSET: 1/1000° of longitude, 1/1400° of latitude a texel (~79 m both ways at 45° N).
+ * (2026-11-02: widened east from lon 14 to ~16: the left views at 282 s look past lon 14 onto the Julian Alps and the
+ * Karawanks, which had only the near level's 460 m and read soft) */
+export const INSET = { lon0: 6, lon1: 15.984, lat0: 43.5, lat1: 47, w: 9984, h: 4900 };
+/**
+ * The inset's 9984 columns are over the 8192 a texture may be on every render box (WebGPU's default limit, which the
+ * renderer does not raise), so its maps are two-layer texture arrays: layer 0 holds columns 0..5120 (lon 6..11.12),
+ * layer 1 columns 4864..9984 (lon 10.864..15.984), cut from one bake on one texel grid. One binding each, as before
+ * (a second inset's own three maps would have taken the earth material to 15 of its 16 textures), for ~100 MB more
+ * than the old 8000 columns. A lookup takes layer 0 west of column `split` (lon 10.992) and layer 1 east of it: 128
+ * columns from either layer's edge, where both hold the same texels — and with the offset and the width multiples of
+ * 256, the same mips through mip 8 (a 20 km texel) — so the switch shows no seam.
+ */
+export const INSET_LAYER = { w: 5120, cols: [0, 4864], split: 4992 };
 const GLOBAL_ELEV = { w: 4096, h: 2048 };
 /** rad on the sphere one texel spans: the region's maps, the global colour / lights / clouds, its elevation, the near
  * level's, the inset's (its north–south side: square on the ground at its latitude) */
@@ -55,7 +68,7 @@ export const ELEV_TEXEL_KM = { inset: INSET_TEXEL * 6371, near: NEAR_TEXEL * 637
 const FADE = { region: 1.5, near: 1, inset: 0.35 };
 const DEG = 180 / Math.PI;
 /** the near level and the inset: on by default (the render boxes have their maps, in the asset bundle since
- * 2026-10-30); `?earthfine=0` turns them off, an A/B against the region alone that also skips their ~800 MB of
+ * 2026-10-30); `?earthfine=0` turns them off, an A/B against the region alone that also skips their ~900 MB of
  * textures */
 const FINE_LEVELS = ((q: string | null) => q !== '0')(typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('earthfine'));
 
@@ -78,10 +91,11 @@ export interface EarthMaps {
   /** as the region's, but G (clouds) empty: the clouds are read from the region */
   nearLcw: THREE.Texture;
   nearElevation: THREE.DataTexture;
-  insetAlbedo: THREE.Texture;
+  /** (the inset's maps are two-layer arrays: INSET_LAYER) */
+  insetAlbedo: THREE.DataArrayTexture;
   /** R open water 0..1 (the inset has no lights or clouds of its own) */
-  insetWater: THREE.DataTexture;
-  insetElevation: THREE.DataTexture;
+  insetWater: THREE.DataArrayTexture;
+  insetElevation: THREE.DataArrayTexture;
   ready: Promise<void>;
   dispose(): void;
 }
@@ -92,12 +106,22 @@ function elevationTexture(w: number, h: number, box = false): THREE.DataTexture 
   return mapTexture(new THREE.DataTexture(new Uint16Array(w * h), w, h, THREE.RedFormat, THREE.HalfFloatType), box);
 }
 
-/** a one-channel 8-bit map (the inset's water) */
-function maskTexture(w: number, h: number): THREE.DataTexture {
-  return mapTexture(new THREE.DataTexture(new Uint8Array(w * h), w, h, THREE.RedFormat, THREE.UnsignedByteType), true);
+/** the inset's maps: INSET_LAYER's two layers, one 8-bit channel (the water), 8-bit sRGB RGBA (the colour) or
+ * half-float metres (the elevation). (With the fine levels off, a 1 x 1 placeholder: never sampled, never filled) */
+function insetArray(kind: 'mask' | 'colour' | 'elevation'): THREE.DataArrayTexture {
+  const [w, h] = FINE_LEVELS ? [INSET_LAYER.w, INSET.h] : [1, 1];
+  const n = w * h * 2;
+  const t =
+    kind === 'elevation'
+      ? new THREE.DataArrayTexture(new Uint16Array(n), w, h, 2)
+      : new THREE.DataArrayTexture(new Uint8Array(kind === 'colour' ? n * 4 : n), w, h, 2);
+  t.format = kind === 'colour' ? THREE.RGBAFormat : THREE.RedFormat;
+  t.type = kind === 'elevation' ? THREE.HalfFloatType : THREE.UnsignedByteType;
+  if (kind === 'colour') t.colorSpace = THREE.SRGBColorSpace;
+  return mapTexture(t, true);
 }
 
-function mapTexture(t: THREE.DataTexture, box: boolean): THREE.DataTexture {
+function mapTexture<T extends THREE.DataTexture | THREE.DataArrayTexture>(t: T, box: boolean): T {
   t.minFilter = THREE.LinearMipmapLinearFilter;
   t.magFilter = THREE.LinearFilter;
   t.generateMipmaps = true;
@@ -121,7 +145,7 @@ export function loadEarthMaps(base = `${import.meta.env.BASE_URL}drift/earth/`):
     });
     return { tex, done };
   };
-  const elevation = (name: string, tex: THREE.DataTexture): Promise<void> =>
+  const elevation = (name: string, tex: THREE.DataTexture | THREE.DataArrayTexture): Promise<void> =>
     fetch(base + name)
       .then((r) => {
         if (!r.ok) throw new Error(`earth maps: ${name} ${r.status} (run scripts/drift-earth-data.py)`);
@@ -131,9 +155,11 @@ export function loadEarthMaps(base = `${import.meta.env.BASE_URL}drift/earth/`):
         (tex.image as { data: Uint16Array }).data = new Uint16Array(b);
         tex.needsUpdate = true;
       });
-  // a grey PNG into a one-channel texture: decoded here, not as an image texture, which would hold it as RGBA (4x the
-  // GPU memory for one channel: 157 MB instead of 39 for the inset's water)
-  const grey = (name: string, tex: THREE.DataTexture): Promise<void> =>
+  // an image decoded here into a data texture: a grey PNG into one channel, not as an image texture, which would hold
+  // it as RGBA (4x the GPU memory for one channel: 157 MB instead of 39 for the inset's water); and the inset's colour,
+  // its two layers stacked in one JPEG, into an array (an image texture cannot be one). Opaque, so the canvas's
+  // premultiplied alpha changes nothing
+  const decode = (name: string, tex: THREE.DataTexture | THREE.DataArrayTexture, channels: 1 | 4): Promise<void> =>
     fetch(base + name)
       .then((r) => {
         if (!r.ok) throw new Error(`earth maps: ${name} ${r.status} (run scripts/drift-earth-data.py)`);
@@ -142,14 +168,16 @@ export function loadEarthMaps(base = `${import.meta.env.BASE_URL}drift/earth/`):
       .then((b) => createImageBitmap(b, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }))
       .then((bmp) => {
         const { width: w, height: h } = bmp;
-        const img = tex.image as { data: Uint8Array; width: number; height: number };
-        if (w !== img.width || h !== img.height) throw new Error(`earth maps: ${name} is ${w}x${h}, not ${img.width}x${img.height}`);
+        const img = tex.image as { data: Uint8Array; width: number; height: number; depth?: number };
+        const rows = img.height * (img.depth ?? 1);
+        if (w !== img.width || h !== rows) throw new Error(`earth maps: ${name} is ${w}x${h}, not ${img.width}x${rows}`);
         const ctx = new OffscreenCanvas(w, h).getContext('2d', { willReadFrequently: true });
         if (!ctx) throw new Error(`earth maps: ${name}: no 2D canvas to decode it`);
         ctx.drawImage(bmp, 0, 0);
         bmp.close();
         const px = ctx.getImageData(0, 0, w, h).data;
-        for (let i = 0; i < w * h; i++) img.data[i] = px[i * 4];
+        if (channels === 4) img.data.set(px);
+        else for (let i = 0; i < w * h; i++) img.data[i] = px[i * 4];
         tex.needsUpdate = true;
       });
   const ra = image('region-albedo.jpg', true);
@@ -159,22 +187,22 @@ export function loadEarthMaps(base = `${import.meta.env.BASE_URL}drift/earth/`):
   const none = { tex: new THREE.Texture(), done: Promise.resolve() };
   const na = FINE_LEVELS ? image('near-albedo.jpg', true, true) : none;
   const nl = FINE_LEVELS ? image('near-lcw.png', false, true) : none;
-  const ia = FINE_LEVELS ? image('inset-albedo.jpg', true, true) : none;
+  const ia = insetArray('colour');
   const re = elevationTexture(REGION.w, REGION.h);
   const ge = elevationTexture(GLOBAL_ELEV.w, GLOBAL_ELEV.h);
   const ne = elevationTexture(NEAR.w, NEAR.h, true);
-  const ie = elevationTexture(INSET.w, INSET.h, true);
-  const iw = maskTexture(INSET.w, INSET.h);
+  const ie = insetArray('elevation');
+  const iw = insetArray('mask');
   const ready = Promise.all([
     ra.done, rl.done, ga.done, gl.done, elevation('region-elevation.f16', re), elevation('global-elevation.f16', ge),
-    ...(FINE_LEVELS ? [na.done, nl.done, ia.done, elevation('near-elevation.f16', ne), elevation('inset-elevation.f16', ie), grey('inset-water.png', iw)] : []),
+    ...(FINE_LEVELS ? [na.done, nl.done, decode('inset-albedo.jpg', ia, 4), elevation('near-elevation.f16', ne), elevation('inset-elevation.f16', ie), decode('inset-water.png', iw, 1)] : []),
   ]).then(() => undefined);
-  const all = [ra.tex, rl.tex, ga.tex, gl.tex, na.tex, nl.tex, ia.tex, re, ge, ne, ie, iw];
+  const all = [ra.tex, rl.tex, ga.tex, gl.tex, na.tex, nl.tex, ia, re, ge, ne, ie, iw];
   return {
     regionAlbedo: ra.tex, regionLcw: rl.tex, regionElevation: re,
     globalAlbedo: ga.tex, globalLcw: gl.tex, globalElevation: ge,
     nearAlbedo: na.tex, nearLcw: nl.tex, nearElevation: ne,
-    insetAlbedo: ia.tex, insetWater: iw, insetElevation: ie,
+    insetAlbedo: ia, insetWater: iw, insetElevation: ie,
     ready,
     dispose: () => all.forEach((t) => t.dispose()),
   };
@@ -227,7 +255,9 @@ export interface MapCoords {
   region: V2;
   global: V2;
   near: V2;
+  /** in the inset's layer `insetLayer` (0 or 1, INSET_LAYER) */
   inset: V2;
+  insetLayer: F;
   /** 0..1 how much of the region's / the near level's / the inset's maps is used (each over the coarser ones) */
   w: F;
   wn: F;
@@ -246,14 +276,20 @@ export function mapCoords(lat: F, lon: F): MapCoords {
   const r = boxCoords(lat, lon, REGION, FADE.region);
   const n = boxCoords(lat, lon, NEAR, FADE.near);
   const i = boxCoords(lat, lon, INSET, FADE.inset);
+  // (the inset's weight from its whole box; its texture coordinates in the layer on this side of the switch)
+  const layer = step((INSET.lon0 * 1000 + INSET_LAYER.split) / 1000, lon) as F;
+  const x0 = mix(float(INSET.lon0 + INSET_LAYER.cols[0] / 1000), float(INSET.lon0 + INSET_LAYER.cols[1] / 1000), layer);
+  const inset = vec2(lon.sub(x0).div(INSET_LAYER.w / 1000), i.uv.y);
   const global = vec2(lon.add(180).div(360), float(90).sub(lat).div(180));
-  return { region: r.uv, global, near: n.uv, inset: i.uv, w: r.w, wn: FINE_LEVELS ? n.w : float(0), wi: FINE_LEVELS ? i.w : float(0) };
+  return { region: r.uv, global, near: n.uv, inset, insetLayer: layer, w: r.w, wn: FINE_LEVELS ? n.w : float(0), wi: FINE_LEVELS ? i.w : float(0) };
 }
 
 // the mip level from the pixel's footprint on the ground (fp, rad), not from screen derivatives: the
 // same on every cube face (derivatives taken in the shaders' loops are undefined, and differed across a
 // face seam), and free of the date line's jump
 const level = (fp: F, texel: number): F => log2(fp.div(texel).max(1)) as F;
+/** a lookup into an array texture's layer (the inset's, INSET_LAYER), or the plain one */
+const onLayer = (t: ReturnType<typeof texture>, layer?: F): ReturnType<typeof texture> => (layer ? t.depth(layer.toInt()) : t);
 
 /** the region over the global maps (the clouds, the desert's bare rock: neither has finer levels) */
 export function sampleBoth(regionTex: THREE.Texture, globalTex: THREE.Texture, c: { region: V2; global: V2; w: F }, fp: F, globalTexel: number = GLOBAL_TEXEL): V4 {
@@ -274,7 +310,7 @@ export function sampleBoth(regionTex: THREE.Texture, globalTex: THREE.Texture, c
  * footprint across it is √μV of that, so even past the first mip a texel spans several pixels across the view (the
  * squares at 275 s were mip 1–2 texels, 1–2 km, under a bilinear lookup).
  */
-function bspline(tex: THREE.Texture, uv: V2, w: number, h: number, lvl: F): V4 {
+function bspline(tex: THREE.Texture, uv: V2, w: number, h: number, lvl: F, layer?: F): V4 {
   const at = (L: F): V4 => {
     const size = vec2(w, h).div(exp2(L));
     const st = uv.mul(size).sub(0.5);
@@ -291,7 +327,7 @@ function bspline(tex: THREE.Texture, uv: V2, w: number, h: number, lvl: F): V4 {
     // the two taps' texel positions (their centres at +0.5), in uv
     const p0 = i.sub(0.5).add(w1.div(g0)).div(size);
     const p1 = i.add(1.5).add(w3.div(g1)).div(size);
-    const tap = (x: F, y: F): V4 => texture(tex, vec2(x, y)).level(L) as unknown as V4;
+    const tap = (x: F, y: F): V4 => onLayer(texture(tex, vec2(x, y)), layer).level(L) as unknown as V4;
     return tap(p0.x, p0.y).mul(g0.x).add(tap(p1.x, p0.y).mul(g1.x)).mul(g0.y).add(tap(p0.x, p1.y).mul(g0.x).add(tap(p1.x, p1.y).mul(g1.x)).mul(g1.y)) as V4;
   };
   const L0 = floor(lvl);
@@ -308,6 +344,8 @@ export interface Aniso {
 
 type Box = { lon0: number; lon1: number; lat0: number; lat1: number };
 const WORLD: Box = { lon0: -180, lon1: 180, lat0: -90, lat1: 90 };
+/** one of the inset's layers, for the gradients' scale (only its spans count) */
+const INSET_LAYER_BOX: Box = { lon0: 0, lon1: INSET_LAYER.w / 1000, lat0: INSET.lat0, lat1: INSET.lat1 };
 /** a (lon, lat) deg step as a step in a level's texture coordinates (v runs north to south) */
 const gradUv = (g: V2, b: Box): V2 => vec2(g.x.div(b.lon1 - b.lon0), g.y.div(b.lat1 - b.lat0).negate());
 
@@ -323,25 +361,25 @@ const gradUv = (g: V2, b: Box): V2 => vec2(g.x.div(b.lon1 - b.lon0), g.y.div(b.l
  * snowfields smeared sideways into soft blobs (the 2026-10-31 look at 275–282 s: "still kind of blurry and pixely").
  */
 export function sampleLevels(t: { global: THREE.Texture; region: THREE.Texture; near?: THREE.Texture; inset?: THREE.Texture; globalTexel?: number; smooth?: boolean }, c: MapCoords, fp: F, an?: Aniso): V4 {
-  const look = (tex: THREE.Texture, uv: V2, texel: number, box: Box): V4 =>
-    (an ? texture(tex, uv).grad(gradUv(an.along, box), gradUv(an.across, box)) : texture(tex, uv).level(level(fp, texel))) as unknown as V4;
+  const look = (tex: THREE.Texture, uv: V2, texel: number, box: Box, layer?: F): V4 =>
+    (an ? onLayer(texture(tex, uv), layer).grad(gradUv(an.along, box), gradUv(an.across, box)) : onLayer(texture(tex, uv), layer).level(level(fp, texel))) as unknown as V4;
   // a finer level: through the B-spline while it is magnified across the view, the plain lookup from there
-  const fine = (tex: THREE.Texture, uv: V2, texel: number, box: Box, w: number, h: number): V4 => {
-    if (!t.smooth) return look(tex, uv, texel, box);
-    const spline = bspline(tex, uv, w, h, level(fp, texel));
+  const fine = (tex: THREE.Texture, uv: V2, texel: number, box: Box, w: number, h: number, layer?: F): V4 => {
+    if (!t.smooth) return look(tex, uv, texel, box, layer);
+    const spline = bspline(tex, uv, w, h, level(fp, texel), layer);
     if (!an) return spline;
-    return mix(spline, look(tex, uv, texel, box), smoothstep(0.5, 1.5, level(an.minor, texel))) as unknown as V4;
+    return mix(spline, look(tex, uv, texel, box, layer), smoothstep(0.5, 1.5, level(an.minor, texel))) as unknown as V4;
   };
   let v = an
     ? (mix(look(t.global, c.global, t.globalTexel ?? GLOBAL_TEXEL, WORLD), look(t.region, c.region, REGION_TEXEL, REGION), c.w) as unknown as V4)
     : sampleBoth(t.region, t.global, c, fp, t.globalTexel ?? GLOBAL_TEXEL);
   if (t.near && FINE_LEVELS) v = mix(v, fine(t.near, c.near, NEAR_TEXEL, NEAR, NEAR.w, NEAR.h), c.wn) as unknown as V4;
-  if (t.inset && FINE_LEVELS) v = mix(v, fine(t.inset, c.inset, INSET_TEXEL, INSET, INSET.w, INSET.h), c.wi) as unknown as V4;
+  if (t.inset && FINE_LEVELS) v = mix(v, fine(t.inset, c.inset, INSET_TEXEL, INSET_LAYER_BOX, INSET_LAYER.w, INSET.h, c.insetLayer), c.wi) as unknown as V4;
   return v;
 }
 
 /** the inset's own water (0..1) over `coarse` (the near level's and the region's, from their colour) */
 export function insetWater(maps: EarthMaps, c: MapCoords, fp: F, coarse: F): F {
   if (!FINE_LEVELS) return coarse;
-  return mix(coarse, texture(maps.insetWater, c.inset).level(level(fp, INSET_TEXEL)).x, c.wi) as F;
+  return mix(coarse, (onLayer(texture(maps.insetWater, c.inset), c.insetLayer).level(level(fp, INSET_TEXEL)) as unknown as V4).x, c.wi) as F;
 }

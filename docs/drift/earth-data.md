@@ -10,10 +10,10 @@ Four nested levels, all equirectangular, each finer one fading into the one unde
 | global | the planet | ~5 km (8192 × 4096; elevation 4096 × 2048) | colour, lights + clouds + water, elevation (zoom 4) | |
 | region | −25..45, 18..68 | 1/100° ~1.1 km (7000 × 5000) | colour, lights + clouds + water, elevation (zoom 7) | 1.5° |
 | near | −12..20, 36..54 | 1/240° ~460 m (7680 × 4320): the Blue and Black Marble's own grid | colour, lights + water, elevation (zoom 9) | 1° |
-| inset | 6..14, 43.5..47 | 1/1000° × 1/1400° ~79 m (8000 × 4900) | Sentinel-2 colour, its own water, elevation (zoom 11, EU-DEM) | 0.35° |
+| inset | 6..15.984, 43.5..47 | 1/1000° × 1/1400° ~79 m (9984 × 4900, as two layers of 5120: below) | Sentinel-2 colour, its own water, elevation (zoom 11, EU-DEM) | 0.35° |
 
 The near level and the inset are on by default (since 2026-11-01; the render boxes have their maps in the asset
-bundle); `?earthfine=0` turns them off (an A/B against the region alone, without their ~800 MB of textures). The
+bundle); `?earthfine=0` turns them off (an A/B against the region alone, without their ~900 MB of textures). The
 on-screen credits these maps need are in [CREDITS.md](CREDITS.md).
 
 ## Rebuild
@@ -26,7 +26,7 @@ out/drift/data/.venv/bin/python -I scripts/drift-earth-data.py out/drift/data/ra
 node scripts/drift-bundle.mjs --manifest-only   # then the render boxes fetch the changed maps file by file
 ```
 
-The near level takes ~35 s, the inset ~30 s on the M3 Max. The inset bake prints what it fitted (the Sentinel
+The near level takes ~35 s, the inset ~45 s on the M3 Max. The inset bake prints what it fitted (the Sentinel
 scenes' Sun, the colour gain) so a rerun can be checked against the last one.
 
 ## Sources and credits
@@ -38,7 +38,7 @@ scenes' Sun, the colour gain) so a rerun can be checked against the last one.
 | night lights | NASA Black Marble 2016, grey: `BlackMarble_2016_3km_gray_geo.tif`, `BlackMarble_2016_{B1,C1}_geo_gray.tif` — https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144897/ | public domain, NASA Earth Observatory (Joshua Stevens, Miguel Román) |
 | global clouds | `cloud_combined_8192.tif` — https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57747/ | public domain, NASA |
 | Europe clouds | VIIRS NOAA-20 Corrected Reflectance (true colour), 2023-09-08, via GIBS WMS: `https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=VIIRS_NOAA20_CorrectedReflectance_TrueColor&CRS=EPSG:4326&BBOX=18,-25,68,45&WIDTH=7000&HEIGHT=5000&FORMAT=image/jpeg&TIME=2023-09-08` | NASA EOSDIS GIBS / Worldview, free use with acknowledgement |
-| elevation | AWS Terrain Tiles (terrarium), zoom 4 globally, 7 over the region, 9 over the near level, 11 over the inset — `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` | Mapzen / AWS Open Data; attribution per https://github.com/tilezen/joerd/blob/master/docs/attribution.md — here: "Europe terrain data produced using Copernicus data and information funded by the European Union - EU-DEM layers"; "Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration"; "United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey"; "Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich" (the inset's north-east corner) |
+| elevation | AWS Terrain Tiles (terrarium), zoom 4 globally, 7 over the region, 9 over the near level, 11 over the inset — `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` | Mapzen / AWS Open Data; attribution per https://github.com/tilezen/joerd/blob/master/docs/attribution.md — here: "Europe terrain data produced using Copernicus data and information funded by the European Union - EU-DEM layers"; "Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration"; "United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey"; "Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich" (along the inset's north-eastern edge) |
 
 The day was picked for clear central Europe (the arrival, the night lights and the flood all look
 there) with an Atlantic cyclone and its fronts at the western limb. The cloud cover is what the VIIRS
@@ -51,9 +51,11 @@ Everything goes into `out/drift/data/raw/` under the names the script reads:
 - the Blue Marble and Black Marble files above, `cloud_combined_8192.tif`, the VIIRS day saved as
   `wv/viirs_2023-09-08_7000.jpg` (~337 MB together);
 - terrain tiles as `terrarium/<z>_<x>_<y>.png`: all 256 of zoom 4; zoom 7 x 55–80, y 30–57 (728); zoom 9
-  x 238–284, y 164–201 (1786 tiles, 208 MB); zoom 11 x 1058–1103, y 720–748 (1334 tiles, 142 MB);
-- Sentinel-2 cloudless as `s2cloudless/11_<row>_<col>.img`: level 11, rows 489–529, columns 2116–2207 (3772
-  tiles, 61 MB; open sea comes as a one-colour PNG, land as JPEG, hence `.img`). EOX asks that its free 2016
+  x 238–284, y 164–201 (1786 tiles, 208 MB); zoom 11 x 1058–1115, y 720–748 (1682 tiles, 176 MB);
+- Sentinel-2 cloudless as `s2cloudless/11_<row>_<col>.img`: level 11, rows 489–529, columns 2116–2230 (4715
+  tiles, 73 MB; open sea comes as a one-colour PNG, land as JPEG, hence `.img`). (The inset was widened east from lon
+  14 to 16 on 2026-11-02: zoom 11 x 1104–1115 and columns 2208–2230 were fetched then, 348 tiles of 34 MB and 943 of
+  12 MB.) EOX asks that its free 2016
   endpoint not be hit with large batches: fetch with a few connections at a time, once, and keep the tiles.
 
 ```sh
@@ -61,9 +63,9 @@ cd out/drift/data/raw
 T=https://s3.amazonaws.com/elevation-tiles-prod/terrarium
 mkdir -p terrarium s2cloudless
 for x in $(seq 238 284); do for y in $(seq 164 201); do curl -fsS -o terrarium/9_${x}_${y}.png $T/9/$x/$y.png; done; done
-for x in $(seq 1058 1103); do for y in $(seq 720 748); do curl -fsS -o terrarium/11_${x}_${y}.png $T/11/$x/$y.png; done; done
+for x in $(seq 1058 1115); do for y in $(seq 720 748); do curl -fsS -o terrarium/11_${x}_${y}.png $T/11/$x/$y.png; done; done
 S=https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless/default/WGS84/11
-for r in $(seq 489 529); do for c in $(seq 2116 2207); do curl -fsS -o s2cloudless/11_${r}_${c}.img $S/$r/$c.jpg; done; done
+for r in $(seq 489 529); do for c in $(seq 2116 2230); do curl -fsS -o s2cloudless/11_${r}_${c}.img $S/$r/$c.jpg; done; done
 ```
 
 ## Resolution (measured 2026-10-30)
@@ -107,15 +109,24 @@ more.
    so the shader's teal shelves match the near level's.
 3. **The scenes' own shading taken out**: Sentinel's ground is sunlit from the south-east at mid-morning; the film
    lights it again from the elevation. The hillshade of the zoom-11 terrain under a fitted Sun (azimuth 160°,
-   elevation 45°; correlation 0.46 with Sentinel's relative brightness on land) is divided out per channel (red
-   1.0, green 0.92, blue 0.56: the shaded side is lit blue by the sky), at most 2× brighter.
+   elevation 45°; correlation 0.45 with Sentinel's relative brightness on land, 0.46 before the box was widened) is
+   divided out per channel (red 1.0, green 0.92, blue 0.55: the shaded side is lit blue by the sky), at most 2×
+   brighter.
 4. **The colour**: each channel's distribution over the land matched to the Blue Marble's (one curve for the
    inset), then a regional cast evened out over ~7 km (by at most 1.5×), held closer to the Blue Marble near the
    box's edge (~2 km, by at most 2×). Tried first and dropped: Sentinel scaled to the Blue Marble's ratio at
    460 m everywhere — it painted July 2004's snow over 2016's bare rock (whitened rock, yellow-green halos round
    every snowfield). What still differs is real (2016's snow line, fields, towns) and fades into the near level
    over the last 0.35°: over 0.25° cells along the edge the two agree to within ±5–10% in red and green.
-5. Blue excess on land cut to a third (shaded snow, 1.5% of the land).
+5. Blue excess on land cut to a third (shaded snow, 1.2% of the land).
+6. **Two layers**: the bake runs over lon 6..16 (10000 columns, on the Blue Marble's grid) and keeps 9984 of them,
+   over the 8192 a texture may be on every render box (WebGPU's default limit). So each inset map is a two-layer
+   texture array, the layers stacked in its file (5120 × 9800): layer 0 columns 0..5120 (lon 6..11.12), layer 1
+   4864..9984 (lon 10.864..15.984). The shader takes layer 0 west of lon 10.992 and layer 1 east of it, 128 columns
+   inside either's edge, where both hold the same texels and (offset and width multiples of 256) the same mips to
+   mip 8: no seam, and no extra texture binding in the earth material (a second inset's own three maps would have
+   taken it to 15 of WebGPU's 16). Only the colour's JPEG differs a little across the switch (its 8-row blocks fall
+   4 rows apart in the two layers: ±3 levels on average, like a block edge).
 
 ### In the shader
 
@@ -137,15 +148,16 @@ more.
 - Under the finest elevation texel the relief gets ridged detail scaled by the measured slope, and the snow (the
   colour's brightness above ~2000 m) its crisp edges, both fading out as the footprint passes the texel. Lakes (the maps'
   water above the old sea, with their drowned shores) are calmer than the sea and mirror the sky they see.
-- Known limit: the left views late in Drift-2 (282 s, yaw 55°) look past the inset's east edge (lon 14°) onto the
-  Julian Alps and the Karawanks, which have only the near level's 460 m colour and zoom-9 terrain: still soft there.
-  Widening the inset to lon ~16° would need more Sentinel and zoom-11 tiles.
+- The left views late in Drift-2 (282 s, yaw 55°) look east onto the Julian Alps and the Karawanks (measured over the
+  show's path: a 4096 pixel under 200 m out to lon 14.9, lat 43.2..46.9 east of lon 13.4): the inset reached lon 14
+  and they had only the near level's 460 m colour and zoom-9 terrain, soft. Since 2026-11-02 it reaches lon 15.984.
 - The flood line's sub-pixel noise over the inset starts at ~160 m and is 1 m high (7 m from ~2 km elsewhere: in
   a plain falling 1 m a km that moved the real coast by kilometres).
 
 ### GPU memory
 
-The two new levels add about 800 MB of textures with their mips (near: colour 177, lights + water 177, elevation
-88; inset: colour 209, water 52 as one channel, elevation 105), on the ~800 MB the region and global maps use.
+The two new levels add about 900 MB of textures with their mips (near: colour 177, lights + water 177, elevation
+88; inset, its two 5120 × 4900 layers: colour 267, water 67 as one channel, elevation 134 — ~100 MB more than the
+8000 × 4900 it was before it was widened), on the ~800 MB the region and global maps use.
 A 2K or 4K lane (~10 GB) has room on every box; the 8K master on a 24 GB card is tighter (it needed `--msaa 0`
 there already).
