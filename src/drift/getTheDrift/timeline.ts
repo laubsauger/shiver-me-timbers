@@ -492,42 +492,121 @@ function landingPlace(t: number, p: GetTheDriftParams, tiltDeg: number): { centr
 }
 
 /**
- * The eye's turn over the planet, Drift-2 and the landing: up by the orbit look over the planet (orbitLook), given
- * back through the flood; from Act 2's framing it looks `driftLook` further down through Drift-2 (`look`, rad, a
- * pitch about the dome's left–right axis, + down: onto the spiral from high up — the eye turns, not the planet,
- * which would turn the planet under its Sun), then levels out (`k`, toward level at the raft, looking ahead).
+ * The eye's turn over the planet, Drift-2 and the landing, a pitch about the dome's left–right axis (`look`, rad, +
+ * down; the eye turns, not the planet, which would turn the planet under its Sun): up by the orbit look as the planet
+ * arrives (orbitLook), then from the flood on THE DIVE AND THE FLARE (diveFlare: the view's angle onto the ground held
+ * while the eye falls, then one pull up to level), reaching level (`k` = 1: the gathering point's horizon, looking
+ * ahead) at LEVEL_END of the landing. `driftLook` (deg, 0 by default) still adds a look further down through Drift-2,
+ * given back by the flare's end — at anything but 0 it brings back a turn down and up again.
  */
 export function landingTurn(t: number, p: GetTheDriftParams, tiltDeg: number): { k: number; look: number; up: Vec3; front: Vec3 } {
   const { starts } = beatStarts(p);
-  const endT = starts.drift2 + p.drift2;
   const g = gatherFrame(p, tiltDeg);
-  const look = ((p.driftLook * Math.PI) / 180) * smooth((t - starts.drift2 + 4) / (p.drift2 + 4)) - orbitLook(t, p);
-  // THE LEVELLING: one slow turn up from where the orbit look has been given back (the flood's limb settled, ~267 s)
-  // to level at LEVEL_END of the landing (~328 s). It used to start 4 s before Drift-2's end and take 0.85 of the
-  // landing, after a 15° look further down (driftLook) — a turn down, then 43° back up peaking at 1.5°/s (the
-  // 2026-10-30 review of the final render: "janky … going kind of back and forth", ~280–310 s). Now the descent's
-  // track (landingTrack) brings the spiral up to the middle of the view by itself (~30° down at Drift-2's end), so
-  // the levelling runs over ~60 s: ≤ ~1°/s, the dome's comfort.
-  const from = starts.flood + 0.6 * (p.flood + p.drift2);
-  const to = endT + LEVEL_END * p.landing;
-  return { k: ramped((t - from) / Math.max(1e-6, to - from), LEVEL_EASE[0], LEVEL_EASE[1]), look, up: g.up, front: g.front };
+  const f = diveFlareFor(p, tiltDeg);
+  const extra = ((p.driftLook * Math.PI) / 180) * smooth((t - starts.drift2 + 4) / (p.drift2 + 4)) * (1 - smooth((t - starts.landing) / Math.max(1e-6, f.to - starts.landing)));
+  if (t >= f.to) return { k: 1, look: 0, up: g.up, front: g.front };
+  const pitch = t <= f.from ? orbitLook(t, p) : levelPitch(t, p, tiltDeg) + f.attitude(t);
+  return { k: 0, look: extra - pitch, up: g.up, front: g.front };
 }
 
 /** share of the landing by which the eye has levelled out (landingTurn) */
 const LEVEL_END = 0.9;
-/** the levelling's ease in and out (shares of its span: ramped) — slow at first, so the spiral the track brings up
- * stays in the middle of the view through Drift-2's end; quicker over the last few km */
-const LEVEL_EASE: [number, number] = [0.6, 0.4];
+
+/**
+ * rad: the pitch (about the dome's left–right axis, + up) at which the eye would look level at act time t — along the
+ * horizon of the ground under it, ahead. The eye's track runs over the planet in the dome's front meridian plane (the
+ * planet's centre stays on it: earthPlace0 slides it along the front; landingTrack's east offset, ≤ ~2 km over a
+ * 6371 km radius, tilts it out of that plane by ≤ ~0.02°), so the local vertical turns about the same axis the eye
+ * pitches about and the level pitch is one angle. It falls ~16° from the flood's start (~44° at 241 s) to the landing
+ * (~28°: `level`, act.ts) as the eye flies ~1800 km of arc over the planet and comes down.
+ */
+function levelPitch(t: number, p: GetTheDriftParams, tiltDeg: number): number {
+  const c = earthPlace(t, p, tiltDeg).centreDir;
+  return Math.atan2(-c[2], -c[1]);
+}
+
+/**
+ * THE DIVE AND THE FLARE's rate keys: [beat, s from its start, rate of the view's ATTITUDE (deg/s, its pitch against
+ * the ground's horizon under the eye; + up)]. `S` is solved to start the move from rest (the eye's own turn at 0 where
+ * the orbit look holds), `P` to land level exactly at LEVEL_END of the landing.
+ *
+ * Why (the 2026-11-02 review of the 665ba98 render: the camera "turns down and then back up around 265 s … on a dome a
+ * pitch wobble like this is uncomfortable and reads as indecision"): the orbit look's 16° was given back through the
+ * flood (241–267 s, peaking at 0.91°/s down), and the levelling only began where that ended (267.4 s), easing in over
+ * 37 s — two eased moves meeting at rest. Measured (scratch harness of the review; star pitch = the eye's pitch against
+ * the stars, attitude = against the ground's horizon): the eye turned 16° down, held under 0.1°/s for ~10 s
+ * (266–276 s, the middle of Drift-2, the stars at full) and turned 28° back up; against the ground it tilted 5° DOWN
+ * (−27.8° at 243 s to −32.9° at 264 s) and then 33° up, and the spiral rose to 31° on the dome at 265 s and slid away
+ * while the view lifted off it: a look down that changed its mind.
+ *
+ * Now ONE move against the ground: the view holds the attitude the orbit look leaves it at (−27°, the ground under the
+ * eye seen ~27° below its horizon) all through the flood and Drift-2 — the eye pitches down only as fast as its own
+ * horizon turns under it while it flies over the planet's curve and falls (≤ 0.58°/s at ~256 s), so the spiral, once
+ * formed, stands at ~25° on the dome through 257–272 s instead of rising and sliding — and from ~3 s before the landing
+ * the attitude pulls up, never down, in one flare to level (≤ 0.89°/s). Against the stars the eye still turns down and
+ * then up (16° → 1.9° → 28.3°: a level-flying eye over a curved planet turns against the sky), but in one smooth swing
+ * with no stop in it: its turnaround falls at the landing's first second (~285 s, the beat change), as the day sky takes
+ * the stars (half gone there, under a fifth by 290 s), and nowhere is the view still. A turn that never goes down against the
+ * stars cannot frame the spiral: held at the orbit look's 16° the spiral would sit at 15.6° on the dome at 265 s and
+ * leave its front edge by ~283 s (the seat view's bottom edge, ~11°, by ~274 s), where it now stays in view to the end of
+ * Drift-2 (13° at 284 s, as before).
+ * The levelled end (LEVEL_END, ~330 s), the place and the time of everything the eye sees are unchanged.
+ */
+const DIVE_FLARE_KEYS: ReadonlyArray<readonly [(typeof BEATS)[number], number, number | 'S' | 'P']> = [
+  ['flood', 0, 'S'],
+  ['flood', 9, 0],
+  ['landing', -3, 0],
+  ['landing', 15, 'P'],
+  ['landing', 28, 'P'],
+];
+
+interface DiveFlare {
+  /** act s the dive takes over from the orbit look, and s the eye is level */
+  from: number;
+  to: number;
+  /** rad, the view's attitude against the ground's horizon (levelPitch) from `from` to `to` */
+  attitude: (t: number) => number;
+}
+const diveFlareCache = new Map<string, DiveFlare>();
+function diveFlareFor(p: GetTheDriftParams, tiltDeg: number): DiveFlare {
+  const key = JSON.stringify(p) + tiltDeg;
+  const hit = diveFlareCache.get(key);
+  if (hit) return hit;
+  const { starts } = beatStarts(p);
+  const from = starts[DIVE_FLARE_KEYS[0][0]] + DIVE_FLARE_KEYS[0][1];
+  const to = starts.drift2 + p.drift2 + LEVEL_END * p.landing;
+  const h = 0.01;
+  // from rest: the eye's pitch rate (the orbit look's, 0 once it is up) less its horizon's
+  const start = (orbitLook(from + h, p) - orbitLook(from - h, p) - levelPitch(from + h, p, tiltDeg) + levelPitch(from - h, p, tiltDeg)) / (2 * h);
+  const a0 = orbitLook(from, p) - levelPitch(from, p, tiltDeg);
+  // where it has to arrive: level (the gathering point's front, the pitch act.ts's `level` has)
+  const g = gatherFrame(p, tiltDeg);
+  const a1 = Math.atan2(g.front[1], -g.front[2]) - levelPitch(to, p, tiltDeg);
+  const ts = [...DIVE_FLARE_KEYS.map(([b, s]) => starts[b] + s), to];
+  const made = (peak: number): ((t: number) => number) =>
+    journey(ts, [...DIVE_FLARE_KEYS.map(([, , v]) => (v === 'S' ? Math.max(0, start) : v === 'P' ? peak : (v * Math.PI) / 180)), 0]);
+  let lo = 0;
+  let hi = 0.2;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (a0 + made(mid)(to) < a1) lo = mid;
+    else hi = mid;
+  }
+  const rise = made((lo + hi) / 2);
+  const made2: DiveFlare = { from, to, attitude: (t) => a0 + rise(t) };
+  diveFlareCache.clear();
+  diveFlareCache.set(key, made2);
+  return made2;
+}
 
 /** s before the planet has slid to the front (ARRIVED) the orbit look starts turning up, and the s it takes */
 const ORBIT_LOOK_LEAD = 22;
 const ORBIT_LOOK_S = 26;
 
 /**
- * THE ORBIT LOOK (rad, up): as the planet arrives the eye turns up by `orbitLook`, and through the flood turns back
- * (with the limb's own rise to floodLimbEl, on the same curve), so Drift-2's spiral and the landing see the frame they
- * always did (its last few degrees run into Drift-2's first seconds, where its own look down begins: one turn, one
- * way). Why (the 2026-10-30 seat review, ~185–200 s: the approach "not projected right"): with its limb at limbEl
+ * THE ORBIT LOOK (rad, up): as the planet arrives the eye turns up by `orbitLook`; from the flood on the dive and the
+ * flare (landingTurn) take the eye's pitch over from it (until 2026-11-02 it was given back through the flood, with the
+ * limb's own rise to floodLimbEl — a turn down before the levelling's turn up: diveFlare). Why (the 2026-10-30 seat review, ~185–200 s: the approach "not projected right"): with its limb at limbEl
  * (42°) straight ahead, the planet's centre sat only ~15° below the dome's edge; a circle of the planet's ~55–62° drawn
  * round a point that high crosses the master as a nearly straight chord, from the springline at ±55° azimuth up to
  * 42° in front, and from a seat that reads as an arch, a hill standing in front, not a horizon round and below. An
@@ -544,8 +623,7 @@ const ORBIT_LOOK_S = 26;
 export function orbitLook(t: number, p: GetTheDriftParams): number {
   const { starts } = beatStarts(p);
   const from = starts.earth + ARRIVED * p.earthApproach - ORBIT_LOOK_LEAD;
-  const flood = smooth((t - starts.flood) / Math.max(1e-6, 0.6 * (p.flood + p.drift2)));
-  return ((p.orbitLook * Math.PI) / 180) * smooth((t - from) / ORBIT_LOOK_S) * (1 - flood);
+  return ((p.orbitLook * Math.PI) / 180) * smooth((t - from) / ORBIT_LOOK_S);
 }
 
 /**

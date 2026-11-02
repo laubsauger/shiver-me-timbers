@@ -199,8 +199,8 @@ describe('Get the Drift arrival', () => {
     // The spiral must read as a shape from the air (v7 notes: "more look down on the spiral from higher up"): the
     // descent comes over it steeply while still kilometres up (a spiral seen at a grazing angle is a smear). The
     // eye turns for it, not the planet (turning the planet would turn it under its Sun), and every turn on a dome
-    // stays slow — about the comfort's 1°/s (the 2026-10-30 review: no going back and forth): from where the orbit
-    // look has been given back the levelling only ever turns the view up.
+    // stays slow — about the comfort's 1°/s (the 2026-10-30 review: no going back and forth): from the flood on the
+    // view never tilts down against the ground's horizon under it (the dive and the flare, below).
     const endT = starts.drift2 + p.drift2;
     const down = (t: number): number => {
       const at = landingTrack(t, p, tilt);
@@ -226,14 +226,57 @@ describe('Get the Drift arrival', () => {
     };
     let fastest = 0;
     let downAgain = 0;
-    const settled = starts.flood + 0.6 * (p.flood + p.drift2) + 1;
-    for (let t = starts.drift2 - 6; t < total; t += 0.1) {
+    for (let t = starts.flood; t < total; t += 0.1) {
       fastest = Math.max(fastest, (turn(t).angleTo(turn(t + 0.1)) * 180) / Math.PI / 0.1);
-      if (t > settled) downAgain = Math.max(downAgain, pitch(t) - pitch(t + 0.1));
+      downAgain = Math.max(downAgain, pitch(t) - pitch(t + 0.1));
     }
     expect(fastest).toBeLessThan(1);
     expect(downAgain).toBeLessThan(1e-3);
     expect(turn(total).angleTo(level)).toBeLessThan(1e-6);
+  });
+
+  // THE DIVE AND THE FLARE (timeline.ts DIVE_FLARE_KEYS; the 2026-11-02 review of the 665ba98 render: the camera "turns
+  // down and then back up around 265 s … reads as indecision"): the orbit look was given back through the flood and the
+  // levelling began only where that came to rest, so the eye turned 16° down, held under 0.1°/s for ~10 s in the middle
+  // of Drift-2, and turned 28° back up — against the ground a 5° tilt down and then up. Now it is one move: against the
+  // ground's horizon it never tilts down (the test above, from the flood on); against the stars, which still show
+  // through the flood and Drift-2, it turns down only as the planet's curve turns its horizon, and back up only once —
+  // at the landing, as the day sky takes the stars — never stopping on the way. The spiral it all serves stays framed:
+  // on the dome through Drift-2's end, steady (not rising and sliding off) while it forms.
+  it('dives and flares in one move: one turnaround, at the landing, no stop on the way, the spiral framed', () => {
+    const g = gatherFrame(p, tilt);
+    const D = 180 / Math.PI;
+    /** deg, the eye's pitch against the stars (every turn here is about the dome's left–right axis) */
+    const star = (t: number): number => {
+      const l = landingTurn(t, p, tilt);
+      return l.k >= 1 ? Math.atan2(g.front[1], -g.front[2]) * D : -l.look * D;
+    };
+    const h = 0.1;
+    const turnarounds: number[] = [];
+    let was = 0;
+    let stillest = Infinity;
+    for (let t = starts.flood + 10; t < starts.drift2 + p.drift2 + 0.8 * p.landing; t += h) {
+      const r = (star(t + h) - star(t)) / h;
+      const sign = Math.sign(r);
+      if (was && sign && sign !== was) turnarounds.push(t);
+      if (sign) was = sign;
+      // never still, away from the one turnaround (where the rate passes through 0 on its way, not resting there)
+      if (Math.abs(t - (starts.landing + 0.2)) > 3) stillest = Math.min(stillest, Math.abs(r));
+    }
+    expect(turnarounds.length).toBe(1);
+    expect(Math.abs(turnarounds[0] - starts.landing)).toBeLessThan(1.5);
+    expect(stillest).toBeGreaterThan(0.05);
+    // the spiral (the debris galaxy's centre, at the gathering point) on the dome, deg over its springline
+    const axis = new THREE.Vector3(...domeDir(90, 0, tilt));
+    const spiral = (t: number): number => {
+      const e = earthPose(t, p, tilt);
+      const eye = new THREE.Vector3(...e.centreDir).multiplyScalar(-e.distance);
+      const d = new THREE.Vector3(...g.up).multiplyScalar(6.371).sub(eye).normalize();
+      return Math.asin(d.applyAxisAngle(new THREE.Vector3(1, 0, 0), -star(t) / D).dot(axis)) * D;
+    };
+    for (let t = starts.drift2; t <= starts.drift2 + p.drift2 - 1; t += 1) expect(spiral(t), `spiral at ${t}`).toBeGreaterThan(12);
+    const forming = [0, 2, 4, 6, 8].map((s) => spiral(starts.drift2 + s));
+    expect(Math.max(...forming) - Math.min(...forming)).toBeLessThan(1.5);
   });
 
   it('glides over the night lights at a pace, never stalling, then hands the descent over untouched', () => {
@@ -372,8 +415,9 @@ describe('Get the Drift arrival', () => {
       let fastest = 0;
       for (let t = starts.earth; t < starts.drift2; t += 0.05) fastest = Math.max(fastest, (Math.abs(orbitLook(t + 0.05, p) - orbitLook(t, p)) * 180) / Math.PI / 0.05);
       expect(fastest).toBeLessThan(1);
-      // (the last few degrees of it run into Drift-2's first seconds, where its own look down begins: one turn, one way)
-      expect((orbitLook(starts.drift2 + 6, p) * 180) / Math.PI).toBeLessThan(0.1);
+      // held until the flood, where the dive takes the eye's pitch over from it without a step (landingTurn)
+      for (const t of [starts.lights, starts.flood - 1, starts.flood]) expect(-landingTurn(t, p, tilt).look).toBeCloseTo(orbitLook(t, p), 9);
+      expect(-landingTurn(starts.flood + 0.05, p, tilt).look).toBeCloseTo(orbitLook(starts.flood, p), 4);
       expect((orbitLook(arrived + 5, p) * 180) / Math.PI).toBeCloseTo(p.orbitLook, 1);
     });
   });

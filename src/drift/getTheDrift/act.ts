@@ -121,8 +121,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   const level = new THREE.Quaternion().setFromRotationMatrix(
     new THREE.Matrix4().makeBasis(new THREE.Vector3().crossVectors(levelFront, up), up, levelFront.clone().negate()),
   );
-  // Drift-2 looks further down onto the spiral (a pitch about the eye's left–right axis), then the landing levels
-  // out from there (timeline.ts landingTurn)
+  // the eye's pitch about its left–right axis: the orbit look, then from the flood one dive and one flare up to level
+  // (timeline.ts landingTurn; `k` 1 is exactly `level`)
   const lookAxis = new THREE.Vector3(1, 0, 0);
   const eyeTurn = (t: number, out: THREE.Quaternion): THREE.Quaternion => {
     const lt = landingTurn(t, p, tiltDeg);
