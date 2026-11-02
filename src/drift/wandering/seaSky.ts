@@ -12,7 +12,7 @@ import * as THREE from 'three/webgpu';
 import { Fn, If, acos, cameraPosition, cubeTexture, exp, float, max, min, mix, normalize, positionWorld, select, smoothstep, uniform, vec3, vec4 } from 'three/tsl';
 import type { NightSky } from './nightSky';
 import { STAR_SIGMA } from '../getTheDrift/milkyWay';
-import { CLOUD_BASE, FULL, REFLECTED, cirrus, cloudMarch, createCloudLight, type CloudData, type CloudQuality, type CloudUniforms } from './clouds';
+import { CLOUD_BASE, CLOUD_TOP, FULL, REFLECTED, SEA_UP, cirrus, cloudMarch, createCloudLight, type CloudData, type CloudQuality, type CloudUniforms } from './clouds';
 import { airTo, shafts } from './cloudAir';
 import {
   BETA_M, BETA_R_RGB, EARTH_R, H_MIE, H_RAY, MIE_G, MS_FEED_H, MS_SOFT, OZONE_H, OZONE_RGB, OZONE_W, SUN_ANG, SUN_E, SUN_TINT,
@@ -55,6 +55,10 @@ export interface SeaSky {
   readonly irradiance: THREE.Color;
   /** CPU: the sky's mean radiance just above the horizon (linear) */
   readonly horizon: THREE.Color;
+  /** CPU: the light the cumulus layer is bathed in, from the half of the sphere above it and from the half below it
+   * (mean radiance, linear: `cloudBath`) — black without clouds */
+  readonly cloudAbove: THREE.Color;
+  readonly cloudBelow: THREE.Color;
   /** the eye's adaptation: exposure that opens as the light falls, only partly (night stays night) */
   readonly exposure: number;
   /** the clouds' light for this instant (clouds.ts: the light volume, the march's jitter): once the clouds'
@@ -222,6 +226,69 @@ export function skyIrradiance(r0: number, sun: THREE.Vector3): Rgb {
   return E;
 }
 
+/** m above the sea: where the cumulus' bath of light is measured (the layer's middle) */
+const BATH_H = (CLOUD_BASE + CLOUD_TOP) / 2;
+/** the bath's sampling: rings even in sin(elevation) (each the same solid angle) × bearings, and steps a ray */
+const BATH_RINGS = 6;
+const BATH_BEARINGS = 12;
+const BATH_STEPS = 24;
+
+/**
+ * CPU: THE LIGHT THE CUMULUS ARE BATHED IN (clouds.ts CloudUniforms.skyAbove/skyBelow), at BATH_H, Sun toward `sun`
+ * (the eye's level frame, y up): the mean radiance (linear) over the half of the sphere above (the sky) and over the
+ * half below — the air down to the sea, and the sea mirroring the sky where the ray meets it (Fresnel, seen through
+ * that air). The Sun's disc and its glitter are left out: the clouds take the Sun's own light themselves.
+ *
+ * An isotropic scatterer takes in the mean radiance about it; the clouds' sky light had been half the irradiance on an
+ * up-facing surface over π — the zenith's weight — and from below 0.12 of that. From 1.75 km the sky a few degrees
+ * up is 3–4× that irradiance/π, and the half below the horizontal is half lit air out to a horizon 150 km off:
+ * `above` is 1.1–1.6× that old irradiance/π, `below` 0.65–1.1× (Sun 30° to −9°), and the dusk's small clouds, lit by
+ * nothing else, came out as dark holes in the twilight (the 2026-11-02 review of the 665ba98 render; clouds.ts `seaUp`)
+ */
+export function cloudBath(sun: THREE.Vector3): { above: Rgb; below: Rgb } {
+  const rc = EARTH_R + BATH_H * MM;
+  const r0 = EARTH_R + 3e-6;
+  const above: Rgb = [0, 0, 0];
+  const below: Rgb = [0, 0, 0];
+  const d = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const r = new THREE.Vector3();
+  const s = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const Y = new THREE.Vector3(0, 1, 0);
+  const T: Rgb = [0, 0, 0];
+  const w = 1 / (BATH_RINGS * BATH_BEARINGS);
+  for (let i = 0; i < BATH_RINGS; i++) {
+    const y = (i + 0.5) / BATH_RINGS;
+    const c = Math.sqrt(1 - y * y);
+    for (let j = 0; j < BATH_BEARINGS; j++) {
+      const az = ((j + 0.5) / BATH_BEARINGS) * Math.PI * 2;
+      d.set(c * Math.sin(az), y, c * Math.cos(az));
+      const L = radianceCpu(rc, d, sun, BATH_STEPS);
+      d.y = -y;
+      const A = radianceCpu(rc, d, sun, BATH_STEPS, GROUND, Infinity, T);
+      for (let k = 0; k < 3; k++) {
+        above[k] += L[k] * w;
+        below[k] += A[k] * w;
+      }
+      // where it meets the sea (the planet's centre at −EARTH_R on y): the sky the sea mirrors there, in that point's
+      // own level frame (150 km off, its horizon is tilted ~1.3° from the eye's)
+      const b = rc * d.y;
+      const disc = b * b - rc * rc + EARTH_R * EARTH_R;
+      if (disc <= 0) continue;
+      const t = -b - Math.sqrt(disc);
+      n.set(d.x * t, rc + d.y * t, d.z * t).normalize();
+      const cv = -d.dot(n);
+      r.copy(d).addScaledVector(n, 2 * cv);
+      q.setFromUnitVectors(n, Y);
+      const M = radianceCpu(r0, r.applyQuaternion(q), s.copy(sun).applyQuaternion(q), BATH_STEPS);
+      const fresnel = 0.02 + 0.98 * Math.pow(1 - cv, 5);
+      for (let k = 0; k < 3; k++) below[k] += M[k] * fresnel * T[k] * w;
+    }
+  }
+  return { above, below };
+}
+
 export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: CloudData; uniforms: CloudUniforms }): SeaSky {
   const u = { sun: uniform(new THREE.Vector3(0, 1, 0)), eyeR: uniform(EARTH_R), pixelAngle: uniform(0.0015) };
   const S = u.sun as unknown as V3;
@@ -347,6 +414,8 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
   const sunColour = new THREE.Color();
   const irradiance = new THREE.Color();
   const horizon = new THREE.Color();
+  const cloudAbove = new THREE.Color(0, 0, 0);
+  const cloudBelow = new THREE.Color(0, 0, 0);
   let exposure = 1;
   const lastSun = new THREE.Vector3(NaN, NaN, NaN);
   let lastR = NaN;
@@ -375,6 +444,8 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
     sunColour,
     irradiance,
     horizon,
+    cloudAbove,
+    cloudBelow,
     get exposure() {
       return exposure;
     },
@@ -405,6 +476,15 @@ export function createSeaSky(radius: number, night?: NightSky, clouds?: { data: 
       }
       irradiance.setRGB(E[0] + NIGHT_LIGHT[0], E[1] + NIGHT_LIGHT[1], E[2] + NIGHT_LIGHT[2]);
       horizon.setRGB(H[0], H[1], H[2]);
+      // (~3 ms, as the irradiance: only when the Sun has moved)
+      if (clouds) {
+        const bath = cloudBath(sun);
+        // (and the night sky's own light, as the scene's: from above as it is, from below as the sea gives it back —
+        // the clouds' night light as it was, (½ + ½·SEA_UP) of it: the night was not the fault)
+        const k = 1 / Math.PI;
+        cloudAbove.setRGB(...(bath.above.map((x, i) => x + NIGHT_LIGHT[i] * k) as Rgb));
+        cloudBelow.setRGB(...(bath.below.map((x, i) => x + NIGHT_LIGHT[i] * k * SEA_UP) as Rgb));
+      }
       const lum = 0.2126 * E[0] + 0.7152 * E[1] + 0.0722 * E[2];
       exposure = adaptation(lum);
     },

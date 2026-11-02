@@ -1998,10 +1998,21 @@ export function buildOceanSurfaceMaterial(
         wakeFresh = ages.lighting;
         // Preserve the analytic wake's body, torn edge and colour when there
         // is no measured age. Merely wiring shoreState must not make it fresh.
+        // THE FILM'S WAKE IS DRAWN ONCE, by its own aeration below (params wakeAeration; built only when on — the Drift,
+        // whose analytic wake has no wakeWhiteNode): here the body takes the contact line and the shore alone. (The
+        // 2026-11-02 review of the 665ba98 render: "fine straight streaks in the raft's wake, seen from the air, around
+        // 530 s". The wake's coverage went through BOTH paths: the film's smooth milky tint below, and this one's
+        // `aerated` body, whose density is the whitecap lace art (foamDetailMask: its cells stretched along the crest
+        // field into streaks), lit by the sun's warm light — dead-straight parallel lines, one world direction in every
+        // view, wherever the raft's trail laid thin foam (hullContact trailFoam, since 2026-10-31). LACE_FILAMENTS 0 had
+        // taken the lace out of the film's own white only. The farm A/Bs at 530 s from the air: trail foam off removed
+        // them; the eddies' flow, the curl, the blur, the push waves, the boils, the lumps, the arms, the roughness and
+        // the lane's slick off did not; nor did the glassy lane cause them, it only shows them more clearly)
+        const filmAeration = sp.wakeAeration > 0 && !!flowFoam && !flowFoam.wakeWhiteNode;
         const wakeMask = foamDetailMask(
           // §V.10: the wake is NOT carved by ambient crest elevation (that is the whitecap mask's law) — the sea's σ does
           // not describe a ship-made surface, and carving tore crest-height holes in the lane
-          combinedCoverage, worldXZ, undefined, undefined, undefined,
+          filmAeration ? contactFlow.max(shoreCoverage) : combinedCoverage, worldXZ, undefined, undefined, undefined,
           ages.edge, ages.body, Boolean(flowFoam?.wakeFoamFreshnessNode),
         );
         wakeMaskFresh = wakeMask;

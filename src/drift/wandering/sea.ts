@@ -413,6 +413,8 @@ export function createSea(
     sunBase: uniform(new THREE.Vector3()),
     sunTop: uniform(new THREE.Vector3()),
     ambient: uniform(new THREE.Vector3()),
+    skyAbove: uniform(new THREE.Vector3()),
+    skyBelow: uniform(new THREE.Vector3()),
     cirrusCover: uniform(CIRRUS_COVER),
     sunCirrus: uniform(new THREE.Vector3()),
   };
@@ -991,6 +993,10 @@ export function createSea(
     atCloud(CLOUD_TOP, cu.sunTop.value);
     atCloud(CIRRUS_H, cu.sunCirrus.value);
     cu.ambient.value.set(seaSky.irradiance.r, seaSky.irradiance.g, seaSky.irradiance.b).multiplyScalar(1 / Math.PI);
+    // (the light the cumulus are bathed in, above and below them: seaSky.ts cloudBath — the dusk's dark smudges, the
+    // 2026-11-02 review)
+    cu.skyAbove.value.set(seaSky.cloudAbove.r, seaSky.cloudAbove.g, seaSky.cloudAbove.b);
+    cu.skyBelow.value.set(seaSky.cloudBelow.r, seaSky.cloudBelow.g, seaSky.cloudBelow.b);
     // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
     // sea's clock: clouds.ts)
     seaSky.updateClouds(renderer, t);

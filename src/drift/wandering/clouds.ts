@@ -158,9 +158,10 @@ const DIFFUSE = 0.75 * (1 - 0.85);
  * sunlit skin (where the octaves are the light, and both would count it twice) */
 const DIFFUSION = 0.5;
 const DIFFUSION_SKIN = 8;
-/** the sea's light up onto the bases, as a share of the sky's light on it: its albedo with the grazing views'
- * Fresnel (from 1.2 km most of the sea a base sees is far off, mirroring the bright sky over the horizon) */
-const SEA_UP = 0.12;
+/** the sea's albedo of the Sun's light, sent up onto the bases (the sky's light from below — the air under the layer,
+ * the sea mirroring the sky — is CloudUniforms.skyBelow, measured; it had been this share of the sky's irradiance/π
+ * too, ~6× under: see `seaUp` in cloudMarch) */
+export const SEA_UP = 0.12;
 
 /** THE LIGHT VOLUME: cells each way, centred on the eye, and layers through the layer's depth (~70 m); m per cell
  * of its two levels — a fine one over the clouds near the eye, ±12.8 km (a cell of 400 m is 15° of the sky
@@ -242,8 +243,12 @@ export interface CloudUniforms {
   /** the sunlight's radiance on a white surface facing it, at the layer's base and top (linear) */
   sunBase: V3;
   sunTop: V3;
-  /** the sky's light on the layer (irradiance / π, linear) */
+  /** the sky's light on the layer (irradiance / π, linear): the cirrus' */
   ambient: V3;
+  /** THE LIGHT THE CUMULUS ARE BATHED IN (linear): the mean radiance over the half of the sphere above the layer (the
+   * sky) and over the half below it (the air down to the sea, the sea mirroring the sky) — seaSky.ts `cloudBath` */
+  skyAbove: V3;
+  skyBelow: V3;
   /** the cirrus: how much of the sky it covers (0..1), and the sunlight on it (as sunBase) */
   cirrusCover: F;
   sunCirrus: V3;
@@ -530,8 +535,22 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, opt:
     near.push([reach, step]);
     reach += step;
   }
-  // the sea's light on the bases: its albedo of the sky's and the Sun's light on it
-  const seaUp = U.ambient.add(U.sunBase.mul(U.sun.y.max(0))).mul(SEA_UP * 0.5);
+  // the light from below: the air and the sea under the layer (U.skyBelow), and the Sun's light off the sea (its albedo
+  // of it). (THE DUSK SMUDGES, the 2026-11-02 review of the 665ba98 render: the small clouds near the horizon read as
+  // "grey-dark blobs against the twilight sky" from ~410 s, and at w1's dawn, ~520 s. The cause was this term and the one
+  // above it, not the grade or the eye's adaptation, which scale cloud and sky alike: the sky's light on a cloud was
+  // taken as half the sky's irradiance on an UP-facing surface over π, zenith-weighted, and from below as the sea's
+  // albedo of it, 0.12 × that. An isotropic scatterer takes in the MEAN radiance about it, and at 1–2 km half of what
+  // lies below its horizontal is the long, lit low air out to a horizon 140 km off and the sea mirroring the twilight
+  // band at grazing Fresnel — measured, from the same air (seaSky.ts cloudBath at 1750 m): above, 1.3–1.5× the old
+  // irradiance/π; below, 0.65–1.1× it, not 0.12×. In all, the clouds' sky light was ~half of what it is, 1.6–2.2× under
+  // at every Sun height. By day the Sun outshines it and only the shaded sides gain; after sunset it is all the light a
+  // cloud has, and the clouds near the horizon came out at 40–50% of the bright low band behind them (measured in the
+  // 16:9 stills at 425 s), the high ones under the zenith's own blue — dark holes. Now: 65–75% of the band near the
+  // horizon (the band is a 100 km path of lit air a cloud cuts short: darker it stays, softly), at the sky's own level
+  // overhead at w1's dawn (~520 s), as the references' twilight clouds read: references/sea-dusk-twilight, "clouds read
+  // as slightly brighter grey shapes, not black holes")
+  const seaUp = U.skyBelow.add(U.sunBase.mul(U.sun.y.max(0)).mul(SEA_UP)).mul(0.5);
   If(mu.greaterThan(0).and(t1.greaterThan(t0)), () => {
     const ds = t1.sub(t0).div(quality.steps);
     Loop(quality.steps, ({ i }) => {
@@ -571,10 +590,10 @@ export function cloudMarch(o: V3, d: V3, data: CloudData, U: CloudUniforms, opt:
         const muS = U.sun.y.mul(float(1).sub(dx.mul(dx).add(dz.mul(dz)).div(2 * R * R))).add(U.sun.x.mul(dx).add(U.sun.z.mul(dz)).div(R));
         const hf = sat(h.sub(CLOUD_BASE).div(CLOUD_TOP - CLOUD_BASE));
         const E = opt.sunAt ? opt.sunAt(h, muS) : mix(U.sunBase, U.sunTop, hf).mul(Math.PI);
-        // the sky's light from above and the sea's from below, through the cloud over and under this point (from
-        // above, half of it: the light comes in through the sides as well as the top)
+        // the light from the half of the sphere above and from the half below, through the cloud over and under this
+        // point (each half of the mean radiance about it: an isotropic scatterer's share of each)
         const vol = opt.light ? opt.light.at(p.add(f.drift), h) : vec3(0, float(CLOUD_TOP).sub(h).mul(0.5), h.sub(CLOUD_BASE).mul(0.5));
-        const amb = U.ambient
+        const amb = U.skyAbove
           .mul(0.5)
           .div(vol.y.mul(SIGMA * DIFFUSE * 0.5).add(1))
           .add(seaUp.div(vol.z.mul(SIGMA * DIFFUSE).add(1)));
