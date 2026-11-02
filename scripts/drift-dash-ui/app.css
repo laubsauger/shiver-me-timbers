@@ -554,6 +554,9 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 /* ---------------------------------------------------------------------------------------------- the timeline */
 .time { display: flex; flex-direction: column; min-height: 0; }
 .time .ph { margin-bottom: 6px; }
+.outs .ph .outs-f { margin-left: auto; flex: none; align-self: center; }
+.thumb.is-pv .media { outline: 1px dashed var(--line-2); outline-offset: -1px; }
+.thumb .pv-tag { position: absolute; left: 6px; top: 6px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .62); color: var(--ink); font: 600 10px/16px var(--f-ui); letter-spacing: .06em; pointer-events: none; }
 .tl-ctl { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
 .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 6px; overflow: hidden; }
 .sb { display: inline-flex; align-items: center; height: 24px; padding: 0 9px; background: none; border: 0; border-left: 1px solid var(--line-2); font: 600 12px/24px var(--f-ui); color: var(--ink-2); text-decoration: none; white-space: nowrap; cursor: pointer; }

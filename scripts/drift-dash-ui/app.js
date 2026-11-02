@@ -58,7 +58,7 @@ const SKELETON = `
 </div>
 <div class="col-r">
 <section class="side">
-  <div class="p outs" aria-labelledby="h-outs"><div class="ph"><h2 id="h-outs">Latest outputs</h2><span class="sec-meta">click one to open it</span></div><div class="thumbs" id="outs"></div></div>
+  <div class="p outs" aria-labelledby="h-outs"><div class="ph"><h2 id="h-outs">Latest outputs</h2><span class="sec-meta">click one to open it</span><span class="seg outs-f" id="outs-f" role="group" aria-label="Which outputs"></span></div><div class="thumbs" id="outs"></div></div>
 </section>
 <section class="p streams" aria-labelledby="h-streams"><div class="you you-sec" aria-labelledby="h-you"><div class="ph"><h2 id="h-you">Waiting on you</h2><span class="you-n" id="you-n"></span></div><ul id="you"></ul></div><div class="ph"><h2 id="h-streams">Work streams</h2><span class="sec-meta" id="streams-meta"></span></div><div class="st-wrap" id="streams"></div></section>
 </div>`;
@@ -1398,20 +1398,42 @@ function renderStreams(d) {
 let outputs = [];
 /** thumbnails whose file would not load (gone, or not an image after all), by their src: not asked for again */
 const GONE = new Set();
+/** which outputs show: all, images or videos (the user, 2026-11-02: "a quick filter … between images and videos");
+ * remembered per browser, like the timeline's settings */
+const OUTS_F_KEY = 'drift-console-outs-filter';
+const OUTS_FILTERS = [['all', 'All'], ['img', 'Images'], ['vid', 'Videos']];
+let outsFilter = 'all';
+try {
+  const v = localStorage.getItem(OUTS_F_KEY);
+  if (OUTS_FILTERS.some(([k]) => k === v)) outsFilter = v;
+} catch {}
 function renderOuts(d) {
-  outputs = d.outputs ?? [];
+  // a farm job's live preview (…/farm/jobs/<id>/preview.jpg) is not an output: it shows, marked as a preview, only
+  // while its job runs, and drops out once the job ends and its real clip or stills land (the user, 2026-11-02: "make
+  // it clear that previews are previews … reconcile them with the video once the video is in")
+  const jobs = new Map((d.farm?.jobs ?? []).map((j) => [j.id, j]));
+  outputs = (d.outputs ?? []).flatMap((o) => {
+    const m = /\/farm\/jobs\/([^/]+)\/preview\.jpg$/.exec(o.path);
+    if (!m) return [o];
+    const j = jobs.get(m[1]);
+    if (!j || !['running', 'preparing'].includes(j.state)) return [];
+    return [{ ...o, preview: true, name: j.label || j.id, dir: `live preview${j.node ? ` · ${j.node}` : ''}` }];
+  });
+  morph($('outs-f'), OUTS_FILTERS.map(([v, w]) => `<button type="button" class="sb${outsFilter === v ? ' cur' : ''}" data-outf="${v}" aria-pressed="${outsFilter === v}">${w}</button>`).join(''));
+  // (the viewer still steps through every output: data-view keeps each one's place in the full list)
+  const shown = outputs.map((o, i) => [o, i]).filter(([o]) => outsFilter === 'all' || (outsFilter === 'vid') === !!o.video);
   // (a new output slides in at the front and the others glide aside: their old places, then FLIP to the new ones)
   const before = new Map([...$('outs').children].map((el) => [el.dataset.key, el.getBoundingClientRect()]));
   const first = before.size === 0;
-  morph($('outs'), outputs.length
-    ? outputs.map((o, i) => {
+  morph($('outs'), shown.length
+    ? shown.map(([o, i]) => {
         const u = fileUrl(o.path, o.mtime);
         const src = o.video ? `${u}#t=0.5` : u;
         const gone = GONE.has(src);
         const media = gone ? '' : o.video ? `<video muted playsinline preload="metadata" src="${src}"></video><span class="play">${icon('play')}</span>` : `<img loading="lazy" decoding="async" alt="" src="${src}">`;
-        return `<button class="thumb" type="button" data-key="${esc(`${o.path}|${o.mtime}`)}" data-view="${i}" title="${esc(o.path)}"><span class="media${gone ? ' gone' : ''}">${media}</span><span class="cap">${esc(o.name)}</span><span class="cap2">${esc(o.dir)}, ${durCoarse((d.now - o.mtime) / 1000)} ago</span></button>`;
+        return `<button class="thumb${o.preview ? ' is-pv' : ''}" type="button" data-key="${esc(o.preview ? o.path : `${o.path}|${o.mtime}`)}" data-view="${i}" title="${esc(o.path)}"><span class="media${gone ? ' gone' : ''}">${media}${o.preview ? '<span class="pv-tag">LIVE PREVIEW</span>' : ''}</span><span class="cap">${esc(o.name)}</span><span class="cap2">${esc(o.dir)}, ${durCoarse((d.now - o.mtime) / 1000)} ago</span></button>`;
       }).join('')
-    : '<div class="note" data-key="none">No review images or clips yet.</div>');
+    : `<div class="note" data-key="none">${outputs.length ? `No ${outsFilter === 'vid' ? 'clips' : 'images'} among the latest outputs.` : 'No review images or clips yet.'}</div>`);
   if (CALM || first) return;
   for (const el of $('outs').children) {
     const was = before.get(el.dataset.key);
@@ -1471,6 +1493,13 @@ document.addEventListener('error', (e) => {
 }, true);
 
 document.addEventListener('click', (e) => {
+  const of = e.target.closest('[data-outf]');
+  if (of) {
+    outsFilter = of.dataset.outf;
+    try { localStorage.setItem(OUTS_F_KEY, outsFilter); } catch {}
+    if (last) renderOuts(last);
+    return;
+  }
   if (e.target.closest('[data-cancel-confirm]')) {
     CONFIRM = null;
     if (last) render(last);
