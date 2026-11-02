@@ -412,22 +412,108 @@ function stableTop(key, items, n, margin, floor, now) {
 }
 
 /**
- * the fixed "others" list of a tile: a heading line and OTHERS_ROWS rows, always (empty ones padded), each a name and
- * two numbers in fixed columns. The last row counts what did not fit.
+ * WHO IS ON A MACHINE, ONE LIST (the user, 2026-11-02: "can we use the info from studio manager to show what kind of
+ * process is currently running there and occupying stuff? Because we don't use the area for showing jobs anyhow … the
+ * job area seems awfully big"): LIST_LINES lines of 15 px under the VRAM bar, in a fixed-height row — our job first as
+ * two lines (jobLines: a small newest frame, its name and time left, its bar or one bar per lane), then the others by
+ * VRAM, a line each, the last line "+n more" when they do not all fit. The lines left empty stay empty: the row's
+ * height never changes, whatever runs (the subgrid keeps the fleet in line).
  */
-const OTHERS_ROWS = 4;
-function othersList(title, cols, rows, total, tip) {
-  const shown = total > OTHERS_ROWS ? rows.slice(0, OTHERS_ROWS - 1) : rows.slice(0, OTHERS_ROWS);
-  let body = shown.map((r) => `<div class="ol${r.live === false ? ' fading' : ''}"><span class="one" title="${esc(r.tip ?? r.name)}">${esc(r.name)}</span><span>${r.a ?? DASH}</span><span>${r.b ?? DASH}</span></div>`).join('');
-  if (total > OTHERS_ROWS) body += `<div class="ol more" title="${esc(tip)}"><span class="one">+${total - shown.length} more</span><span></span><span></span></div>`;
-  for (let i = Math.max(shown.length + (total > OTHERS_ROWS ? 1 : 0), shown.length === 0 ? 1 : 0); i < OTHERS_ROWS; i++) body += '<div class="ol pad"><span></span><span></span><span></span></div>';
-  if (shown.length === 0) body = `<div class="ol none"><span class="one">none</span><span></span><span></span></div>${body}`;
-  return `<div class="r-oth" title="${esc(tip)}"><div class="ol oh"><span class="one">${esc(title)}</span><span>${esc(cols[0])}</span><span>${esc(cols[1])}</span></div>${body}</div>`;
+const LIST_LINES = 4;
+/** GB: a process holding less (rustdesk, Edge, a terminal at 0.0) only counts in "+n more" — a studio service always shows */
+const TINY_GB = 0.05;
+/** ms: a heartbeat older than this is not believed (drift-fleet.mjs STALE_MS) */
+const HEARTBEAT_MS = 90_000;
+
+/**
+ * whom a box's GPU holds besides our job, merged by name: our worker's heartbeat (d.nodes[].foreign, drift-node.mjs →
+ * drift-share.mjs: every process on the card from `nvidia-smi -q -x`, its VRAM from nvidia-smi on Linux and from the
+ * GPU counters on Windows, named by studio-manager's service pids — "comfy" — else the studio's known apps — "ComfyUI",
+ * "Blender" — else the exe; the six biggest), the services the box's studio-manager agent says run (m.services, with
+ * the VRAM its own counters give each), and whom a waiting job yields to (m.waiting.foreign). A service the heartbeat
+ * also named is one row (the larger figure, not a sum); two processes of one name are one row, summed, "×2".
+ * Every source may be missing — a worker from before the list, a box without an agent, a stale heartbeat — and then
+ * the list is what the rest says. No per-process GPU %: neither nvidia-smi under Windows' WDDM nor the agent gives one.
+ */
+function gpuUsers(m, d) {
+  const by = new Map();
+  const hb = (d.nodes ?? []).find((n) => n.node === m.key);
+  const fresh = m.online && hb && fin(hb.seen) && d.now - hb.seen < HEARTBEAT_MS;
+  for (const f of fresh && Array.isArray(hb.foreign) ? hb.foreign : []) {
+    if (!f?.name) continue;
+    const e = by.get(f.name) ?? { id: f.name, name: f.name, memGB: null, n: 0, svc: false, state: null };
+    e.n += 1;
+    if (fin(f.memGB)) e.memGB = (e.memGB ?? 0) + f.memGB;
+    by.set(f.name, e);
+  }
+  const svc = (name, memGB, state) => {
+    const e = by.get(name) ?? { id: name, name, memGB: null, n: 1, svc: false, state: null };
+    e.svc = true;
+    e.state = state ?? e.state;
+    if (fin(memGB)) e.memGB = Math.max(e.memGB ?? 0, memGB);
+    by.set(name, e);
+  };
+  for (const s of m.online ? m.services ?? [] : []) svc(s.name, s.vramGB, s.state);
+  for (const f of m.waiting?.foreign ?? []) svc(f.name, f.memGB, 'yielded to');
+  const all = [...by.values()].sort((a, b) => (b.memGB ?? -1) - (a.memGB ?? -1) || Number(b.svc) - Number(a.svc));
+  const shown = all.filter((x) => x.svc || (x.memGB ?? 0) >= TINY_GB);
+  return { shown, tiny: all.length - shown.length, tinyGB: all.filter((x) => !shown.includes(x)).reduce((a, x) => a + (x.memGB ?? 0), 0), heartbeat: !!fresh };
 }
 
 /**
- * one machine's tile: SEVEN ROWS, ALWAYS, in this order — the subgrid lines them up across the fleet (the user,
- * 2026-10-30: "make sure that stuff is in line")
+ * a render's lanes (the user, 2026-11-02: "I don't know if you can do this better for dual lane stuff"): how many
+ * from its command's --lanes (drift-render.mjs; a review clip or stills run is one page, no lanes), and each lane's
+ * frames from its newest progress line, "[render] 123/600  2.1 fps  62/300 61/300", when that is the line we have
+ */
+function lanesOf(src, last) {
+  const s = Array.isArray(src) ? src.join(' ') : String(src ?? '');
+  if (!s.includes('drift-render')) return { n: null, each: null };
+  const m = /\[render\] \d+\/\d+\s+[\d.]+ fps\s+((?:\d+\/\d+\s*)+)$/.exec(String(last ?? '').trim());
+  const each = m ? m[1].trim().split(/\s+/).map((x) => x.split('/').map(Number)) : null;
+  return { n: Number(flagOf(s, 'lanes')) || each?.length || 1, each: each?.length > 1 ? each : null };
+}
+
+/**
+ * our job as two lines of the list: its newest frame (a 16:9 thumb; the farm's preview.jpg, the stills' newest image)
+ * beside its name and time left, then its progress — ONE BAR, or with two lanes and more ONE THIN BAR PER LANE stacked
+ * in the bar's own height (each lane renders its own span of the show, so one may lead: the stacked bars show it,
+ * a single average would hide a stuck lane) — and lanes · frames on the right. The count, the rate, the job's id in
+ * the title. `j`: { name, tip, done, total, unit, rate, etaS, lanes: { n, each }, chunk, waiting }
+ */
+function jobLines(j, pv) {
+  const p = fin(j.total) && j.total > 0 ? pct(j.done ?? 0, j.total) : null;
+  const bars = j.lanes?.each ? j.lanes.each.map(([a, b]) => (fin(a) && b > 0 ? pct(a, b) : null)) : [p];
+  const count = fin(j.total) ? `${num(j.done ?? 0)}/${num(j.total)}${j.unit === 'stills' ? ' stills' : ''}` : fin(j.done) && j.done > 0 ? `${j.done} ${j.unit ?? ''}` : '';
+  const right = j.waiting ? 'yielding' : fin(j.etaS) ? `${dur(j.etaS)} left` : p === 100 ? 'finishing' : 'starting';
+  const meta = joinDot(j.lanes?.n ? `${j.lanes.n} lane${j.lanes.n > 1 ? 's' : ''}` : '', j.chunk ?? '', count);
+  const tip = [j.tip ?? j.name, joinDot(count && `${count} ${j.unit === 'stills' ? '' : j.unit ?? ''}`.trim(), fin(j.rate) ? `${j.rate.toFixed(2)} fps` : '', fin(j.etaS) ? `${dur(j.etaS)} left` : ''),
+    j.lanes?.each ? `lanes: ${j.lanes.each.map(([a, b], k) => `${k + 1}: ${a}/${b}`).join(', ')}` : '', j.waiting ?? ''].filter(Boolean).join('\n');
+  return `<div class="oj${j.waiting ? ' wait' : ''}" title="${esc(tip)}">${pv}`
+    + `<div class="oj-1"><span class="one name">${esc(j.name)}</span><span class="eta">${esc(right)}</span></div>`
+    + `<div class="oj-2"><div class="lbars n${bars.length}">${bars.map((x) => `<div class="pbar${x == null ? ' idle' : ''}"><b style="transform:scaleX(${((x ?? 0) / 100).toFixed(4)})"></b></div>`).join('')}</div><span class="lm one">${esc(meta)}</span></div></div>`;
+}
+
+/** one line of the list: a colour square (teal ours, amber someone else's, none for the Mac's processes), a name, two numbers */
+const listLine = (r, sq) => `<div class="ol${r.live === false ? ' fading' : ''}${r.cls ? ` ${r.cls}` : ''}"><span class="one" title="${esc(r.tip ?? r.name)}">${sq ? `<i class="sq ${sq}"></i>` : ''}${esc(r.name)}</span><span>${r.a ?? ''}</span><span>${r.b ?? ''}</span></div>`;
+
+/** the list: the job blocks (two lines each), then `rows` in the lines left, the last "+n more" when `total` does not fit */
+function machineList(blocks, rows, total, tip, empty, more = (k) => `+${k} more`) {
+  let free = LIST_LINES - 2 * blocks.length;
+  let body = blocks.join('');
+  if (free > 0) {
+    const fits = total <= free;
+    const shown = rows.slice(0, fits ? free : free - 1);
+    body += shown.map((r) => listLine(r, r.sq)).join('');
+    if (!fits) body += listLine({ name: more(total - shown.length), cls: 'more' });
+    if (!blocks.length && !shown.length && fits) body += listLine({ name: empty, cls: 'none' });
+  }
+  return `<div class="r-oth" title="${esc(tip)}">${body}</div>`;
+}
+
+/**
+ * one machine's tile: FIVE ROWS, ALWAYS, in this order — the subgrid lines them up across the fleet (the user,
+ * 2026-10-30: "make sure that stuff is in line"). Seven until 2026-11-02, when the job's own 112–128 px block, mostly
+ * "No job of ours", went into the list of who is on the machine (machineList) and the fleet row got ~90 px shorter
  */
 function tile(m, d) {
   const now = d.now;
@@ -459,65 +545,61 @@ function tile(m, d) {
   met += cell('RAM', on && fin(ram) ? Math.round(ram) : null, '%', on && fin(ram) ? ram : null, ram >= 90, [fin(m.ramTotalGB) ? `${m.ramTotalGB} GB` : '', self && fin(mc.memFreePct) ? `memory free ${mc.memFreePct}% (memory_pressure)` : ''].filter(Boolean).join(', '));
   h += `<div class="r-met">${met}</div>`;
 
-  // 3. memory: VRAM ours | others | free; this Mac's unified memory, GPU | the rest | free, and its pressure
+  // 3. memory, a line and a bar: VRAM ours | others | free; this Mac's unified memory, GPU | the rest | free, and its
+  // pressure. The numbers of each part in the bar's title; whose they are in the list under it (its colour squares)
   if (self) {
     const total = mc.ramTotalGB ?? m.ramTotalGB;
     const gpuGB = fin(g.usedGB) ? g.usedGB : null;
     const usedGB = fin(total) && fin(ram) ? (ram / 100) * total : null;
     const restGB = fin(usedGB) ? Math.max(0, usedGB - (gpuGB ?? 0)) : null;
     const pressure = fin(mc.memFreePct) && mc.memFreePct < 15;
-    h += `<div class="r-mem"><div class="vk"><span class="g-k">Memory, unified${pressure ? ` <b class="warn">${icon('warn')}pressure: ${mc.memFreePct}% free</b>` : ''}</span><span class="g-v">${fin(usedGB) ? gb(usedGB) : DASH}<small> / ${fin(total) ? gb(total) : DASH} GB</small></span></div>`;
-    h += `<div class="vbar"><b class="unified" style="width:${pct(gpuGB, total).toFixed(1)}%"></b><b class="rest" style="width:${pct(restGB, total).toFixed(1)}%"></b></div>`;
-    h += `<div class="legend"><span><i class="unified"></i>GPU <b>${gb(gpuGB)}</b></span><span><i class="rest"></i>other <b>${gb(restGB)}</b></span><span><i></i>free <b>${fin(usedGB) ? gb(total - usedGB) : DASH}</b></span></div></div>`;
+    const tip = `unified memory: GPU ${gb(gpuGB)} GB, other ${gb(restGB)} GB, free ${fin(usedGB) ? gb(total - usedGB) : DASH} GB`;
+    h += `<div class="r-mem" title="${esc(tip)}"><div class="vk"><span class="g-k">Memory, unified${pressure ? ` <b class="warn">${icon('warn')}pressure: ${mc.memFreePct}% free</b>` : ''}</span><span class="g-v">${fin(usedGB) ? gb(usedGB) : DASH}<small> / ${fin(total) ? gb(total) : DASH} GB</small></span></div>`;
+    h += `<div class="vbar" role="img" aria-label="${esc(tip)}"><b class="unified" style="width:${pct(gpuGB, total).toFixed(1)}%"></b><b class="rest" style="width:${pct(restGB, total).toFixed(1)}%"></b></div></div>`;
   } else {
     const has = on && fin(g.totalGB) && g.totalGB > 0 && fin(g.usedGB);
     const ours = has ? (fin(g.oursGB) ? g.oursGB : 0) : null;
     const others = has ? (fin(g.othersGB) ? g.othersGB : Math.max(0, g.usedGB - ours)) : null;
     const free = has ? Math.max(0, g.totalGB - ours - others) : null;
-    h += `<div class="r-mem"><div class="vk"><span class="g-k">VRAM</span><span class="g-v">${has ? gb(g.usedGB) : DASH}<small> / ${fin(g.totalGB) ? gb(g.totalGB) : DASH} GB</small></span></div>`;
-    h += `<div class="vbar" role="img" aria-label="VRAM: ours ${gb(ours)} GB, others ${gb(others)} GB, free ${gb(free)} GB"><b class="ours" style="width:${pct(ours, g.totalGB).toFixed(1)}%"></b><b class="foreign" style="width:${pct(others, g.totalGB).toFixed(1)}%"></b></div>`;
-    h += `<div class="legend"><span><i class="ours"></i>ours <b>${gb(ours)}</b></span><span><i class="foreign"></i>others <b>${gb(others)}</b></span><span><i></i>free <b>${gb(free)}</b></span></div></div>`;
+    const tip = `VRAM: ours ${gb(ours)} GB, others ${gb(others)} GB, free ${gb(free)} GB`;
+    h += `<div class="r-mem" title="${esc(tip)}"><div class="vk"><span class="g-k">VRAM${has ? `<small class="fr">${gb(free)} GB free</small>` : ''}</span><span class="g-v">${has ? gb(g.usedGB) : DASH}<small> / ${fin(g.totalGB) ? gb(g.totalGB) : DASH} GB</small></span></div>`;
+    h += `<div class="vbar" role="img" aria-label="${esc(tip)}"><b class="ours" style="width:${pct(ours, g.totalGB).toFixed(1)}%"></b><b class="foreign" style="width:${pct(others, g.totalGB).toFixed(1)}%"></b></div></div>`;
   }
 
-  // 4. others on the machine: a fixed list — this Mac's busiest processes (CPU, RAM), a box's services and whom we
-  // yield to (VRAM, state), in a stable order (stableTop)
-  if (self) {
-    const procs = macProcs(mc.top).filter((p) => !/render\)$/.test(p.name)).map((p) => ({ id: p.name, v: p.cpu, name: `${p.name}${p.n > 1 ? ` ×${p.n}` : ''}`, memMB: p.memMB }));
-    const { rows, total } = stableTop(`procs:${m.key}`, procs, OTHERS_ROWS, 8, 0.5, now);
-    h += othersList('Busiest processes', ['CPU', 'RAM'], rows.map((r) => ({ ...r, a: `${Math.round(r.avg)}%`, b: r.memMB >= 1024 ? `${gb(r.memMB / 1024)} GB` : `${r.memMB} MB`, tip: `${r.name}: ${Math.round(r.avg)}% CPU (30 s average), ${r.memMB} MB` })), total,
-      `this Mac’s busiest processes, by CPU averaged over ~30 s (our renders are left out)\n${procs.map((p) => `${p.name}: ${Math.round(p.v)}% CPU now`).join('\n')}`);
-  } else {
-    const why = [m.why, m.waiting?.why].filter(Boolean).join('; ');
-    const svcs = (on ? m.services ?? [] : []).map((s) => ({ id: s.name, v: fin(s.vramGB) ? s.vramGB : 0, name: s.name, state: s.state, vramGB: s.vramGB }));
-    for (const f of m.waiting?.foreign ?? []) if (!svcs.some((s) => s.id === f.name)) svcs.push({ id: f.name, v: f.memGB ?? 0, name: f.name, state: 'on the GPU', vramGB: f.memGB });
-    const { rows, total } = stableTop(`svcs:${m.key}`, svcs, OTHERS_ROWS, 0.3, 0.01, now);
-    h += othersList(m.badge === 'waiting-foreign' ? 'Yielding to' : 'Others on the box', ['VRAM', 'State'], rows.map((r) => ({ ...r, a: fin(r.vramGB) ? `${gb(r.vramGB)} GB` : DASH, b: r.state ?? DASH, tip: `${r.name}: ${r.state ?? ''}${fin(r.vramGB) ? `, ${gb(r.vramGB)} GB of VRAM` : ''}` })), total,
-      [why, ...svcs.map((s) => `${s.name} (${s.state}${fin(s.vramGB) ? `, ${gb(s.vramGB)} GB` : ''})`)].filter(Boolean).join('\n') || (on ? 'nothing else running' : 'offline'));
-  }
-
-  // (5. the last 30 min: moved to the timeline, every machine on one time axis)
-
-  // 6. our job there, over its newest frame (previewOf: the "now rendering" mosaic is the fleet's row of these)
+  // 4. who is on the machine (machineList): our job, then the others — this Mac's busiest processes (CPU, RAM), a
+  // box's GPU users (gpuUsers: VRAM, and the studio-manager state of a service) in a stable order (stableTop)
   const pv = `<div class="pv" data-own="1" data-src="${esc(previewOf(m, d) ?? '')}" aria-hidden="true"></div>`;
+  const nopv = '<div class="pv" aria-hidden="true"></div>';
   if (self) {
     const held = d.slots?.held ?? [];
-    const lim = d.slots?.limit;
     const waiting = d.slots?.waiting?.length ?? 0;
-    // (one job in full; a second slot's and the waiting ones in the reserved fourth line, so the row never grows)
-    const s = held[0];
-    const extra = [held.length > 1 ? `slot ${held[1].slot}: ${humanJob(held[1].cmd || held[1].label)}` : '', waiting ? `${waiting} waiting for a slot` : ''].filter(Boolean).join('; ');
-    h += s
-      ? `<div class="r-job">${pv}${tileJob({ name: humanJob(s.cmd || s.label), tip: s.cmd, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, label: `Slot ${s.slot}` }, extra)}</div>`
-      : `<div class="r-job none">${pv}<span>No render of ours${fin(lim) ? `: ${lim} slot${lim > 1 ? 's' : ''} free` : ''}</span><span class="x one">${esc(extra)}</span></div>`;
+    // (a slot job: its own progress; the newest frame for the first only, previewOf's)
+    const blocks = held.slice(0, 2).map((s, k) => jobLines({ name: humanJob(s.cmd || s.label), tip: `slot ${s.slot}: ${s.cmd || s.label}`, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, lanes: lanesOf(s.cmd, s.last) }, k === 0 ? pv : nopv));
+    const procs = macProcs(mc.top).filter((p) => !/render\)$/.test(p.name)).map((p) => ({ id: p.name, v: p.cpu, name: `${p.name}${p.n > 1 ? ` ×${p.n}` : ''}`, memMB: p.memMB }));
+    const { rows, total } = stableTop(`procs:${m.key}`, procs, LIST_LINES, 8, 0.5, now);
+    const lines = rows.map((r) => ({ ...r, a: `${Math.round(r.avg)}%`, b: r.memMB >= 1024 ? `${gb(r.memMB / 1024)} GB` : `${r.memMB} MB`, tip: `${r.name}: ${Math.round(r.avg)}% CPU (30 s average), ${r.memMB} MB` }));
+    if (waiting) lines.unshift({ id: 'waiting', name: `${waiting} job${waiting > 1 ? 's' : ''} waiting for a slot`, cls: 'none', tip: (d.slots?.waiting ?? []).map((w) => w.label).join('\n') });
+    h += machineList(blocks, lines, lines.length + Math.max(0, total - rows.length),
+      `this Mac’s busiest processes, by CPU averaged over ~30 s (our renders are left out)\n${procs.map((p) => `${p.name}: ${Math.round(p.v)}% CPU now`).join('\n')}`, 'no busy process');
   } else {
     const fj = m.farm;
     const j = m.job;
-    if (fj) h += `<div class="r-job">${pv}${tileJob({ name: humanJob(fj.argv?.length ? fj.argv : fj.label), tip: fj.label, done: fj.progress?.done, total: fj.progress?.total, unit: fj.progress?.unit, rate: fin(fj.progress?.fps) && fj.progress.fps > 0 ? fj.progress.fps : null, etaS: fj.progress?.etaS, label: `Farm ${shortId(fj.id)}` })}</div>`;
-    else if (j) h += `<div class="r-job">${pv}${tileJob({ name: cap(j.name), tip: j.out, done: j.frames, total: j.framesTotal, unit: 'frames', rate: fin(j.fps) && j.fps > 0 ? +j.fps : null, etaS: j.etaS, label: j.chunks ? `Chunk ${j.chunk} of ${j.chunks}` : 'Our job' })}</div>`;
-    else h += `<div class="r-job none">${pv}<span>${on ? (m.badge === 'ready' ? 'Free: no job of ours' : 'No job of ours') : DASH}</span><span class="x"></span></div>`;
+    const waiting = m.badge === 'waiting-foreign' ? m.waiting?.why ?? 'waiting for the GPU' : null;
+    const blocks = [];
+    if (fj) blocks.push(jobLines({ name: humanJob(fj.argv?.length ? fj.argv : fj.label), tip: `farm ${shortId(fj.id)}: ${fj.label}`, done: fj.progress?.done, total: fj.progress?.total, unit: fj.progress?.unit, rate: fin(fj.progress?.fps) && fj.progress.fps > 0 ? fj.progress.fps : null, etaS: fj.progress?.etaS, lanes: lanesOf(fj.argv?.length ? fj.argv : fj.label, fj.last), waiting }, pv));
+    else if (j) blocks.push(jobLines({ name: cap(j.name), tip: j.out, done: j.frames, total: j.framesTotal, unit: 'frames', rate: fin(j.fps) && j.fps > 0 ? +j.fps : null, etaS: j.etaS, lanes: lanesOf(j.name, m.last), chunk: j.chunks ? `chunk ${j.chunk}/${j.chunks}` : '', waiting }, pv));
+    const users = gpuUsers(m, d);
+    // (ours without a job: a page or an ffmpeg of ours still on the card)
+    if (!blocks.length && fin(g.oursGB) && g.oursGB >= TINY_GB) users.shown.unshift({ id: 'ours', name: 'The Drift (ours)', memGB: g.oursGB, ours: true });
+    const { rows, total } = stableTop(`gpu:${m.key}`, users.shown.map((x) => ({ ...x, v: x.memGB ?? 0 })), LIST_LINES, 0.3, 0.01, now);
+    const lines = rows.map((r) => ({ ...r, sq: r.ours ? 'ours' : 'foreign', name: `${r.name}${r.n > 1 ? ` ×${r.n}` : ''}`, a: fin(r.memGB) ? `${gb(r.memGB)} GB` : DASH, b: r.ours ? 'ours' : r.svc ? r.state ?? 'service' : '',
+      tip: `${r.name}${r.n > 1 ? ` (${r.n} processes)` : ''}: ${fin(r.memGB) ? `${gb(r.memGB)} GB of VRAM` : 'VRAM not known'}${r.svc ? `, a studio-manager service (${r.state ?? 'running'})` : r.ours ? '' : ', a process on the GPU'}` }));
+    const tip = [m.why, m.waiting?.why, ...users.shown.map((s) => `${s.name}${fin(s.memGB) ? ` ${gb(s.memGB)} GB` : ''}${s.svc ? ` (service, ${s.state ?? 'running'})` : ''}`), users.tiny ? `and ${users.tiny} more under ${TINY_GB * 1000} MB each` : '',
+      on && !users.heartbeat ? 'no fresh heartbeat from our worker here: only the studio-manager services are listed' : ''].filter(Boolean).join('\n');
+    h += machineList(blocks, lines, lines.length + Math.max(0, total - rows.length) + users.tiny, tip || (on ? 'nothing else on the GPU' : 'offline'),
+      on ? (m.badge === 'ready' ? 'Free: nothing else on the GPU' : 'nothing else on the GPU') : 'offline', (k) => `+${k} more${k === users.tiny ? `, under ${TINY_GB * 1000} MB each` : users.tinyGB >= 0.1 ? `, ${gb(users.tinyGB)} GB` : ''}`);
   }
-
-  // 7. footer: where the numbers come from, when we last heard, our last run there
+  // 5. footer: where the numbers come from, when we last heard, our last run there
   const bits = [];
   bits.push(self ? 'this Mac’s own probes' : m.source === 'agent' ? 'its studio-manager agent' : m.source === 'hub' ? 'studio-manager’s hub' : m.seen ? 'our heartbeat' : 'no source');
   if (m.seen) bits.push(`heard ${durCoarse((now - m.seen) / 1000)} ago`);
@@ -526,16 +608,6 @@ function tile(m, d) {
   const err = m.agentError ? `agent: ${m.agentError}` : m.error ? `error: ${m.error}` : '';
   h += `<footer class="r-foot">${self ? '' : farmControls(m)}<span class="src one${err ? ' err' : ''}" title="${esc([...bits, err].filter(Boolean).join(', '))}">${esc([err, ...bits].filter(Boolean).join(', '))}</span></footer>`;
   return h + '</article>';
-}
-
-/** one job in a tile: its name, a bar, frames · fps · time left in fixed columns, and a reserved fourth line */
-function tileJob(j, extra = '') {
-  const p = fin(j.total) && j.total > 0 ? pct(j.done ?? 0, j.total) : null;
-  const count = fin(j.total) ? `${j.done ?? 0} / ${j.total} ${j.unit ?? ''}` : fin(j.done) && j.done > 0 ? `${j.done} ${j.unit ?? ''} done` : 'starting';
-  return `<div class="tj-1"><span class="k one">${esc(j.label)}</span><span class="name one" title="${esc(j.tip ?? j.name)}">${esc(j.name)}</span></div>`
-    + `<div class="pbar${p == null ? ' idle' : ''}"><b style="transform:scaleX(${((p ?? 0) / 100).toFixed(4)})"></b></div>`
-    + `<div class="meta"><span class="one">${esc(count)}</span><span>${fin(j.rate) ? `${j.rate.toFixed(2)} fps` : DASH}</span><span class="eta">${fin(j.etaS) ? `${dur(j.etaS)} left` : DASH}</span></div>`
-    + `<div class="x one" title="${esc(extra)}">${esc(extra)}</div>`;
 }
 
 function renderFleet(d) {

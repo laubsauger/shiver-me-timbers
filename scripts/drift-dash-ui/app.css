@@ -127,28 +127,26 @@ h2 { margin: 0; font: 600 16px/1.2 var(--f-ui); flex: none; }
 .chip.big { height: 22px; font-size: 12.5px; padding: 0 7px 0 6px; }
 .chip.big svg { width: 12px; height: 12px; }
 
-/* ------------------------------------------------------------------------- the fleet: one tile each, seven rows */
+/* -------------------------------------------------------------------------- the fleet: one tile each, five rows */
 /* the tiles lie on one grid whose rows each tile shares (subgrid): a row is at the same height in every tile */
 .tiles { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 12px; row-gap: 0; }
 @media (min-width: 640px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (min-width: 1280px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .tile {
-  grid-row: span 6; display: grid; grid-template-rows: subgrid; row-gap: 0;
+  grid-row: span 5; display: grid; grid-template-rows: subgrid; row-gap: 0;
   min-width: 0; margin-bottom: 12px; container-type: inline-size;
   background: var(--panel); border: 1px solid var(--line); border-top: 4px solid var(--st);
   border-radius: 10px; overflow: hidden;
 }
 .tile > * { min-width: 0; overflow: hidden; }
-/* the seven rows, each its fixed height (px; the sum, 434, is the tile) */
+/* the five rows, each its fixed height (px; the sum, 225, is the tile — 434 with seven rows until 2026-11-02, when the
+   job's own block went into the list: the user, "the job area seems awfully big … so that we don't need to take so
+   much space and everything below") */
 .r-head { height: 48px; padding: 7px 14px 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.r-met { height: 50px; padding: 2px 14px 0; display: grid; grid-template-columns: 1fr 1fr 1.5fr 1fr 1fr; gap: 0 10px; }
-.r-mem { height: 50px; padding: 0 14px; }
-.r-oth { height: 80px; padding: 2px 14px 0; }
-.r-util { height: 50px; padding: 0 14px; }
-.r-job { position: relative; height: 112px; padding: 6px 14px 8px; display: grid; grid-template-rows: 1fr 19px 6px 15px 15px; gap: 4px; background: var(--panel-2); border-top: 1px solid var(--line); }
-.r-job > *:not(.pv) { position: relative; text-shadow: 0 1px 3px rgba(0, 0, 0, .85); }
-.r-job > .tj-1 { grid-row: 2; } .r-job > .pbar { grid-row: 3; } .r-job > .meta { grid-row: 4; } .r-job > .x { grid-row: 5; }
-.r-foot { height: 31px; padding: 0 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; line-height: 16px; color: var(--ink-3); border-top: 1px solid var(--line); }
+.r-met { height: 46px; padding: 2px 14px 0; display: grid; grid-template-columns: 1fr 1fr 1.5fr 1fr 1fr; gap: 0 10px; }
+.r-mem { height: 34px; padding: 0 14px; }
+.r-oth { height: 70px; padding: 5px 14px 5px; background: var(--panel-2); border-top: 1px solid var(--line); }
+.r-foot { height: 27px; padding: 0 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; line-height: 16px; color: var(--ink-3); border-top: 1px solid var(--line); }
 .r-foot .src { flex: 1; }
 .r-foot .src.err { color: var(--hot); }
 .r-foot .err { color: var(--hot); }
@@ -181,30 +179,39 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .vk .g-v { font-size: 17px; line-height: 20px; height: 20px; width: 7.8em; text-align: right; }
 .vk .g-k b.warn { color: var(--hot); font-weight: 600; margin-left: 6px; }
 .vk .g-k b.warn svg { width: 12px; height: 12px; vertical-align: -1px; margin-right: 4px; }
-.vbar { display: flex; height: 8px; margin: 4px 0; border-radius: 3px; background: var(--track); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); }
+.vk .g-k .fr { margin-left: 8px; font: 400 12.5px var(--f-num); color: var(--ink-2); }
+.vbar { display: flex; height: 8px; margin: 3px 0 0; border-radius: 3px; background: var(--track); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); }
 .vbar b { display: block; height: 100%; }
 .vbar b.ours { background: var(--ours); }
 .vbar b.foreign { background: var(--foreign); }
 .vbar b.unified { background: #c9d6db; }
 .vbar b.rest { background: #6f8792; }
 .vbar b + b { box-shadow: -2px 0 0 var(--panel); }
-.legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 15px; font-size: 12px; line-height: 15px; color: var(--ink-2); }
-.legend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; }
-.legend i { width: 9px; height: 9px; flex: none; border-radius: 2px; background: var(--track); box-shadow: inset 0 0 0 1px var(--line-2); }
-.legend i.ours { background: var(--ours); box-shadow: none; }
-.legend i.foreign { background: var(--foreign); box-shadow: none; }
-.legend i.unified { background: #c9d6db; box-shadow: none; }
-.legend i.rest { background: #6f8792; box-shadow: none; }
-.legend b { display: inline-block; min-width: 2.6em; color: var(--ink); font: 400 13px var(--f-num); }
 
-/* the others list: a heading and four rows, always; name · two numbers in fixed columns */
+/* who is on the machine: four lines of 15 px — our job as two (.oj), then a line per process or service: a colour
+   square (the VRAM bar's: teal ours, amber someone else's), the name, two numbers in fixed columns */
 .ol { display: grid; grid-template-columns: minmax(0, 1fr) 4.6em 5.4em; gap: 0 8px; height: 15px; font-size: 12px; line-height: 15px; }
 .ol > span:nth-child(n+2) { text-align: right; font: 400 12.5px/15px var(--f-num); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ol.oh { color: var(--ink-2); font-weight: 600; border-bottom: 1px solid var(--line); height: 17px; }
-.ol.oh > span:nth-child(n+2) { font: 600 12px/16px var(--f-ui); }
+.ol > span:nth-child(3) { font: 400 12px/15px var(--f-ui); color: var(--ink-2); }
 .ol .one { display: block; }
 .ol.fading, .ol.more, .ol.none { color: var(--ink-3); }
-.ol.pad { visibility: hidden; }
+.sq { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; background: var(--foreign); }
+.sq.ours { background: var(--ours); }
+.oj { display: grid; grid-template-columns: 53px minmax(0, 1fr); grid-template-rows: 15px 15px; column-gap: 8px; height: 30px; }
+.oj > .pv { position: relative; inset: auto; grid-row: 1 / span 2; width: 53px; height: 30px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line); }
+.oj > .pv::after { display: none; }
+.oj-1 { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; font-size: 12.5px; line-height: 15px; }
+.oj-1 .name { font-weight: 600; }
+.oj-1 .eta { font-weight: 600; white-space: nowrap; }
+.oj.wait .oj-1 .eta { color: var(--yield); }
+.oj-2 { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; line-height: 15px; color: var(--ink-2); }
+.oj-2 .lm { max-width: 11em; text-align: right; font-family: var(--f-num); }
+/* one bar, or one per lane stacked in the same 10 px */
+.lbars { display: grid; gap: 2px; }
+.lbars.n1 .pbar { height: 7px; }
+.lbars:not(.n1) .pbar { height: 4px; border-radius: 2px; }
+.lbars.n3, .lbars.n4 { gap: 1px; }
+.lbars.n3 .pbar, .lbars.n4 .pbar { height: 3px; }
 
 /* the last 30 min: bars of GPU use, coloured by whose load it was */
 .r-util .vk { height: 16px; grid-template-columns: minmax(0, 1fr) 5.5em; }
@@ -216,16 +223,6 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .ustrip rect.idle { fill: var(--idle); }
 .ustrip line { stroke: var(--line-2); stroke-width: 1; vector-effect: non-scaling-stroke; }
 
-/* our job there: label + name, a bar, frames · fps · time left, a reserved fourth line */
-.tj-1 { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; line-height: 19px; }
-.tj-1 .k { width: 6.6em; font-size: 12px; color: var(--ink-2); }
-.tj-1 .name { font-weight: 600; }
-.r-job .meta { display: grid; grid-template-columns: minmax(0, 1fr) 6.2em 7.5em; gap: 8px; font-size: 12px; line-height: 15px; color: var(--ink-2); }
-.r-job .meta span:nth-child(2) { text-align: right; }
-.r-job .meta .eta { text-align: right; color: var(--ink); font-weight: 600; }
-.r-job .x { font-size: 12px; line-height: 15px; color: var(--ink-2); }
-.r-job.none { color: var(--ink-3); font-size: 13px; grid-template-rows: 1fr 19px 15px; }
-.r-job.none > span:first-of-type { grid-row: 2; } .r-job.none > .x { grid-row: 3; }
 .pbar { height: 7px; border-radius: 4px; background: var(--track); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line); }
 .pbar b { display: block; width: 100%; height: 100%; background: var(--st, var(--ours)); transform-origin: left center; transition: transform .9s cubic-bezier(.2, .7, .2, 1); }
 .pbar.idle b { transform: scaleX(.22) !important; background: repeating-linear-gradient(90deg, var(--line-2) 0 6px, transparent 6px 10px); }
@@ -419,7 +416,7 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .fchip.f-removed { box-shadow: inset 0 0 0 1.5px var(--hot); }
 .fchip.nil { color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line); }
 .fseg { display: inline-flex; flex: none; border: 1px solid var(--line-2); border-radius: 5px; overflow: hidden; }
-.fbtn { height: 22px; padding: 0 8px; background: none; border: 0; border-left: 1px solid var(--line-2); font: 600 12px/22px var(--f-ui); color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+.fbtn { height: 19px; padding: 0 7px; background: none; border: 0; border-left: 1px solid var(--line-2); font: 600 11.5px/19px var(--f-ui); color: var(--ink-2); cursor: pointer; white-space: nowrap; }
 .fbtn:first-child { border-left: 0; }
 .fbtn:hover:not(:disabled) { color: var(--ink); background: var(--panel-2); }
 .fbtn.cur { background: var(--ink); color: var(--chip-ink); }
@@ -531,7 +528,6 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .pv img.in { opacity: 1; }
 .pv::after { content: ""; position: absolute; inset: 0; opacity: 0; transition: opacity .6s ease; background: linear-gradient(180deg, rgba(7, 14, 19, .05) 0%, rgba(7, 14, 19, .45) 35%, rgba(7, 14, 19, .82) 58%, rgba(7, 14, 19, .95)); }
 .pv.has::after { opacity: 1; }
-.r-job .k, .r-job .meta, .r-job .x { color: #c3d1d7; }
 
 /* ---------------------------------------------------------------------------------------------- the timeline */
 .time { display: flex; flex-direction: column; min-height: 0; }
@@ -695,12 +691,10 @@ main.console { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); 
   .jobs, .streams { min-height: 0; display: flex; flex-direction: column; }
   .jt-wrap, .st-wrap { flex: 1 1 auto; max-height: none; min-height: 0; }
 }
-/* a big screen of only ~1080 px: the fleet's lists and the timeline's charts give their height to the queue */
+/* a big screen of only ~1080 px: the timeline's charts give their height to the queue (the fleet's list stays: since
+   2026-11-02 it is where our job shows, and the tile is shorter with it than it was without) */
 @media (min-width: 1600px) and (min-height: 900px) and (max-height: 1180px) {
-  .tile { grid-row: span 5; }
-  .tile .r-oth { display: none; }
   .tl-chart, .tl-lab.ch { display: none; }
-  .r-job { height: 128px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

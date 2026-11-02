@@ -208,6 +208,15 @@ export function mockStatus(now, scenario = 'default', real = null) {
     slots: { held: held.length, limit: 1, waiting: slots.waiting.length, jobs: held.map((h) => h.label) }, job: null, hub: false,
   };
   const linuxJob = runOn('linux-monster');
+  // (a DUAL-LANE render, the 2026-11-02 tile: two pages on the one card, each its half of the chunk's frames, as
+  // drift-render.mjs's progress line names them; the second lane a little behind)
+  if (linuxJob && !yieldCase && linuxJob.progress?.total) {
+    const { done, total, fps } = linuxJob.progress;
+    const half = Math.ceil(total / 2);
+    const a = Math.min(half, Math.round(done * 0.54));
+    linuxJob.argv = linuxJob.argv.map((x, i, w) => (w[i - 1] === '--lanes' ? '2' : x));
+    linuxJob.last = `[render] ${done}/${total}  ${fps.toFixed(1)} fps  ${a}/${half} ${Math.min(total - half, done - a)}/${total - half}`;
+  }
   const linux = yieldCase
     ? box({ key: 'linux-monster', name: 'linux-monster', tailnet: 'rnatwoofour-linux', os: 'linux', badge: 'syncing', farmState: 'draining', hint: { gpu: 'RTX 4090', speed: 1, battery: false },
         gpu: { name: 'NVIDIA GeForce RTX 4090', utilPct: 3, usedGB: 1.1, totalGB: 24, tempC: 44, oursGB: 0, othersGB: 1.1, powerW: 61, powerLimitW: 450 }, ramPct: 22, ramTotalGB: 62.6, cpuPct: 31,
@@ -251,7 +260,13 @@ export function mockStatus(now, scenario = 'default', real = null) {
         { node: 'eeg-msi', state: yieldCase ? 'offline' : 'busy', farmState: yieldCase ? 'removed' : 'accepting', seen: now - (yieldCase ? 3 * H : 5000), speed: 0.52, job: eegJob?.id ?? null },
       ],
     },
-    nodes: [],
+    // our workers' heartbeats: whom each card holds besides us (drift-share.mjs: studio-manager's service names by pid,
+    // the known apps by pattern, else the exe; the six biggest), the tile's list of who is on the machine
+    nodes: [
+      { node: 'linux-monster', seen: now - 3000, state: yieldCase ? 'syncing' : 'rendering', foreign: [{ name: 'sd-webrtc', memGB: 1.2 }, { name: 'Chrome (not ours)', memGB: 0.2 }] },
+      { node: 'windows-monster', seen: now - 4000, state: yieldCase ? 'waiting-foreign' : 'busy-foreign', foreign: [{ name: 'ComfyUI', memGB: 18.1 }, { name: 'sd-webrtc', memGB: 2.2 }, { name: 'vgw-agent', memGB: 0.4 }, { name: 'Chrome (not ours)', memGB: 0.3 }, { name: 'rustdesk', memGB: 0 }, { name: 'rustdesk', memGB: 0 }] },
+      { node: 'eeg-msi', seen: yieldCase ? now - 3 * H : now - 5000, state: yieldCase ? 'offline' : 'rendering', foreign: [{ name: 'WindowsTerminal', memGB: 0.1 }, { name: 'ClickToDo', memGB: 0.1 }, { name: 'Edge', memGB: 0 }] },
+    ],
   };
 }
 
