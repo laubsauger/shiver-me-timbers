@@ -58,16 +58,32 @@
  * moment above; `?linedown=day` the synthesis's brighter-water fallback, 319–335 s in the morning landing, the eye
  * gliding in under the raft through the flood's debris (LINE_DOWN_DAY: the slot, and why). Same water model, same
  * shared K_d; the day's own scatter, trim and ceiling (WATER_DAY).
+ *
+ * THE DAY, BUILT (after the 2026-11-02 review of the look-dev clip: "water scenes start to look interesting, some more
+ * polish and lets go"; still behind `?linedown=day`, the default off until the user has seen it). The look-dev's cuts
+ * in and out are gone: the descent's last 20 s DIVE (lineDownDive.ts: the eye re-blocked from 315 s, through the
+ * surface at a wave's trough at ~322 s, gliding on 8 m down to hang under the raft's near side, drifting back up
+ * through it at ~331 s onto the landing's own rest at 335 s, so c1's follow begins from the very frame it always did),
+ * each crossing under a veil of bubbles and foam with the eye's adaptation eased across it (lineDownVeil.ts,
+ * `exposure`); the stand-ins are real flotsam (lineDownSet.ts) and the raft has weed under it; the raft's rig shows in
+ * the window (lineDownWindow.ts); marine snow gives the water depth; and the dolphin is met here first (DAY_DOLPHIN).
+ * The sunset version (`?linedown`) keeps its cut-in moment and takes the new flotsam.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, abs, cameraPosition, exp, float, fract, fwidth, max, min, mix, mx_noise_float, output, positionLocal, positionWorld, pow, sin, smoothstep, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, If, Loop, abs, cameraPosition, exp, float, min, mix, mx_noise_float, output, positionWorld, pow, smoothstep, uniform, vec3, vec4 } from 'three/tsl';
 import { causticsParams } from '../../params/caustics';
 import { oceanSurfaceParams } from '../../params/oceanSurface';
 import { EARTH_R } from '../getTheDrift/atmosphere';
+import { DEBRIS_SPIN } from '../getTheDrift/timeline';
 import { createDolphin } from './dolphin';
 import { createHardCase } from './hardCase';
 import { skyIrradiance } from './seaSky';
 import type { BeatName } from './beats';
+import { DIVE, adaptAt, planDive, veilAt, type DivePlan } from './lineDownDive';
+import { createFlotsam, createRaftWeed, type FlotsamPiece, type LeafSpec, type NetSpec } from './lineDownSet';
+import { raftLogsInPlan } from './raft';
+import { createLineDownVeil, type LineDownVeil } from './lineDownVeil';
+import type { WindowRaft } from './lineDownWindow';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node unions
 type Node = any;
@@ -148,15 +164,10 @@ export const LINE_DOWN = {
  * look does not need a higher Sun, and the landing's light stays as it is.
  */
 export const LINE_DOWN_DAY = {
-  /** under from here … (beat, s into it: before c2, so within c1) */
-  from: ['c2', -36] as [BeatName, number],
-  /** … to here: the follow's start, where the descent comes to rest beside the raft */
-  to: ['c2', -20] as [BeatName, number],
-  /** m under the mean sea at the moment's start and its end: rising in under the raft (the window's radius on the
-   * surface, depth·tan 48.6°: 7.9 m → 5.1 m) */
-  depth: [7, 4.5] as [number, number],
-  /** m from the raft's centre (right, ahead) at the start and the end: gliding in from 28 m behind it (~1.5 m/s, eased) */
-  offset: [[-3, -28], [-3, -5]] as [[number, number], [number, number]],
+  /** the dive from here … (beat, s into it: before c2, so within c1; lineDownDive.ts DIVE has its inner keys) */
+  from: ['c2', DIVE.from] as [BeatName, number],
+  /** … to here: the follow's start, where the descent comes to rest beside the raft (the eye back at its height) */
+  to: ['c2', DIVE.to] as [BeatName, number],
   /** × the show's exposure while under, at the landing's own 11° Sun: the r1 day stills at 1.25 were a dark teal
    * (the light on the level at 11° is a third of a 40° Sun's: sin 11° against sin 40°), the same scene at a 40° Sun
    * (&ldsun=40) clear blue at 1.25 — so the eye adapts the difference, and the high-Sun look keeps 1.25 */
@@ -229,22 +240,75 @@ const CEILING_DAY = '#06243a';
 
 /**
  * THE SET, in the eye's level frame (x right, y up from the mean sea, z AHEAD), laid about the eye under the water:
- * only what floats.
- *   pieces  a plank, a door, a chair, a barrel, a tyre afloat over the window, drifting (the Act 2 debris galaxy's
- *           rhyme): m right, m ahead, its rest depth (m), its slow turn (rad/s)
+ * only what floats (lineDownSet.ts: what each piece is, and where it comes from).
+ *   pieces  planks, a door, a chair, a barrel, a tyre, a branch in leaf afloat over the window, drifting (the Act 2
+ *           debris galaxy's rhyme): m right, m ahead, a turn (rad)
  *   net     a ghost net hanging from a line of floats, NET.drop m deep, billowing; the case snagged in it at NET.snag
  *   dolphin crossing the window from the left, 2.5 m under, at DOLPHIN.pass
  */
-const PIECES: Array<{ kind: 'plank' | 'door' | 'chair' | 'barrel' | 'tyre'; at: [number, number]; y: number; spin: number }> = [
-  { kind: 'plank', at: [-2.5, 2], y: -0.06, spin: 0.03 },
-  { kind: 'door', at: [3.2, -1.5], y: -0.05, spin: -0.02 },
-  { kind: 'chair', at: [-1, -5.5], y: -0.15, spin: 0.05 },
-  { kind: 'barrel', at: [-5.5, -2.5], y: -0.25, spin: 0.04 },
-  { kind: 'tyre', at: [1.5, 6.5], y: -0.12, spin: -0.03 },
+const PIECES: FlotsamPiece[] = [
+  { kind: 'plank', at: [-2.5, 2], turn: 0.4, length: 2.6 },
+  { kind: 'door', at: [3.2, -1.5], turn: -0.3 },
+  { kind: 'chair', at: [-1, -5.5], turn: 0.9 },
+  { kind: 'barrel', at: [-5.5, -2.5], turn: 0.5 },
+  { kind: 'tyre', at: [1.5, 6.5], turn: 0 },
+  { kind: 'branch', at: [2.5, 3], turn: -0.6 },
 ];
-/** the net: its float line from `a` to `b` (m right, m ahead), hanging `drop` m, its mesh (m), the case snagged at
- * (share along, m down) */
-const NET = { a: [-7, -0.5] as [number, number], b: [-2.5, 5.5] as [number, number], drop: 3.2, cell: 0.14, snag: [0.55, 1.7] as [number, number] };
+/** the net: its float line from `a` to `b` (m right, m ahead), hanging `drop` m, the case snagged at (share along,
+ * m down) */
+const NET = { a: [-7, -0.5] as [number, number], b: [-2.5, 5.5] as [number, number], drop: 3.2, snag: [0.55, 1.7] as [number, number] };
+/**
+ * THE DAY'S SET, about the landing's rest (x right, z ahead of where the eye comes to rest; the dive's way under the
+ * water runs from ~(3.7, 5.6) at the entry out to its hang at ~(3.4, 8.1), 8 m down, and back to ~(1.0, 1.2) at the
+ * surfacing; the raft is at ~(4.7, 17.4)). Overhead of the way, inside the window's 9 m: the door, the planks, the tyre,
+ * the chair, the barrel, a twig and the branch in leaf with its loose leaves; to the left, seen across the blue, the
+ * ghost net. None within the raft's berth (sea.ts RAFT_BERTH, 7.5 m), each piece 2.5 m or more from where the eye goes
+ * through the surface (in the first round's stills a branch beside the surfacing filled the veil with leaves a hand's
+ * breadth from the lens), and the set is gone with the surfacing's veil: it would float beside c1's first frame.
+ */
+const DAY_SET: FlotsamPiece[] = [
+  { kind: 'door', at: [-1.0, 9.0], turn: 0.4 },
+  { kind: 'plank', at: [6.5, 6.5], turn: 0.3, length: 2.6 },
+  { kind: 'plank', at: [-2.5, 4.5], turn: 1.2, length: 1.9 },
+  { kind: 'plank', at: [-3.5, 11.0], turn: -0.5, length: 2.2 },
+  { kind: 'plank', at: [7.5, 2.5], turn: 0.9, length: 2.4 },
+  { kind: 'chair', at: [7.5, 9.5], turn: 2.1 },
+  { kind: 'barrel', at: [-4.5, 7.0], turn: 0.8 },
+  { kind: 'tyre', at: [0.5, 6.0], turn: 0 },
+  { kind: 'branch', at: [-1.5, 2.0], turn: 0.25, length: 2.8 },
+  { kind: 'twig', at: [5.8, 3.0], turn: -1.1, length: 1.2 },
+  { kind: 'twig', at: [-6.0, 12.0], turn: 0.7, length: 1.4 },
+];
+/**
+ * THE DOLPHIN, FIRST MET UNDER THE WATER (`?linedown=day`; the user, 2026-11-02: "seeing the dolphin under water could
+ * be a thing too right? maybe a great opportunity?" — and the coordinator: it answers the dive's gap, no character
+ * until the raft, and sets up its c3 scene at ~400 s). One dolphin, in the rest's frame (x right, z ahead, m; y m under
+ * the mean sea; times s from c2's start: 323–332 s of the show). It comes out of the blue deep low ahead, past the raft's
+ * keel, rises and crosses over the eye's hang through the window from front to back (~3.3 m/s, ~3 s inside the
+ * window, ~4–5 m over the eye; the eye drifting back under it, the same way), swings round to the right and up, and
+ * breaks the surface ~5 m right of where the eye comes up, just before it — leading us up — its leap coming down
+ * behind the eye as it surfaces (gone with the set, under the surfacing's veil). Seen from below as an outline
+ * against the window (dolphin.ts: its beak, its falcate fin, its flukes beating up and down, not side to side).
+ */
+export const DAY_DOLPHIN: Array<[number, number, number, number]> = [
+  [-31.5, -4, 27, -12],
+  [-30.0, -1.5, 19, -7],
+  [-28.5, 0.8, 14.0, -3.8],
+  [-27.0, 2.4, 10.5, -2.6],
+  [-25.6, 3.6, 7.0, -2.2],
+  [-24.8, 5.0, 4.2, -1.6],
+  [-24.3, 6.0, 2.4, -0.2],
+  [-23.9, 6.6, 0.6, 0.8],
+  [-23.4, 7.2, -1.4, 0.0],
+  [-22.8, 7.7, -3.4, -1.5],
+];
+
+/** s (from c2's start) after which it is gone: back under the water behind the eye, which is in the air by then */
+export const DAY_DOLPHIN_GONE = -23.4;
+const DAY_NET: NetSpec = { a: [-8.5, 4.5], b: [-5, 11.5], drop: 3.4 };
+/** the loose leaves round the branch, none within 1.8 m of where the eye goes in and comes up (`clear`: the dive's
+ * own places, filled in when it is planned) */
+const DAY_LEAVES: LeafSpec = { at: [-0.5, 5.5], spread: 5, clearRadius: 1.8 };
 /** the dolphin: the time it crosses over the eye (beat, s), m under, m/s, m ahead of the eye where it crosses, m either side it is drawn */
 const DOLPHIN = { pass: ['c2', 17] as [BeatName, number], depth: 2.5, speed: 4.2, ahead: 2, reach: 30 };
 
@@ -259,13 +323,27 @@ export interface LineDown {
   update(t: number, eye: THREE.Object3D): void;
   /** × the show's exposure this frame */
   readonly exposure: number;
+  /** the dive (the day's, once it has its drive and its sea: lineDownDive.ts) */
+  readonly plan: DivePlan | null;
+  setPixelAngle(rad: number): void;
+}
+
+/** what the day's dive is built from (main-drift.ts): the descent's eye at sea s, the sea the GPU draws, the window */
+export interface LineDownDayInputs {
+  /** the descent (Act 2's drive, as the sea takes it): the eye, its heading, the debris field's drift time */
+  drive: (t: number) => { eye: THREE.Vector3; yaw: number; driftTime: number };
+  /** the sea's height (m) at world x, z and sea s t (sea.ts probeWater: the CpuOcean the rafts float on) */
+  water: (x: number, z: number, t: number) => number;
+  /** the raft's rig in Snell's window (lineDownWindow.ts; wired into the sea as its `windowSky`) */
+  window?: WindowRaft;
 }
 
 /**
  * The look-dev for `scene` (the sea's), its moments at beat starts `starts` (sea s). Sets the scene's fog node (the
- * water) and the underside's trim; builds the set.
+ * water) and the underside's trim; builds the set. The day's dive needs `inputs` (without them — the tests — it is
+ * not planned and the eye is never moved).
  */
-export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Scene, starts: Record<BeatName, number>, light: LineDownLight = LINE_DOWN_LIGHT): LineDown {
+export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Scene, starts: Record<BeatName, number>, light: LineDownLight = LINE_DOWN_LIGHT, inputs?: LineDownDayInputs): LineDown {
   const at = ([b, s]: [BeatName, number]): number => starts[b] + s;
   const day = light === 'day';
   const WATER_ = day ? WATER_DAY : WATER;
@@ -273,19 +351,22 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
   const from = at(day ? LINE_DOWN_DAY.from : LINE_DOWN.from);
   const to = at(day ? LINE_DOWN_DAY.to : LINE_DOWN.to);
   const pass = at(DOLPHIN.pass);
-  /** the moment's share 0..1 at t, eased (the day's glide in under the raft; the sunset's eye holds still) */
-  const glide = (t: number): number => {
-    const k = Math.min(1, Math.max(0, (t - from) / (to - from)));
-    return k * k * (3 - 2 * k);
-  };
-  /** m under the mean sea, and m from the raft's centre (right, ahead), at t */
-  const depthAt = (t: number): number => (day ? THREE.MathUtils.lerp(LINE_DOWN_DAY.depth[0], LINE_DOWN_DAY.depth[1], glide(t)) : LINE_DOWN.depth);
-  const offsetAt = (t: number, end = false): [number, number] => {
-    if (!day) return LINE_DOWN.offset;
-    const [a, b] = LINE_DOWN_DAY.offset;
-    const k = end ? 1 : glide(t);
-    return [THREE.MathUtils.lerp(a[0], b[0], k), THREE.MathUtils.lerp(a[1], b[1], k)];
-  };
+  // THE DIVE (lineDownDive.ts): the eye's place from `from` to `to`, through the surface at two troughs
+  const water = inputs?.water;
+  const plan = day && inputs ? planDive(starts.c2, (t) => inputs.drive(t).eye.toArray() as [number, number, number], inputs.water, inputs.drive(to).yaw) : null;
+  if (plan && !(plan.check.down && plan.check.up))
+    // FAIL LOUD: a crossing that is not single, or slow through the waterline band, is a strobe on the dome
+    console.error(`lineDown: the dive's crossings are not clean (down ${plan.check.down}, up ${plan.check.up}) — check the sea at ${plan.down.toFixed(2)} / ${plan.up.toFixed(2)} s`);
+  if (plan) console.info(`lineDown: the dive goes in at sea ${plan.down.toFixed(2)} s, comes up at ${plan.up.toFixed(2)} s; clearance ${plan.check.clearance.toFixed(2)} m`);
+  /** m under the mean sea at t (the sunset's eye holds its depth; the day's is the dive's) */
+  const depthAt = (t: number): number => (plan ? -plan.y(t) : LINE_DOWN.depth);
+  const offsetAt = (): [number, number] => LINE_DOWN.offset;
+  // the day's set rides the debris field's turn from where it lies when the eye comes to rest (`to`): the raft does,
+  // and the eye with the descent's drift, so the set keeps its place against both
+  const rest = day && inputs ? inputs.drive(to) : null;
+  const restEye = rest ? rest.eye.clone() : new THREE.Vector3();
+  const restYaw = rest ? rest.yaw : 0;
+  const restDrift = rest ? rest.driftTime : 0;
 
   // ── THE WATER: every material's output, per fragment, from the world ray eye → fragment ──────────────────────
   const uUnder = uniform(0);
@@ -380,73 +461,31 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
   /** the eye's level frame → the group's (rotated by the eye's yaw: its −z the front) */
   const local = (x: number, z: number): [number, number] => [x, -z];
 
-  // the pieces afloat over the window (wet wood, paint, rubber: dark from below)
-  const wood = new THREE.MeshStandardNodeMaterial({ color: 0x4a3a2a, roughness: 0.8 });
-  const painted = new THREE.MeshStandardNodeMaterial({ color: 0x6f7a74, roughness: 0.7 });
-  const rubber = new THREE.MeshStandardNodeMaterial({ color: 0x1b1b1b, roughness: 0.9 });
-  const drum = new THREE.MeshStandardNodeMaterial({ color: 0x5a2a1e, roughness: 0.6, metalness: 0.3 });
-  const pieces = PIECES.map((q) => {
-    let mesh: THREE.Object3D;
-    if (q.kind === 'plank') mesh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.05, 0.24), wood);
-    else if (q.kind === 'door') mesh = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.045, 2.0), painted);
-    else if (q.kind === 'barrel') {
-      // (a drum afloat on its side)
-      mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.29, 0.29, 0.88, 20), drum);
-      mesh.rotation.z = Math.PI / 2;
-    } else if (q.kind === 'tyre') mesh = new THREE.Mesh(new THREE.TorusGeometry(0.33, 0.11, 10, 24).rotateX(Math.PI / 2), rubber);
-    else {
-      const chair = new THREE.Group();
-      const part = (w: number, h: number, d: number, x: number, y: number, z: number): void => {
-        const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wood);
-        m.position.set(x, y, z);
-        chair.add(m);
-      };
-      part(0.45, 0.04, 0.45, 0, 0, 0);
-      part(0.45, 0.5, 0.04, 0, 0.25, -0.21);
-      for (const [x, z] of [[-0.2, -0.2], [0.2, -0.2], [-0.2, 0.2], [0.2, 0.2]]) part(0.035, 0.45, 0.035, x, -0.22, z);
-      // (afloat on its side, its legs out)
-      chair.rotation.set(1.3, 0, 0.2);
-      mesh = new THREE.Group().add(chair);
-    }
-    const holder = new THREE.Group().add(mesh);
-    group.add(holder);
-    return { ...q, mesh: holder };
-  });
-
-  // THE GHOST NET: a curtain hanging from its floats, a mesh of twine cut out of a sheet (a grid by its uv,
-  // anti-aliased by the grid's own screen-space rate, so it greys out with distance instead of shimmering), billowing
-  // in the slow swell — a pure function of t through `uNet`
+  // THE FLOTSAM (lineDownSet.ts): real pieces in place of the look-dev's boxes, riding the sea the GPU draws (the
+  // sunset's eye-held set, without the sea at hand in its moment, rides the mean sea), and the ghost net with its floats
+  /** a world place (x, z m) in the day's set frame: m right of and ahead of the eye's rest */
+  const inRest = ([x, z]: [number, number]): [number, number] => {
+    const [dx, dz] = [x - restEye.x, z - restEye.z];
+    return [dx * Math.cos(restYaw) - dz * Math.sin(restYaw), -dx * Math.sin(restYaw) - dz * Math.cos(restYaw)];
+  };
+  const leaves: LeafSpec = { ...DAY_LEAVES, clear: plan ? [inRest(plan.xz(plan.down)), inRest(plan.xz(plan.up))] : [] };
+  const flotsam = createFlotsam(day ? DAY_SET : PIECES, day ? DAY_NET : NET, day ? leaves : undefined);
+  // (the sunset's set is laid in `group`, moved to the eye's place each frame; the day's group stays at the world's
+  // origin and the flotsam is laid in the world, on the debris field's turn)
+  group.add(flotsam.group);
   const [na, nb] = [local(...NET.a), local(...NET.b)];
-  const span = Math.hypot(nb[0] - na[0], nb[1] - na[1]);
-  const netGeo = new THREE.PlaneGeometry(span, NET.drop, 40, 16).translate(span / 2, -NET.drop / 2, 0);
-  const uNet = uniform(0);
-  const netMat = new THREE.MeshStandardNodeMaterial({ color: 0x2c3a33, roughness: 0.9, side: THREE.DoubleSide, transparent: true, depthWrite: false });
-  {
-    const u = uv();
-    const g = vec2(u.x.mul(span / NET.cell), u.y.mul(NET.drop / NET.cell));
-    const w = fwidth(g).max(1e-4);
-    // (twine 1.2 cm on a 14 cm cell: a half-width of 0.043 of a cell. Sharp while a cell spans pixels; once a cell
-    // nears a pixel, its mean — 0.086 a direction, 0.165 both — so a far net is a faint grey veil, not moiré)
-    const dist = float(0.5).sub(abs(fract(g).sub(0.5)));
-    const sharp = dist.negate().add(0.043).div(w).add(0.5).clamp(0, 1);
-    const far = smoothstep(0.3, 1.0, max(w.x, w.y));
-    const cover = mix(max(sharp.x, sharp.y), float(0.165), far);
-    netMat.opacityNode = cover.mul(0.85);
-    // the curtain: hung from the floats (y 0 at the top edge), bellied out with depth, swaying
-    const depthShare = positionLocal.y.negate().div(NET.drop);
-    const sway = sin(positionLocal.x.mul(0.9).add(uNet.mul(0.5))).mul(0.35).add(sin(positionLocal.x.mul(2.3).sub(uNet.mul(0.8))).mul(0.12));
-    netMat.positionNode = positionLocal.add(vec3(0, positionLocal.y.mul(0.15).mul(depthShare), sway.mul(depthShare).add(depthShare.mul(depthShare).mul(0.8))));
+  // THE VEIL, THE BUBBLES, THE SNOW (lineDownVeil.ts): the day's dive only, its bursts where the eye goes in and comes up
+  let veil: LineDownVeil | null = null;
+  if (plan) {
+    const eIn = plan.xz(plan.down);
+    const [a, b] = [plan.xz(plan.down - 0.5), plan.xz(plan.down + 0.5)];
+    const eUp = plan.xz(plan.up);
+    veil = createLineDownVeil({
+      down: { t: plan.down, x: eIn[0], z: eIn[1], v: DIVE.vDown, vx: b[0] - a[0], vz: b[1] - a[1] },
+      up: { t: plan.up, x: eUp[0], z: eUp[1] },
+    });
+    scene.add(veil.group);
   }
-  const net = new THREE.Mesh(netGeo, netMat);
-  net.frustumCulled = false;
-  net.position.set(na[0], -0.05, na[1]);
-  net.rotation.y = -Math.atan2(nb[1] - na[1], nb[0] - na[0]);
-  group.add(net);
-  // its floats: cork-orange balls along the top
-  const floatMat = new THREE.MeshStandardNodeMaterial({ color: 0xa8582a, roughness: 0.7 });
-  const floats = new THREE.InstancedMesh(new THREE.SphereGeometry(0.11, 12, 8), floatMat, 9);
-  for (let i = 0; i < 9; i++) floats.setMatrixAt(i, new THREE.Matrix4().makeTranslation(na[0] + ((nb[0] - na[0]) * i) / 8, -0.02, na[1] + ((nb[1] - na[1]) * i) / 8));
-  group.add(floats);
   // the case, snagged in it, tilted
   const theCase = createHardCase();
   theCase.position.set(na[0] + (nb[0] - na[0]) * NET.snag[0], -NET.snag[1], na[1] + (nb[1] - na[1]) * NET.snag[0]);
@@ -456,8 +495,23 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
   // flotsam and the net only)
   theCase.visible = !day;
 
-  const dolphin = createDolphin();
+  // (the day's dolphin takes the water's light, dolphin.ts DolphinWater: set per frame from the light down there)
+  const uDolphinDown = uniform(new THREE.Vector3());
+  const uDolphinUp = uniform(new THREE.Vector3());
+  const dolphin = createDolphin(day ? { water: { down: uDolphinDown, up: uDolphinUp } } : {});
   group.add(dolphin.group);
+  const dayDolphin = new THREE.CatmullRomCurve3(DAY_DOLPHIN.map(([, x, z, y]) => new THREE.Vector3(x, y, z)));
+  /** the day's dolphin in the rest's frame at sea s t: its place (x right, y up, z ahead) */
+  const dayDolphinAt = (t: number, out: THREE.Vector3): THREE.Vector3 => {
+    const k = t - starts.c2;
+    const n = DAY_DOLPHIN.length;
+    let i = 0;
+    while (i < n - 2 && k > DAY_DOLPHIN[i + 1][0]) i++;
+    const u = (k - DAY_DOLPHIN[i][0]) / (DAY_DOLPHIN[i + 1][0] - DAY_DOLPHIN[i][0]);
+    return dayDolphin.getPoint(Math.min(1, Math.max(0, (i + u) / (n - 1))), out);
+  };
+  const dA = new THREE.Vector3();
+  const dB = new THREE.Vector3();
 
   for (const o of [group]) o.traverse((x) => void ((x as THREE.Mesh).isMesh && ((x as THREE.Mesh).castShadow = false)));
 
@@ -470,17 +524,41 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
   const fogged = new WeakSet<THREE.Material>();
   const sunDir = new THREE.Vector3();
   const fwd = new THREE.Vector3();
-  /** where the set is laid (x, z m; yaw rad): the eye's place at the moment's END, so the day's glide moves the eye
-   * through the set (for the sunset's still eye, where the eye is) */
+  /** where the sunset's set is laid (x, z m; yaw rad): where the eye is */
   const anchor = { x: 0, z: 0, yaw: 0 };
+  /** the hero raft's group (sea.ts's `drift-raft` nearest the raft the eye hook reports), for the window and the weed */
+  let raftGroup: THREE.Object3D | null = null;
+  const weed = day ? createRaftWeed(raftLogsInPlan()) : null;
+  const raftAt = { x: 0, z: 0 };
+  const veilLight = new THREE.Vector3();
+  const waterLight = new THREE.Vector3();
+  const sunEv = new THREE.Vector3();
+  const skyEv = new THREE.Vector3();
+  const dayAdaptNow = (t: number): number => (plan ? adaptAt(t, plan.down, plan.up, dayAdapt) : dayAdapt);
   return {
     group,
-    ready: Promise.resolve(),
+    ready: flotsam.ready,
+    plan,
     get exposure() {
       return exposure;
     },
+    setPixelAngle(rad) {
+      veil?.setPixelAngle(rad);
+    },
     place(t, eye, raft) {
       if (!inMoment(t)) return false;
+      raftAt.x = raft.x;
+      raftAt.z = raft.z;
+      // (heading 0 looks toward −z, as the eye's: the raft's logs lie along its heading)
+      uRaft.value.set(raft.x, raft.z, Math.sin(raft.heading), Math.cos(raft.heading));
+      if (day) {
+        // THE DIVE: the descent's own turn (sea.ts put the eye there), its place the dive's
+        if (plan) {
+          const [x, z] = plan.xz(t);
+          eye.position.set(x, plan.y(t), z);
+        }
+        return plan !== null;
+      }
       // (the eye's level frame: its yaw, as sea.ts set it; heading 0 looks toward −z. Taken from its front, not
       // rotation.y: in c1 before the follow the eye is the landing's turn (sea.ts: eye.quaternion = the drive's), which
       // still holds the descent's pitch — its Euler y is not its heading then)
@@ -488,71 +566,91 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
       const yaw = Math.atan2(-fwd.x, -fwd.z);
       const f = [-Math.sin(yaw), -Math.cos(yaw)];
       const r = [Math.cos(yaw), -Math.sin(yaw)];
-      const [ox, oz] = offsetAt(t);
+      const [ox, oz] = offsetAt();
       eye.position.set(raft.x + r[0] * ox + f[0] * oz, -depthAt(t), raft.z + r[1] * ox + f[1] * oz);
       eye.rotation.set(0, yaw, 0, 'YXZ');
-      const [ex, ez] = offsetAt(t, true);
-      anchor.x = raft.x + r[0] * ex + f[0] * ez;
-      anchor.z = raft.z + r[1] * ex + f[1] * ez;
+      anchor.x = eye.position.x;
+      anchor.z = eye.position.z;
       anchor.yaw = yaw;
-      // (heading 0 looks toward −z, as the eye's: the raft's logs lie along its heading)
-      uRaft.value.set(raft.x, raft.z, Math.sin(raft.heading), Math.cos(raft.heading));
       return true;
     },
     update(t, eye) {
-      const under = inMoment(t) && eye.position.y < -0.5;
+      // UNDER: the eye below the sea the GPU draws, at its own place (the ocean's own test: oceanSurface.ts
+      // setWaterHeightAt) — so the water's fog and the sea's underside switch on the same frame
+      const surface = water ? water(eye.position.x, eye.position.z, t) : 0;
+      const depth = surface - eye.position.y;
+      const under = inMoment(t) && (day ? depth > 0 : eye.position.y < -0.5);
       uUnder.value = under ? 1 : 0;
-      group.visible = under;
-      exposure = under ? (day ? dayAdapt : LINE_DOWN.adapt) : 1;
-      if (!under) return;
-      // every material in the water takes the water (the sky's and the sea's had `fog: false`: from above, they do
-      // their own haze — from below, the sky past the window's edge and below the horizontal IS the deep)
-      scene.traverse((x) => {
-        const m = (x as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
-        for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
-          if (fogged.has(mat)) continue;
-          fogged.add(mat);
-          // (the day's sea underside: the water through its own output, with the mirrored deep — fog left off, or the
-          // water would go on twice: an outputNode is taken after the fog)
-          if (day && x.name === 'ocean-surface') {
-            (mat as THREE.Material & { outputNode?: Node }).outputNode = waterOf(output, true);
-            mat.needsUpdate = true;
-            continue;
-          }
-          const nm = mat as THREE.Material & { fog?: boolean; outputNode?: Node };
-          if (nm.fog === false) {
-            nm.fog = true;
-            mat.needsUpdate = true;
-          }
-          // A CUSTOM OUTPUT REPLACES THE FOG (three's NodeMaterial: the outputNode is taken after setupOutput, which is
-          // where the fog goes): the masts' and the stations' air (radioTower.ts expAir) mixes its haze over the fogged
-          // colour, and the ring's stations on the horizon came through the deep as three bright unfogged streaks in
-          // the gate-2 dome frame. Their output takes the water as well (the object's own colour twice: it is in the
-          // deep at that range either way).
-          if (nm.outputNode) {
-            nm.outputNode = waterOf(nm.outputNode);
-            mat.needsUpdate = true;
-          }
-        }
-      });
-      // the set, laid about the eye in its level frame
-      group.position.set(anchor.x, 0, anchor.z);
-      group.rotation.set(0, anchor.yaw, 0);
-      for (const p of pieces) {
-        const [x, z] = local(p.at[0] + 0.12 * Math.sin(t * 0.21 + p.at[1]), p.at[1] + 0.1 * Math.cos(t * 0.17 + p.at[0]));
-        p.mesh.position.set(x, p.y + 0.04 * Math.sin(t * 0.9 + p.at[0]), z);
-        p.mesh.rotation.y = p.spin * t;
+      // (the day's set from the dive's start, tiny from 100 m up among the field's pieces, to just after the surfacing,
+      // under the veil — it would float beside c1's first frame; the sunset's while under)
+      group.visible = day ? plan !== null && t >= from && t < plan.up + 0.1 : under;
+      const v = plan && inMoment(t) ? veilAt(t, plan.down, plan.up) : 0;
+      exposure = !inMoment(t) ? 1 : day ? (plan ? dayAdaptNow(t) : under ? dayAdapt : 1) : under ? LINE_DOWN.adapt : 1;
+      if (!under && v <= 0 && !group.visible) {
+        inputs?.window?.update(null, false, sunDir, sunEv, skyEv);
+        veil?.update(t, eye.position, 0, veilLight, waterLight, false);
+        return;
       }
-      uNet.value = t;
+      if (under) {
+        // every material in the water takes the water (the sky's and the sea's had `fog: false`: from above, they do
+        // their own haze — from below, the sky past the window's edge and below the horizontal IS the deep)
+        scene.traverse((x) => {
+          // (the veil, the bubbles and the snow are the water's own: lit as it, never fogged by it)
+          if (x.userData.lineDownOwn) return;
+          const m = (x as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+          for (const mat of Array.isArray(m) ? m : m ? [m] : []) {
+            if (fogged.has(mat)) continue;
+            fogged.add(mat);
+            // (the day's sea underside: the water through its own output, with the mirrored deep — fog left off, or the
+            // water would go on twice: an outputNode is taken after the fog)
+            if (day && x.name === 'ocean-surface') {
+              (mat as THREE.Material & { outputNode?: Node }).outputNode = waterOf(output, true);
+              mat.needsUpdate = true;
+              continue;
+            }
+            const nm = mat as THREE.Material & { fog?: boolean; outputNode?: Node };
+            if (nm.fog === false) {
+              nm.fog = true;
+              mat.needsUpdate = true;
+            }
+            // A CUSTOM OUTPUT REPLACES THE FOG (three's NodeMaterial: the outputNode is taken after setupOutput, which
+            // is where the fog goes): the masts' and the stations' air (radioTower.ts expAir) mixes its haze over the
+            // fogged colour, and the ring's stations on the horizon came through the deep as three bright unfogged
+            // streaks in the gate-2 dome frame. Their output takes the water as well (the object's own colour twice:
+            // it is in the deep at that range either way).
+            if (nm.outputNode) {
+              nm.outputNode = waterOf(nm.outputNode);
+              mat.needsUpdate = true;
+            }
+          }
+        });
+      }
+      // THE SET: the day's in the world, on the debris field's turn from the rest (the raft's and the eye's current);
+      // the sunset's laid about the eye in its level frame
+      if (day) {
+        group.position.set(0, 0, 0);
+        group.rotation.set(0, 0, 0);
+        const turn = inputs ? DEBRIS_SPIN * (inputs.drive(t).driftTime - restDrift) : 0;
+        const c = Math.cos(turn);
+        const s = Math.sin(turn);
+        // (three's turn about +y, as applyAxisAngle(UP, turn): x' = x cos + z sin, z' = −x sin + z cos)
+        flotsam.update(t, { x: restEye.x * c + restEye.z * s, z: -restEye.x * s + restEye.z * c, yaw: restYaw + turn }, (x, z) => (water ? water(x, z, t) : 0));
+      } else {
+        group.position.set(anchor.x, 0, anchor.z);
+        group.rotation.set(0, anchor.yaw, 0);
+        flotsam.update(t, { x: 0, z: 0, yaw: 0 }, () => 0);
+      }
       theCase.position.y = -NET.snag[1] + 0.06 * Math.sin(t * 0.5);
       // the dolphin across the window, nose first (its body along −z), its tail beating
       const s = t - pass;
-      const [dx, dz] = local(DOLPHIN.speed * s, DOLPHIN.ahead + 0.15 * s);
-      dolphin.group.position.set(dx, -DOLPHIN.depth + 0.25 * Math.sin(s * 0.8), dz);
-      // heading: toward +x (its right) in the eye's frame, a little ahead: −90° about y turns its −z nose to +x
-      dolphin.group.rotation.set(0.04 * Math.cos(s * 0.8), -Math.PI / 2 + 0.035, 0, 'YXZ');
-      dolphin.set({ x: 0, y: 0, z: 0, heading: 0, pitch: 0, bend: 0.02, turn: 0, bank: 0, beat: 0.12, phase: s * 2.2 * Math.PI * 2, speed: DOLPHIN.speed, dry: 100 });
-      dolphin.group.visible = !day && Math.abs(DOLPHIN.speed * s) < DOLPHIN.reach;
+      if (!day) {
+        const [dx, dz] = local(DOLPHIN.speed * s, DOLPHIN.ahead + 0.15 * s);
+        dolphin.group.position.set(dx, -DOLPHIN.depth + 0.25 * Math.sin(s * 0.8), dz);
+        // heading: toward +x (its right) in the eye's frame, a little ahead: −90° about y turns its −z nose to +x
+        dolphin.group.rotation.set(0.04 * Math.cos(s * 0.8), -Math.PI / 2 + 0.035, 0, 'YXZ');
+        dolphin.set({ x: 0, y: 0, z: 0, heading: 0, pitch: 0, bend: 0.02, turn: 0, bank: 0, beat: 0.12, phase: s * 2.2 * Math.PI * 2, speed: DOLPHIN.speed, dry: 100 });
+        dolphin.group.visible = Math.abs(DOLPHIN.speed * s) < DOLPHIN.reach;
+      }
 
       // the water's light: the Sun as sea.ts set it this frame, the sky's irradiance for it (cached per direction)
       if (!sun) scene.traverse((x) => void (!sun && (x as THREE.DirectionalLight).isDirectionalLight && x.castShadow && (sun = x as THREE.DirectionalLight)));
@@ -567,7 +665,8 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
       // the light the water is bathed in at the eye's depth: the sky's irradiance and the Sun's on the level, down
       // through the eye's depth of water (Fresnel's loss at a low Sun left in the scatter's look gains)
       const el = Math.max(0, sunDir.y);
-      const down = (k: number): number => Math.exp(-[K.x, K.y, K.z][k] * depthAt(t));
+      const dEye = Math.max(0, depthAt(t));
+      const down = (k: number): number => Math.exp(-[K.x, K.y, K.z][k] * dEye);
       const E = [0, 1, 2].map((k) => (skyE[k] + [sunE.r, sunE.g, sunE.b][k] * el) * down(k));
       uDeep.value.set((E[0] * WATER_.scatter[0]) / Math.PI, (E[1] * WATER_.scatter[1]) / Math.PI, (E[2] * WATER_.scatter[2]) / Math.PI);
       // the Sun refracted into the water: its horizontal run kept, sin θw = cos(el)/n
@@ -577,6 +676,83 @@ export function createLineDown(_renderer: THREE.WebGPURenderer, scene: THREE.Sce
       uSunW.value.set((sunDir.x / Math.max(h, 1e-6)) * sinW, cosW, (sunDir.z / Math.max(h, 1e-6)) * sinW);
       uShaft.value.set(sunE.r, sunE.g, sunE.b).multiplyScalar(SHAFTS_.gain);
       uTime.value = t;
+      if (day) {
+        // THE DAY'S DOLPHIN (DAY_DOLPHIN): along its path in the rest's frame, turned with the debris field as the set is
+        const k = t - starts.c2;
+        const on = k >= DAY_DOLPHIN[0][0] && k < DAY_DOLPHIN_GONE;
+        dolphin.group.visible = on;
+        if (on) {
+          const turn = inputs ? DEBRIS_SPIN * (inputs.drive(t).driftTime - restDrift) : 0;
+          const yaw0 = restYaw + turn;
+          const [c, sn] = [Math.cos(turn), Math.sin(turn)];
+          const fx = restEye.x * c + restEye.z * sn;
+          const fz = -restEye.x * sn + restEye.z * c;
+          // (the rest's frame: right (cos, −sin), ahead (−sin, −cos) of its yaw)
+          const toWorld = (p: THREE.Vector3, out: THREE.Vector3): THREE.Vector3 =>
+            out.set(fx + p.x * Math.cos(yaw0) - p.z * Math.sin(yaw0), p.y, fz - p.x * Math.sin(yaw0) - p.z * Math.cos(yaw0));
+          const p = toWorld(dayDolphinAt(t, dA), new THREE.Vector3());
+          const q = toWorld(dayDolphinAt(t + 0.05, dB), new THREE.Vector3());
+          const v = q.sub(p).divideScalar(0.05);
+          const speed = v.length();
+          // nose first (its body along −z): yaw turns its −z onto the way it swims, pitch lifts it
+          dolphin.group.position.copy(p);
+          dolphin.group.rotation.set(Math.asin(Math.max(-1, Math.min(1, v.y / Math.max(speed, 1e-3)))), Math.atan2(-v.x, -v.z), 0, 'YXZ');
+          // (a pure function of t: the beat's phase from t itself, as dolphin.ts dolphinPose's; under the water only)
+          const wet = p.y < (water ? water(p.x, p.z, t) : 0) ? 1 : 0;
+          dolphin.set({ x: 0, y: 0, z: 0, heading: 0, pitch: 0, bend: 0, turn: 0, bank: 0, beat: 0.12 * wet, phase: 2 * Math.PI * 2.2 * t, speed, dry: wet ? 0 : 0.3 });
+          // the water's light at its depth (the same model as the deep's: the sky's and the Sun's light on the level,
+          // down through its depth), its belly's from the deep below a few percent of it
+          const dd = Math.max(0, -p.y);
+          const lit = (k2: number): number => ((skyE[k2] + [sunE.r, sunE.g, sunE.b][k2] * Math.max(0, sunDir.y)) * Math.exp(-[K.x, K.y, K.z][k2] * dd)) / Math.PI;
+          uDolphinDown.value.set(lit(0), lit(1), lit(2));
+          uDolphinUp.value.copy(uDolphinDown.value).multiplyScalar(0.05);
+        }
+      }
+      if (day) {
+        // THE WINDOW'S BRIGHTNESS FOLLOWS THE EYE'S ADAPTATION (WINDOW_SKY_DAY: the window at the sky's own brightness
+        // on the dome): held at the adapted eye's trim, the window was half the sky's brightness through the eye's
+        // re-adaptation before the surfacing — and the sky came back at twice the window's the moment the eye broke
+        // through, over the window's whole disc
+        oceanSurfaceParams.underWindowBrightness = WINDOW_SKY_DAY / (Math.max(1, exposure) * N_WATER * N_WATER);
+        // THE VEIL'S LIGHT: a lit white foam in the air (the sky's and the Sun's light on it, over π, at foam's ~0.7
+        // albedo), the water's milky in-scatter under it (a third of that: the light down there, the aerated water
+        // whiter than the deep) — blended through the waterline, so the veil does not jump as the eye goes through
+        const airFoam = [0, 1, 2].map((k) => ((skyE[k] + [sunE.r, sunE.g, sunE.b][k] * el) * 0.7) / Math.PI);
+        // (the first round's: a third of the foam's light under, tinted barely blue — a grey smoke over the dome. The
+        // aerated water is the water's own cyan, at ~0.55 of the foam's light, the air's foam a sunlit white)
+        // (round 3's tint of the warm foam light still read grey-green under the water: the aerated water is the
+        // water's cyan at the foam's brightness, AQUA, not the Sun's colour dimmed)
+        const kWet = Math.min(1, Math.max(0, (depth + 0.3) / 0.6));
+        const wet = kWet * kWet * (3 - 2 * kWet);
+        const lum = 0.2126 * airFoam[0] + 0.7152 * airFoam[1] + 0.0722 * airFoam[2];
+        const AQUA = [0.36, 0.66, 0.84];
+        veilLight.set(...([0, 1, 2].map((k) => airFoam[k] * (1 - wet) + lum * AQUA[k] * wet) as [number, number, number]));
+        waterLight.copy(uDeep.value);
+        veil?.update(t, eye.position, v, veilLight, waterLight, under, wet);
+        // the raft's rig in the window (only while under: above, the same sky is the sea's reflection), and its weed
+        if (inputs) {
+          if (!raftGroup) {
+            let best = Infinity;
+            scene.traverse((x) => {
+              if (x.name !== 'drift-raft') return;
+              const d = Math.hypot(x.position.x - raftAt.x, x.position.z - raftAt.z);
+              if (d < best) {
+                best = d;
+                raftGroup = x;
+              }
+            });
+          }
+          sunEv.set(sunE.r, sunE.g, sunE.b);
+          skyEv.set(skyE[0], skyE[1], skyE[2]);
+          inputs.window?.update(raftGroup, under, sunDir, sunEv, skyEv);
+          const rg = raftGroup as THREE.Object3D | null;
+          if (weed && rg && weed.mesh.parent !== rg) rg.add(weed.mesh);
+          if (weed) {
+            weed.mesh.visible = under;
+            weed.update(t);
+          }
+        }
+      }
     },
   };
 }

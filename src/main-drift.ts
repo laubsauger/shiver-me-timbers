@@ -39,7 +39,8 @@ import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 import { createSea } from './drift/wandering/sea';
-import { LINE_DOWN_ON, LINE_DOWN_SUN_EL, createLineDown, raiseSun } from './drift/wandering/lineDown';
+import { LINE_DOWN_LIGHT, LINE_DOWN_ON, LINE_DOWN_SUN_EL, createLineDown, raiseSun } from './drift/wandering/lineDown';
+import { createWindowRaft } from './drift/wandering/lineDownWindow';
 import { C1_FOLLOW, beatStarts as seaBeats, type BeatName } from './drift/wandering/beats';
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
@@ -152,17 +153,18 @@ async function boot(): Promise<void> {
   // ?sea[&hour=h], the sea test act alone on its own clock
   const seaQuery = new URLSearchParams(location.search);
   const seaTest = seaQuery.has('sea');
+  // (LOOK-DEV ONLY, `?linedown=day&ldsun=<deg>`: the landing's Sun raised, lineDown.ts LINE_DOWN_SUN_EL)
+  const seaDrive = (ts: number): ReturnType<typeof arrival.seaDrive> => {
+    const d = arrival.seaDrive(arrival.seaFrom + ts, arrival.cloudsFrom);
+    if (LINE_DOWN_ON && LINE_DOWN_SUN_EL !== undefined) raiseSun(d.sun, LINE_DOWN_SUN_EL);
+    return d;
+  };
+  // the daylight Line Down's raft in Snell's window (lineDownWindow.ts): wired into the sea's surface as it is built
+  const lineDownDay = LINE_DOWN_ON && LINE_DOWN_LIGHT === 'day' && !seaTest;
+  const windowRaft = lineDownDay ? createWindowRaft() : undefined;
   const sea = seaTest
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
-    : createSea(renderer, {
-        // (LOOK-DEV ONLY, `?linedown=day&ldsun=<deg>`: the landing's Sun raised, lineDown.ts LINE_DOWN_SUN_EL)
-        drive: (ts) => {
-          const d = arrival.seaDrive(arrival.seaFrom + ts, arrival.cloudsFrom);
-          if (LINE_DOWN_ON && LINE_DOWN_SUN_EL !== undefined) raiseSun(d.sun, LINE_DOWN_SUN_EL);
-          return d;
-        },
-        c1End: arrival.total - arrival.seaFrom + C1_FOLLOW,
-      });
+    : createSea(renderer, { drive: seaDrive, c1End: arrival.total - arrival.seaFrom + C1_FOLLOW, windowSky: windowRaft?.sky });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
   // "THE LINE DOWN", LOOK-DEV ONLY (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option, behind
   // its gates): with ?linedown the eye goes under the water for its moment in c2–c3 (?linedown=day: 319–335 s, the
@@ -170,7 +172,12 @@ async function boot(): Promise<void> {
   // put under through the sea's eye hook (`reviewEye`, run once update has placed the eye and the raft, before
   // anything reads the eye — the ocean decides top or underside from it); the review scripts set that hook too, so it
   // is wrapped here: the look-dev's eye first, then the review's.
-  const lineDown = LINE_DOWN_ON && !seaTest ? createLineDown(renderer, sea.scene, seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts) : undefined;
+  // (the day's dive, lineDownDive.ts: the descent's height re-blocked from 315 s through the sea and back up onto the
+  // landing's rest at 335 s, its crossings timed to troughs of the sea the GPU draws — the sea's own CpuOcean)
+  const lineDown =
+    LINE_DOWN_ON && !seaTest
+      ? createLineDown(renderer, sea.scene, seaBeats(arrival.total - arrival.seaFrom + C1_FOLLOW).starts, LINE_DOWN_LIGHT, lineDownDay ? { drive: seaDrive, water: (x, z, t) => sea.probeWater(x, z, t).sea, window: windowRaft } : undefined)
+      : undefined;
   let lineClock = 0;
   if (lineDown) {
     sea.scene.add(lineDown.group);
@@ -403,6 +410,7 @@ async function boot(): Promise<void> {
     field.setPixelAngle(rad);
     arrival.setPixelAngle(rad);
     sea.setPixelAngle(rad);
+    lineDown?.setPixelAngle(rad);
   };
   const renderMaster = (): void => {
     setPixelAngle(Math.PI / 2 / (pixelFace ?? p.domeFace));
@@ -538,6 +546,18 @@ async function boot(): Promise<void> {
     flatMarks,
     /** offline dome-master render to the cine sink (npm run cine:sink): { size, fps, from, to, shot } */
     record,
+    /** `?linedown=day` (lineDownDive.ts): the dive's crossings in show s and its check — what a review is timed against */
+    lineDown: lineDown?.plan
+      ? {
+          down: seaStart + lineDown.plan.down,
+          up: seaStart + lineDown.plan.up,
+          check: lineDown.plan.check,
+          /** the raft's pieces traced into the window this frame (lineDownWindow.ts) */
+          get windowBoxes(): number {
+            return windowRaft?.boxes ?? 0;
+          },
+        }
+      : undefined,
   };
 
   draw();

@@ -17,7 +17,7 @@
  * the air it does not. A pure function of the time into c3; positions in the eye's level frame.
  */
 import * as THREE from 'three/webgpu';
-import { exp, float, mix, positionLocal, sin, smoothstep, uniform, vec3 } from 'three/tsl';
+import { exp, float, mix, normalWorld, positionLocal, sin, smoothstep, uniform, vec3 } from 'three/tsl';
 import { SAILING, beatStarts, raftPose, speedAt } from './beats';
 
 /** m/s² */
@@ -567,7 +567,24 @@ export interface Dolphin {
   set(p: DolphinPose): void;
 }
 
-export function createDolphin(): Dolphin {
+/**
+ * UNDER THE WATER (`water`: the daylight Line Down's dive, lineDown.ts — its first meeting with us, the coordinator's
+ * brief of 2026-11-02: "lit by the water: the window's light from above, dark belly, and the blue fog of distance. Not
+ * the air sun"). In the air it is lit by the scene's Sun and sky; a metre under the water that light is the air's still,
+ * unattenuated, and its flank caught the low morning Sun from the side as if on deck. Given `water`, it takes the
+ * water's own light instead: the light coming down through the surface (`down`: on its back, falling off over its
+ * flanks), the faint light coming up from the deep (`up`: its belly), its counter-shading on top — a dark back seen
+ * from above, a pale belly seen from below, as a dolphin's colouring is made to be. The water between it and the eye
+ * is the scene's fog's (lineDown.ts's water), as for everything else down there. No shadows cast: under the water it
+ * would shade the sea's top, which no one sees from below.
+ */
+export interface DolphinWater {
+  /** the light (linear radiance off a white surface) from above, and from below */
+  down: THREE.Node<'vec3'>;
+  up: THREE.Node<'vec3'>;
+}
+
+export function createDolphin(o: { water?: DolphinWater } = {}): Dolphin {
   const uBend = uniform(0);
   const uTurn = uniform(0);
   const uBeat = uniform(0);
@@ -578,18 +595,25 @@ export function createDolphin(): Dolphin {
   // sharp. Just out of the water a SHEET runs off it: streaks along the body, running tail-ward, that sharpen the
   // highlights to glints and thin out over ~1.5 s (uDry: s out of the water). Backlit at last light it is the rim of
   // highlights along its back that tells it is wet.
-  const mat = new THREE.MeshPhysicalNodeMaterial({ metalness: 0 });
+  const mat = o.water ? new THREE.MeshBasicNodeMaterial() : new THREE.MeshPhysicalNodeMaterial({ metalness: 0 });
   // counter-shaded: the back dark slate, the belly pale — both a step darker, wet
   // (the belly 0.3, not 0.5: turned toward us in the leaps' descent, backlit, it read flat pale grey and cut out —
   // 2026-11-01; a dolphin's belly is pale, but not paler than the sky-lit sea round it)
-  mat.colorNode = mix(vec3(0.3, 0.31, 0.32), vec3(0.1, 0.115, 0.135), smoothstep(-0.12, 0.1, positionLocal.y));
+  const albedo = mix(vec3(0.3, 0.31, 0.32), vec3(0.1, 0.115, 0.135), smoothstep(-0.12, 0.1, positionLocal.y));
+  if (o.water) {
+    const up = normalWorld.y;
+    const above = up.mul(0.5).add(0.5);
+    mat.colorNode = albedo.mul(o.water.down.mul(above.mul(above)).add(o.water.up.mul(float(1).sub(above))));
+  } else mat.colorNode = albedo;
   const sheet = exp(uDry.mul(-1 / 0.6));
   // (streaks: thin lines along the body, round its girth, beaded and running toward the flukes, +z)
   const streak = smoothstep(0.55, 0.95, sin(positionLocal.x.mul(53).add(positionLocal.y.mul(41)).add(sin(positionLocal.z.mul(3.1)).mul(2))))
     .mul(smoothstep(0.2, 0.9, sin(positionLocal.z.mul(9).sub(uPhase.mul(0.55)))));
-  mat.roughnessNode = mix(float(0.3), float(0.14), sheet);
-  mat.clearcoatNode = float(1);
-  mat.clearcoatRoughnessNode = mix(float(0.09), float(0.02), sheet.mul(streak.mul(0.7).add(0.3)));
+  if (mat instanceof THREE.MeshPhysicalNodeMaterial) {
+    mat.roughnessNode = mix(float(0.3), float(0.14), sheet);
+    mat.clearcoatNode = float(1);
+    mat.clearcoatRoughnessNode = mix(float(0.09), float(0.02), sheet.mul(streak.mul(0.7).add(0.3)));
+  }
   // the arch (nose and tail toward the arc's centre) and, under water, the tail's beat, a wave running to the
   // flukes, growing toward them
   const z = positionLocal.z;
@@ -624,8 +648,8 @@ export function createDolphin(): Dolphin {
     const mesh = new THREE.Mesh(g, mat);
     // (casts on the sea, which samples the Sun's shadow map, and takes the raft's, the sail's and its own: the user,
     // 2026-11-01, "it's still not getting shadows?" — it had cast but not received)
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.castShadow = !o.water;
+    mesh.receiveShadow = !o.water;
     // (the vertex shader bends it: its bounds are no longer the geometry's)
     mesh.frustumCulled = false;
     group.add(mesh);

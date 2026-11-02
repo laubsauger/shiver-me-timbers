@@ -357,11 +357,13 @@ function seabedShadowAt(sunDir: { value: THREE.Vector3 } & THREE.Node<'vec3'>): 
 
 /**
  * `drive`: Act 2 hands over (see SeaDrive) and c1 comes to rest by `c1End`, then the beats run on (beats.ts);
- * without it, the test act: `hour` held, `flock` flying, an island.
+ * without it, the test act: `hour` held, `flock` flying, an island. `windowSky` (`?linedown=day` only, lineDownWindow.ts):
+ * what the sea's surface sees along a sky direction in front of its sky — the raft's rig in Snell's window.
  */
 export function createSea(
   renderer: THREE.WebGPURenderer,
-  o: { hour?: number; flock?: boolean; total?: number; drive?: (t: number) => SeaDrive; c1End?: number } = {},
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node unions
+  o: { hour?: number; flock?: boolean; total?: number; drive?: (t: number) => SeaDrive; c1End?: number; windowSky?: (dir: any, sky: any) => any } = {},
 ): SeaAct {
   const hour = o.hour ?? HOUR;
   const c1End = o.c1End ?? 0;
@@ -620,7 +622,7 @@ export function createSea(
   const surface = new OceanSurface(ocean, undefined, flowFoam, {
     reflection: mirror.reflection,
     sunLight: sky.sunLight,
-    skyDomeColor: seaSky.dome,
+    skyDomeColor: o.windowSky ? (dir: THREE.Node<'vec3'>) => o.windowSky!(dir, seaSky.dome(dir)) : seaSky.dome,
     skySunTerm: seaSky.sunTerm,
     cloudSun: seaSky.cloudSun,
     // (none of the sea over the swash sim's water, on its own curving, feathered edges: swashSim.ts swashSeaGone)
