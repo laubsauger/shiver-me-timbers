@@ -115,9 +115,12 @@ describe('the wanderers', () => {
     expect(together).toBeLessThan(1.2);
   });
 
-  it('never walk through one another: any two stay apart at every instant of w5 and w6, a stoop and an arm\'s swing clear', () => {
-    /** m, centre to centre (two bodies 0.45 m across at the shoulders, a swinging arm ~0.1 m out) */
-    const MIN_APART = 0.6;
+  it('never walk through one another: any two stay a passing distance apart at every instant of w5 and w6', () => {
+    /** m, centre to centre: a PASSING distance, not only clear of each other — at 0.9 m (two bodies 0.45 m across at
+     * the shoulders, a swinging arm ~0.1 m out, a stoop's reach) the pass at ~684 s read from the elevated review
+     * camera as two figures touching (the 2026-11-02 review of the 665ba98 render); ~1 m of air between shoulders reads
+     * as two people passing */
+    const MIN_APART = 1.3;
     let nearest = Infinity;
     let when = 0;
     for (let t = starts.w5 - WALK_LEAD_S; t < total; t += 0.05) {

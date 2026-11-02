@@ -30,11 +30,11 @@ VIIRS imagery: NASA Worldview / GIBS, part of NASA's Earth Observing System Data
 - ESA/Hubble & NASA, D. Rosario — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:A_Spiral_in_Profile_NGC_3717.jpg
 - ESA/Hubble & NASA, C. Kilpatrick — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:A_super(nova)_spiral_(potw2434a).jpg
 - ESA/Hubble & NASA, L. Galbany, S. Jha, K. Noll, A. Riess — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:A_supernova-rich_spiral_(potw2530a).jpg
-- Image: European Space Agency & NASA Acknowledgements: Project Invest … — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:M101_hires_STScI-PRC2006-10a.jpg
+- Image: European Space Agency & NASA. Acknowledgements: Project Investigators for the original Hubble data: K.D. Kuntz (GSFC), F. Bresolin (University of Hawaii), J. Trauger (JPL), J. Mould (NOAO), and Y.-H. Chu (University of Illinois, Urbana); image processing: Davide De Martin (ESA/Hubble); CFHT image: Canada-France-Hawaii Telescope/J.-C. Cuillandre/Coelum; NOAO image: George Jacoby, Bruce Bohannan, Mark Hanna/NOAO/AURA/NSF — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:M101_hires_STScI-PRC2006-10a.jpg
 - ESA/Hubble & NASA, G. Fabbiano — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Revisiting_an_unusual_spiral_(potw2544a).jpg
-- ESA/Hubble & NASA, O. Fox, L. Jenkins, S. Van Dyk, A. Filippenko, J. Lee and … — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Galaxy_light_show_(potw2445a).jpg
+- ESA/Hubble & NASA, O. Fox, L. Jenkins, S. Van Dyk, A. Filippenko, J. Lee and the PHANGS-HST Team, D. de Martin (ESA/Hubble), M. Zamani (ESA/Hubble) — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Galaxy_light_show_(potw2445a).jpg
 - ESA/Hubble & NASA — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:A_galaxy_on_the_edge.jpg
-- ESA/Hubble, NASA Y. Choi (NOIRLab), K. Gilbert (Space Telescope Science Institut … — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Dwarf_irregular_galaxy_UGC_8091_(heic2313a).jpg
+- ESA/Hubble, NASA, Y. Choi (NOIRLab), K. Gilbert (Space Telescope Science Institute), J. Dalcanton (Flatiron Institute and University of Washington) — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Dwarf_irregular_galaxy_UGC_8091_(heic2313a).jpg
 - ESA/Hubble & NASA, C. Kilpatrick — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:A_dishevelled_irregular_galaxy_(potw2324a).jpg
 - ESA/Hubble & NASA, R. J. Foley (UC Santa Cruz) — CC BY 4.0 — https://commons.wikimedia.org/wiki/File:Swirling_spiral_in_Hydra_(potw2529a).jpg
 
@@ -55,5 +55,7 @@ Further galaxy images: NASA, ESA and the Hubble Heritage Team (STScI/AURA), publ
 - **NASA Blue Marble, Black Marble, the cloud composite, VIIRS via GIBS**: public domain or free use; a credit is
   customary (GIBS asks for an acknowledgement).
 - **Galaxies**: from `public/drift/galaxies/galaxy-atlas.json` (built by `scripts/drift-galaxy-atlas.py`). Its credit
-  field is cut at 80 characters: the lines ending in "…" must be completed from the source page before they go on
-  screen. The 16 public-domain ones need no credit; the last line covers them.
+  field is cut at 80 characters: a cut line must be completed from the source page before it goes on screen. The three
+  cut CC BY lines (M101, Galaxy light show, UGC 8091) were completed on 2026-11-02 from each file's Commons page (the
+  author field of its metadata, `prop=imageinfo&iiprop=extmetadata`), verbatim but for the punctuation joining its
+  lines. The 16 public-domain ones need no credit; the last line covers them.

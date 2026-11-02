@@ -193,13 +193,29 @@ const alongOf = (i: number, walked: number): number => WALK_FROM + walked - i * 
  * for its shell at 9.5 s (0.5 m apart, centre to centre), through the first as it stood looking out at 18.5 s (0.2 m),
  * the first through the third at 31.5 s (0.4 m) — bodies, arms and the stoop's reach in one another. Now two within
  * SEPARATION.along m of each other up the beach keep SEPARATION.across m apart across it, and further apart up it the
- * gap they need narrows by SEPARATION.slope m a metre (none past ~2.7 m): the one coming up steps round the other at a
- * walker's veer (~27°), not in a jump. The side-step is split by their paces (averaged over a second either side), so
+ * gap they need narrows by SEPARATION.slope m a metre (none past ~3.4 m): the one coming up steps round the other at a
+ * walker's veer, not in a jump. The side-step is split by their paces (averaged over a second either side), so
  * the one walking goes round the one standing, which stays where it is. Each meeting is passed on ONE side, the one
  * that needs the least stepping aside over the whole of it (`passingSides`, from their own paths, which depend on
  * nothing but these tables), so no one swaps sides through the other mid-pass. A pure function of t, as the walk is.
+ *
+ * AT A PASSING DISTANCE (the 2026-11-02 review of the 665ba98 render, the walkers' pass at ~684 s: still "too close
+ * from above … overlapping or almost touching" from the elevated review camera, out/drift/review/walkers-1102c
+ * pass_684). At 0.9 m across the third came by the hat stooping for its shell 0.90 m off, centre to centre, and the
+ * first by the third at 693 s 0.83 m off: two bodies ~0.45 m wide with an arm swinging, or a stoop's reach, leave a hand
+ * or less between them — from above they read as one shape. Now 1.5 m (≈ 1 m of air between shoulders, how strangers'
+ * and friends' paths part on an open beach); measured over w5–w6: 1.50 m at 684.2 s, 1.34 m at 693.4 s (0–2 still a
+ * step apart up the beach there). The steeper narrowing (0.6 m a metre, from 0.4; none past ~3.4 m, ~2.7 before)
+ * keeps the meetings as short as they were: at 0.4 the wider gap made every meeting reach ~4.7 m up the beach, and in
+ * the longer windows the side kept for a pass pulled walkers ~2 m across the beach with no one near them (the hat at
+ * 705 s, 5 m behind the first) — wandering, not passing. The side-step's split goes by the square of their paces, so
+ * one slowing to stoop or stand gives way to the one walking (0.11 of it at a third of the other's pace, not 0.27; the
+ * 0.02 m²/s² keeps the hand-over soft near a standstill — at 0.001 two standing behind the eye before w5 swapped their
+ * shares as the first set off and slid 0.6 m in 0.4 s): over w5–w6 the fastest sideways slide of one standing is
+ * 0.28–0.54 m/s (0.35–0.51 at 0.9 m), the steepest veer round one who stops just ahead ~48° for a second (41° before),
+ * the others' ≤ 36°, and no one moves faster than 1.56 m/s.
  */
-const SEPARATION = { across: 0.9, along: 0.9, slope: 0.4, rounds: 3, paceOver: 1 };
+const SEPARATION = { across: 1.5, along: 0.9, slope: 0.6, rounds: 3, paceOver: 1 };
 const PAIRS: Array<[number, number]> = [
   [0, 1],
   [0, 2],
@@ -242,6 +258,7 @@ function passingSides(): Array<Array<[number, number, number]>> {
   return out;
 }
 /** m/s: wanderer i's pace averaged over SEPARATION.paceOver s either side of τ — what splits a side-step between two
+ * (by its square: stepAside)
  * (by the pace now, the one setting off from a stop took its share within a step). Continuous in τ */
 const paceAround = (i: number, tau: number): number => {
   let sum = 0;
@@ -265,7 +282,7 @@ function stepAside(tau: number, along: number[], off: number[]): number[] {
       if (!m) return;
       const side = m[2];
       const short = Math.max(0, gapNeeded(along[j] - along[i]) - side * (off[j] + push[j] - off[i] - push[i]));
-      const share = (v[i] + 0.03) / (v[i] + v[j] + 0.06);
+      const share = (v[i] * v[i] + 0.02) / (v[i] * v[i] + v[j] * v[j] + 0.04);
       push[i] -= side * short * share;
       push[j] += side * short * (1 - share);
     });
