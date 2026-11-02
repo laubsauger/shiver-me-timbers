@@ -25,11 +25,11 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { float, vec3 } from 'three/tsl';
 import { createFilmCoast } from '../src/drift/wandering/coast';
-import { BOULEVARD, CABLE_MIN_ANGLE, CHURCH, LOTS, RAFT_CLEAR, SWASH_EDGE, cableGoldSheen, drownedLayout, seaPowerLine } from '../src/drift/wandering/drowned';
-import { beatStarts, coastEye, coastLook, landfall, raftPose } from '../src/drift/wandering/beats';
+import { BOULEVARD, CABLE_MIN_ANGLE, CHURCH, LOTS, RAFT_CLEAR, SUNKEN_SET, SWASH_EDGE, cableGoldSheen, drownedLayout, POWER_STUB, seaPowerLine, stubPowerLine } from '../src/drift/wandering/drowned';
+import { beatStarts, beatsAt, coastEye, coastLook, landfall, raftPose } from '../src/drift/wandering/beats';
 import { BUILDING_DIMS, BURIED, buildTown, buildingMatrix, loadTownKit, type BuildingSpec } from '../src/drowned/town';
 import { LEAF, buildFanPalms, crownOf, leafGeometry, trunkAxis, type FanPalmSpec } from '../src/drowned/fanPalm';
-import { attachAt, buildPowerLine, loadPylonKit } from '../src/drowned/powerLine';
+import { attachAt, buildPowerLine, loadPylonKit, pylonMatrix } from '../src/drowned/powerLine';
 import { beatSun } from '../src/drift/wandering/beats';
 
 const coast = createFilmCoast([-40000, 0], { ground: () => ({ albedo: vec3(0.5), roughness: float(1) }) } as never);
@@ -258,8 +258,161 @@ describe('the power line at sea', () => {
   });
 });
 
+describe('the stub of a power line near land, running up onto the high island', () => {
+  // (the 2026-11-02 review: the line at sea parked — "Somewhere nearer to land, that would work for me. But we have to
+  // see where we position it so that we don't … screw up existing shots that work"; then, on the r1 stills: "that
+  // drowned could work. Maybe it spans from the water onto the island, kinda oriented towards the far back,
+  // suggesting that this is a flooded valley now")
+  const stub = stubPowerLine(beach);
+  const D = 180 / Math.PI;
+  /** each tower's silhouette points, world: its earth-wire peak, its widest arm's tips */
+  const outlines = stub.pylons.map((p) => {
+    const m = pylonMatrix(p);
+    return [[0, 25.9], [-9, 15.35], [9, 15.35]].map(([x, y]) => new THREE.Vector3(x, y, 0).applyMatrix4(m));
+  });
+  const lamp = (id: string): THREE.Vector3 => new THREE.Vector3(...coast.towers.find((t) => t.id === id)!.lamp);
+  const eyeAt = (t: number): { x: number; y: number; z: number; look: number } => {
+    const e = coastEye(t, c1End, beach);
+    return { x: e.x, z: e.z, y: e.ashore * (coast.ground(e.x, e.z) + e.height) + (1 - e.ashore) * 2.6, look: coastLook(t, c1End) * D };
+  };
+  /** deg right of the coast's front (world), deg over the eye's level, m away */
+  const seen = (e: { x: number; y: number; z: number }, p: THREE.Vector3): { b: number; el: number; d: number } => {
+    const d = Math.hypot(p.x - e.x, p.z - e.z);
+    return { b: Math.atan2(p.x - e.x, -(p.z - e.z)) * D, el: Math.atan2(p.y - e.y, d) * D, d };
+  };
+  /** a tower as one box on the sky from an eye: its bearings and its top's elevation */
+  const box = (e: { x: number; y: number; z: number }, i: number): { b0: number; b1: number; top: number } => {
+    const v = outlines[i].map((p) => seen(e, p));
+    return { b0: Math.min(...v.map((q) => q.b)), b1: Math.max(...v.map((q) => q.b)), top: Math.max(...v.map((q) => q.el)) };
+  };
+  const all = times(starts.w1 + 15, starts.w6 + 60);
+  /** deg: the seat's view (Horizon 18 row 8, 136° wide, lens 0.5: drift-seat-view.py, measured off its remap tables)
+   * reaches 91° either side of the front at the horizon, ~101° at the masts' lamps (~3° up), 105° at 5° */
+  const SEAT = 101;
+
+  it('is out of the cut unless asked for (`?drownedstub`)', () => {
+    expect(SUNKEN_SET.stub).toBe(false);
+  });
+
+  it('stands on the ground the coast has there: the water towers on the floor, the land towers on the island', () => {
+    POWER_STUB.towers.forEach((t, i) => {
+      const p = stub.pylons[i];
+      expect(Math.abs(coast.heightAt(p.x, p.z) - t.ground), `tower ${i}`).toBeLessThan(0.3);
+      // the kit's foot (14 m × its scale under its origin) in the ground, never over it
+      const foot = new THREE.Vector3(0, -14, 0).applyMatrix4(pylonMatrix(p));
+      expect(foot.y).toBeLessThan(t.ground);
+    });
+  });
+
+  it('runs out of the water and up onto the high island, receding: the drowned ones lean, the ones on land stand', () => {
+    const grounds = POWER_STUB.towers.map((t) => t.ground);
+    const water = grounds.filter((g) => g < 0).length;
+    // the half-drowned one near us (and at most one more in the shallows); then the shore and one or two up the slope
+    expect(water).toBeGreaterThanOrEqual(1);
+    expect(water).toBeLessThanOrEqual(2);
+    expect(grounds.length - water).toBeGreaterThanOrEqual(2);
+    expect(grounds.length - water).toBeLessThanOrEqual(3);
+    // in order: the water ones first, then each tower on land higher than the last (climbing)
+    for (let i = 1; i < grounds.length; i++) if (grounds[i - 1] >= 0) expect(grounds[i]).toBeGreaterThan(grounds[i - 1]);
+    for (let i = 0; i < water; i++) expect(grounds[i]).toBeLessThan(0);
+    stub.pylons.forEach((p, i) => {
+      if (grounds[i] < 0) {
+        expect(Math.abs(p.lean![1]) * D, `water tower ${i}`).toBeGreaterThan(3);
+        // drowned to its lowest arm: that arm a few metres over the water
+        const arm = new THREE.Vector3(0, 11.35, 0).applyMatrix4(pylonMatrix(p));
+        expect(arm.y).toBeGreaterThan(1);
+        expect(arm.y).toBeLessThan(5);
+        // the lean pivots where it leaves the floor
+        const pivot = new THREE.Vector3(0, -(p.footing ?? 0) + (p.sink ?? 0), 0).applyMatrix4(new THREE.Matrix4().makeScale(1 / (p.scale ?? 1), 1 / (p.scale ?? 1), 1 / (p.scale ?? 1))).applyMatrix4(pylonMatrix(p));
+        expect(pivot.y).toBeCloseTo(grounds[i], 4);
+      } else expect(p.lean![1], `land tower ${i}`).toBe(0);
+    });
+    // receding from the w1 eye: each further than the last, so each smaller
+    const e = eyeAt(starts.w1 + 30);
+    const d = stub.pylons.map((p) => Math.hypot(p.x - e.x, p.z - e.z));
+    for (let i = 1; i < d.length; i++) expect(d[i]).toBeGreaterThan(d[i - 1]);
+    // the land ones on the high island (a few km, inside its ground's reach), not on our island or a motu
+    for (let i = water; i < d.length; i++) expect(d[i]).toBeGreaterThan(5000);
+    // the wires: strung between the towers on land, snapped where the line goes into the water
+    for (const s of stub.spans) expect(Math.min(grounds[s.from], grounds[s.to])).toBeGreaterThanOrEqual(0);
+    expect(stub.spans.length).toBe(grounds.length - water - 1);
+    expect(stub.snapped!.some((s) => s.at === water)).toBe(true);
+  });
+
+  it('stands ~100 m off the raft in w1, in the open water between the high island and motu 1, then recedes toward the island', () => {
+    const [first] = stub.pylons;
+    // clear of the raft's way, past the swash sim
+    expect(off(first.x)).toBeGreaterThan(SWASH_EDGE);
+    for (const t of [...w1, ...runIn]) {
+      const r = raftAt(t);
+      expect(Math.hypot(first.x - r.x, first.z - r.z)).toBeGreaterThan(RAFT_CLEAR + 20);
+    }
+    for (const t of times(starts.w1 + 20, starts.w2)) {
+      const r = raftAt(t);
+      const dr = Math.hypot(first.x - r.x, first.z - r.z);
+      expect(dr).toBeGreaterThan(90);
+      expect(dr).toBeLessThan(160);
+      const e = eyeAt(t);
+      // the first wholly between motu 1's tower and the high island's mast
+      const { b0, b1 } = box(e, 0);
+      expect(b1).toBeLessThan(seen(e, lamp('treetops')).b - 6);
+      expect(b0).toBeGreaterThan(seen(e, lamp('relay-a')).b + 3);
+      // on the dome: nothing under the tilted rim (the 0.27 × distance rule)
+      for (const o of outlines) for (const p of o) expect(e.y - Math.min(p.y, 0)).toBeLessThan(0.27 * seen(e, p).d);
+    }
+  });
+
+  it('never stands in front of the high island\'s masts, from any eye of w1–w6', () => {
+    // (the station that answers in the radio story): wherever a tower's bearings come within 3° of a mast's, its top is
+    // under the mast's foot on the summit
+    for (const t of all) {
+      const e = eyeAt(t);
+      for (let i = 0; i < outlines.length; i++) {
+        const { b0, b1, top } = box(e, i);
+        for (const id of ['treetops', 'treetops-second']) {
+          const l = lamp(id);
+          const v = seen(e, l);
+          const foot = seen(e, new THREE.Vector3(l.x, coast.heightAt(l.x, l.z), l.z));
+          if (v.b > b0 - 3 && v.b < b1 + 3) expect(top, `tower ${i}, ${id} at ${(t - starts.w1).toFixed(1)} s into w1`).toBeLessThan(foot.el);
+        }
+      }
+    }
+  });
+
+  it('keeps off the sunset road and the beacons in the seat\'s view', () => {
+    const over: Record<string, number> = {};
+    for (const t of all) {
+      const e = eyeAt(t);
+      const beat = beatsAt(t, c1End).at(-1)!.name;
+      for (let i = 0; i < outlines.length; i++) {
+        const { b0, b1, top } = box(e, i);
+        const inView = Math.min(Math.abs(b0 + e.look), Math.abs(b1 + e.look)) < SEAT + 6;
+        if (!inView) continue;
+        // the low Sun of w3–w5 over the sea and its road on the water: never within 8° of it
+        if (beat === 'w3' || beat === 'w4' || beat === 'w5') {
+          const [sx, , sz] = beatSun(beat, t, c1End);
+          const sun = Math.atan2(sx, -sz) * D;
+          expect(sun < b0 - 8 || sun > b1 + 8, `tower ${i} at ${t.toFixed(1)}`).toBe(true);
+        }
+        // every station's lamp clear of it in the seat's view — but for motu 1's, which the first passes at the very
+        // edge of the frame (96–100° round) as the eye turns toward the land in w2 (551–577 s)
+        for (const s of coast.towers) {
+          const v = seen(e, new THREE.Vector3(...s.lamp));
+          const view = v.b + e.look;
+          if (v.b > b0 - 1 && v.b < b1 + 1 && v.el < top + 0.5 && Math.abs(view) < SEAT) {
+            expect(Math.abs(view), `${s.id} behind tower ${i} at ${t.toFixed(1)}`).toBeGreaterThan(95);
+            over[`${i} ${s.id}`] = (over[`${i} ${s.id}`] ?? 0) + 0.5;
+          }
+        }
+      }
+    }
+    expect(Object.keys(over).every((k) => k === '0 relay-a')).toBe(true);
+    for (const s of Object.values(over)) expect(s).toBeLessThanOrEqual(27);
+  });
+});
+
 describe('a fan palm', () => {
-  const spec = (state: FanPalmSpec['state'], lean = 0): FanPalmSpec => ({ x: 0, z: 0, foot: -1.5, height: 18, lean, leanDir: 0, state, seed: 7 });
+  const spec =(state: FanPalmSpec['state'], lean = 0): FanPalmSpec => ({ x: 0, z: 0, foot: -1.5, height: 18, lean, leanDir: 0, state, seed: 7 });
 
   it('wears the crown of its state: a living one green over its skirt, a dead one hanging, a snag none', () => {
     const live = crownOf('live', 3);
@@ -361,6 +514,20 @@ describe('the builders, built', async () => {
     const spec = seaPowerLine({ x: 0, z: 0 }, 0);
     // (with the film's cables: the angular floor and the gold sheen, drowned.ts)
     const { group } = buildPowerLine(kit, spec, { origin: [0, 0], cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen });
+    const meshes: THREE.Mesh[] = [];
+    group.traverse((o) => void ((o as THREE.Mesh).isMesh && meshes.push(o as THREE.Mesh)));
+    expect(meshes.some((m) => m.name === 'drowned-cables')).toBe(true);
+    for (const m of meshes) {
+      const { vertex, fragment } = shaders(m);
+      expect(vertex.length).toBeGreaterThan(100);
+      expect(fragment.length).toBeGreaterThan(100);
+    }
+  });
+
+  it('builds the stub near land and compiles its tower and its snapped wires', async () => {
+    const pb = readFileSync(new URL('../assets/models/course_pylon.glb', import.meta.url));
+    const kit = await loadPylonKit(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength) as ArrayBuffer);
+    const { group } = buildPowerLine(kit, stubPowerLine(beach), { origin: [beach.x, beach.z], cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen });
     const meshes: THREE.Mesh[] = [];
     group.traverse((o) => void ((o as THREE.Mesh).isMesh && meshes.push(o as THREE.Mesh)));
     expect(meshes.some((m) => m.name === 'drowned-cables')).toBe(true);

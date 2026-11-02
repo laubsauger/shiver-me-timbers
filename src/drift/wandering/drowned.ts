@@ -1,8 +1,8 @@
 /**
  * THE SUNKEN WORLD ON THE FILM'S COAST AND AT SEA — the film's own placing of the sunken world's builders (src/drowned:
  * town.ts, fanPalm.ts, powerLine.ts, drownedLook.ts, the ones the game will share): a drowned town and its boulevard
- * off the beach of w1–w6 (coast.ts), and a power line at sea through c2–c4. Each part is switched in or out of the
- * cut by SUNKEN_SET (all out for the 2026-10-30 full render).
+ * off the beach of w1–w6 (coast.ts), a power line at sea through c2–c4, and the stub of one in the lagoon near land
+ * (POWER_STUB). Each part is switched in or out of the cut by SUNKEN_SET (all out for the 2026-10-30 full render).
  *
  * WHY (the user, 2026-10-29: "without someone telling me the story it doesn't become apparent that this is what
  * happened" — this is California under hundreds of feet of water; drift-narrative/wandering-on/sunken-world-cues.md):
@@ -53,6 +53,7 @@ import { PYLON_KIT_URL, buildPowerLine, loadPylonKit, type PowerLineSpec, type P
 import { createRng } from '../../state/rng';
 import { expAir } from './radioTower';
 import { HIGH_AIR } from './coast';
+import { farAir } from './farAir';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node unions
 type Node = any;
@@ -70,9 +71,14 @@ type Node = any;
  * cut by default, so the next master draws as the last one did until the user has seen it. A URL switch and not a
  * live `__drift.params` field because the line is built (its kit loaded, its geometry merged) once, as the sea is
  * built; the review scripts pass a query before boot and `--setup` only after it (raft.ts `?raftplain` is the same).
+ *
+ * THE STUB NEAR LAND, FOR REVIEW (2026-11-02, after the power line at sea was parked — the user: "Somewhere nearer to
+ * land, that would work for me. But we have to see where we position it so that we don't … screw up existing shots
+ * that work"; then "yes lets do it, try stuff, lets see"): `drift.html?drownedstub` (POWER_STUB), OUT of the cut by
+ * default, as the line at sea is.
  */
 const QUERY = typeof location !== 'undefined' ? new URLSearchParams(location.search) : undefined;
-export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: QUERY?.has('powerline') ?? false };
+export const SUNKEN_SET = { boulevard: false, town: false, church: false, powerLine: QUERY?.has('powerline') ?? false, stub: QUERY?.has('drownedstub') ?? false };
 
 /** m: the raft's logs reach this far from its centre, and a little more — the clearance kept round its way */
 export const RAFT_CLEAR = 9;
@@ -237,7 +243,7 @@ export function createDrownedShallows(
   if (palms) above.add(palms.group);
   const site = { sand: o.sand, origin };
   const inCut = (b: BuildingSpec): boolean => (b.kind === 'Steeple' ? SUNKEN_SET.church : SUNKEN_SET.town);
-  const ready = !SUNKEN_SET.town && !SUNKEN_SET.church
+  const town = !SUNKEN_SET.town && !SUNKEN_SET.church
     ? Promise.resolve()
     : loadTownKit(TOWN_KIT_URL, renderer).then((kit) => {
         const submerged = layout.buildings.filter((b) => inCut(b) && !layout.above.includes(b));
@@ -245,6 +251,16 @@ export function createDrownedShallows(
         if (submerged.length) under.add(buildTown(kit, submerged, site, { shadowAt: o.shadowAt }).group);
         if (out.length) above.add(buildTown(kit, out, site, { shadowAt: o.shadowAt }).group);
       });
+  // the stub of a power line near land, running up onto the high island (POWER_STUB): with the town's other pieces above
+  // the water, shown with the coast; seen through the far islands' air (farAir.ts, which the coast refreshes each
+  // frame), as the high island's ground and masts are — nothing at the first tower's ~150 m, the island's own slate
+  // haze at the last's 7 km
+  const stub = !SUNKEN_SET.stub
+    ? Promise.resolve()
+    : loadPylonKit(PYLON_KIT_URL, renderer).then((kit) => {
+        above.add(buildPowerLine(kit, stubPowerLine(o.beach), { origin, air: farAir.air, cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen }).group);
+      });
+  const ready = Promise.all([town, stub]).then(() => undefined);
   return { under, above, ready, layout, setTime: (t) => palms?.setTime(t) };
 }
 
@@ -394,4 +410,133 @@ export function cableGoldSheen(m: THREE.MeshStandardNodeMaterial, mesh: THREE.Me
     sunDir.value.copy(s.position).sub(s.target.position).normalize();
     sunLight.value.copy(s.color).multiplyScalar(s.intensity / Math.PI);
   };
+}
+
+/**
+ * THE STUB OF A POWER LINE NEAR LAND, RUNNING UP ONTO THE HIGH ISLAND (the 2026-11-02 review, the line at sea parked: "we
+ * zoomed into what really looks like an ocean, flooding or not … Somewhere nearer to land, that would work for me";
+ * then, on the r1 seat stills of one half-drowned tower: "that drowned could work. Maybe it spans from the water onto
+ * the island, kinda oriented towards the far back, suggesting that this is a flooded valley now"). Not a march to the
+ * horizon but what is left of a valley line where the valley went under: a tower drowned to its lowest arm in our
+ * lagoon's shallows and then, across the deep lagoon where its towers are gone, the line coming up out of the water
+ * at the high island's shore and climbing its left flank, the towers there upright on dry ground (never flooded),
+ * each further, higher and smaller. Switched by `drift.html?drownedstub`
+ * (SUNKEN_SET.stub), off by default.
+ *
+ * WHERE, AND WHY THERE. The w1–w6 eyes see the coast's far land on fixed bearings (deg right of the coast's front, −z;
+ * within a degree or two from every eye of the coast, it is so far): the high island's skyline −52..−27 with ITS
+ * MASTS at −42..−45 (the station that answers in the radio story: never a tower in front of them), motu 2's relay at
+ * −28..−30, motu 1's low band −66..−87 with its tower at −74..−78, and the Sun on w3–w5's sunset road at −68. Measured
+ * along every eye of w1–w6 at 0.5 s (beats.ts coastEye, coastLook; the masts from coast.ts `towers`; the row-8 seat's
+ * view reaches 91° round at the horizon, ~101° at the masts' 3°, 105° at 5°: off drift-seat-view.py's remap tables):
+ *
+ *   - THE FIRST, in the gap between the high island and motu 1: 120–130 m from the w1 raft, 170 m out from the beach.
+ *     Through w1's dawn it stands in the open water left of the island, −52..−69 from the eye arm to arm (its peak
+ *     6.5° up), its right arm 7° and more clear of the island's masts (only before first light, 505–515 s, does that
+ *     arm stand over the island's low left foot). A near thing sweeps across everything far as the eye travels its
+ *     ~150 m to the beach: this one sweeps off to the left as the eye turns toward the land in w2, in front of motu 1's
+ *     tower at the very edge of the frame (551–577 s, 96–100° round); from the beach (w3–w5) it stands ~100° round, its
+ *     top just in the seat view's left corner (w4's turn toward the flock brings the whole tower to the edge, 30° left
+ *     of the Sun); in w6 it is back at the left edge, low against motu 1's band, then under the 22 m eye's horizon.
+ *     (Nearer the raft, from ~65 m off the w1 eye, it leaves the beach's view but sweeps across the island's flank and
+ *     its second mast in w1's dawn instead.)
+ *   - THE ISLAND: the shore tower 6.3 km off with its feet at the waterline, then two up the flank, 28 m and 86 m up
+ *     the slope, at −52.4, −51.5 and −50.5 from the w1 eye (−53.5..−51.2 from the beach): beside each other, not
+ *     stacked end-on, and 5° and more clear of the masts from every eye. Each where its top stands over the island's
+ *     own skyline behind it from every eye (by 0.2–0.5°: its cross-arms and peak against the sky, not lost on the
+ *     island's slate slope), drawn 2× the kit (an 80 m tower, as the big lines' are, not the 230 kV kit's 40) and
+ *     with its members read 10× heavier by the pixel floor (powerLine.ts `heavy`): the r2 stills had them at 1.5×,
+ *     against the slope, and the r3 ones at 2× over the skyline, and at row 8 neither showed at all — a lattice
+ *     member 7 km off is ~1/25 of a dome pixel, the whole tower ~5 % off its sky through the far air. In the r4 stills
+ *     they show in w1's morning light as three pale posts at the island's left foot (their middles, where the kit's
+ *     paint band is, read best; the cross-arms hardly), faintly at dusk, not at all against the w3–w4 glare. The line
+ *     ends at the last, as if it ran on over the flank's shoulder. (A second tower in the water, on a shoal 1.5 km out on the
+ *     same way, stood end-on in front of the shore tower from w1 and was dropped.)
+ *
+ * The wires are strung only between the towers on the island (710 and 516 m spans, sagging as decades of slack do,
+ * powerLine.ts), floored at 2 px of the 4096² master (CABLE_MIN_ANGLE). Every one that went toward the lagoon has
+ * snapped and hangs into the water: at the first tower, and at the shore tower on its seaward side.
+ *
+ * Tried before (the r1 seat stills): the placement study's window, −15° to −35° from the w1 raft (two towers 160–210 m
+ * off at along 88, off 112): its sweep ran ACROSS the island and its mast as the eye came ashore (575–597 s, in
+ * frame), and from the beach it stood in the front-left vista within 8° of the sunset road. Every spot ~100 m off in
+ * that window measured worse: over motu 1's tower for 20–40 s of w3–w6, or on the sunset road.
+ *
+ * Each tower: where (beach coordinates), the ground under it (the coast's), the kit's scale, and, in the water, how far
+ * it is drowned (m lower than the kit: sink 8 leaves the first's lowest arm 3.35 m over the water, its earth-wire peak
+ * 17.6 m) and its lean (deg, across the line, pivoting where it leaves the floor). Each tower's cross-arms stand square
+ * to the line (an angle tower's on the bisector of its two spans), broadside to the w1 eye that looks along it.
+ */
+export interface StubTower {
+  /** m: beach coordinates (beats.ts COAST) */
+  along: number;
+  off: number;
+  /** m: the ground under it over the sea (− under: the floor), as coast.ts `heightAt` has it — the far island's ground
+   * is not in the sand function this file is handed, so it is written here and the tests hold it to the coast's */
+  ground: number;
+  /** × the kit's size */
+  scale: number;
+  /** a tower in the water: m it stands lower than the kit (and deg it leans across the line, pivoting where it leaves
+   * the floor). A tower on land has neither: it stands upright on its footings, as built */
+  sink?: number;
+  lean?: number;
+  /** × its members' widths as the pixel floor reads them (powerLine.ts PylonSpec.heavy): the far ones' */
+  heavy?: number;
+}
+export interface StubLayout {
+  towers: StubTower[];
+  /** the spans still strung: tower indices and the conductors on them (the kit's attach indices; the rest snapped) */
+  spans: Array<{ from: number; to: number; attach?: number[] }>;
+  /** conductors snapped at tower `at`, hanging toward tower `toward` */
+  snapped: Array<{ at: number; toward: number; attach: number[] }>;
+}
+/** m: a tower on land stands this far into its ground (its footings, and the slope under its widest legs) */
+const FOOTINGS = 1.5;
+/** m: the kit's foot under its own origin (powerLine.ts: from 14 m under still water to its 26 m peak) */
+const KIT_FOOT = 14;
+
+export const POWER_STUB: StubLayout = {
+  towers: [
+    // the half-drowned one in our lagoon's shallows (the r1 stills: "that drowned could work")
+    { along: -20, off: 168, ground: -2.46, scale: 1, sink: 8, lean: 9 },
+    // at the high island's shore, its feet at the waterline; then up its left flank, each topping the skyline
+    { along: 3755, off: 5058, ground: 1.7, scale: 2, heavy: 10 },
+    { along: 4278, off: 5538, ground: 28.2, scale: 2, heavy: 10 },
+    { along: 4691, off: 5847, ground: 85.8, scale: 2, heavy: 10 },
+  ],
+  spans: [
+    { from: 1, to: 2 },
+    { from: 2, to: 3 },
+  ],
+  snapped: [
+    // (the lagoon's 6 km had its towers once: gone under, their conductors hang from the ones left at either end)
+    { at: 0, toward: 1, attach: [0, 2, 4] },
+    { at: 0, toward: -1, attach: [3, 7] },
+    { at: 1, toward: 0, attach: [0, 1, 2, 3] },
+  ],
+};
+
+/** the stub's towers and wires off `beach`, world x, z (pure: the tests read it). `toward` −1: away from tower 1 */
+export function stubPowerLine(beach: { x: number; z: number }, stub: StubLayout = POWER_STUB): PowerLineSpec {
+  const D = Math.PI / 180;
+  const at = stub.towers.map((t): [number, number] => [beach.x - t.off, beach.z - t.along]);
+  const n = at.length;
+  /** rad: the kit's +z along world (dx, dz) */
+  const way = (dx: number, dz: number): number => Math.atan2(dx, dz);
+  const pylons: PylonSpec[] = stub.towers.map((t, i) => {
+    const [x, z] = at[i];
+    // each tower's cross-arms square to the line, an angle tower's on the bisector of its two spans
+    const inW = i > 0 ? way(x - at[i - 1][0], z - at[i - 1][1]) : way(at[1][0] - x, at[1][1] - z);
+    const outW = i + 1 < n ? way(at[i + 1][0] - x, at[i + 1][1] - z) : inW;
+    const yaw = Math.atan2(Math.sin(inW) + Math.sin(outW), Math.cos(inW) + Math.cos(outW));
+    // in the water: sunk and leaning on the floor; on land: its foot FOOTINGS m into the ground, upright
+    const sink = t.sink ?? -(t.ground - FOOTINGS + KIT_FOOT * t.scale);
+    return { x, z, yaw, sink, lean: [0, (t.lean ?? 0) * D], footing: -t.ground, scale: t.scale, heavy: t.heavy };
+  });
+  const snapped = stub.snapped.map((s) => {
+    const [x, z] = at[s.at];
+    const [tx, tz] = s.toward >= 0 ? at[s.toward] : [2 * x - at[1][0], 2 * z - at[1][1]];
+    return { at: s.at, toward: [tx, tz] as [number, number], attach: s.attach };
+  });
+  return { pylons, spans: stub.spans.map((s) => ({ ...s })), snapped };
 }

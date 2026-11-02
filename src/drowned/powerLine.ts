@@ -66,6 +66,24 @@ export interface PylonSpec {
   lean?: [number, number];
   /** m it stands lower than the kit's (a deeper valley under it) */
   sink?: number;
+  /**
+   * m under the still water its lean pivots at (default: the kit's footing, FOOTING m under its own origin). In a
+   * lagoon a couple of metres deep a tower leans where it leaves the sand, not 40 m down: pivoting at the deep-water
+   * footing a 9° lean also slid its waterline sideways by ~8 m (The Drift's stub near land, drift/wandering/drowned.ts)
+   */
+  footing?: number;
+  /** × the kit's size (default 1: its 230 kV tower; The Drift's line climbing the high island is drawn larger, so a
+   * tower 6–8 km off still reads from the back rows) */
+  scale?: number;
+  /**
+   * × its members' widths as the pixel floor reads them (default 1). At 6–7 km a lattice member is ~1/25 of a dome
+   * pixel: floored to THIN_MIN_WIDTH_PX it is drawn at ~4 % coverage, and the whole tower — through the far air —
+   * comes out ~5 % off the sky behind it: there, but unseen (The Drift's line on the high island, the 2026-11-02 r3
+   * seat stills). Heavier members raise that coverage k-fold while the floor still sets the drawn width. Only for a
+   * tower whose members stay under the floor at every eye (k × their width < THIN_MIN_WIDTH_PX): above it a member is
+   * drawn at its true width at full coverage.
+   */
+  heavy?: number;
 }
 
 export interface SpanSpec {
@@ -74,6 +92,8 @@ export interface SpanSpec {
   to: number;
   /** × the kit's sag (default 1.3: decades of slack) */
   sag?: number;
+  /** the conductors strung on it, the kit's attach indices (default: every one; the rest have snapped) */
+  attach?: number[];
 }
 
 export interface PowerLineSpec {
@@ -108,13 +128,16 @@ const DEFAULT_SLACK = 1.3;
 /** a pylon's pose: the kit's frame → world */
 export function pylonMatrix(p: PylonSpec): THREE.Matrix4 {
   const [lx, lz] = p.lean ?? [0, 0];
+  // (the pivot, m under the kit's origin: its own footing, or the world depth asked for)
+  const f = p.footing !== undefined ? p.footing - (p.sink ?? 0) : FOOTING;
   return new THREE.Matrix4()
     .makeTranslation(p.x, -(p.sink ?? 0), p.z)
-    .multiply(new THREE.Matrix4().makeTranslation(0, -FOOTING, 0))
+    .multiply(new THREE.Matrix4().makeTranslation(0, -f, 0))
     .multiply(new THREE.Matrix4().makeRotationX(lx))
     .multiply(new THREE.Matrix4().makeRotationZ(lz))
-    .multiply(new THREE.Matrix4().makeTranslation(0, FOOTING, 0))
-    .multiply(new THREE.Matrix4().makeRotationY(p.yaw));
+    .multiply(new THREE.Matrix4().makeTranslation(0, f, 0))
+    .multiply(new THREE.Matrix4().makeRotationY(p.yaw))
+    .multiply(new THREE.Matrix4().makeScale(p.scale ?? 1, p.scale ?? 1, p.scale ?? 1));
 }
 
 /** a conductor's attach point `k` on pylon `p`, world */
@@ -137,12 +160,15 @@ export function buildPowerLine(kit: PylonKit, line: PowerLineSpec, o: PowerLineO
   for (const p of line.pylons) {
     const m = local.clone().multiply(pylonMatrix(p));
     const rot = new THREE.Matrix3().setFromMatrix4(m);
+    // (a scaled tower's members are as much wider: the half-width w with the offsets; a heavy one's read heavier)
+    const k = p.scale ?? 1;
+    const h = p.heavy ?? 1;
     for (const prim of kit.parts) {
       const g = prim.geometry.clone().applyMatrix4(m);
       const axes = new Float32Array(axesOf.get(prim)!);
       for (let i = 0; i < axes.length; i += 4) {
-        v.set(axes[i], axes[i + 1], axes[i + 2]).applyMatrix3(rot);
-        axes.set([v.x, v.y, v.z], i);
+        v.set(axes[i], axes[i + 1], axes[i + 2]).applyMatrix3(rot).multiplyScalar(h);
+        axes.set([v.x, v.y, v.z, axes[i + 3] * k * h], i);
       }
       g.setAttribute(THIN_AXIS_ATTRIBUTE, new THREE.BufferAttribute(axes, 4));
       let entry = perSlot.get(prim.slot);
@@ -181,6 +207,7 @@ export function buildPowerLine(kit: PylonKit, line: PowerLineSpec, o: PowerLineO
     const B = line.pylons[s.to];
     const span = Math.hypot(A.x - B.x, A.z - B.z);
     kit.attach.forEach((_, k) => {
+      if (s.attach && !s.attach.includes(k)) return;
       const a = attachAt(kit, A, k).applyMatrix4(local);
       // (the far pylon's attach point on the same side: the line turned end for end is the same tower)
       const b = attachAt(kit, B, k).applyMatrix4(local);
