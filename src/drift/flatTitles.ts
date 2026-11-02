@@ -32,11 +32,17 @@
  * glyph by glyph along the arc (each placed by the face's own advances, kerning included, and turned to it); the
  * written-on signature, a picture, is bent in thin vertical slices, each turned to the arc at its place.
  *
+ * VARIANT B, `?type=sans` (the client's note of 2026-10-31: "a clean airy helvetica or arial style for the main type …
+ * (but with this 'signature')"; undertime/crawlSans.ts): the body in Inter Light, each glyph arriving out of a soft
+ * blur and leaving the same way, by the same pure function of the time since its phrase began as the dome's crawl, so
+ * the cut shows what the dome shows; the signature unchanged. Its em is SANS.em of the body's here as there.
+ *
  * The canvas is SQUARE, the master's size: the flat view is drawn square and cut to 16:9 after (scripts/drift-review-
  * clip.mjs), so its uv is the overlay's uv and the text is drawn into the middle 9/16 of the canvas.
  */
 import * as THREE from 'three/webgpu';
-import { LINE_PITCH, PEN, bodyPen, drawPen, glyphInk, inkGlyph, phrasePlacement, type CrawlLayout, type CrawlPhrase, type PenAt } from './undertime/crawl';
+import { FADE_OUT, LINE_PITCH, PEN, bodyPen, drawPen, glyphInk, inkGlyph, phraseLife, phrasePlacement, type CrawlLayout, type CrawlPhrase, type PenAt } from './undertime/crawl';
+import { SANS, sansGlyph, sansGlyphPaint, sansWords, titleType } from './undertime/crawlSans';
 import { InkWord } from './titleInk';
 
 /** the 16:9 frame's height as a fraction of the square frame it is cut from */
@@ -116,6 +122,8 @@ export class FlatTitles {
   private drawn = '';
   /** the signature, written on (the dome's crawl has its own) */
   private readonly word = new InkWord();
+  /** variant B (undertime/crawlSans.ts, `?type=sans`): the body in the sans, arriving glyph by glyph, no pen */
+  private readonly sans = titleType() === 'sans';
 
   constructor(size = 2048) {
     this.size = size;
@@ -165,9 +173,9 @@ export class FlatTitles {
         ctx.restore();
         continue;
       }
-      const font = FONTS.body;
-      const tracking = FONTS.bodyTracking;
-      let px = line.em * h;
+      const font = this.sans ? SANS.font : FONTS.body;
+      const tracking = this.sans ? SANS.tracking : FONTS.bodyTracking;
+      let px = line.em * h * (this.sans ? SANS.em : 1);
       const width = (): number => {
         ctx.font = font.replace('{px}', px.toFixed(1));
         ctx.letterSpacing = `${(tracking * px).toFixed(2)}px`;
@@ -181,18 +189,31 @@ export class FlatTitles {
       }
       // written by the survivor's light, glyph by glyph (undertime/crawl.ts bodyPen; the dome's dark halo behind every
       // glyph, crawl.ts inkGlyph)
-      const ink = line.pen ? bodyPen(line.pen.since, line.pen.lines) : null;
+      const ink = line.pen && !this.sans ? bodyPen(line.pen.since, line.pen.lines) : null;
+      const words = this.sans ? sansWords(line.text) : null;
+      const life = line.pen ? phraseLife(line.pen.lines) : 0;
       // glyph by glyph along the arc (THE ARC): each at its advance in the whole line (the prefix's width: the face's
       // kerning and the tracking included), centred on the line, turned to the arc at its middle
       const glyphs = Array.from(line.text);
       const total = ctx.measureText(line.text).width - tracking * px;
       let prefix = '';
-      for (const g of glyphs) {
+      for (const [k, g] of glyphs.entries()) {
         const x0 = ctx.measureText(prefix).width;
         prefix += g;
         const gw = ctx.measureText(g).width - tracking * px;
         if (g.trim() === '') continue;
         const at = arcPoint(x0 + gw / 2 - total / 2, size / 2, top + line.y * h, radius);
+        if (words && line.pen) {
+          // variant B: the glyph's own arriving or leaving state is its fade (as on the dome: crawl.ts drawSansLine)
+          const s = sansGlyph(line.pen.since, life, FADE_OUT, line.pen.line, k, words[k], (x0 + gw / 2) / total);
+          if (s.alpha <= 0.002) continue;
+          ctx.save();
+          ctx.translate(at.x, at.y);
+          ctx.rotate(at.angle);
+          sansGlyphPaint(ctx, g, px, s, 1);
+          ctx.restore();
+          continue;
+        }
         const r = ink && line.pen ? glyphInk(line.pen.since, ink.starts[line.pen.line], ink.durs[line.pen.line], x0 / total, (x0 + gw) / total) : { alpha: 1, warm: 0 };
         if (r.alpha <= 0.002) continue;
         ctx.save();
@@ -213,7 +234,7 @@ export class FlatTitles {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     // the pen's light: it comes down from above the text (the act's one place, the grain's spot — PEN.spotEl on the
     // dome, as many ems above the first line here as there), writes, and goes back up
-    if (penLine?.pen) {
+    if (penLine?.pen && !this.sans) {
       const ink = bodyPen(penLine.pen.since, penLine.pen.lines);
       const first = lines.find((l) => l.pen && l.pen.lines === penLine?.pen?.lines);
       if (ink.pen && first && where[0]) {

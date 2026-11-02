@@ -21,9 +21,16 @@
  * OFL, served from public/drift/fonts and loaded before the first frame (../titleFonts.ts). The body is set at weight
  * 560, not the face's 400: the dome softens a hairline serif to nothing at an x-height of 3°, and the halo eats into
  * thin strokes too; 500–600 keeps the italic's shape and reads (the user's brief: "not thinner than ~500").
+ *
+ * VARIANT B, `?type=sans` (the client's note of 2026-10-31 again: "a clean airy helvetica or arial style for the main
+ * type … (but with this 'signature')"): the copy in Inter Light, each glyph arriving out of a soft blur and settling
+ * into its place instead of being written by the pen, and leaving the same way; the signature unchanged. Off by
+ * default; the face, its size and the reveal are ./crawlSans.ts. The phrases, their slots and their placement here are
+ * the same in both.
  */
 import * as THREE from 'three/webgpu';
 import { InkWord, inkProgress } from '../titleInk';
+import { SANS, sansGlyph, sansGlyphPaint, sansWords, titleType } from './crawlSans';
 
 export interface CrawlPhrase {
   /** one or two lines, read top to bottom */
@@ -66,8 +73,9 @@ const smooth = (x: number): number => {
   const k = clamp01(x);
   return k * k * (3 - 2 * k);
 };
-const FADE_IN = 0.9;
-const FADE_OUT = 1.1;
+/** s a body phrase fades in over, and out over at the end of its life */
+export const FADE_IN = 0.9;
+export const FADE_OUT = 1.1;
 /** line pitch, in text heights */
 export const LINE_PITCH = 1.35;
 /**
@@ -81,6 +89,11 @@ export const SIGNATURE_SCALE = 2;
 export function phraseHold(p: CrawlPhrase): number {
   const words = p.lines.join(' ').split(/\s+/).filter(Boolean).length;
   return 1.5 + 0.3 * words;
+}
+
+/** s a body phrase of `lines` is on the dome: its fade-in, its hold, its fade-out */
+export function phraseLife(lines: string[]): number {
+  return FADE_IN + phraseHold({ lines, at: 0 }) + FADE_OUT;
 }
 
 /** where phrase `p` is at act time `t`, or null if it is not on the dome */
@@ -224,6 +237,8 @@ export class CrawlOverlay {
   private readonly size: number;
   /** the signature, written on, before it is bent onto its circle */
   private readonly word = new InkWord();
+  /** variant B (./crawlSans.ts, `?type=sans`): the copy in the sans, arriving glyph by glyph, no pen */
+  private readonly sans = titleType() === 'sans';
 
   constructor(
     /** replaceable: the phrase times follow the beat lengths, which are live tunables */
@@ -252,12 +267,14 @@ export class CrawlOverlay {
       const at = phrasePlacement(t, p, this.layout);
       if (!at) continue;
       const since = t - p.at;
-      const ink = p.signature ? null : bodyPen(since, p.lines);
+      const ink = p.signature || this.sans ? null : bodyPen(since, p.lines);
       const where: Array<(f: number) => [number, number]> = [];
+      const life = phraseLife(p.lines);
       p.lines.forEach((line, j) => {
         const el = at.el - j * textDeg(at.size) * LINE_PITCH;
         if (p.signature) this.drawSignature(line, el, at.size, at.alpha, at.ink);
         else if (ink) where.push(this.drawLine(line, el, at.size, at.alpha, (f0, f1) => glyphInk(since, ink.starts[j], ink.durs[j], f0, f1)));
+        else this.drawSansLine(line, el, at.size, since, life, j);
       });
       if (ink?.pen) {
         const c = size / 2;
@@ -300,6 +317,49 @@ export class CrawlOverlay {
       ctx.drawImage(img, x, 0, sw, H, -sw / 2, -H / 2, sw + 0.4, H);
     }
     ctx.restore();
+  }
+
+  /**
+   * a body line in variant B (./crawlSans.ts): the sans, tracked, each glyph on its circle as `drawLine` sets the
+   * Garamond's, in its own arriving or leaving state. The phrase's own fade (phrasePlacement's alpha) is not applied on
+   * top: the glyphs' arriving and leaving ARE the fade, over the same seconds, and multiplying the two would hold the
+   * first glyphs back in a dimness the reveal did not mean.
+   */
+  private drawSansLine(text: string, el: number, sizeFrac: number, since: number, life: number, j: number): void {
+    const { ctx, size } = this;
+    const c = size / 2;
+    const R = ((90 - el) / 90) * c;
+    let px = sizeFrac * size * SANS.em;
+    const measure = (): { chars: string[]; widths: number[]; total: number } => {
+      ctx.font = SANS.font.replace('{px}', px.toFixed(1));
+      ctx.letterSpacing = '0px';
+      const chars = [...text];
+      const widths = chars.map((ch) => ctx.measureText(ch).width + SANS.tracking * px);
+      return { chars, widths, total: widths.reduce((a, b) => a + b, 0) - SANS.tracking * px };
+    };
+    let m = measure();
+    if (m.total / R > this.layout.maxArc) {
+      px *= (this.layout.maxArc * R) / m.total;
+      m = measure();
+    }
+    const words = sansWords(text);
+    let az = -m.total / 2 / R;
+    let run = 0;
+    m.chars.forEach((ch, k) => {
+      const w = m.widths[k] - SANS.tracking * px;
+      const mid = az + w / 2 / R;
+      const f = (run + w / 2) / m.total;
+      run += m.widths[k];
+      az += m.widths[k] / R;
+      if (ch.trim() === '') return;
+      const g = sansGlyph(since, life, FADE_OUT, j, k, words[k], f);
+      if (g.alpha <= 0.002) return;
+      ctx.save();
+      ctx.translate(c + R * Math.sin(mid), c + R * Math.cos(mid));
+      ctx.rotate(-mid); // glyph top toward the zenith; its x along the line, its y away from the zenith
+      sansGlyphPaint(ctx, ch, px, g, 1);
+      ctx.restore();
+    });
   }
 
   /** a body line, each glyph as `reveal` (its span's fractions of the line) has it; returns where fraction f of the
