@@ -56,6 +56,56 @@ export async function loadPylonKit(source: string | ArrayBuffer, renderer?: THRE
   return { parts: [...kitPrims(root, 1, 'Pylon'), ...kitPrims(root, 1, 'Insulators')], attach, cable };
 }
 
+/** m (kit): the top of the legs' hazard band (pylon.py `band1`, 2.2 m, and a little for the members' own ends); the
+ * kit's other paint (its danger plate from 3.0 m, the league's chequer boards from 3.9 m) all stands above it */
+const PAINT_BAND_TOP = 2.4;
+
+/**
+ * THE KIT WITHOUT ITS RACE PAINT: a tower of a valley's line, never the speedboat league's course furniture. The kit's
+ * paint slot (C_Paint, pylon.py) is the legs' hazard band at the waterline, the danger plate over it and the league's
+ * chequer boards bolted across two faces; here the plate and the boards are dropped and the band's leg members are
+ * drawn as the steel they are (they are the legs between −0.8 and 2.2 m: dropped too, the four legs would stop short),
+ * each of their vertices taking the steel atlas's coordinates at the nearest vertex of the kit's own steel, so they
+ * wear the galvanised legs' colour above and below them. (The Drift's line climbing the high island, the 2026-11-02
+ * review: "remove the speedboat-course hazard paint band … a valley line wouldn't have it")
+ */
+export function plainPylonKit(kit: PylonKit): PylonKit {
+  const steel = kit.parts.find((p) => p.slot === 'C_Steel');
+  if (!steel) return kit;
+  // the steel's vertices near the band, to take the band's texture coordinates from
+  const sp = steel.geometry.getAttribute('position');
+  const suv = steel.geometry.getAttribute('uv');
+  const near: number[] = [];
+  for (let i = 0; i < sp.count; i++) if (sp.getY(i) > -4 && sp.getY(i) < PAINT_BAND_TOP + 3) near.push(i);
+  const parts = kit.parts.map((p): KitPrim => {
+    if (p.slot !== 'C_Paint') return p;
+    const g = p.geometry.clone();
+    const pos = g.getAttribute('position');
+    const idx = g.getIndex();
+    const corner = (t: number, c: number): number => (idx ? idx.getX(t * 3 + c) : t * 3 + c);
+    const keep: number[] = [];
+    for (let t = 0; t < (idx ? idx.count : pos.count) / 3; t++) {
+      const tri = [corner(t, 0), corner(t, 1), corner(t, 2)];
+      if (tri.every((i) => pos.getY(i) < PAINT_BAND_TOP)) keep.push(...tri);
+    }
+    g.setIndex(keep);
+    const uv = g.getAttribute('uv');
+    if (uv && suv) {
+      for (let i = 0; i < pos.count; i++) {
+        let best = -1;
+        let bd = Infinity;
+        for (const j of near) {
+          const d = (sp.getX(j) - pos.getX(i)) ** 2 + (sp.getY(j) - pos.getY(i)) ** 2 + (sp.getZ(j) - pos.getZ(i)) ** 2;
+          if (d < bd) [bd, best] = [d, j];
+        }
+        if (best >= 0) uv.setXY(i, suv.getX(best), suv.getY(best));
+      }
+    }
+    return { geometry: g, slot: steel.slot, source: steel.source };
+  });
+  return { ...kit, parts };
+}
+
 export interface PylonSpec {
   /** m: world x, z of its axis */
   x: number;

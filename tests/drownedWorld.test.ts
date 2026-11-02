@@ -29,7 +29,7 @@ import { BOULEVARD, CABLE_MIN_ANGLE, CHURCH, LOTS, RAFT_CLEAR, SUNKEN_SET, SWASH
 import { beatStarts, beatsAt, coastEye, coastLook, landfall, raftPose } from '../src/drift/wandering/beats';
 import { BUILDING_DIMS, BURIED, buildTown, buildingMatrix, loadTownKit, type BuildingSpec } from '../src/drowned/town';
 import { LEAF, buildFanPalms, crownOf, leafGeometry, trunkAxis, type FanPalmSpec } from '../src/drowned/fanPalm';
-import { attachAt, buildPowerLine, loadPylonKit, pylonMatrix } from '../src/drowned/powerLine';
+import { attachAt, buildPowerLine, loadPylonKit, plainPylonKit, pylonMatrix } from '../src/drowned/powerLine';
 import { beatSun } from '../src/drift/wandering/beats';
 
 const coast = createFilmCoast([-40000, 0], { ground: () => ({ albedo: vec3(0.5), roughness: float(1) }) } as never);
@@ -258,17 +258,27 @@ describe('the power line at sea', () => {
   });
 });
 
-describe('the stub of a power line near land, running up onto the high island', () => {
+describe('the drowned valley\'s power line: tower tops marching across the lagoon onto the high island', () => {
   // (the 2026-11-02 review: the line at sea parked — "Somewhere nearer to land, that would work for me. But we have to
   // see where we position it so that we don't … screw up existing shots that work"; then, on the r1 stills: "that
   // drowned could work. Maybe it spans from the water onto the island, kinda oriented towards the far back,
-  // suggesting that this is a flooded valley now")
+  // suggesting that this is a flooded valley now"; the coordinator's call on the r4 stills: the tops of towers
+  // marching across the lagoon toward the island, sunk deeper toward the valley's middle, rising again to the shore)
   const stub = stubPowerLine(beach);
   const D = 180 / Math.PI;
-  /** each tower's silhouette points, world: its earth-wire peak, its widest arm's tips */
+  /** the kit's silhouette points (its earth-wire tips and peak, each cross-arm's tips; drowned.ts KIT_FOOT under) */
+  const KIT_PTS = [[2.2, 25.9], [-2.2, 25.9], [6.8, 19.35], [-6.8, 19.35], [9, 15.35], [-9, 15.35], [7.2, 11.35], [-7.2, 11.35]];
+  /** the conductors' attach points (the kit's `extras.attach`: six phases, the two earth wires last) */
+  const ATTACH = [[7.2, 11.35], [-7.2, 11.35], [9, 15.35], [-9, 15.35], [6.8, 19.35], [-6.8, 19.35], [2.2, 25.9], [-2.2, 25.9]];
+  const ARMS = [11.35, 15.35, 19.35];
+  /** each tower's silhouette as the eye sees it, world: the points out of the water, and its axis where it leaves it */
   const outlines = stub.pylons.map((p) => {
     const m = pylonMatrix(p);
-    return [[0, 25.9], [-9, 15.35], [9, 15.35]].map(([x, y]) => new THREE.Vector3(x, y, 0).applyMatrix4(m));
+    const pts = KIT_PTS.map(([x, y]) => new THREE.Vector3(x, y, 0).applyMatrix4(m)).filter((v) => v.y > 0);
+    const a = new THREE.Vector3(0, -14, 0).applyMatrix4(m);
+    const b = new THREE.Vector3(0, 26, 0).applyMatrix4(m);
+    pts.push(a.clone().lerp(b, Math.max(0, -a.y) / (b.y - a.y)));
+    return pts;
   });
   const lamp = (id: string): THREE.Vector3 => new THREE.Vector3(...coast.towers.find((t) => t.id === id)!.lamp);
   const eyeAt = (t: number): { x: number; y: number; z: number; look: number } => {
@@ -289,6 +299,10 @@ describe('the stub of a power line near land, running up onto the high island', 
   /** deg: the seat's view (Horizon 18 row 8, 136° wide, lens 0.5: drift-seat-view.py, measured off its remap tables)
    * reaches 91° either side of the front at the horizon, ~101° at the masts' lamps (~3° up), 105° at 5° */
   const SEAT = 101;
+  const grounds = POWER_STUB.towers.map((t) => t.ground);
+  const water = grounds.filter((g) => g < 0).length;
+  /** the share of each tower out of the water (its peak over the water / the kit's 39.9 m, × its scale) */
+  const shown = stub.pylons.map((p, i) => Math.max(...outlines[i].map((q) => q.y)) / (39.9 * (p.scale ?? 1)));
 
   it('is out of the cut unless asked for (`?drownedstub`)', () => {
     expect(SUNKEN_SET.stub).toBe(false);
@@ -304,39 +318,84 @@ describe('the stub of a power line near land, running up onto the high island', 
     });
   });
 
-  it('runs out of the water and up onto the high island, receding: the drowned ones lean, the ones on land stand', () => {
-    const grounds = POWER_STUB.towers.map((t) => t.ground);
-    const water = grounds.filter((g) => g < 0).length;
-    // the half-drowned one near us (and at most one more in the shallows); then the shore and one or two up the slope
-    expect(water).toBeGreaterThanOrEqual(1);
-    expect(water).toBeLessThanOrEqual(2);
+  it('runs out of our shallows, across the lagoon\'s floor and up onto the high island: the drowned ones lean, the ones on land stand', () => {
+    // the half-drowned one near us and the tops of a few more in the lagoon; then the shore and one or two up the slope
+    expect(water).toBeGreaterThanOrEqual(3);
     expect(grounds.length - water).toBeGreaterThanOrEqual(2);
     expect(grounds.length - water).toBeLessThanOrEqual(3);
     // in order: the water ones first, then each tower on land higher than the last (climbing)
-    for (let i = 1; i < grounds.length; i++) if (grounds[i - 1] >= 0) expect(grounds[i]).toBeGreaterThan(grounds[i - 1]);
     for (let i = 0; i < water; i++) expect(grounds[i]).toBeLessThan(0);
+    for (let i = water + 1; i < grounds.length; i++) expect(grounds[i]).toBeGreaterThan(grounds[i - 1]);
     stub.pylons.forEach((p, i) => {
-      if (grounds[i] < 0) {
-        expect(Math.abs(p.lean![1]) * D, `water tower ${i}`).toBeGreaterThan(3);
-        // drowned to its lowest arm: that arm a few metres over the water
-        const arm = new THREE.Vector3(0, 11.35, 0).applyMatrix4(pylonMatrix(p));
-        expect(arm.y).toBeGreaterThan(1);
-        expect(arm.y).toBeLessThan(5);
+      if (i < water) {
+        // every drowned one leans its own way, settled on the silt
+        expect(Math.hypot(...p.lean!) * D, `water tower ${i}`).toBeGreaterThan(3);
         // the lean pivots where it leaves the floor
         const pivot = new THREE.Vector3(0, -(p.footing ?? 0) + (p.sink ?? 0), 0).applyMatrix4(new THREE.Matrix4().makeScale(1 / (p.scale ?? 1), 1 / (p.scale ?? 1), 1 / (p.scale ?? 1))).applyMatrix4(pylonMatrix(p));
         expect(pivot.y).toBeCloseTo(grounds[i], 4);
-      } else expect(p.lean![1], `land tower ${i}`).toBe(0);
+      } else expect(p.lean, `land tower ${i}`).toEqual([0, 0]);
     });
-    // receding from the w1 eye: each further than the last, so each smaller
+    // (each its own way: not all to one side)
+    expect(new Set(stub.pylons.slice(0, water).map((p) => Math.sign(p.lean![1]))).size).toBeGreaterThan(1);
+    // the first drowned to its lowest arm: that arm a few metres over the water
+    const arm = (i: number, y: number): number => new THREE.Vector3(0, y, 0).applyMatrix4(pylonMatrix(stub.pylons[i])).y;
+    expect(arm(0, ARMS[0])).toBeGreaterThan(1);
+    expect(arm(0, ARMS[0])).toBeLessThan(5);
+    // the tops in the lagoon: only their upper cross-arms out of the water (the top one always, never the whole
+    // tower: under half of it out), the tower sunk deepest toward the valley's middle and rising again to the shore —
+    // its least-shown top neither the first nor the last of them
+    for (let i = 1; i < water; i++) {
+      expect(arm(i, ARMS[2]), `tower ${i}'s top arm`).toBeGreaterThan(2);
+      expect(shown[i]).toBeLessThan(0.5);
+    }
+    const lagoon = shown.slice(1, water);
+    const deepest = 1 + lagoon.indexOf(Math.min(...lagoon));
+    expect(deepest).toBeGreaterThan(1);
+    expect(deepest).toBeLessThan(water - 1);
+    expect(shown[water - 1]).toBeGreaterThan(shown[deepest]);
+    // receding from the w1 eye: each further than the last
     const e = eyeAt(starts.w1 + 30);
     const d = stub.pylons.map((p) => Math.hypot(p.x - e.x, p.z - e.z));
     for (let i = 1; i < d.length; i++) expect(d[i]).toBeGreaterThan(d[i - 1]);
     // the land ones on the high island (a few km, inside its ground's reach), not on our island or a motu
     for (let i = water; i < d.length; i++) expect(d[i]).toBeGreaterThan(5000);
-    // the wires: strung between the towers on land, snapped where the line goes into the water
+  });
+
+  it('hangs its wires as a drowned line\'s: strung on land only, every one into the water snapped from an arm still out of it', () => {
     for (const s of stub.spans) expect(Math.min(grounds[s.from], grounds[s.to])).toBeGreaterThanOrEqual(0);
     expect(stub.spans.length).toBe(grounds.length - water - 1);
-    expect(stub.snapped!.some((s) => s.at === water)).toBe(true);
+    // at the shore tower toward the lagoon, and at every tower in the water
+    for (let i = 0; i <= water; i++) expect(stub.snapped!.some((s) => s.at === i), `tower ${i}`).toBe(true);
+    for (const s of POWER_STUB.snapped) {
+      for (const k of s.attach) {
+        const y = new THREE.Vector3(ATTACH[k][0], ATTACH[k][1], 0).applyMatrix4(pylonMatrix(stub.pylons[s.at])).y;
+        expect(y, `tower ${s.at}, conductor ${k}`).toBeGreaterThan(0.5);
+      }
+    }
+  });
+
+  it('reads from the raft as a row of tops receding to the island\'s foot: none stacked, each further right, once the first has slid past', () => {
+    // the near one covers the far tops as w1 begins and slides off them to the left (the line's parallax), clear of
+    // them by w1's 45th second (535 s)
+    const early = eyeAt(starts.w1 + 25);
+    expect(box(early, 0).b1).toBeGreaterThan(box(early, 1).b0);
+    for (const t of times(starts.w1 + 45, starts.w2 + 35)) {
+      const e = eyeAt(t);
+      const boxes = stub.pylons.map((_, i) => box(e, i));
+      expect(boxes[0].b1, `the first at ${t}`).toBeLessThan(boxes[1].b0);
+      for (let i = 2; i < boxes.length; i++) {
+        // each further right than the last, its box apart from the last's by a few tenths of a degree at least
+        expect(boxes[i].b0 - boxes[i - 1].b1, `${i - 1}–${i} at ${t}`).toBeGreaterThan(0.3);
+      }
+      // the tops over the sea's horizon, enough to read from the back rows
+      for (let i = 1; i < boxes.length; i++) expect(boxes[i].top).toBeGreaterThan(0.3);
+    }
+    // and from the beach the same row, in the same order, between the Sun's road and the island
+    for (const t of times(starts.w3, starts.w6)) {
+      const e = eyeAt(t);
+      const boxes = stub.pylons.map((_, i) => box(e, i));
+      for (let i = 2; i < boxes.length; i++) expect(boxes[i].b0).toBeGreaterThan(boxes[i - 1].b1);
+    }
   });
 
   it('stands ~100 m off the raft in w1, in the open water between the high island and motu 1, then recedes toward the island', () => {
@@ -524,13 +583,55 @@ describe('the builders, built', async () => {
     }
   });
 
-  it('builds the stub near land and compiles its tower and its snapped wires', async () => {
+  it('takes the race paint off the kit for a valley\'s line: the hazard band\'s legs drawn as steel, the plate and the chequer boards gone', async () => {
+    // (the coordinator, 2026-11-02: "remove the speedboat-course hazard paint band … a valley line wouldn't have it")
     const pb = readFileSync(new URL('../assets/models/course_pylon.glb', import.meta.url));
     const kit = await loadPylonKit(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength) as ArrayBuffer);
-    const { group } = buildPowerLine(kit, stubPowerLine(beach), { origin: [beach.x, beach.z], cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen });
+    const plain = plainPylonKit(kit);
+    expect(plain.parts.some((p) => p.slot === 'C_Paint')).toBe(false);
+    expect(plain.parts).toHaveLength(kit.parts.length);
+    const paint = kit.parts.find((p) => p.slot === 'C_Paint')!;
+    const steel = kit.parts.find((p) => p.slot === 'C_Steel')!;
+    const band = plain.parts[kit.parts.indexOf(paint)];
+    expect(band.source).toBe(steel.source);
+    // what is left is the legs' band, −0.8..2.2 m (pylon.py): no triangle reaching the plate (3 m) or the boards (3.9 m),
+    // and the legs still whole through it — every one of the band's triangles kept
+    const pos = band.geometry.getAttribute('position');
+    const idx = band.geometry.getIndex()!;
+    let ys = [Infinity, -Infinity];
+    for (let i = 0; i < idx.count; i++) ys = [Math.min(ys[0], pos.getY(idx.getX(i))), Math.max(ys[1], pos.getY(idx.getX(i)))];
+    expect(ys[0]).toBeLessThan(-0.7);
+    expect(ys[1]).toBeGreaterThan(2.1);
+    expect(ys[1]).toBeLessThan(2.5);
+    const pIdx = paint.geometry.getIndex()!;
+    let legTris = 0;
+    for (let t = 0; t < pIdx.count / 3; t++) if ([0, 1, 2].every((c) => paint.geometry.getAttribute('position').getY(pIdx.getX(t * 3 + c)) < 2.4)) legTris++;
+    expect(idx.count / 3).toBe(legTris);
+    expect(legTris).toBeLessThan(pIdx.count / 3);
+    // and wearing the steel's atlas: its coordinates within the range of the steel's own
+    const suv = steel.geometry.getAttribute('uv');
+    const buv = band.geometry.getAttribute('uv');
+    const range = (a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, k: 'getX' | 'getY'): [number, number] => {
+      let r: [number, number] = [Infinity, -Infinity];
+      for (let i = 0; i < a.count; i++) r = [Math.min(r[0], a[k](i)), Math.max(r[1], a[k](i))];
+      return r;
+    };
+    for (const k of ['getX', 'getY'] as const) {
+      const [s0, s1] = range(suv, k);
+      const [b0, b1] = range(buv, k);
+      expect(b0).toBeGreaterThanOrEqual(s0);
+      expect(b1).toBeLessThanOrEqual(s1);
+    }
+  });
+
+  it('builds the valley\'s line and compiles its towers and its snapped wires, in steel only', async () => {
+    const pb = readFileSync(new URL('../assets/models/course_pylon.glb', import.meta.url));
+    const kit = await loadPylonKit(pb.buffer.slice(pb.byteOffset, pb.byteOffset + pb.byteLength) as ArrayBuffer);
+    const { group } = buildPowerLine(plainPylonKit(kit), stubPowerLine(beach), { origin: [beach.x, beach.z], cableMinAngle: CABLE_MIN_ANGLE, cableLook: cableGoldSheen });
     const meshes: THREE.Mesh[] = [];
     group.traverse((o) => void ((o as THREE.Mesh).isMesh && meshes.push(o as THREE.Mesh)));
     expect(meshes.some((m) => m.name === 'drowned-cables')).toBe(true);
+    expect(meshes.some((m) => m.name.includes('C_Paint'))).toBe(false);
     for (const m of meshes) {
       const { vertex, fragment } = shaders(m);
       expect(vertex.length).toBeGreaterThan(100);
