@@ -27,11 +27,12 @@
  * remain"). Two of its moves are timed here, each behind a film param (params/drift.ts), off by default:
  *
  *   c4, CALL, WAIT, ANSWER   (radioCall) the review's diagnosis: "in c4 the radio is answered 1.5 s after it is
- *                           called" — the wake above had no doubt in it. Now the dial wakes, our masthead lamp sends a
- *                           call (CALL_RHYTHM) that runs out along the sky to the station ahead and ends in nothing;
- *                           stars and surf; a second, shorter call; and the lamp ahead blinks the same rhythm back on
- *                           the music's step (ANSWER_AT). Only then does the Rose wake from it (CASCADE): one pulse a
- *                           side at a time round the ring, its arches raised high over the dome, closing behind us.
+ *                           called" — the wake above had no doubt in it. Now the dial wakes, our masthead sends a
+ *                           call (CALL_RHYTHM, as pulses: callPulses) that runs out along the sky to the station ahead
+ *                           and ends in nothing; stars and surf; a second, shorter call; and the lamp ahead flares the
+ *                           same rhythm back on the music's step (ANSWER_AT), its pulses running back to us. Only then
+ *                           does the Rose wake from it (CASCADE): one pulse a side at a time round the ring, its arches
+ *                           raised high over the dome, closing behind us, each path left faintly lit (TRAIL).
  *   w6, THE STRANGER         (radioEnding) our own lamp lights and joins, the traffic turns seaward and falls quiet,
  *                           and on the music's decay something that is not a station answers (ENDING).
  */
@@ -212,32 +213,43 @@ export function dialFlare(t: number, c4: number, at: number = WAKE.dial): number
  * 2 s loudness step detectors both put the widest rise at 447.2, the swell's middle; the step the ear hears is the
  * bass). The answer's first flash peaks there: 430.0 + 17.93. The calls sit before it, the wait in the dip. */
 export const ANSWER_AT = 17.93;
-/** OUR CALL SIGN, as the masthead lamp flashes it and the answer repeats it: [s after the call begins, s held] —
- * two short and a long, a lamp's rhythm, not the L-864's even blink (36 a minute on the station ahead, radio/network.ts):
- * the answer has to be told from the lamp's own blink at a glance. At most ~1 flash a second, soft-edged (FLASH):
- * a small lamp low on the dome, never a strobe */
+/** OUR CALL SIGN, as our call's pulses carry it and the answer repeats it: [s after the call begins, s held] — two
+ * short and a long, not the L-864's even blink (36 a minute on the station ahead, radio/network.ts): the answer has to
+ * be told from the lamp's own blink at a glance. At most ~1 a second, soft-edged (FLASH), never a strobe. (Flashed by a
+ * signal lamp at our masthead in the first two looks; the user, 2026-11-02, of those: "blinking light on the topmast
+ * of the raft is not doing it for me at all" — now each is a pulse along the sky, as the network's are: callPulses) */
 export const CALL_RHYTHM: ReadonlyArray<readonly [number, number]> = [
   [0, 0.45],
   [0.9, 0.45],
   [2.2, 1.1],
 ];
-/** s: a flash's soft edges (a hand on a lamp's shutter, not a strobe's square edge) */
+/** s: a flash's (and a call pulse's) soft edges, front and back — never a square edge */
 export const FLASH = { rise: 0.25, fall: 0.45 };
 /**
  * THE CALLS (s into c4): the dial's crackle (`dial`, its peak: the static rises from 1.5 s before), the first call's
- * start (`first`), how many of CALL_RHYTHM's flashes the second, shorter call sends (`second`), the s a call's pulse
- * takes from the masthead to the lamp ahead (`travel`), and the breath between the second call's pulse reaching it and
- * the answer's first flash peaking (`beat`). The pulse leaves with the call's last flash.
+ * start (`first`), how many of CALL_RHYTHM's pulses the second, shorter call sends (`second`), the s a pulse takes from
+ * our masthead to the lamp ahead (`travel`), and the breath between the second call's last pulse having wholly arrived
+ * there and the answer's first flash beginning (`beat`).
  *
- * Laid out, show s: the dial 433.0 · the first call 434.5–438.3, its pulse out 436.7 → 439.3, at the lamp ahead:
- * nothing · the wait, 438.3–443.9: stars, surf, and the sail struck (beats.ts SAIL_STRIKE, 440–447) · the second call
- * 443.9–445.7, its pulse 444.8 → 447.4 · the answer, its flashes peaking 447.93 and 448.8, the long one 450.1–451.4 ·
- * the Rose from 452.0 (CASCADE). The doc's "about 8 s": 9.4 s from call to call, 5.7 s of dark lamp between them.
- * (The dial at WAKE.dial's 7.5 s left no room: a call, 8 s, a call and the answer have to fit before 447.93.)
+ * EACH BEAT OF THE CALL SIGN IS A PULSE ALONG THE SKY (round 3; the user, 2026-11-02: the masthead blink "is not doing
+ * it for me at all" — a radio pulse in the network's own language instead): one leaves our masthead as each beat of
+ * the rhythm begins and runs out to the lamp ahead, as long along the path as the beat is held (CALL_PULSES); the
+ * first call's arrive and nothing answers. The answer comes back the same way, a pulse from that lamp for each of its
+ * flashes, to us (`back`).
+ *
+ * Laid out, show s: the dial 433.0 · the first call's pulses leave 434.5, 435.4, 436.7 (the long one), the last wholly
+ * at the lamp ahead by 440.9: nothing · the wait: stars, surf, and the sail struck (beats.ts SAIL_STRIKE, 440–447) ·
+ * the second call's two leave 443.0 and 443.9, in by 447.4 · the answer, its flashes peaking 447.93 and 448.8, the long
+ * one 450.1–451.4, each sending a pulse back to us (in 450.3 … 454.0) · the Rose from 452.0 (CASCADE). The doc's "about
+ * 8 s": 8.5 s from call to call. (Round 2 timed the second call by its single pulse's head: it began 443.9, and with
+ * the train's tail still running in, the answer would have started before the call was wholly there. The dial at
+ * WAKE.dial's 7.5 s left no room: a call, 8 s, a call and the answer have to fit before 447.93.)
  */
-export const CALL = { dial: 3, first: 4.5, second: 2, travel: 2.6, beat: 0.5 };
-/** the second call's start: so its pulse arrives CALL.beat before the answer's first flash peaks */
-const SECOND_AT = ANSWER_AT - CALL.beat - CALL.travel - CALL_RHYTHM[CALL.second - 1][0];
+export const CALL = { dial: 3, first: 4.5, second: 2, travel: 2.6, beat: 0.3 };
+/** the second call's start: so its last pulse is wholly in (its hold and its fall run past the lamp) CALL.beat before
+ * the answer's first flash begins to rise */
+const SECOND_LAST = CALL_RHYTHM[CALL.second - 1];
+const SECOND_AT = ANSWER_AT - FLASH.rise - CALL.beat - CALL.travel - (SECOND_LAST[0] + SECOND_LAST[1] + FLASH.fall);
 /** the calls: when each starts (s into c4) and its flashes */
 export const CALLS: ReadonlyArray<{ at: number; flashes: ReadonlyArray<readonly [number, number]> }> = [
   { at: CALL.first, flashes: CALL_RHYTHM },
@@ -255,13 +267,33 @@ function flash(x: number, hold: number): number {
 const rhythm = (x: number, flashes: ReadonlyArray<readonly [number, number]>): number =>
   Math.min(1, flashes.reduce((f, [at, hold]) => f + flash(x - at, hold), 0));
 
-/** OUR MASTHEAD LAMP at sea s `t`: 0 … 1 as it flashes the calls (dark between: a signal lamp, not a riding light) */
+/** OUR CALL at its source, sea s `t`: 0 … 1, the call sign's rhythm as its pulses leave the masthead (no lamp shows
+ * it: the light is the pulses' own, radioSignal.ts) — what the answer repeats, and what the dial swells with */
 export function callLamp(t: number, c4: number): number {
   return CALLS.reduce((f, c) => Math.max(f, rhythm(t - c4 - c.at, c.flashes)), 0);
 }
-/** the calls' pulses, masthead → the lamp ahead: sea s each leaves (with its call's last flash) and s it takes */
-export function callPulses(c4: number): Array<{ t0: number; dur: number }> {
-  return CALLS.map((c) => ({ t0: c4 + c.at + c.flashes[c.flashes.length - 1][0], dur: CALL.travel }));
+/** THE PULSES BETWEEN US AND THE LAMP AHEAD, on the one path between our masthead and its lamp: each one's sea s of
+ * leaving its end, s held (its length along the path, in s), and `back` (true: from the lamp ahead to us, the answer).
+ * The calls' as their beats begin; the answer's as its flashes begin (answerFlare), CALL.travel s each */
+export interface CallPulse {
+  t0: number;
+  hold: number;
+  back: boolean;
+}
+export function callPulses(c4: number): CallPulse[] {
+  const calls = CALLS.flatMap((c) => c.flashes.map(([at, hold]) => ({ t0: c4 + c.at + at, hold, back: false })));
+  const answer = CALL_RHYTHM.map(([at, hold]) => ({ t0: c4 + ANSWER_AT - FLASH.rise + at, hold, back: true }));
+  return [...calls, ...answer];
+}
+/** the dial as each call leaves (under radioOperator, props.ts): 0 … 1, swelling over the second before the call's
+ * first pulse, held through its last, settling over 1.5 s — one swell a call, not a blink a pulse */
+export function callSwell(t: number, c4: number): number {
+  const sm = (k: number): number => (k <= 0 ? 0 : k >= 1 ? 1 : k * k * (3 - 2 * k));
+  return CALLS.reduce((f, c) => {
+    const [at, hold] = c.flashes[c.flashes.length - 1];
+    const x = t - c4 - c.at;
+    return Math.max(f, sm((x + 1) / 1) * (1 - sm((x - at - hold) / 1.5)));
+  }, 0);
 }
 /** × the answer's flashes, against a Rose flare's 1 (stationFlare caps at 1.5) */
 const ANSWER_GAIN = 1.2;
@@ -303,6 +335,29 @@ export function answerFlare(t: number, c4: number): number {
  *           and the lamps are as they were
  */
 export const CASCADE = { lead: 3.5, call: 0.6, speed: 34, min: 5, lift: 0.6, gain: 1.8, quiet: [14, 6] as [number, number] };
+
+/**
+ * THE TRAILS (radioCall's c4; round 3, the user, 2026-11-02, of the cascade: "keeping faint lines of where the lines
+ * traveled … this interesting pattern, but like much more faint than we used to have. Otherwise, it's like very
+ * empty"). Once a pulse has run along a path — the Rose's arcs (props.ts) and our call's (radioSignal.ts) — the path
+ * keeps a faint line: it comes in behind the pulse over `in` s and decays over tens of seconds (`decay`, s, e-folding),
+ * so over the cascade the sky builds the network's figure link by link, the oldest fading first. It outlasts the
+ * pulses' quiet (CASCADE.quiet: the Rose's light goes 476 → 484) — still faintly there over the quiet — and goes over
+ * `out` (s before w1, start and end), gone as w1's dissolve begins (5 s before it), so the dissolve never crossfades a
+ * lit sky into an empty one (the 2026-11-01 review: "abrupt and blendy"). Its light: props.ts ARC_L.trail.
+ */
+export const TRAIL = { in: 2, decay: 40, out: [9, 5] as [number, number] };
+/** a trail's level `tau` s after a pulse's head passed: 0 before, in over TRAIL.in, decaying after */
+export const trailLevel = (tau: number): number => {
+  if (tau <= 0) return 0;
+  const k = Math.min(1, tau / TRAIL.in);
+  return k * k * (3 - 2 * k) * Math.exp(-tau / TRAIL.decay);
+};
+/** × every trail at sea s `t` (w1: sea s w1 starts): 1, then out over TRAIL.out */
+export const trailOut = (t: number, w1: number): number => {
+  const k = Math.min(1, Math.max(0, (t - (w1 - TRAIL.out[0])) / (TRAIL.out[0] - TRAIL.out[1])));
+  return 1 - k * k * (3 - 2 * k);
+};
 export const cascadeTravel = (arcDeg: number): number => Math.max(CASCADE.min, TRAVEL.base + arcDeg / CASCADE.speed);
 /** c4's wake under radioCall: the cascade from the answer (arcs `arcDeg` long as raised: CASCADE.lift) */
 export function cascadeTraffic(c4: number, links: Array<[number, number]>, arcDeg: number[], n: number): { messages: RoseMessage[]; litAt: number[] } {

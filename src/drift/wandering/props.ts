@@ -41,13 +41,14 @@ import { stationOf, type MastLamp } from '../../radio/network';
 import { beaconLevelNode } from '../../radio/mast';
 import {
   CALL,
+  CALL_RHYTHM,
   CASCADE,
   ENDING,
   WAKE,
   WAKE_FROM,
   answerFlare,
-  callLamp,
   callPulses,
+  callSwell,
   cascadeTraffic,
   chatterTraffic,
   dialFlare,
@@ -58,6 +59,8 @@ import {
   roseLinks,
   stationFlare,
   strangerPulse,
+  TRAIL,
+  trailOut,
   wakeTraffic,
   type RoseMessage,
 } from './roseTraffic';
@@ -498,7 +501,11 @@ const PULSE = { head: 0.35, trail: 0.6, trailK: 0.35, long: 4, longK: 0.12 };
  * glow about it, the faint glow a lit path keeps between messages (halo only: no line), a lamp's flare in the haze */
 // (rest 0.0022, then 0.0015: under w6's and c4's night exposure every lit path stayed a soft full line converging on its
 // lamp — the drawn Rose again; at 0.0004 a path is barely sensed between its messages)
-const ARC_L = { core: 0.035, halo: 0.01, rest: 0.0004, flare: 0.012 };
+// THE TRAIL (`trail`, radioCall's c4 only: roseTraffic.ts TRAIL; the user, 2026-11-02: "keeping faint lines of where
+// the lines traveled … but like much more faint than we used to have"): a line where a pulse has run, at a twelfth of
+// a pulse's core and an eighth of the drawn tubes' 0.025 the client found "pasted on", with twice the rest's glow (at
+// 0.004 the whole ring stood as clear thin lines at 476 s from row 8, the first round-3 stills: more drawn than sensed)
+const ARC_L = { core: 0.035, halo: 0.01, rest: 0.0004, flare: 0.012, trail: { core: 0.003, halo: 0.0008 } };
 /** the light's colours (linear): the pulse's warm white, the haze's amber (the raft's dial's own), a lamp's red-amber */
 const ARC_CORE: [number, number, number] = [1, 0.84, 0.6];
 const ARC_HALO: [number, number, number] = [1, 0.62, 0.3];
@@ -513,22 +520,25 @@ const RADIO_REACH = 7;
  * THE RADIO STORY (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md; what is said when:
  * roseTraffic.ts CALL, CASCADE, ENDING), each piece behind its film param (params/drift.ts), read every frame:
  *
- *   radioCall      c4: our masthead lamp (a signal lamp at the raft's truck, dark but for the calls: roseTraffic.ts
- *                  callLamp) and its calls' pulses (radioSignal.ts) out to the lamp ahead (WAKE_FROM), which answers
- *                  the same rhythm (answerFlare); the Rose's wake becomes the cascade (cascadeTraffic) over arches
- *                  raised high (CASCADE.lift), its pulses brighter for the thin air up there (CASCADE.gain), and goes quiet
- *                  later (CASCADE.quiet)
+ *   radioCall      c4: our calls, pulses from our masthead out along the sky to the lamp ahead (WAKE_FROM), and its
+ *                  answer, the same rhythm flared on its lamp (answerFlare) and run back to us as pulses (roseTraffic.ts
+ *                  callPulses; radioSignal.ts) — no lamp on our raft (round 3: the masthead's signal lamp is gone);
+ *                  the Rose's wake becomes the cascade (cascadeTraffic) over arches raised high (CASCADE.lift), its
+ *                  pulses brighter for the thin air up there (CASCADE.gain), it goes quiet later (CASCADE.quiet), and
+ *                  every path a pulse has run along keeps a faint line until the dissolve (TRAIL, ARC_L.trail)
  *   radioOperator  c1–w2: the crew's third kneels at the case's spot on the fore-deck, facing the eye across it, so the
- *                  case lands at their knees and the dial lights them from c4 on (THE OPERATOR)
+ *                  case lands at their knees and the dial lights them from c4 on (THE OPERATOR); under radioCall too
+ *                  the dial swells as each call leaves (callSwell, CALL_SWELL)
  *   radioEnding    w6: our island's mast dark until it lights (oursLit), w6's traffic turned seaward and quiet
  *                  (endingTraffic, endingRose), the far rafts' lanterns drifting in (HOMECOMING), the stranger's pulse
  *                  (STRANGER) and every lamp's last flare (lastFlare)
  */
-/** m over the main mast's top (raft-local: the bounds of its 'mast-main' piece) the signal lamp hangs; and its level
- * against a far raft's 25 cd lantern (farRafts.ts LANTERN_CD) — at 1, 12 m off, it bloomed into a second Moon over the
- * sail (the first look, out/drift/review/radio-1102/r1, 438 s) */
-const MAST_LAMP_UP = 0.25;
-const MAST_LAMP_LEVEL = 0.2;
+/** m over the main mast's top (raft-local: the bounds of its 'mast-main' piece) our calls leave from — where its
+ * antenna would be. (A signal lamp hung there in the first two looks, flashing the calls: the user, 2026-11-02, "blinking
+ * light on the topmast of the raft is not doing it for me at all"; the light is the pulses' own now, none on the raft) */
+const MAST_TOP_UP = 0.25;
+/** × the dial's glow at the height of a call's swell (roseTraffic.ts callSwell), under radioOperator */
+const CALL_SWELL = 0.8;
 /** the calls' pulses: × (CALL_NIGHT[0] + CALL_NIGHT[1] · night) — the first call goes out in the dusk (434 s, the Sun
  * ~2.5° down, the night's own measure near 0, where the Rose's × night would hide it) */
 const CALL_NIGHT: [number, number] = [0.35, 0.65];
@@ -768,6 +778,9 @@ export function createProps(): Props {
   /** × a pulse's light, its core and its haze (not a lit path's rest, not a lamp's flare): 1 but in c4 under radioCall
    * (roseTraffic.ts CASCADE.gain: the raised arches run through thin air) */
   const pulseGain = uniform(1);
+  /** × the trails (ARC_L.trail): 0 but in c4 under radioCall (roseTraffic.ts TRAIL, trailOut) — so the default Rose
+   * draws exactly what it drew */
+  const trailGain = uniform(0);
   /** the arc from A to B at u (TSL mirror of `arcPoint`) */
   const arcPath = (A: V3, B: V3, u: F): V3 => {
     const flatOf = (d: V3) => {
@@ -887,7 +900,15 @@ export function createProps(): Props {
       // A LAMP'S ANSWER in the haze about it, as a message reaches it (and its own lamp flares: radioTower.ts setFlare)
       const glowAt = (f: unknown, from: F): F => exp(from.mul(from).add(across.mul(across)).div(-((ARC.glow * DEG) ** 2))).mul(f as F) as F;
       const lamps = vec3(...ARC_LAMP).mul(glowAt(flareU[a], fromA).add(glowAt(flareU[b], fromB)).mul(ARC_L.flare));
-      return vec4(arc.add(lamps).mul(above).mul(beamNight).mul(beamGain), 1);
+      // THE TRAIL where the first message has run (roseTraffic.ts trailLevel, on the GPU): a faint line and its haze,
+      // under its own gain, not the pulses' — it outlasts their quiet (TRAIL.out)
+      const tt = lampTime.sub(first.x).sub(fs.mul(first.y));
+      const trailK = smoothstep(0, TRAIL.in, tt).mul(exp(tt.max(0).div(-TRAIL.decay)));
+      const trailL = vec3(...ARC_CORE)
+        .mul(coreProfile.mul(ARC_L.trail.core).mul(float(ARC.core * DEG).div(air.core)))
+        .add(vec3(...ARC_HALO).mul(haloProfile.mul(ARC_L.trail.halo)))
+        .mul(trailK.mul(inside).mul(scatter).mul(above).mul(beamNight).mul(trailGain));
+      return vec4(arc.add(lamps).mul(above).mul(beamNight).mul(beamGain).add(trailL), 1);
     })();
     const ribbon = new THREE.Mesh(g, mat);
     ribbon.frustumCulled = false;
@@ -907,9 +928,7 @@ export function createProps(): Props {
   let trafficFor = '';
 
   // THE RADIO STORY (see its constants): our signal lamp, our calls' pulses, the stranger, the far rafts coming in
-  const mastLamp = createFarLantern();
-  beams.add(mastLamp.mesh);
-  const callSignal = createSignal({ core: ARC_CORE, halo: ARC_HALO });
+  const callSignal = createSignal({ core: ARC_CORE, halo: ARC_HALO }, { train: callPulses(0).length });
   beams.add(callSignal.mesh);
   const matter = new THREE.Color(driftParams.matterColor);
   const anti = new THREE.Color(driftParams.antimatterColor);
@@ -1168,7 +1187,9 @@ export function createProps(): Props {
       // (under radioCall it wakes before our calls, not as the Rose answers: roseTraffic.ts CALL.dial)
       const crackle = dialFlare(t, starts.c4, callOn ? CALL.dial : WAKE.dial);
       const flicker = 0.85 + (0.15 + 0.25 * crackle) * Math.sin(t * 7.3) * Math.sin(t * 2.1);
-      dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle) * 6;
+      // (and under radioCall with the operator at it, it swells as each call goes out: one swell a call)
+      const swell = callOn && operatorOn ? CALL_SWELL * callSwell(t, starts.c4) : 0;
+      dialGlow.value = radio * flicker * (1 + DIAL_FLARE * crackle + swell) * 6;
       radioLight.intensity = (dialGlow.value / 6) * 0.08 * (operatorOn ? OPERATOR.light : 1);
       radioLight.distance = operatorOn ? OPERATOR.reach : RADIO_REACH;
       radioLight.color.setHex(operatorOn ? OPERATOR.color : RADIO_COLOR);
@@ -1197,6 +1218,7 @@ export function createProps(): Props {
       beamGain.value = world === 'coast' ? 0.4 * roseIn : roseIn;
       arcLift.value = callOn && world === 'open' ? CASCADE.lift : 0;
       pulseGain.value = callOn && world === 'open' ? CASCADE.gain : 1;
+      trailGain.value = callOn && world === 'open' ? trailOut(t, starts.w1) : 0;
       lampTime.value = t;
       for (const r of ring) r.tower.setTime(t);
       // THE TRAFFIC (roseTraffic.ts), once: c4's wake and w6's chatter, pure in the beats' starts
@@ -1260,8 +1282,8 @@ export function createProps(): Props {
           (l.first.value as THREE.Vector3).set(f ? f.t0 : NONE, f ? f.dur : 1, f ? dirOf(f) : 1);
         });
       }
-      // OUR CALLS (radioCall, c4): the signal lamp at the masthead flashing them, and each call's pulse from it out to
-      // the lamp ahead — the last to have left (or about to: its head glows a moment before)
+      // OUR CALLS (radioCall, c4): their pulses from the masthead out to the lamp ahead, and the answer's back, on the
+      // one path between them (roseTraffic.ts callPulses), and the path's faint trail from the first call on
       const calling = callOn && world === 'open' && beams.visible;
       if (calling && !mastTop) {
         // (the main mast's piece, raft-local: its top, over its middle — found once the raft is in)
@@ -1269,25 +1291,27 @@ export function createProps(): Props {
         if (mast) {
           raft.updateMatrixWorld(true);
           const box = new THREE.Box3().setFromObject(mast);
-          mastTop = raft.worldToLocal(new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y + MAST_LAMP_UP, (box.min.z + box.max.z) / 2));
+          mastTop = raft.worldToLocal(new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y + MAST_TOP_UP, (box.min.z + box.max.z) / 2));
         }
       }
       if (calling && mastTop) {
         raft.updateWorldMatrix(true, false);
         mastAt.copy(mastTop).applyMatrix4(raft.matrixWorld);
-        mastLamp.update(mastAt, s.eye, MAST_LAMP_LEVEL * callLamp(t, starts.c4));
-        const pulse = callPulses(starts.c4).filter((p) => p.t0 <= t + 1).pop();
+        const pulses = callPulses(starts.c4);
         const aLamp = callA.copy(mastAt).sub(s.eye);
         const bLamp = lampsFrom[WAKE_FROM];
         callSignal.set({
           path: (u) => arcPoint(aLamp, bLamp, u),
           t,
-          t0: pulse ? pulse.t0 : 1e7,
-          dur: pulse ? pulse.dur : 1,
-          gain: pulse && t < pulse.t0 + pulse.dur + 8 ? CALL_NIGHT[0] + CALL_NIGHT[1] * s.night : 0,
+          t0: 0,
+          dur: CALL.travel,
+          // (from a second before the first call; its trail goes with the Rose's, roseTraffic.ts trailOut)
+          gain: t > pulses[0].t0 - 1 ? (CALL_NIGHT[0] + CALL_NIGHT[1] * s.night) * trailOut(t, starts.w1) : 0,
+          // (each beat one of the Rose's pulse heads, the long one drawn out by what it is held beyond a short one)
+          pulses: pulses.map((p) => ({ ...p, hold: p.hold - CALL_RHYTHM[0][1] })),
+          trail: 1,
         });
       } else {
-        mastLamp.update(mastAt, s.eye, 0);
         callSignal.set({ path: () => mastAt, t, t0: 0, dur: 1, gain: 0 });
       }
       // THE ENDING (radioEnding, w6): the stranger from the sea's horizon at ENDING.bearing up to the one place (Act

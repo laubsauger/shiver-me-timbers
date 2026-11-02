@@ -8,10 +8,12 @@
  *     the answer, is the 1.5 s wake the review cut;
  *   - the calls leave room for doubt (about 8 s between them), the second is shorter, and its pulse has arrived before
  *     the answer starts (an answer that leads the call reads as coincidence);
- *   - the answer repeats the first call's rhythm exactly (the "same rhythm" is the whole message);
+ *   - the answer repeats the first call's rhythm exactly (the "same rhythm" is the whole message), and both ride
+ *     pulses along the sky, one a beat — no lamp blinks on our raft;
  *   - nothing flashes faster than about once a second, and no flash edge is a cut (comfort);
  *   - the cascade puts one pulse in flight a side, every crossing ≥ 5 s, reaches every station, and has closed before
- *     c4's Rose starts going quiet (else the ring closes in the fade, unseen);
+ *     c4's Rose starts going quiet (else the ring closes in the fade, unseen); the paths it and our call ran along
+ *     keep faint trails through that quiet, gone as the dissolve begins;
  *   - the raft's bow comes round to the station that answered while the eye's own pose is untouched;
  *   - the ending: our station speaks only once it is lit, the traffic ends converging on one station before the title,
  *     Act 1's pairs leave w6's sky with the Rose (the stranger's braid is the only thing in their colours), and the
@@ -32,6 +34,10 @@ import {
   answerFlare,
   callLamp,
   callPulses,
+  callSwell,
+  TRAIL,
+  trailLevel,
+  trailOut,
   cascadeTraffic,
   endingTraffic,
   lastFlare,
@@ -77,17 +83,42 @@ describe('move 1: call, wait, answer (c4)', () => {
     for (let t = C4; t < C4 + ANSWER_AT; t += 0.05) expect(stationFlare(t, WAKE_FROM, messages, links)).toBe(0);
   });
 
-  it('leaves about 8 s between the calls, the second shorter, its pulse in before the answer', () => {
+  it('leaves about 8 s between the calls, the second shorter, its pulses wholly in before the answer', () => {
     const [first, second] = CALLS;
     expect(second.at - first.at).toBeGreaterThan(7);
     expect(second.at - first.at).toBeLessThan(11);
     expect(second.flashes.length).toBeLessThan(first.flashes.length);
-    const [, p2] = callPulses(C4);
-    const arrive = p2.t0 + p2.dur;
-    expect(arrive).toBeLessThan(C4 + ANSWER_AT - FLASH.rise);
-    expect(arrive).toBeGreaterThan(C4 + ANSWER_AT - FLASH.rise - 1.5);
+    // (a pulse is wholly at its far end CALL.travel after its tail, hold + FLASH.fall, has left)
+    const ours = callPulses(C4).filter((p) => !p.back);
+    const second2 = ours.filter((p) => p.t0 >= C4 + second.at - 1e-9);
+    expect(second2.length).toBe(second.flashes.length);
+    const inBy = Math.max(...second2.map((p) => p.t0 + p.hold + FLASH.fall + CALL.travel));
+    expect(inBy).toBeLessThan(C4 + ANSWER_AT - FLASH.rise);
+    // …and the answer follows within a breath (more, and the call and the answer read as unrelated)
+    expect(inBy).toBeGreaterThan(C4 + ANSWER_AT - FLASH.rise - 1.5);
     // the dial wakes before the first call
     expect(CALL.dial).toBeLessThan(first.at);
+  });
+
+  it('calls in pulses along the sky, one a beat, and the answer comes back the same way', () => {
+    // (the user, 2026-11-02: the masthead's blinking lamp "is not doing it for me at all" — the call sign rides the
+    // pulses: they leave as its beats begin, as long as each is held)
+    const ps = callPulses(C4);
+    const out = ps.filter((p) => !p.back);
+    const back = ps.filter((p) => p.back);
+    const beats = CALLS.flatMap((c) => c.flashes.map(([at]) => c.at + at));
+    expect(out.length).toBe(beats.length);
+    out.forEach((p, i) => expect(p.t0 - C4).toBeCloseTo(beats[i], 9));
+    expect(out.map((p) => p.hold)).toEqual(CALLS.flatMap((c) => c.flashes.map(([, hold]) => hold)));
+    // the answer's pulses leave the lamp ahead with its flares, in our first call's rhythm
+    expect(back.map((p) => p.hold)).toEqual(CALL_RHYTHM.map(([, hold]) => hold));
+    for (const p of back) expect(answerFlare(p.t0 + FLASH.rise, C4)).toBeGreaterThan(1);
+    expect(Math.min(...back.map((p) => p.t0))).toBeCloseTo(C4 + ANSWER_AT - FLASH.rise, 9);
+    // the dial swells once a call, not once a pulse: no dip between a call's beats
+    for (const c of CALLS) {
+      const [lastAt, lastHold] = c.flashes[c.flashes.length - 1];
+      for (let x = 0; x <= lastAt + lastHold; x += 0.05) expect(callSwell(C4 + c.at + x, C4)).toBe(1);
+    }
   });
 
   it('answers with exactly the first call’s rhythm', () => {
@@ -139,6 +170,36 @@ describe('move 1: call, wait, answer (c4)', () => {
     const last = messages.reduce((a, m) => (m.t0 + m.dur > a.t0 + a.dur ? m : a));
     const back = (i: number): number => Math.abs(Math.abs(STATIONS[i]) - 180);
     expect(Math.min(back(sender(last, links)), back(receiver(last, links)))).toBeLessThan(35);
+  });
+});
+
+describe('move 1: the paths keep faint trails (radioCall)', () => {
+  // (the user, 2026-11-02: "keeping faint lines of where the lines traveled … but like much more faint … Otherwise, it's
+  // like very empty") — the network's figure builds link by link, still there through the quiet, gone by the dissolve
+  const w1 = C4 + BEATS.find((b) => b.name === 'c4')!.length;
+  const at = (t: number, lit: number): number => trailLevel(t - lit) * trailOut(t, w1);
+  it('comes in behind the pulse, not before it', () => {
+    expect(trailLevel(0)).toBe(0);
+    expect(trailLevel(-1)).toBe(0);
+    expect(trailLevel(TRAIL.in)).toBeGreaterThan(0.9);
+  });
+  it('keeps every path the cascade and our first call ran along faintly lit through the quiet', () => {
+    const { messages } = cascadeTraffic(C4, links, arcRaised, N);
+    // (a path's trail starts as the first pulse's head has run its length: its far end lit last)
+    const lit = [...messages.map((m) => m.t0 + m.dur), callPulses(C4)[0].t0 + CALL.travel];
+    // the quiet: the Rose's pulses and flares fade over CASCADE.quiet (476 → 484 show s)
+    const quiet = w1 - CASCADE.quiet[0];
+    for (const l of lit) {
+      expect(at(quiet, l)).toBeGreaterThan(0.3);
+      expect(at(w1 - CASCADE.quiet[1], l)).toBeGreaterThan(0);
+    }
+    // the oldest, the first call's, has faded most — it is the earliest stroke of the figure
+    expect(at(quiet, lit[lit.length - 1])).toBeLessThan(at(quiet, lit[0]));
+  });
+  it('is gone as the dissolve to w1 begins (5 s before it), never crossfaded', () => {
+    expect(trailOut(w1 - 5, w1)).toBe(0);
+    expect(TRAIL.out[1]).toBeGreaterThanOrEqual(5);
+    expect(TRAIL.out[0]).toBeLessThan(CASCADE.quiet[0]);
   });
 });
 

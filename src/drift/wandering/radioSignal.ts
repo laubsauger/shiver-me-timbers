@@ -15,9 +15,19 @@
  *
  * Between messages the path is dark: a call that reaches nothing leaves nothing (the review: "It travels out and ends
  * in nothing: no flare, no reply").
+ *
+ * A TRAIN OF PULSES (`train`, round 3 of the radio story): our call is no longer a lamp blinking at the masthead and one
+ * pulse after it (the user, 2026-11-02: the blink "is not doing it for me at all") but the call sign itself in pulses
+ * along the path — one per beat, each the Rose's own pulse head, the long beat's drawn out by how much longer it is held
+ * (roseTraffic.ts callPulses) — and the answer's pulses back along the same path from its far end. (Drawn first as the
+ * lamp's flashes laid along the path, rise, hold and fall: every beat a dash a third to two thirds of the path long, a
+ * streak out of the masthead rather than a pulse, the round-3 stills at 436–449 s.) Then the path keeps a faint
+ * line once the first has run along it (roseTraffic.ts TRAIL; the user: "keeping faint lines of where the lines
+ * traveled"), as the Rose's do (props.ts ARC_L.trail).
  */
 import * as THREE from 'three/webgpu';
-import { Fn, exp, float, sin, step, uniform, uv, vec3, vec4 } from 'three/tsl';
+import { Fn, exp, float, mix, sin, smoothstep, step, uniform, uv, vec3, vec4 } from 'three/tsl';
+import { FLASH, TRAIL } from './roseTraffic';
 
 /** segments along the ribbon; and those laid on past each end, along its tangent, over 3 σ of an end's glow — so a glow
  * at an end is round (the ribbon had stopped at its ends, and the stranger's arrival at the one place was a half-disc
@@ -29,8 +39,9 @@ const WIDTH = { core: 0.07, halo: 0.5 };
 /** the pulse in time (s): its head's σ, its trail's time constant and share, its afterglow's (haze only) — the Rose's
  * own (props.ts PULSE), so our call reads as the same kind of thing as the network's messages */
 const PULSE = { head: 0.35, trail: 0.6, trailK: 0.35, long: 4, longK: 0.12 };
-/** radiances (scene units, at the night's exposure): the core and the haze, as the Rose's (props.ts ARC_L) */
-const L = { core: 0.035, halo: 0.01 };
+/** radiances (scene units, at the night's exposure): the core and the haze, as the Rose's (props.ts ARC_L); and a
+ * path's trail, its line and its haze (as props.ts ARC_L.trail) */
+const L = { core: 0.035, halo: 0.01, trail: { core: 0.003, halo: 0.0008 } };
 /** deg: σ of the glow at an end (the stranger's arrival at the one place, its faint glow on the horizon before) */
 const END_GLOW = 0.6;
 /** deg along the path one turn of a pair's braid takes; and how far apart its two cores swing (σ of the haze) */
@@ -45,6 +56,14 @@ export interface SignalLook {
   halo: [number, number, number];
 }
 
+/** one pulse of a train: sea s it leaves its end (its head peaks there FLASH.rise later, as a lamp's flash would),
+ * s it is drawn out beyond one Rose pulse head (0: one head), and whether it runs from the path's far end back */
+export interface SignalPulse {
+  t0: number;
+  hold: number;
+  back: boolean;
+}
+
 export interface SignalState {
   /** m from the eye (the ribbon's group stands at the eye, unturned): the path at u 0 … 1 */
   path: (u: number) => THREE.Vector3;
@@ -57,6 +76,10 @@ export interface SignalState {
   /** a glow at the end (× END_GLOW's radiance, 0 none) and at the start */
   endGlow?: number;
   startGlow?: number;
+  /** a train's pulses (createSignal `train`; t0 then unused, dur the s each takes along the path), and × its trail
+   * (0 none), which runs from the first pulse out (its t0) */
+  pulses?: ReadonlyArray<SignalPulse>;
+  trail?: number;
 }
 
 export interface Signal {
@@ -65,7 +88,8 @@ export interface Signal {
   set(s: SignalState): void;
 }
 
-export function createSignal(look: SignalLook): Signal {
+/** `train`: draw up to this many pulses (SignalState.pulses) and the path's trail, instead of the one pulse */
+export function createSignal(look: SignalLook, o: { train?: number } = {}): Signal {
   const g = new THREE.BufferGeometry();
   const COUNT = SEGMENTS + 1 + 2 * EXT;
   const pos = new Float32Array(COUNT * 2 * 3);
@@ -90,23 +114,55 @@ export function createSignal(look: SignalLook): Signal {
   const startK = uniform(0);
   /** deg: the path's length as the eye sees it (for the braid and the end glows) */
   const arcLen = uniform(1);
+  /** a train's pulses: (t0 sea s, hold s, 1 back / 0 out; unused: t0 far ahead), and × the trail */
+  const NONE = 1e7;
+  const train = Array.from({ length: o.train ?? 0 }, () => uniform(new THREE.Vector3(NONE, 1, 0)));
+  const trailK = uniform(0);
 
   const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
   mat.colorNode = Fn(() => {
     const u = uv().x;
     // across the ribbon, in σ of the haze (the ribbon holds 3 σ each side)
     const across = uv().y.mul(2).sub(1).mul(3);
-    const tau = time.sub(t0).sub(u.mul(dur));
-    // (squares as products: WGSL's pow is undefined for a negative base)
-    const h = tau.div(PULSE.head);
-    const head = exp(h.mul(h).negate());
-    const after = tau.max(0);
-    const trail = step(0, tau).mul(exp(after.div(-PULSE.trail)).mul(PULSE.trailK));
-    const long = step(0, tau).mul(exp(after.div(-PULSE.long)).mul(PULSE.longK));
     // (the pulse runs between the ends only: the extensions carry the ends' glows)
     const inside = step(0, u).mul(step(u, 1));
-    const coreK = head.add(trail).mul(inside);
-    const haloK = head.mul(0.8).add(trail.mul(0.5)).add(long).mul(inside);
+    let coreK: F;
+    let haloK: F;
+    let trailLine: F = float(0) as F;
+    if (train.length) {
+      // THE TRAIN: each pulse the Rose's head (drawn out over its `hold`), its trail and afterglow behind it
+      let c: F = float(0) as F;
+      let hk: F = float(0) as F;
+      for (const p of train) {
+        const P = p as unknown as THREE.Node<'vec3'>;
+        const s = mix(u, float(1).sub(u), P.z);
+        // (s past the head's peak, its plateau 0 … hold)
+        const x = time.sub(P.x).sub(FLASH.rise).sub(s.mul(dur));
+        const d = x.negate().max(x.sub(P.y)).max(0).div(PULSE.head);
+        const body = exp(d.mul(d).negate());
+        const past = x.sub(P.y).max(0);
+        const trail = step(P.y, x).mul(exp(past.div(-PULSE.trail)).mul(PULSE.trailK));
+        const long = step(0, x).mul(exp(x.max(0).div(-PULSE.long)).mul(PULSE.longK));
+        c = c.add(body.add(trail)) as F;
+        hk = hk.add(body.mul(0.8).add(trail.mul(0.5)).add(long)) as F;
+      }
+      coreK = c.mul(inside) as F;
+      haloK = hk.mul(inside) as F;
+      // THE PATH'S TRAIL, from the first pulse out (roseTraffic.ts trailLevel, on the GPU)
+      const P0 = train[0] as unknown as THREE.Node<'vec3'>;
+      const tt = time.sub(P0.x).sub(FLASH.rise).sub(u.mul(dur));
+      trailLine = smoothstep(0, TRAIL.in, tt).mul(exp(tt.max(0).div(-TRAIL.decay))).mul(trailK).mul(inside) as F;
+    } else {
+      const tau = time.sub(t0).sub(u.mul(dur));
+      // (squares as products: WGSL's pow is undefined for a negative base)
+      const h = tau.div(PULSE.head);
+      const head = exp(h.mul(h).negate());
+      const after = tau.max(0);
+      const trail = step(0, tau).mul(exp(after.div(-PULSE.trail)).mul(PULSE.trailK));
+      const long = step(0, tau).mul(exp(after.div(-PULSE.long)).mul(PULSE.longK));
+      coreK = head.add(trail).mul(inside) as F;
+      haloK = head.mul(0.8).add(trail.mul(0.5)).add(long).mul(inside) as F;
+    }
     const ratio = WIDTH.halo / WIDTH.core;
     const profile = (off: F): F => {
       const x = across.sub(off).mul(ratio);
@@ -126,8 +182,8 @@ export function createSignal(look: SignalLook): Signal {
     const glowAt = (alongDeg: F): F => exp(alongDeg.mul(alongDeg).add(acrossDeg.mul(acrossDeg)).div(-(END_GLOW * END_GLOW))) as F;
     const ends = glowAt(float(1).sub(u).mul(arcLen) as F).mul(endK).add(glowAt(u.mul(arcLen) as F).mul(startK));
     const light = core
-      .mul(coreK.mul(L.core))
-      .add(vec3(...look.halo).mul(haloK.mul(halo).add(ends).mul(L.halo)));
+      .mul(coreK.mul(L.core).add(trailLine.mul(L.trail.core)))
+      .add(vec3(...look.halo).mul(haloK.mul(halo).add(ends).mul(L.halo).add(trailLine.mul(halo).mul(L.trail.halo))));
     return vec4(light.mul(gain), 1);
   })();
   const mesh = new THREE.Mesh(g, mat);
@@ -159,6 +215,11 @@ export function createSignal(look: SignalLook): Signal {
       gain.value = s.gain;
       endK.value = s.endGlow ?? 0;
       startK.value = s.startGlow ?? 0;
+      train.forEach((u, i) => {
+        const p = s.pulses?.[i];
+        (u.value as THREE.Vector3).set(p ? p.t0 : NONE, p ? p.hold : 1, p?.back ? 1 : 0);
+      });
+      trailK.value = s.trail ?? 0;
       for (let i = 0; i <= SEGMENTS; i++) {
         P[EXT + i].copy(s.path(i / SEGMENTS));
         U[EXT + i] = i / SEGMENTS;
