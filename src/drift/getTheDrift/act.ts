@@ -109,7 +109,8 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   group.name = 'get-the-drift';
   group.add(galaxies, milky.group, earth.group);
   // LIGHTS OUT's lamp (lamp.ts; params lightsOut): only built when it is on, so the approved flood draws as it did
-  const lamp = p.lightsOut ? createLamp() : null;
+  // (and only with loLamp: the 2026-11-02 review took the lamp out, "it doesn't read" — the front and the black stay)
+  const lamp = p.lightsOut && p.loLamp ? createLamp() : null;
   if (lamp) group.add(lamp.mesh);
   const centre = new THREE.Vector3();
   const sun = new THREE.Vector3();

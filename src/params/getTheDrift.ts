@@ -113,6 +113,10 @@ export interface GetTheDriftParams {
    * straight ahead, 20° up; it swings out with the lit ground to ~−40° as the eye comes down (lamp.ts) */
   loLampLat: number;
   loLampLon: number;
+  /** 1 = draw the surviving lamp, 0 = the front and the black without it. Off since the 2026-11-02 review: from a few
+   * hundred km up the lamp "looks like a miniature sun on the surface … it doesn't read and it doesn't work". The
+   * front putting the cities out and the black stay; ?loLamp=1 brings the lamp back for review */
+  loLamp: number;
   /** s, one slow blink of the lamp where the score sets none (lamp.ts: before its first pulse, after the dawn's hit) */
   loBlink: number;
   /** s the Sun rises later than the approved flood's (timeline.ts sunDay) */
@@ -190,6 +194,7 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     loOriginLon: 30,
     loLampLat: 45.22,
     loLampLon: 12.24,
+    loLamp: typeof location !== 'undefined' && new URLSearchParams(location.search).get('loLamp') === '1' ? 1 : 0,
     loBlink: 3.2,
     loSunLate: 15,
     loDawnAt: 11.3,
