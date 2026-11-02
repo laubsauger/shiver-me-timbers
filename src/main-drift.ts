@@ -39,7 +39,7 @@ import { DomeGuides } from './drift/domeGuides';
 import { billboardMesh, eyeFacing } from './drift/undertime/billboard';
 import { float, length, step, uv, vec3, vec4 } from 'three/tsl';
 import { createSea } from './drift/wandering/sea';
-import { LINE_DOWN_ON, createLineDown } from './drift/wandering/lineDown';
+import { LINE_DOWN_ON, LINE_DOWN_SUN_EL, createLineDown, raiseSun } from './drift/wandering/lineDown';
 import { C1_FOLLOW, beatStarts as seaBeats, type BeatName } from './drift/wandering/beats';
 import { adaptation, skyIrradiance } from './drift/wandering/seaSky';
 import { EARTH_R } from './drift/getTheDrift/atmosphere';
@@ -155,12 +155,18 @@ async function boot(): Promise<void> {
   const sea = seaTest
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
     : createSea(renderer, {
-        drive: (ts) => arrival.seaDrive(arrival.seaFrom + ts, arrival.cloudsFrom),
+        // (LOOK-DEV ONLY, `?linedown=day&ldsun=<deg>`: the landing's Sun raised, lineDown.ts LINE_DOWN_SUN_EL)
+        drive: (ts) => {
+          const d = arrival.seaDrive(arrival.seaFrom + ts, arrival.cloudsFrom);
+          if (LINE_DOWN_ON && LINE_DOWN_SUN_EL !== undefined) raiseSun(d.sun, LINE_DOWN_SUN_EL);
+          return d;
+        },
         c1End: arrival.total - arrival.seaFrom + C1_FOLLOW,
       });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
   // "THE LINE DOWN", LOOK-DEV ONLY (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option, behind
-  // its gates): with ?linedown the eye goes under the water for its moment in c2–c3. Off, nothing is built. The eye is
+  // its gates): with ?linedown the eye goes under the water for its moment in c2–c3 (?linedown=day: 319–335 s, the
+  // morning landing, the brighter-water fallback). Off, nothing is built. The eye is
   // put under through the sea's eye hook (`reviewEye`, run once update has placed the eye and the raft, before
   // anything reads the eye — the ocean decides top or underside from it); the review scripts set that hook too, so it
   // is wrapped here: the look-dev's eye first, then the review's.
