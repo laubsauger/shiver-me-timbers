@@ -762,7 +762,11 @@ export function sunDay(p: GetTheDriftParams, tiltDeg: number): SunDay {
   };
   // where along the circle it sets (in the lights beat's sky) and rises (in the flood's)
   const tSet = starts.lights + 0.4 * p.lights;
-  const tRise = starts.flood + 0.45 * p.flood;
+  // (LIGHTS OUT, the 2026-11-02 next-level review, move 2: "only then does the Sun rise" — after the front, the black
+  // and the lamp alone, `loSunLate` s later than the approved dawn over the flood: ~266.8 s of the show, not 251.8. Only
+  // the key's time moves; the rise is still found where the Sun clears the limb at that time, so it rises in view, and
+  // the morning at the raft — the last key — is the same, so the sea's day is untouched from the landing's end on)
+  const tRise = starts.flood + 0.45 * p.flood + (p.lightsOut ? p.loSunLate : 0);
   const step = Math.PI / 720;
   let set = Math.PI;
   for (let th = 0.3; th < 2 * Math.PI; th += step) {

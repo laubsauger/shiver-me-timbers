@@ -89,6 +89,33 @@ export interface GetTheDriftParams {
   orbitLook: number;
   /** deg the Sun climbs through the dawn (a time-lapse: the terminator sweeps toward the audience) */
   sunRise: number;
+  /**
+   * LIGHTS OUT (the 2026-11-02 next-level review, move 2, "the flood as Act 1's wave"; lifeLayers.ts floodFront,
+   * lamp.ts): 1 = on, 0 = the approved flood as it was. Off by default until the user has seen it in a seat-view clip;
+   * `drift.html?lightsOut` turns it on for a page (the review scripts and drift-render.mjs pass it with
+   * `--query lightsOut`). On: the overshoot pushes on into the front, a ragged front of water crosses the lit night
+   * side toward the audience and the cities go out behind it in clusters, 4–5 s of near-black sit in the score's dip,
+   * one warm lamp stays lit, blinking slowly, low in front — and only then does the Sun rise, `loSunLate` s later.
+   */
+  lightsOut: number;
+  /** s from the flood's start the front leaves the far limb (on the score's last hit before its dip, 235.1 s of the
+   * show), and the s it takes to cross everything in view (the last cluster is out `LO_CLUSTER` s after) */
+  loFront: number;
+  loFrontLen: number;
+  /** deg, where on Earth the front starts from (latitude, longitude): east of the limb ahead, so it comes over it */
+  loOriginLat: number;
+  loOriginLon: number;
+  /** deg, where the surviving lamp is (latitude, longitude): on the drowned Po delta's new sea, ~30 km beyond the
+   * debris spiral's centre on the descent's heading — the one place the camera path keeps at a fixed place on the
+   * dome (az 0 ± 0.1°, 20–26° up from 225 s to the sea's hand-over; lamp.ts) */
+  loLampLat: number;
+  loLampLon: number;
+  /** s, one slow blink of the lamp (lamp.ts) */
+  loBlink: number;
+  /** s the Sun rises later than the approved flood's (timeline.ts sunDay) */
+  loSunLate: number;
+  /** how much further the overshoot pushes past its balance (1 = its full overshoot again) while the front comes */
+  loPush: number;
   galaxyRadiance: number;
   volumeRadiance: number;
   /** ray-march steps through our galaxy */
@@ -137,6 +164,17 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     dawnSink: 5,
     orbitLook: 16,
     sunRise: 38,
+    // (?lightsOut: the review switch, read once at load — as wandering/raft.ts reads ?raftplain)
+    lightsOut: typeof location !== 'undefined' && new URLSearchParams(location.search).has('lightsOut') ? 1 : 0,
+    loFront: -5.9,
+    loFrontLen: 4.3,
+    loOriginLat: 45,
+    loOriginLon: 30,
+    loLampLat: 45.03,
+    loLampLon: 12.3,
+    loBlink: 3.2,
+    loSunLate: 15,
+    loPush: 0.4,
     galaxyRadiance: 1.2,
     volumeRadiance: 0.2,
     marchSteps: 72,
@@ -181,6 +219,16 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     dawnSink: { min: 0, max: 20, step: 0.5 },
     orbitLook: { min: 0, max: 30, step: 0.5 },
     sunRise: { min: 0, max: 80, step: 1 },
+    lightsOut: { min: 0, max: 1, step: 1 },
+    loFront: { min: -10, max: 0, step: 0.1 },
+    loFrontLen: { min: 1, max: 10, step: 0.1 },
+    loOriginLat: { min: -90, max: 90, step: 0.5 },
+    loOriginLon: { min: -180, max: 180, step: 0.5 },
+    loLampLat: { min: 44, max: 46, step: 0.01 },
+    loLampLon: { min: 11, max: 14, step: 0.01 },
+    loBlink: { min: 1.5, max: 8, step: 0.1 },
+    loSunLate: { min: 0, max: 30, step: 0.5 },
+    loPush: { min: 0, max: 1, step: 0.05 },
     galaxyRadiance: { min: 0, max: 10, step: 0.05 },
     volumeRadiance: { min: 0, max: 10, step: 0.05 },
     marchSteps: { min: 8, max: 256, step: 1 },

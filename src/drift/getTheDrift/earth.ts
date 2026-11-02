@@ -260,11 +260,17 @@ export function createEarth(): Earth {
   const lu = {
     fields: uniform(0), forests: uniform(0), ice: uniform(1), lights: uniform(0), overshoot: uniform(0), sea: uniform(0),
     waveOrigin: uniform(new THREE.Vector3(0, 0, 1)),
+    // (Lights Out's front, lifeLayers.ts floodFront: off, its clock never reaches anything)
+    frontClock: uniform(-1e4), frontLen: uniform(4.3), frontOrigin: uniform(new THREE.Vector3(1, 0, 0)),
   };
   const L: LifeUniforms = {
     fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
     waveOrigin: lu.waveOrigin as unknown as V3,
+    frontClock: lu.frontClock, frontLen: lu.frontLen, frontOrigin: lu.frontOrigin as unknown as V3,
   };
+  /** unit normal n in the planet's frame (x lon 0, y lon 90°E, z north): where Lights Out's front and its clusters are
+   * laid, so they stay on the cities while the map turns under the eye (timeline.ts glideSpin) */
+  const planetFrame = (n: V3): V3 => vec3(n.dot(G.zero), n.dot(G.east), n.dot(G.north));
   const du = {
     clear: uniform(0), time: uniform(0), presence: uniform(0), up: uniform(new THREE.Vector3(0, 1, 0)), east: uniform(new THREE.Vector3(1, 0, 0)), north: uniform(new THREE.Vector3(0, 0, -1)),
     /** the eye in the debris galaxy's frame (m: x east, y above the sea, z north of its centre: the sea's scene's) */
@@ -544,7 +550,7 @@ export function createEarth(): Earth {
     });
     // the lights of the night side, dimmed and spread by the cloud over them
     // the lights come up behind the terminator as the dusk deepens (a gradient that follows it, not a switch)
-    const lights = nightLights(n, lcw.x, land, L, fp).mul(night).mul(float(1).sub(overhead.mul(0.75)));
+    const lights = nightLights(n, lcw.x, land, L, fp, planetFrame(n)).mul(night).mul(float(1).sub(overhead.mul(0.75)));
     const out = lit.add(sun.mul(glint).add(skyInWater).mul(SUN_E)).add(lights).add(mirrored);
     const T = towardEye(float(EARTH_R), muV, eyeR, eyeUp.dot(v));
     // the moonlight through the air: grey (moonGrey)
@@ -601,7 +607,7 @@ export function createEarth(): Earth {
     // thin cloud is darker as well as clearer; at night the towns below light its underside
     const thick = cover.mul(0.6).add(0.4);
     const below = coords(n);
-    const glow = nightLights(n, lcwAt(below, fp.mul(12)).x, float(1), L, float(1)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
+    const glow = nightLights(n, lcwAt(below, fp.mul(12)).x, float(1), L, float(1), planetFrame(n)).mul(float(1).sub(smoothstep(-0.12, 0.04, muS))).mul(0.6);
     // the light falls off as the Sun gets low: the terminator a soft ramp, not a gold-edged line
     const low = smoothstep(-0.04, 0.25, muS).mul(0.85).add(0.15);
     // (the clouds a little dimmer than the ground's moonlight would make them: they read as cut-outs otherwise)
@@ -787,6 +793,9 @@ export function createEarth(): Earth {
       lu.overshoot.value = l?.overshoot ?? 0;
       lu.sea.value = l?.sea ?? 0;
       if (l) lu.waveOrigin.value.copy(l.waveOrigin);
+      lu.frontClock.value = l?.front ?? -1e4;
+      lu.frontLen.value = l?.frontLen ?? 4.3;
+      if (l) lu.frontOrigin.value.set(...l.frontOrigin);
       u.centre.value.copy(o.centre);
       u.sun.value.copy(o.sun).normalize();
       u.presence.value = o.presence;

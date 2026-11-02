@@ -13,6 +13,8 @@ import type { SeaDrive } from '../wandering/sea';
 import { createEarth } from './earth';
 import { geoFrameAt } from './earthMaps';
 import { lifeState } from './life';
+import { createLamp, lampState } from './lamp';
+import { frontArrival } from './lifeLayers';
 import { OUR_LOOK, createGalaxies, type GalaxyAtlas, type GalaxySpec } from './galaxies';
 import { diveGalaxies } from './webGalaxies';
 import type { WebFrame } from './webDive';
@@ -106,6 +108,9 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
   const group = new THREE.Group();
   group.name = 'get-the-drift';
   group.add(galaxies, milky.group, earth.group);
+  // LIGHTS OUT's lamp (lamp.ts; params lightsOut): only built when it is on, so the approved flood draws as it did
+  const lamp = p.lightsOut ? createLamp() : null;
+  if (lamp) group.add(lamp.mesh);
   const centre = new THREE.Vector3();
   const sun = new THREE.Vector3();
   const waveOrigin = new THREE.Vector3();
@@ -142,6 +147,16 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
     return hi;
   };
   const hi = comesDown(SEA_FROM_ALT);
+  // the lamp's place in the planet's frame (x lon 0, y lon 90°E, z north) and the act s the flood's front passes it
+  // (lifeLayers.ts FRONT_KEYS, from the front's origin; half a second on, as a cluster there goes)
+  const D2R = Math.PI / 180;
+  const lampGeo = [Math.cos(p.loLampLat * D2R) * Math.cos(p.loLampLon * D2R), Math.cos(p.loLampLat * D2R) * Math.sin(p.loLampLon * D2R), Math.sin(p.loLampLat * D2R)];
+  const L0 = lifeState(0, p).frontOrigin;
+  const lampFromOrigin = Math.acos(Math.min(1, lampGeo[0] * L0[0] + lampGeo[1] * L0[1] + lampGeo[2] * L0[2])) / D2R;
+  const lampPassed = starts.flood + p.loFront + frontArrival(lampFromOrigin, p.loFrontLen) + 0.5;
+  const lampAt = new THREE.Vector3();
+  const lampN = new THREE.Vector3();
+  const lampToEye = new THREE.Vector3();
   // WHERE ON EARTH (direction.md: "a high angle POV looking eastward"): the matter gathers over the
   // drowned Po plain between Padua and Rovigo (~5–10 m up today), the view heading east. The flood flies
   // ~1300 km east to it, so we arrive over the Bay of Biscay: France below, the Alps, Italy and the Adriatic
@@ -257,6 +272,17 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       // (the mats out before the hand-over: MATS_OUT; the pieces below keep drift.presence)
       const mats = { ...drift, presence: drift.presence * (1 - smoothstep01((t - (hi - MATS_OUT)) / MATS_OUT)) };
       earth.update({ time: t, centre, sun, presence: s.earth, sunPresence: handover, pixelAngle, eye, life: { ...L, waveOrigin }, drift: mats });
+      if (lamp) {
+        // on the map as it is turned now (the glide's turn is over by the flood's 7th s; before it the lamp turns with
+        // its cities), hidden as it goes under the eye's horizon (it does not, on the approved path, before the sea)
+        lampN.copy(geoNow.zero).multiplyScalar(lampGeo[0]).addScaledVector(geoNow.east, lampGeo[1]).addScaledVector(geoNow.north, lampGeo[2]).normalize();
+        lampAt.copy(centre).addScaledVector(lampN, EARTH_RADIUS);
+        lampToEye.subVectors(eye, lampAt).normalize();
+        const above = smoothstep01(lampN.dot(lampToEye) / 0.003);
+        const sunEl = Math.asin(Math.max(-1, Math.min(1, lampN.dot(sun)))) / D2R;
+        const ls = lampState(t, { from: starts.overshoot, passed: lampPassed, period: p.loBlink, sunEl, gone: hi - 2 });
+        lamp.update(lampAt, centre, ls.gain * above * s.earth, pixelAngle);
+      }
       // the pieces: where the gathering point is now (the planet only translates), turning with the field, lit by
       // the same air as the sea there
       field.visible = drift.presence > 0;
@@ -306,6 +332,7 @@ export function createArrival(p: GetTheDriftParams, e0: Vec3, web: { frame: WebF
       for (const c of galaxies.children) ((c as THREE.Mesh).material as THREE.Material).dispose();
       milky.dispose();
       earth.dispose();
+      lamp?.dispose();
     },
   };
 }
