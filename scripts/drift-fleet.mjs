@@ -183,6 +183,25 @@ export function machineCard(n, view, report, policy = YIELD_DEFAULTS, now = Date
 }
 
 /**
+ * THE STUDIO FARM WORKERS' GPU PICTURE as heartbeats (the user, 2026-11-02, after linux-monster moved to the studio
+ * farm's worker: "the Linux box is not telling us anymore what is using VRAM … it's eating everything" — our own
+ * render, which the old drift-node worker had reported in its /report heartbeat): each worker's card as it reports it
+ * to the hub (studio-farm's gpuReport: gpu, vram with ours, the named others), in the heartbeat's own shape, so the
+ * cards and the page read it as they read drift-node's. `workers`: the hub's view().workers (each `gpu` null or
+ * { gpu, vram, foreign, at }). No state, job or power: the farm's own job and the box's agent say those
+ */
+export function farmHeartbeats(workers = []) {
+  return workers.filter((w) => w?.gpu && Number.isFinite(w.gpu.at)).map((w) => ({ node: w.node, seen: w.gpu.at, gpu: w.gpu.gpu, vram: w.gpu.vram, foreign: w.gpu.foreign, via: 'farm' }));
+}
+
+/** heartbeats from both kinds of worker, the newest per node (a box moved to the farm's worker keeps its old one) */
+export function newestHeartbeats(...lists) {
+  const by = new Map();
+  for (const r of lists.flat()) if (r?.node && (by.get(r.node)?.seen ?? -1) < (r.seen ?? 0)) by.set(r.node, r);
+  return [...by.values()];
+}
+
+/**
  * this Mac's card, from the dashboard's own probes: ioreg's GPU load and memory, RAM, our render slots — and THIS MAC
  * AS A FARM WORKER (the user, 2026-11-02: "accept, drain, pause and remove toggles in the dashboard, so we can join in
  * or out of the render farm"), when the hub knows it: its farm state and moves (`farmState`, the hub's

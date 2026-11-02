@@ -10,7 +10,7 @@
  */
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { agentView, farmNodes, fleetCards, machineCard, macCard, STALE_MS } from '../scripts/drift-fleet.mjs';
+import { agentView, farmHeartbeats, farmNodes, fleetCards, machineCard, macCard, newestHeartbeats, STALE_MS } from '../scripts/drift-fleet.mjs';
 import { YIELD_DEFAULTS } from '../scripts/drift-share.mjs';
 
 const allow = farmNodes(join(__dirname, '..', 'scripts/drift-farm-nodes.json'));
@@ -119,6 +119,23 @@ describe('the machine cards', () => {
 
   it('this Mac is rendering while a render slot is held', () => {
     expect(macCard({ host: 'm', machine: {}, slots: { held: [{ label: 'review clip 300–330 s' }], limit: 2, waiting: [] } })).toMatchObject({ badge: 'rendering', slots: { held: 1, jobs: ['review clip 300–330 s'] } });
+  });
+
+  // (the user, 2026-11-02, after linux-monster moved to the studio farm's worker: "the Linux box is not telling us
+  // anymore what is using VRAM … it's eating everything" — our own 2-lane render): the farm worker's GPU picture, through
+  // the hub, makes the card's "ours" and its named others again, newer than the old worker's last heartbeat
+  it('a studio-farm worker\'s GPU picture is the box\'s heartbeat: ours on the card, the others named', () => {
+    const old = { node: 'linux-monster', seen: NOW - 3_600_000, state: 'idle', vram: { oursGB: 0 }, foreign: [] };
+    const workers = [{ node: 'linux-monster', gpu: { at: NOW - 4000, gpu: { name: 'NVIDIA GeForce RTX 4090', utilPct: 100, memUsedGB: 21.5, memTotalGB: 24 }, vram: { usedGB: 21.5, totalGB: 24, oursGB: 17.4, foreignGB: 3.9, freeGB: 2.5 }, foreign: [{ name: 'ComfyUI', memGB: 3.9 }] } }, { node: 'eeg-msi', gpu: null }];
+    const hbs = newestHeartbeats([old], farmHeartbeats(workers));
+    expect(hbs).toHaveLength(1);
+    expect(hbs[0]).toMatchObject({ node: 'linux-monster', seen: NOW - 4000, foreign: [{ name: 'ComfyUI', memGB: 3.9 }] });
+    const farmJob = { id: 'j', node: 'linux-monster', state: 'running', startedAt: NOW - 60_000 };
+    const c = fleetCards({ reports: hbs, farm: [farmJob], allow, now: NOW }).find((x: { name: string }) => x.name === 'linux-monster');
+    expect(c.badge).toBe('rendering');
+    expect(c.gpu).toMatchObject({ usedGB: 21.5, totalGB: 24, oursGB: 17.4, othersGB: 4.1, utilPct: 100 });
+    // (an old drift-node heartbeat newer than the farm's picture still wins: windows-monster, eeg-msi on /report)
+    expect(newestHeartbeats([{ ...old, seen: NOW }], farmHeartbeats(workers))[0].seen).toBe(NOW);
   });
 
   // (the user, 2026-11-02: "accept, drain, pause and remove toggles in the dashboard, so we can join in or out of the

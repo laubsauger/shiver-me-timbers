@@ -241,7 +241,7 @@ import { readFileSync, readdirSync, statSync, createReadStream, existsSync, writ
 import { join, dirname, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus, loadavg, freemem, totalmem, platform, hostname } from 'node:os';
-import { farmNodes, fleetCards, macCard } from './drift-fleet.mjs';
+import { farmHeartbeats, farmNodes, fleetCards, macCard, newestHeartbeats } from './drift-fleet.mjs';
 import { readYieldPolicy } from './drift-share.mjs';
 import { createFarmHub as createOldFarmHub, farmToken } from './drift-farm.mjs';
 import { STUDIO_FARM_DIR, fromPackage } from '../farm/package.mjs';
@@ -577,7 +577,7 @@ const MAC_NAME = (() => {
 const MAC_WORKER = { name: MAC_NAME, os: 'macos', gpu: 'Apple silicon', speed: 0.3, maxLanes: 1, battery: true, self: true };
 
 /** Status.machines and Status.sources (scripts/drift-fleet.mjs): this Mac, then the render machines */
-function machinesNow(m, sl, farm) {
+function machinesNow(m, sl, farm, heartbeats = newestHeartbeats([...nodes.values()], farmHeartbeats(farm.workers))) {
   let allow = [];
   let policy;
   try {
@@ -587,7 +587,7 @@ function machinesNow(m, sl, farm) {
     return { machines: [], sources: { agents: {}, hub: { url: HUB, ok: false, at: 0, error: String(e.message), used: false } } };
   }
   const hubUsed = allow.some((n) => agents[n.name] && !agents[n.name].ok);
-  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: [...nodes.values()], farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl, farm: farm.jobs, farmState: farm.nodes?.[MAC_NAME] ?? null, worker: (farm.workers ?? []).find((w) => w.node === MAC_NAME) ?? null }), policy, now: Date.now() });
+  const machines = fleetCards({ agents, hub: hubUsed && hub.ok ? hub.snapshot : null, reports: heartbeats, farm: farm.jobs, farmNodes: farm.nodes ?? {}, allow, mac: macCard({ host: MAC_NAME, machine: m, slots: sl, farm: farm.jobs, farmState: farm.nodes?.[MAC_NAME] ?? null, worker: (farm.workers ?? []).find((w) => w.node === MAC_NAME) ?? null }), policy, now: Date.now() });
   const sources = { agents: Object.fromEntries(allow.map((n) => [n.name, { ok: agents[n.name]?.ok ?? false, at: agents[n.name]?.at ?? 0, error: agents[n.name] ? agents[n.name].error : 'not asked yet' }])), hub: { url: HUB, ok: hub.ok, at: hub.at, error: hub.error, used: hubUsed } };
   return { machines, sources };
 }
@@ -598,10 +598,13 @@ async function status() {
   const [m, sl] = [await machine(), slots()];
   remember(sl);
   const farm = farmView();
-  const { machines, sources } = machinesNow(m, sl, farm);
+  // (the boxes' heartbeats: drift-node's /report, and the studio farm workers' GPU picture through the hub — the newest
+  // per box, so a box that moved to the farm's worker reads as before: farmHeartbeats)
+  const heartbeats = newestHeartbeats([...nodes.values()], farmHeartbeats(farm.workers));
+  const { machines, sources } = machinesNow(m, sl, farm, heartbeats);
   // (fleet: the same cards under the name the previous page read, until scripts/drift-dash-ui/ replaces it)
   const fleet = { hub: { url: HUB, ok: !sources.hub.used || hub.ok, error: hub.error }, cards: machines };
-  return { now: Date.now(), machine: m, slots: sl, work: work ?? { streams: [], waitingOnUser: [] }, outputs: outputs(work), machines, sources, farm, fleet, nodes: [...nodes.values()].sort((a, b) => String(a.node).localeCompare(String(b.node))) };
+  return { now: Date.now(), machine: m, slots: sl, work: work ?? { streams: [], waitingOnUser: [] }, outputs: outputs(work), machines, sources, farm, fleet, nodes: heartbeats.sort((a, b) => String(a.node).localeCompare(String(b.node))) };
 }
 
 /** the render farm's hub (header); off, with the reason on the console, when farm.json cannot be read */
