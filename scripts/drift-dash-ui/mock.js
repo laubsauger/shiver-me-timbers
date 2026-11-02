@@ -225,7 +225,8 @@ export function mockStatus(now, scenario = 'default', real = null) {
         gpu: { name: 'NVIDIA GeForce RTX 4090', utilPct: 96, usedGB: 15.6, totalGB: 24, tempC: 72, oursGB: 14.2, othersGB: 1.4, powerW: 398 + Math.round(8 * Math.sin(t / 5)), powerLimitW: 450 }, ramPct: 34, ramTotalGB: 62.6, cpuPct: 41,
         services: [{ name: 'sd-webrtc', state: 'healthy', vramGB: 1.2 }, { name: 'mediamtx', state: 'healthy', vramGB: null }],
         farm: linuxJob, last: linuxJob?.last });
-  const comfy = [{ name: 'ComfyUI', state: 'busy', vramGB: 18.1 }, { name: 'sd-webrtc', state: 'healthy', vramGB: 2.2 }, { name: 'mediamtx', state: 'healthy', vramGB: null }, { name: 'frame-server', state: 'healthy', vramGB: null }, { name: 'studio-tts', state: 'healthy', vramGB: null }, { name: 'vgw-agent', state: 'healthy', vramGB: 0.4 }];
+  // (with the pid, CPU and RAM the agent has for each: what the overview shows once the server passes them on)
+  const comfy = [{ name: 'ComfyUI', state: 'busy', vramGB: 18.1, pid: 14212, cpuPct: 38, rssMb: 9120 }, { name: 'sd-webrtc', state: 'healthy', vramGB: 2.2, pid: 9932, cpuPct: 4, rssMb: 2310 }, { name: 'mediamtx', state: 'healthy', vramGB: null, pid: 22920, cpuPct: 0, rssMb: 22 }, { name: 'frame-server', state: 'healthy', vramGB: null, pid: 59192, cpuPct: 1, rssMb: 140 }, { name: 'studio-tts', state: 'healthy', vramGB: null, pid: 7710, cpuPct: 0, rssMb: 610 }, { name: 'vgw-agent', state: 'healthy', vramGB: 0.4, pid: 8124, cpuPct: 2, rssMb: 380 }];
   const winJob = runOn('windows-monster');
   const windows = yieldCase
     ? box({ key: 'windows-monster', name: 'windows-monster', tailnet: 'desktop-0kl6e4p', badge: 'waiting-foreign', hint: { gpu: 'RTX 4090', speed: 1, battery: false },

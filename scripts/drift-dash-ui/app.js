@@ -439,25 +439,44 @@ function gpuUsers(m, d) {
   const by = new Map();
   const hb = (d.nodes ?? []).find((n) => n.node === m.key);
   const fresh = m.online && hb && fin(hb.seen) && d.now - hb.seen < HEARTBEAT_MS;
+  // (src: who said so, for the overview — "worker" our heartbeat, "studio-manager" the box's agent)
+  const row = (name) => by.get(name) ?? { id: name, name, memGB: null, n: 0, svc: false, yieldTo: false, state: null, src: [], pids: [], cpuPct: null, rssMb: null };
+  const from = (e, src) => !e.src.includes(src) && e.src.push(src);
   for (const f of fresh && Array.isArray(hb.foreign) ? hb.foreign : []) {
     if (!f?.name) continue;
-    const e = by.get(f.name) ?? { id: f.name, name: f.name, memGB: null, n: 0, svc: false, state: null };
+    const e = row(f.name);
     e.n += 1;
     if (fin(f.memGB)) e.memGB = (e.memGB ?? 0) + f.memGB;
+    if (fin(f.pid)) e.pids.push(f.pid);
+    from(e, 'worker');
     by.set(f.name, e);
   }
-  const svc = (name, memGB, state) => {
-    const e = by.get(name) ?? { id: name, name, memGB: null, n: 1, svc: false, state: null };
+  // (a service's pid, CPU and RAM where the card carries them — the agent has them, stats.cpuPct and rssMb; a server
+  // from before 2026-11-02 passes only name, state and VRAM, and the overview shows a dash)
+  for (const s of m.online ? m.services ?? [] : []) {
+    const e = row(s.name);
+    e.n ||= 1;
     e.svc = true;
-    e.state = state ?? e.state;
-    if (fin(memGB)) e.memGB = Math.max(e.memGB ?? 0, memGB);
-    by.set(name, e);
-  };
-  for (const s of m.online ? m.services ?? [] : []) svc(s.name, s.vramGB, s.state);
-  for (const f of m.waiting?.foreign ?? []) svc(f.name, f.memGB, 'yielded to');
+    e.state = s.state ?? e.state;
+    if (fin(s.vramGB)) e.memGB = Math.max(e.memGB ?? 0, s.vramGB);
+    e.cpuPct = s.cpuPct ?? s.stats?.cpuPct ?? e.cpuPct;
+    e.rssMb = s.rssMb ?? s.stats?.rssMb ?? e.rssMb;
+    if (fin(s.pid) && s.pid > 0 && !e.pids.includes(s.pid)) e.pids.push(s.pid);
+    from(e, 'studio-manager');
+    by.set(s.name, e);
+  }
+  for (const f of m.waiting?.foreign ?? []) {
+    const e = row(f.name);
+    e.n ||= 1;
+    e.yieldTo = true;
+    e.state = 'yielded to';
+    if (fin(f.memGB)) e.memGB = Math.max(e.memGB ?? 0, f.memGB);
+    from(e, 'worker');
+    by.set(f.name, e);
+  }
   const all = [...by.values()].sort((a, b) => (b.memGB ?? -1) - (a.memGB ?? -1) || Number(b.svc) - Number(a.svc));
-  const shown = all.filter((x) => x.svc || (x.memGB ?? 0) >= TINY_GB);
-  return { shown, tiny: all.length - shown.length, tinyGB: all.filter((x) => !shown.includes(x)).reduce((a, x) => a + (x.memGB ?? 0), 0), heartbeat: !!fresh };
+  const shown = all.filter((x) => x.svc || x.yieldTo || (x.memGB ?? 0) >= TINY_GB);
+  return { all, shown, tiny: all.length - shown.length, tinyGB: all.filter((x) => !shown.includes(x)).reduce((a, x) => a + (x.memGB ?? 0), 0), heartbeat: !!fresh };
 }
 
 /**
@@ -485,7 +504,7 @@ function jobLines(j, pv) {
   const bars = j.lanes?.each ? j.lanes.each.map(([a, b]) => (fin(a) && b > 0 ? pct(a, b) : null)) : [p];
   const count = fin(j.total) ? `${num(j.done ?? 0)}/${num(j.total)}${j.unit === 'stills' ? ' stills' : ''}` : fin(j.done) && j.done > 0 ? `${j.done} ${j.unit ?? ''}` : '';
   const right = j.waiting ? 'yielding' : fin(j.etaS) ? `${dur(j.etaS)} left` : p === 100 ? 'finishing' : 'starting';
-  const meta = joinDot(j.lanes?.n ? `${j.lanes.n} lane${j.lanes.n > 1 ? 's' : ''}` : '', j.chunk ?? '', count);
+  const meta = joinDot(j.lanes?.n ? `${j.lanes.n} lane${j.lanes.n > 1 ? 's' : ''}` : '', j.chunk ?? '', count, j.queue ?? '');
   const tip = [j.tip ?? j.name, joinDot(count && `${count} ${j.unit === 'stills' ? '' : j.unit ?? ''}`.trim(), fin(j.rate) ? `${j.rate.toFixed(2)} fps` : '', fin(j.etaS) ? `${dur(j.etaS)} left` : ''),
     j.lanes?.each ? `lanes: ${j.lanes.each.map(([a, b], k) => `${k + 1}: ${a}/${b}`).join(', ')}` : '', j.waiting ?? ''].filter(Boolean).join('\n');
   return `<div class="oj${j.waiting ? ' wait' : ''}" title="${esc(tip)}">${pv}`
@@ -493,21 +512,79 @@ function jobLines(j, pv) {
     + `<div class="oj-2"><div class="lbars n${bars.length}">${bars.map((x) => `<div class="pbar${x == null ? ' idle' : ''}"><b style="transform:scaleX(${((x ?? 0) / 100).toFixed(4)})"></b></div>`).join('')}</div><span class="lm one">${esc(meta)}</span></div></div>`;
 }
 
-/** one line of the list: a colour square (teal ours, amber someone else's, none for the Mac's processes), a name, two numbers */
-const listLine = (r, sq) => `<div class="ol${r.live === false ? ' fading' : ''}${r.cls ? ` ${r.cls}` : ''}"><span class="one" title="${esc(r.tip ?? r.name)}">${sq ? `<i class="sq ${sq}"></i>` : ''}${esc(r.name)}</span><span>${r.a ?? ''}</span><span>${r.b ?? ''}</span></div>`;
+/**
+ * WHAT IS GRABBING THE CARD, AT A GLANCE (the user, 2026-11-02: "make it easier to see at a glance what is grabbing
+ * shit"): each line of someone else's carries its share of the card's VRAM as a faint fill behind it and a hairline
+ * under it, so the big consumer pops; one over HEAVY_SHARE of the card is drawn heavier still. The three biggest
+ * others each get their own amber shade (SHADES), the same in their square, their part of the VRAM bar (vramParts)
+ * and the overview, so the bar and the list read together; the rest of the others' memory is the dim amber.
+ */
+const HEAVY_SHARE = 0.5;
+const SHADES = 3;
+/** by machine: the ids of its shaded others, in list order (the tile sets it; the overview reuses it) */
+const SHADE_OF = new Map();
+/** the open machine overview (gpuPop below): { key, el }, key null while closed */
+let GPUPOP = null;
 
-/** the list: the job blocks (two lines each), then `rows` in the lines left, the last "+n more" when `total` does not fit */
-function machineList(blocks, rows, total, tip, empty, more = (k) => `+${k} more`) {
-  let free = LIST_LINES - 2 * blocks.length;
+/** one line of the list: a colour square, a name, two numbers; `share` (0–1 of the card's VRAM) the fill behind it */
+const listLine = (r, sq) => {
+  const sh = fin(r.share) && r.share > 0 ? Math.min(1, r.share) : null;
+  return `<div class="ol${r.live === false ? ' fading' : ''}${r.cls ? ` ${r.cls}` : ''}${sh != null ? ` u ${sq ?? ''}` : ''}${sh != null && sh > HEAVY_SHARE ? ' heavy' : ''}"${sh != null ? ` style="--sh:${(sh * 100).toFixed(1)}%"` : ''}>`
+    + `<span class="one" title="${esc(r.tip ?? r.name)}">${sq ? `<i class="sq ${sq}"></i>` : ''}${esc(r.name)}</span><span>${r.a ?? ''}</span><span>${r.b ?? ''}</span></div>`;
+};
+
+/**
+ * the list: the job blocks (two lines each), a hairline with a small word between them and the others (the user,
+ * 2026-11-02: "a little bit of a divider in between rendering jobs and processes"), then `rows` in the lines left,
+ * the last "+n more" when `total` does not fit. THE WHOLE LIST IS ONE BUTTON: a click, Enter or Space opens the
+ * machine's overview (gpuPop) — every process and service, not just the four lines
+ */
+function machineList(key, blocks, rows, total, tip, empty, more = (k) => `+${k} more`, divider = 'on this GPU') {
+  const free = LIST_LINES - 2 * blocks.length;
   let body = blocks.join('');
   if (free > 0) {
     const fits = total <= free;
     const shown = rows.slice(0, fits ? free : free - 1);
+    if (blocks.length && (shown.length || !fits)) body += `<div class="odiv" aria-hidden="true"><span>${esc(divider)}</span></div>`;
     body += shown.map((r) => listLine(r, r.sq)).join('');
-    if (!fits) body += listLine({ name: more(total - shown.length), cls: 'more' });
+    if (!fits) body += listLine({ name: `${more(total - shown.length)}`, cls: 'more' });
     if (!blocks.length && !shown.length && fits) body += listLine({ name: empty, cls: 'none' });
   }
-  return `<div class="r-oth" title="${esc(tip)}">${body}</div>`;
+  const open = GPUPOP?.key === key;
+  return `<div class="r-oth${open ? ' open' : ''}" role="button" tabindex="0" data-gpulist="${esc(key)}" aria-haspopup="dialog" aria-expanded="${open}" aria-label="${esc(`Everything on ${key}: open the overview`)}" title="${esc(`${tip}\n\nclick for the full overview`)}">${body}</div>`;
+}
+
+/** a box's GPU users for its tile and its overview: merged (gpuUsers), in the tile's stable order, the top ones shaded */
+function gpuView(m, d) {
+  const g = m.gpu ?? {};
+  const users = gpuUsers(m, d);
+  // (ours without a job: a page or an ffmpeg of ours still on the card)
+  if (!m.farm && !m.job && fin(g.oursGB) && g.oursGB >= TINY_GB) users.shown.unshift({ id: 'ours', name: 'The Drift (ours)', memGB: g.oursGB, ours: true, n: 1, src: ['worker'], pids: [] });
+  const { rows, total } = stableTop(`gpu:${m.key}`, users.shown.map((x) => ({ ...x, v: x.memGB ?? 0 })), LIST_LINES, 0.3, 0.01, d.now);
+  const shadeIds = rows.filter((r) => !r.ours && fin(r.memGB) && r.memGB >= TINY_GB).slice(0, SHADES).map((r) => r.id);
+  SHADE_OF.set(m.key, shadeIds);
+  return { users, rows, total, shadeIds };
+}
+const shadeOf = (ids, id) => (ids.indexOf(id) >= 0 ? `sh${ids.indexOf(id)}` : 'shx');
+
+/**
+ * the VRAM bar's parts, in the list's colours: ours (teal), the shaded others in list order (their own amber), the
+ * rest of the others' memory (dim amber: unlisted, or the counters' gap). Each part is clamped to what the card says
+ * others hold, so the parts never add up past the bar
+ */
+function vramParts(g, users, shadeIds) {
+  const T = g.totalGB;
+  const ours = fin(g.oursGB) ? g.oursGB : 0;
+  let left = fin(g.othersGB) ? g.othersGB : Math.max(0, (g.usedGB ?? 0) - ours);
+  let h = `<b class="ours" style="width:${pct(ours, T).toFixed(1)}%" title="${esc(`ours: ${gb(ours)} GB`)}"></b>`;
+  shadeIds.forEach((id, i) => {
+    const u = users.find((x) => x.id === id);
+    const v = Math.min(left, fin(u?.memGB) ? u.memGB : 0);
+    left -= v;
+    if (v > 0) h += `<b class="foreign sh${i}" style="width:${pct(v, T).toFixed(1)}%" title="${esc(`${u.name}: ${gb(u.memGB)} GB`)}"></b>`;
+  });
+  if (left > 0) h += `<b class="foreign shx" style="width:${pct(left, T).toFixed(1)}%" title="${esc(`everyone else: ${gb(left)} GB`)}"></b>`;
+  return h;
 }
 
 /**
@@ -526,6 +603,8 @@ function tile(m, d) {
   const subTip = [g.name || m.hint?.gpu, osName(m.os), m.tailnet && `tailnet ${m.tailnet}`, m.hint?.speed && `renders at ${m.hint.speed}× a 4090`, m.hint?.battery && 'a laptop: renders on AC power only'].filter(Boolean).join(', ');
   const badgeTip = [stateOf(m.badge)[3], m.why, m.waiting?.why].filter(Boolean).join(': ');
   const on = m.online;
+  // (a box's GPU users, once: its VRAM bar's parts and its list share their order and colours)
+  const gv = self ? null : gpuView(m, d);
   let h = `<article class="tile s-${cls}${on ? '' : ' off'}" data-key="${esc(m.key)}">`;
 
   // 1. head
@@ -563,7 +642,7 @@ function tile(m, d) {
     const free = has ? Math.max(0, g.totalGB - ours - others) : null;
     const tip = `VRAM: ours ${gb(ours)} GB, others ${gb(others)} GB, free ${gb(free)} GB`;
     h += `<div class="r-mem" title="${esc(tip)}"><div class="vk"><span class="g-k">VRAM${has ? `<small class="fr">${gb(free)} GB free</small>` : ''}</span><span class="g-v">${has ? gb(g.usedGB) : DASH}<small> / ${fin(g.totalGB) ? gb(g.totalGB) : DASH} GB</small></span></div>`;
-    h += `<div class="vbar" role="img" aria-label="${esc(tip)}"><b class="ours" style="width:${pct(ours, g.totalGB).toFixed(1)}%"></b><b class="foreign" style="width:${pct(others, g.totalGB).toFixed(1)}%"></b></div></div>`;
+    h += `<div class="vbar" role="img" aria-label="${esc(tip)}">${has ? vramParts(g, gv.users.shown, gv.shadeIds) : ''}</div></div>`;
   }
 
   // 4. who is on the machine (machineList): our job, then the others — this Mac's busiest processes (CPU, RAM), a
@@ -574,29 +653,28 @@ function tile(m, d) {
     const held = d.slots?.held ?? [];
     const waiting = d.slots?.waiting?.length ?? 0;
     // (a slot job: its own progress; the newest frame for the first only, previewOf's)
-    const blocks = held.slice(0, 2).map((s, k) => jobLines({ name: humanJob(s.cmd || s.label), tip: `slot ${s.slot}: ${s.cmd || s.label}`, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, lanes: lanesOf(s.cmd, s.last) }, k === 0 ? pv : nopv));
+    // (the jobs waiting for a slot: "+n waiting" beside the last held job's count, a line of their own when none runs)
+    const blocks = held.slice(0, 2).map((s, k, a) => jobLines({ name: humanJob(s.cmd || s.label), tip: `slot ${s.slot}: ${s.cmd || s.label}`, done: s.done, total: s.total, unit: s.unit, rate: slotFps(s).now, etaS: s.etaS, lanes: lanesOf(s.cmd, s.last), queue: waiting && k === a.length - 1 ? `+${waiting} waiting` : '' }, k === 0 ? pv : nopv));
     const procs = macProcs(mc.top).filter((p) => !/render\)$/.test(p.name)).map((p) => ({ id: p.name, v: p.cpu, name: `${p.name}${p.n > 1 ? ` ×${p.n}` : ''}`, memMB: p.memMB }));
     const { rows, total } = stableTop(`procs:${m.key}`, procs, LIST_LINES, 8, 0.5, now);
     const lines = rows.map((r) => ({ ...r, a: `${Math.round(r.avg)}%`, b: r.memMB >= 1024 ? `${gb(r.memMB / 1024)} GB` : `${r.memMB} MB`, tip: `${r.name}: ${Math.round(r.avg)}% CPU (30 s average), ${r.memMB} MB` }));
-    if (waiting) lines.unshift({ id: 'waiting', name: `${waiting} job${waiting > 1 ? 's' : ''} waiting for a slot`, cls: 'none', tip: (d.slots?.waiting ?? []).map((w) => w.label).join('\n') });
-    h += machineList(blocks, lines, lines.length + Math.max(0, total - rows.length),
-      `this Mac’s busiest processes, by CPU averaged over ~30 s (our renders are left out)\n${procs.map((p) => `${p.name}: ${Math.round(p.v)}% CPU now`).join('\n')}`, 'no busy process');
+    if (waiting && !blocks.length) lines.unshift({ id: 'waiting', name: `${waiting} job${waiting > 1 ? 's' : ''} waiting for a slot`, cls: 'none', tip: (d.slots?.waiting ?? []).map((w) => w.label).join('\n') });
+    h += machineList(m.key, blocks, lines, lines.length + Math.max(0, total - rows.length),
+      `this Mac’s busiest processes, by CPU averaged over ~30 s (our renders are left out)\n${procs.map((p) => `${p.name}: ${Math.round(p.v)}% CPU now`).join('\n')}`, 'no busy process', undefined, 'busiest processes');
   } else {
     const fj = m.farm;
     const j = m.job;
     const waiting = m.badge === 'waiting-foreign' ? m.waiting?.why ?? 'waiting for the GPU' : null;
     const blocks = [];
     if (fj) blocks.push(jobLines({ name: humanJob(fj.argv?.length ? fj.argv : fj.label), tip: `farm ${shortId(fj.id)}: ${fj.label}`, done: fj.progress?.done, total: fj.progress?.total, unit: fj.progress?.unit, rate: fin(fj.progress?.fps) && fj.progress.fps > 0 ? fj.progress.fps : null, etaS: fj.progress?.etaS, lanes: lanesOf(fj.argv?.length ? fj.argv : fj.label, fj.last), waiting }, pv));
-    else if (j) blocks.push(jobLines({ name: cap(j.name), tip: j.out, done: j.frames, total: j.framesTotal, unit: 'frames', rate: fin(j.fps) && j.fps > 0 ? +j.fps : null, etaS: j.etaS, lanes: lanesOf(j.name, m.last), chunk: j.chunks ? `chunk ${j.chunk}/${j.chunks}` : '', waiting }, pv));
-    const users = gpuUsers(m, d);
-    // (ours without a job: a page or an ffmpeg of ours still on the card)
-    if (!blocks.length && fin(g.oursGB) && g.oursGB >= TINY_GB) users.shown.unshift({ id: 'ours', name: 'The Drift (ours)', memGB: g.oursGB, ours: true });
-    const { rows, total } = stableTop(`gpu:${m.key}`, users.shown.map((x) => ({ ...x, v: x.memGB ?? 0 })), LIST_LINES, 0.3, 0.01, now);
-    const lines = rows.map((r) => ({ ...r, sq: r.ours ? 'ours' : 'foreign', name: `${r.name}${r.n > 1 ? ` ×${r.n}` : ''}`, a: fin(r.memGB) ? `${gb(r.memGB)} GB` : DASH, b: r.ours ? 'ours' : r.svc ? r.state ?? 'service' : '',
-      tip: `${r.name}${r.n > 1 ? ` (${r.n} processes)` : ''}: ${fin(r.memGB) ? `${gb(r.memGB)} GB of VRAM` : 'VRAM not known'}${r.svc ? `, a studio-manager service (${r.state ?? 'running'})` : r.ours ? '' : ', a process on the GPU'}` }));
+    else if (j) blocks.push(jobLines({ name: humanJob(j.name), tip: j.out, done: j.frames, total: j.framesTotal, unit: 'frames', rate: fin(j.fps) && j.fps > 0 ? +j.fps : null, etaS: j.etaS, lanes: lanesOf(j.name, m.last), chunk: j.chunks ? `chunk ${j.chunk}/${j.chunks}` : '', waiting }, pv));
+    const { users, rows, total, shadeIds } = gv;
+    const T = g.totalGB;
+    const lines = rows.map((r) => ({ ...r, sq: r.ours ? 'ours' : shadeOf(shadeIds, r.id), share: !r.ours && fin(r.memGB) && fin(T) && T > 0 ? r.memGB / T : null, name: `${r.name}${r.n > 1 ? ` ×${r.n}` : ''}`, a: fin(r.memGB) ? `${gb(r.memGB)} GB` : DASH, b: r.ours ? 'ours' : r.svc ? r.state ?? 'service' : '',
+      tip: `${r.name}${r.n > 1 ? ` (${r.n} processes)` : ''}: ${fin(r.memGB) ? `${gb(r.memGB)} GB of VRAM${fin(T) ? `, ${Math.round((100 * r.memGB) / T)}% of the card` : ''}` : 'VRAM not known'}${r.svc ? `, a studio-manager service (${r.state ?? 'running'})` : r.ours ? '' : ', a process on the GPU'}` }));
     const tip = [m.why, m.waiting?.why, ...users.shown.map((s) => `${s.name}${fin(s.memGB) ? ` ${gb(s.memGB)} GB` : ''}${s.svc ? ` (service, ${s.state ?? 'running'})` : ''}`), users.tiny ? `and ${users.tiny} more under ${TINY_GB * 1000} MB each` : '',
       on && !users.heartbeat ? 'no fresh heartbeat from our worker here: only the studio-manager services are listed' : ''].filter(Boolean).join('\n');
-    h += machineList(blocks, lines, lines.length + Math.max(0, total - rows.length) + users.tiny, tip || (on ? 'nothing else on the GPU' : 'offline'),
+    h += machineList(m.key, blocks, lines, lines.length + Math.max(0, total - rows.length) + users.tiny, tip || (on ? 'nothing else on the GPU' : 'offline'),
       on ? (m.badge === 'ready' ? 'Free: nothing else on the GPU' : 'nothing else on the GPU') : 'offline', (k) => `+${k} more${k === users.tiny ? `, under ${TINY_GB * 1000} MB each` : users.tinyGB >= 0.1 ? `, ${gb(users.tinyGB)} GB` : ''}`);
   }
   // 5. footer: where the numbers come from, when we last heard, our last run there
@@ -624,6 +702,172 @@ function renderFleet(d) {
     ? `<div class="note">studio-manager’s hub isn’t answering at <code>${esc(hub.url)}</code>${hub.error ? ` (${esc(hub.error)})` : ''}: a box whose own agent is silent shows only our heartbeats. To start it: <code>cd ../studio-manager &amp;&amp; yarn studio</code></div>`
     : '');
 }
+
+// ------------------------------------------------------------------------------------- a machine's overview (gpuPop)
+/**
+ * EVERYTHING ON ONE MACHINE (the user, 2026-11-02: "click the '+5 more' on the different services and then actually
+ * get a full overview if there's more to see"): a panel under the tile — opened by a click on the list, Enter
+ * or Space on it; closed by Escape (focus back on the list), a click outside, × or the list again. Every process and
+ * service the sources name, ours first: its share of the card as a bar (the tile's colours), its VRAM, the
+ * studio-manager state, CPU and RAM where the agent has them, its pid where known, and who said so — "worker" (our
+ * drift-node heartbeat: nvidia-smi and the GPU counters) or "studio-mgr" (the box's agent). This Mac: its slot jobs
+ * and its busiest processes from ps, by CPU. Refreshed with the data where it is (morph: no flicker, no jump); its
+ * rows by VRAM to 0.1 GB, then by name, so two near-equal processes do not swap on every poll.
+ */
+const popSort = (a, b) => Math.round(((b.memGB ?? -1) - (a.memGB ?? -1)) * 10) || String(a.name).localeCompare(String(b.name));
+const SRC_WORD = { worker: 'worker', 'studio-manager': 'studio-mgr', ps: 'ps' };
+
+/** the overview's rows of a box: { sq, name, sub, share, a, state, cpu, ram, src, ours, heavy } */
+function popRowsBox(m, d) {
+  const g = m.gpu ?? {};
+  const T = g.totalGB;
+  const shadeIds = SHADE_OF.get(m.key) ?? [];
+  const users = gpuUsers(m, d);
+  const rows = [];
+  const fj = m.farm;
+  const j = m.job;
+  const oursGB = fin(g.oursGB) ? g.oursGB : null;
+  const yielding = m.badge === 'waiting-foreign';
+  if (fj || j || (oursGB ?? 0) >= TINY_GB) {
+    const p = fj?.progress ?? (j ? { done: j.frames, total: j.framesTotal, etaS: j.etaS } : {});
+    const lanes = fj ? lanesOf(fj.argv?.length ? fj.argv : fj.label, fj.last) : j ? lanesOf(j.name, m.last) : null;
+    const name = fj ? humanJob(fj.argv?.length ? fj.argv : fj.label) : j ? humanJob(j.name) : 'The Drift (ours)';
+    const prog = fin(p.total) && p.total > 0 ? `${Math.round(pct(p.done ?? 0, p.total))}%` : '';
+    rows.push({ ours: true, sq: 'ours', name, sub: joinDot(fj ? `farm ${shortId(fj.id)}` : '', lanes?.n ? `${lanes.n} lane${lanes.n > 1 ? 's' : ''}` : '', prog, fin(p.etaS) ? `${dur(p.etaS)} left` : ''),
+      share: fin(oursGB) && fin(T) && T > 0 ? oursGB / T : null, a: oursGB, state: yielding ? 'yielding' : fj || j ? 'rendering' : 'ours', src: ['worker'] });
+  }
+  for (const u of [...users.all].sort(popSort)) {
+    const share = fin(u.memGB) && fin(T) && T > 0 ? u.memGB / T : null;
+    rows.push({ sq: shadeOf(shadeIds, u.id), name: `${u.name}${u.n > 1 ? ` ×${u.n}` : ''}`, sub: u.pids.length ? `pid ${u.pids.join(', ')}` : '', share, a: u.memGB, state: u.state ?? (u.svc ? 'service' : ''),
+      cpu: u.cpuPct, ram: fin(u.rssMb) ? u.rssMb : null, src: u.src, heavy: share != null && share > HEAVY_SHARE });
+  }
+  return { rows, heartbeat: users.heartbeat, listedGB: users.all.reduce((x, u) => x + (u.memGB ?? 0), 0) };
+}
+
+/** this Mac's: its slot jobs, then each process ps names (pid by pid), by CPU; its share of the whole machine's CPU */
+function popRowsMac(d) {
+  const mc = d.machine ?? {};
+  const cores = mc.cores || 1;
+  const rows = (d.slots?.held ?? []).map((s) => ({ ours: true, sq: 'ours', name: humanJob(s.cmd || s.label), sub: joinDot(`slot ${s.slot}`, fin(s.total) && s.total > 0 ? `${Math.round(pct(s.done ?? 0, s.total))}%` : '', fin(s.etaS) ? `${dur(s.etaS)} left` : ''), state: 'rendering', src: ['ps'] }));
+  for (const p of [...(mc.top ?? [])].sort((a, b) => b.cpu - a.cpu)) {
+    const ours = /render\)$/.test(p.name);
+    rows.push({ ours, sq: ours ? 'ours' : null, name: p.name, sub: fin(p.pid) ? `pid ${p.pid}` : '', share: fin(p.cpu) ? p.cpu / (100 * cores) : null, a: p.cpu, cpu: null, ram: p.memMB, state: ours ? 'ours' : '', src: ['ps'] });
+  }
+  for (const w of d.slots?.waiting ?? []) rows.push({ ours: true, sq: 'ours', name: humanJob(w.cmd || w.label), sub: 'waiting for a slot', state: 'waiting', src: ['ps'] });
+  return { rows };
+}
+
+function gpuPopHtml(m, d) {
+  const self = m.self === true;
+  const g = m.gpu ?? {};
+  const { name } = splitName(m.name);
+  const box = self ? popRowsMac(d) : popRowsBox(m, d);
+  const mb = (x) => (fin(x) ? (x >= 1024 ? `${gb(x / 1024)} GB` : `${Math.round(x)} MB`) : DASH);
+  let h = `<div class="gp-h"><b>${esc(name)}</b><span class="one">${esc(joinDot(gpuShort(g.name || m.hint?.gpu), self ? 'busiest processes, from ps' : fin(g.usedGB) && fin(g.totalGB) ? `${gb(g.usedGB)} of ${gb(g.totalGB)} GB VRAM used` : '', fin(g.utilPct) ? `GPU ${Math.round(g.utilPct)}%` : ''))}</span>`
+    + '<button type="button" class="cc-x" data-gpuclose="1" aria-label="Close the overview">×</button></div>';
+  if (!self && fin(g.totalGB) && fin(g.usedGB)) h += `<div class="vbar gp-bar">${vramParts(g, gpuUsers(m, d).shown, SHADE_OF.get(m.key) ?? [])}</div>`;
+  const head = self ? ['Process', 'Share of CPU', 'CPU', 'State', 'RAM', 'From'] : ['Process or service', 'Share of VRAM', 'VRAM', 'State', 'CPU', 'RAM', 'From'];
+  h += `<div class="gp-t${self ? ' mac' : ''}" role="table" aria-label="${esc(`Everything on ${name}`)}"><div class="gp-r gp-hr" role="row"><span role="columnheader"></span>${head.map((x) => `<span role="columnheader">${esc(x)}</span>`).join('')}</div>`;
+  let divided = false;
+  for (const r of box.rows) {
+    if (!r.ours && !divided && box.rows.some((x) => x.ours)) {
+      divided = true;
+      h += `<div class="gp-div" role="presentation"><span>${self ? 'busiest processes' : 'on this GPU'}</span></div>`;
+    }
+    const sh = fin(r.share) ? Math.max(0, Math.min(1, r.share)) : null;
+    const cells = [
+      `<span>${r.sq ? `<i class="sq ${r.sq}"></i>` : ''}</span>`,
+      `<span class="gp-n"><span class="one" title="${esc(r.name)}">${esc(r.name)}</span>${r.sub ? `<small class="one">${esc(r.sub)}</small>` : ''}</span>`,
+      `<span class="gp-sb">${sh != null ? `<span class="gp-track"><b class="${r.sq ?? 'neutral'}" style="width:${(sh * 100).toFixed(1)}%"></b></span><span class="gp-pc">${sh * 100 >= 1 ? Math.round(sh * 100) : sh > 0 ? '<1' : 0}%</span>` : ''}</span>`,
+      `<span class="n">${self ? (fin(r.a) ? `${Math.round(r.a)}%` : DASH) : fin(r.a) ? `${gb(r.a)} GB` : DASH}</span>`,
+      `<span class="st one">${esc(r.state ?? '')}</span>`,
+      ...(self ? [] : [`<span class="n">${fin(r.cpu) ? `${Math.round(r.cpu)}%` : DASH}</span>`]),
+      `<span class="n">${mb(r.ram)}</span>`,
+      `<span class="src">${(r.src ?? []).map((x) => `<i>${esc(SRC_WORD[x] ?? x)}</i>`).join('')}</span>`,
+    ];
+    h += `<div class="gp-r${r.ours ? ' ours' : ''}${r.heavy ? ' heavy' : ''}" role="row">${cells.map((c) => c.replace(/^<span/, '<span role="cell"')).join('')}</div>`;
+  }
+  if (!box.rows.length) h += `<div class="gp-r gp-none" role="row"><span role="cell"></span><span role="cell">${m.online ? 'nothing on the GPU that any source names' : 'offline: nothing to list'}</span></div>`;
+  h += '</div>';
+  const notes = [];
+  if (!self) {
+    const others = g.othersGB;
+    const gap = fin(others) ? others - box.listedGB : null;
+    if (fin(gap) && gap >= 0.1) notes.push(`${gb(gap)} GB of the others’ VRAM is named by no source (the driver, the desktop, or a process the counters miss).`);
+    if (m.online && !box.heartbeat) notes.push('No fresh heartbeat from our worker here: only studio-manager’s services are listed.');
+    if (!box.rows.some((r) => fin(r.cpu))) notes.push('CPU and RAM per service need the dashboard server to pass on the agent’s stats (not yet).');
+    notes.push('No GPU % per process: neither nvidia-smi under Windows nor the agent reports one.');
+  } else notes.push('Share of CPU: of all the Mac’s cores. Our own renders are marked teal.');
+  h += `<div class="gp-f">${notes.map((x) => `<p>${esc(x)}</p>`).join('')}</div>`;
+  return h;
+}
+
+/** the open overview: { key, el, opener } */
+function openGpuPop(key) {
+  if (!GPUPOP) {
+    const el = document.createElement('div');
+    el.className = 'gpop';
+    el.setAttribute('role', 'dialog');
+    el.tabIndex = -1;
+    document.body.append(el);
+    GPUPOP = { key: null, el };
+  }
+  GPUPOP.key = key;
+  GPUPOP.el.setAttribute('aria-label', `Everything on ${key}`);
+  if (last) {
+    renderFleet(last);
+    syncGpuPop(last);
+  }
+  GPUPOP.el.classList.add('on');
+  GPUPOP.el.querySelector('[data-gpuclose]')?.focus({ preventScroll: true });
+}
+function closeGpuPop(refocus) {
+  if (!GPUPOP?.key) return;
+  const key = GPUPOP.key;
+  GPUPOP.key = null;
+  GPUPOP.el.classList.remove('on');
+  if (last) renderFleet(last);
+  if (refocus) document.querySelector(`[data-gpulist="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+}
+/** its content from the newest data, and its place: under the tile's list, else above it, inside the window */
+function syncGpuPop(d) {
+  if (!GPUPOP?.key) return;
+  const m = machinesOf(d).find((x) => x.key === GPUPOP.key);
+  const list = document.querySelector(`[data-gpulist="${CSS.escape(GPUPOP.key)}"]`);
+  if (!m || !list) return closeGpuPop(false);
+  morph(GPUPOP.el, gpuPopHtml(m, d));
+  placeGpuPop();
+}
+function placeGpuPop() {
+  if (!GPUPOP?.key) return;
+  const list = document.querySelector(`[data-gpulist="${CSS.escape(GPUPOP.key)}"]`);
+  if (!list) return;
+  // (under the whole tile, its left at the list's: the tile's footer and its farm buttons stay in sight)
+  const r = { left: list.getBoundingClientRect().left, top: list.closest('.tile').getBoundingClientRect().top, bottom: list.closest('.tile').getBoundingClientRect().bottom };
+  const w = GPUPOP.el.offsetWidth;
+  const hh = GPUPOP.el.offsetHeight;
+  const left = Math.max(8, Math.min(innerWidth - w - 8, r.left));
+  const top = r.bottom + 6 + hh <= innerHeight - 8 ? r.bottom + 6 : r.top - 6 - hh >= 8 ? r.top - 6 - hh : Math.max(8, innerHeight - hh - 8);
+  GPUPOP.el.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+}
+document.addEventListener('click', (e) => {
+  const l = e.target.closest('[data-gpulist]');
+  if (l) return GPUPOP?.key === l.dataset.gpulist ? closeGpuPop(false) : openGpuPop(l.dataset.gpulist);
+  if (!GPUPOP?.key) return;
+  if (e.target.closest('[data-gpuclose]')) return closeGpuPop(true);
+  if (!GPUPOP.el.contains(e.target)) closeGpuPop(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && GPUPOP?.key) return closeGpuPop(true);
+  const l = e.target.closest?.('[data-gpulist]');
+  if (l && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    if (GPUPOP?.key === l.dataset.gpulist) closeGpuPop(true);
+    else openGpuPop(l.dataset.gpulist);
+  }
+});
+addEventListener('resize', placeGpuPop);
+addEventListener('scroll', placeGpuPop, { passive: true, capture: true });
 
 // ------------------------------------------------------------------------------------------------ the queue's jobs
 const shortId = (id) => String(id ?? '').split('-').pop().slice(0, 6);
@@ -742,7 +986,7 @@ function allJobs(d) {
     if (m.self || !m.job || m.farm) continue;
     const j = m.job;
     out.push(job({
-      key: `node:${m.key}:${j.name}`, id: `${m.key.slice(0, 3)}-${j.name}`, source: 'node', name: cap(j.name), src: j.out ?? '', kind: 'long', machine: m.name, where: j.chunks ? `chunk ${j.chunk} of ${j.chunks}` : 'drift-node',
+      key: `node:${m.key}:${j.name}`, id: `${m.key.slice(0, 3)}-${j.name}`, source: 'node', name: humanJob(j.name), src: j.out ?? '', kind: 'long', machine: m.name, where: j.chunks ? `chunk ${j.chunk} of ${j.chunks}` : 'drift-node',
       state: { 'waiting-foreign': 'waiting', syncing: 'syncing', failed: 'failed' }[m.badge] ?? 'running', why: m.waiting?.why ?? m.error ?? null,
       done: j.frames, total: j.framesTotal, unit: 'frames', fpsNow: fin(j.fps) ? +j.fps : null, etaS: j.etaS, last: m.last, outs: [j.out].filter(Boolean),
       detail: [['Queue job', j.name], ['Output', j.out], ['Box', `${m.name}${m.commit ? ` at ${m.commit}` : ''}${m.bundle ? `, bundle ${m.bundle}` : ''}`]],
@@ -1986,6 +2230,7 @@ function render(d) {
   const shows = showGroups(d);
   renderHero(d, jobs, shows);
   renderFleet(d);
+  syncGpuPop(d);
   renderTimeline(d, jobs);
   renderJobs(d);
   renderYou(d);

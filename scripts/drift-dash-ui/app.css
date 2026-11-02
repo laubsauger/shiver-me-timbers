@@ -139,13 +139,16 @@ h2 { margin: 0; font: 600 16px/1.2 var(--f-ui); flex: none; }
   border-radius: 10px; overflow: hidden;
 }
 .tile > * { min-width: 0; overflow: hidden; }
-/* the five rows, each its fixed height (px; the sum, 225, is the tile — 434 with seven rows until 2026-11-02, when the
+/* the five rows, each its fixed height (px; the sum, 231, is the tile — 434 with seven rows until 2026-11-02, when the
    job's own block went into the list: the user, "the job area seems awfully big … so that we don't need to take so
    much space and everything below") */
 .r-head { height: 48px; padding: 7px 14px 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .r-met { height: 46px; padding: 2px 14px 0; display: grid; grid-template-columns: 1fr 1fr 1.5fr 1fr 1fr; gap: 0 10px; }
 .r-mem { height: 34px; padding: 0 14px; }
-.r-oth { height: 70px; padding: 5px 14px 5px; background: var(--panel-2); border-top: 1px solid var(--line); }
+.r-oth { position: relative; height: 76px; padding: 4px 14px 3px; background: var(--panel-2); border-top: 1px solid var(--line); cursor: pointer; transition: background .15s ease; }
+/* (the whole list opens the machine's overview: a calm lift on hover, a ring on keyboard focus, the lift held open) */
+.r-oth:hover, .r-oth.open { background: #1e3442; }
+.r-oth:focus-visible { outline: 2px solid var(--ink-2); outline-offset: -2px; }
 .r-foot { height: 27px; padding: 0 14px; display: flex; align-items: center; gap: 10px; font-size: 12px; line-height: 16px; color: var(--ink-3); border-top: 1px solid var(--line); }
 .r-foot .src { flex: 1; }
 .r-foot .src.err { color: var(--hot); }
@@ -195,8 +198,27 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .ol > span:nth-child(3) { font: 400 12px/15px var(--f-ui); color: var(--ink-2); }
 .ol .one { display: block; }
 .ol.fading, .ol.more, .ol.none { color: var(--ink-3); }
-.sq { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; background: var(--foreign); }
+.sq { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; background: var(--c, var(--foreign)); }
+/* THE OTHERS' SHADES: the three biggest each their own amber (bright, pale, deep), the rest a dim amber — the same in
+   a line's square, its share fill, its part of the VRAM bar and the overview, so the bar and the list read together */
+.sh0 { --c: #f4983a; } .sh1 { --c: #f8c088; } .sh2 { --c: #c46f26; } .shx { --c: rgba(244, 152, 58, .42); } .ours { --c: var(--ours); } .neutral { --c: #c9d6db; }
 .sq.ours { background: var(--ours); }
+.vbar b.foreign[class*="sh"] { background: var(--c); }
+/* a line's share of the card's VRAM: a faint fill behind it and a hairline under it, as wide as its share; over half
+   the card, heavier, its name and figure lit — the one grabbing the GPU pops */
+.ol.u { position: relative; }
+.ol.u > span { position: relative; }
+.ol.u::before, .ol.u::after { content: ""; position: absolute; left: 0; width: var(--sh); pointer-events: none; }
+.ol.u::before { top: 1px; bottom: 1px; border-radius: 2px; background: color-mix(in srgb, var(--c, var(--foreign)) 9%, transparent); }
+.ol.u::after { bottom: 0; height: 1px; background: color-mix(in srgb, var(--c, var(--foreign)) 60%, transparent); }
+.ol.u.heavy::before { background: color-mix(in srgb, var(--c, var(--foreign)) 20%, transparent); }
+.ol.u.heavy > span:first-child { color: var(--ink); font-weight: 600; }
+.ol.u.heavy > span:nth-child(2) { color: var(--foreign); }
+.ol.more .one::after { content: " ›"; color: var(--ink-2); }
+.r-oth:hover .ol.more .one, .r-oth:focus-visible .ol.more .one { color: var(--ink); }
+/* between our job and the others: a hairline with a small word */
+.odiv { display: flex; align-items: center; gap: 6px; height: 9px; padding-top: 1px; font: 600 8px/8px var(--f-ui); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+.odiv::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, #4a6573, rgba(74, 101, 115, .15)); }
 .oj { display: grid; grid-template-columns: 53px minmax(0, 1fr); grid-template-rows: 15px 15px; column-gap: 8px; height: 30px; }
 .oj > .pv { position: relative; inset: auto; grid-row: 1 / span 2; width: 53px; height: 30px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line); }
 .oj > .pv::after { display: none; }
@@ -602,6 +624,48 @@ h3 { margin: 0; font: 400 18px/21px var(--f-num); letter-spacing: .01em; white-s
 .tl-now::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1.5px; background: var(--ink); box-shadow: 0 0 10px rgba(232, 239, 241, .55); }
 .tl-now span { position: absolute; right: 5px; top: -1px; padding: 0 4px; border-radius: 3px; font: 12px/16px var(--f-num); color: var(--ink); background: rgba(12, 23, 32, .88); white-space: nowrap; }
 .tl-now.gone { opacity: 0; }
+
+/* a machine's overview (gpuPop): under its tile's list, every process and service with its share of the card */
+.gpop {
+  position: fixed; left: 0; top: 0; z-index: 41; width: 680px; max-width: calc(100vw - 16px); max-height: min(72vh, 600px); overflow: auto; scrollbar-width: thin;
+  padding: 12px 14px 10px; border-radius: 10px; border: 1px solid var(--line-2); background: #0f1c25; color: var(--ink); font-size: 13px;
+  box-shadow: 0 22px 48px -14px rgba(0, 0, 0, .92), inset 0 1px 0 rgba(255, 255, 255, .06);
+  opacity: 0; pointer-events: none; transition: opacity .16s ease;
+}
+.gpop.on { opacity: 1; pointer-events: auto; }
+.gpop:focus { outline: none; }
+.gp-h { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.gp-h b { font: 400 17px/22px var(--f-num); flex: none; }
+.gp-h > span.one { flex: 1; color: var(--ink-2); font-size: 12px; }
+.gp-h .cc-x { align-self: center; }
+.gp-bar { height: 10px; margin: 9px 0 6px; }
+.gp-r { display: grid; grid-template-columns: 10px minmax(9em, 1fr) 128px 4.8em 6.6em 3.4em 4.6em 6.6em; gap: 0 10px; align-items: center; min-height: 31px; border-top: 1px solid var(--line); font-size: 12.5px; }
+.gp-t.mac .gp-r { grid-template-columns: 10px minmax(9em, 1fr) 128px 3.6em 6.6em 4.6em 3em; }
+.gp-r .sq { margin: 0; }
+.gp-hr { min-height: 24px; border-top: 0; font: 600 11px/1.2 var(--f-ui); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.gp-r > .n, .gp-hr > span:nth-child(4), .gp-hr > span:nth-child(6), .gp-hr > span:nth-child(7) { text-align: right; }
+.gp-t.mac .gp-hr > span:nth-child(7) { text-align: left; }
+.gp-r > .n { font: 400 13px/1 var(--f-num); white-space: nowrap; }
+.gp-n { display: flex; flex-direction: column; min-width: 0; line-height: 15px; }
+.gp-n small { font-size: 11px; line-height: 13px; color: var(--ink-3); }
+.gp-r .one { display: block; }
+.gp-sb { display: grid; grid-template-columns: minmax(0, 1fr) 2.6em; gap: 6px; align-items: center; }
+.gp-track { height: 6px; border-radius: 3px; background: var(--track); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+.gp-track b { display: block; height: 100%; background: var(--c, var(--foreign)); border-radius: 3px; transition: width .6s ease; }
+.gp-pc { font: 400 12px/1 var(--f-num); color: var(--ink-2); text-align: right; }
+.gp-r .st { color: var(--ink-2); }
+.gp-r .src { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+.gp-r .src i { font: 500 10.5px/12px var(--f-ui); font-style: normal; color: var(--ink-2); padding: 0 4px; border-radius: 3px; box-shadow: inset 0 0 0 1px var(--line-2); white-space: nowrap; }
+.gp-r.ours { background: linear-gradient(90deg, rgba(56, 199, 176, .09), transparent 70%); }
+.gp-r.ours .gp-n > .one { font-weight: 600; }
+.gp-r.heavy { background: linear-gradient(90deg, rgba(244, 152, 58, .12), transparent 70%); }
+.gp-r.heavy .gp-n > .one { font-weight: 600; }
+.gp-r.heavy > .n:nth-child(4) { color: var(--foreign); }
+.gp-none { color: var(--ink-3); }
+.gp-div { display: flex; align-items: center; gap: 8px; height: 20px; font: 600 10px/1 var(--f-ui); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); border-top: 1px solid var(--line); }
+.gp-div::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.gp-f { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line); }
+.gp-f p { margin: 2px 0; font-size: 11.5px; line-height: 15px; color: var(--ink-3); }
 
 /* the card of a bar: on hover or focus, pinned by a click or a tap (fixed: it moves nothing) */
 .tlcard {
