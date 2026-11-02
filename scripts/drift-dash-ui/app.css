@@ -729,17 +729,27 @@ main.console { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); 
 .st-wrap { max-height: 60vh; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .you-sec { margin: 0 0 10px; align-self: stretch; min-width: 0; }
 .you-sec ul { max-height: 260px; overflow: auto; scrollbar-width: thin; }
+/* TWO COLUMNS THAT STACK ON THEIR OWN (the user, 2026-11-02: "Can we make the latest output thing a bit taller? And
+   then the 'waiting for you' thing can live underneath, but it's a little bit squeezed for me"): on a wide screen the
+   last hours over the queue on the left, the newest outputs over the asks and the work streams on the right, each
+   column as tall as its own content (the queue's panel fills what the right column has more); on a narrow one the
+   wrappers are not there for the grid (display: contents) and the sections stack in the areas' order */
+.col-l, .col-r { display: contents; }
 @media (min-width: 1100px) {
-  main.console { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); grid-template-areas: "hero hero" "fleet fleet" "time side" "jobs streams"; }
-  /* (the newest outputs no taller than the last hours beside them: their own scroll) */
-  .side .outs .thumbs { max-height: 330px; overflow: auto; scrollbar-width: thin; align-content: start; }
+  main.console { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); grid-template-areas: "hero hero" "fleet fleet" "l r"; }
+  .col-l, .col-r { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .col-l { grid-area: l; } .col-r { grid-area: r; }
+  .col-l > .jobs { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .col-l > .jobs .jt-wrap { flex: 1 1 auto; }
+  /* (the newest outputs: three rows of thumbnails at 1600 × 1000, then their own scroll) */
+  .side .outs .thumbs { max-height: min(640px, 64vh); overflow: auto; scrollbar-width: thin; align-content: start; }
 }
 /* THE PAGE SCROLLS (the user, 2026-11-02: "the layout is shifting when these previews come in and out, and we don't
    have any space left for the render queue and 'waiting on you'. Maybe we allow the page to scroll and place the
    render queue and 'waiting on you' below the fold"), instead of the one-window view of 2026-10-30 ("on my ultrawide
-   screen without having to scroll"): above the fold the hero, the fleet with its now-rendering row, the last hours
-   and the newest outputs; below it the queue (its table wants ≥ 820 px) and the asks with the work streams. The long
-   lists still scroll inside their own panels (.jt-wrap, .st-wrap) */
+   screen without having to scroll"): above the fold the hero, the fleet with its now-rendering row; below it the
+   last hours over the queue (its table wants ≥ 820 px), the newest outputs over the asks and the work streams. The
+   long lists still scroll inside their own panels (.jt-wrap, .st-wrap, .thumbs) */
 @media (min-width: 1600px) {
   main.console { max-width: none; padding: 12px 18px 14px; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
 }

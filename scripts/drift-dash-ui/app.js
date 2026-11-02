@@ -52,12 +52,16 @@ const CALM = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const SKELETON = `
 <section class="p hero" id="hero" aria-label="The farm at a glance"></section>
 <section class="p fleet" aria-labelledby="h-fleet"><div class="ph"><h2 id="h-fleet">Fleet</h2><span class="sec-meta" id="fleet-meta"></span></div><div id="fleet-note"></div><div class="tiles" id="tiles"></div><div class="nowq"><div class="nowr" id="nowr" role="list" aria-label="Now rendering: each machine's running job, under its card"></div></div></section>
+<div class="col-l">
 <section class="p time" aria-labelledby="h-time"><div class="ph"><h2 id="h-time">The last hours</h2><span class="sec-meta" id="time-meta"></span><div class="tl-ctl" id="tl-ctl"></div></div><div class="agents" id="agents" role="group" aria-label="Agents: click to dim or show"></div><div class="tl" id="tl"></div></section>
+<section class="p jobs" aria-labelledby="h-jobs"><div class="ph"><h2 id="h-jobs">Render queue</h2><span class="sec-meta" id="jobs-meta"></span></div><div class="tabs" id="tabs" role="tablist" aria-label="Jobs by state"></div><div class="jt-wrap"><div class="jt" id="jobs" role="table" aria-labelledby="h-jobs"></div></div></section>
+</div>
+<div class="col-r">
 <section class="side">
   <div class="p outs" aria-labelledby="h-outs"><div class="ph"><h2 id="h-outs">Latest outputs</h2><span class="sec-meta">click one to open it</span></div><div class="thumbs" id="outs"></div></div>
 </section>
-<section class="p jobs" aria-labelledby="h-jobs"><div class="ph"><h2 id="h-jobs">Render queue</h2><span class="sec-meta" id="jobs-meta"></span></div><div class="tabs" id="tabs" role="tablist" aria-label="Jobs by state"></div><div class="jt-wrap"><div class="jt" id="jobs" role="table" aria-labelledby="h-jobs"></div></div></section>
-<section class="p streams" aria-labelledby="h-streams"><div class="you you-sec" aria-labelledby="h-you"><div class="ph"><h2 id="h-you">Waiting on you</h2><span class="you-n" id="you-n"></span></div><ul id="you"></ul></div><div class="ph"><h2 id="h-streams">Work streams</h2><span class="sec-meta" id="streams-meta"></span></div><div class="st-wrap" id="streams"></div></section>`;
+<section class="p streams" aria-labelledby="h-streams"><div class="you you-sec" aria-labelledby="h-you"><div class="ph"><h2 id="h-you">Waiting on you</h2><span class="you-n" id="you-n"></span></div><ul id="you"></ul></div><div class="ph"><h2 id="h-streams">Work streams</h2><span class="sec-meta" id="streams-meta"></span></div><div class="st-wrap" id="streams"></div></section>
+</div>`;
 {
   const main = document.querySelector('main');
   main.className = 'console';
