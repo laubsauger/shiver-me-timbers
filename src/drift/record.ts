@@ -65,6 +65,12 @@ export interface DriftRecordOptions {
    * capture.ts Encoder16; the sink must encode ProRes: cine-sink.mjs --codec proreshq | prores4444)
    */
   depth?: 8 | 16;
+  /**
+   * build every pipeline the take's first frame needs in parallel before drawing it (`DriftRecordDeps.compile`,
+   * cine/precompile.ts); default on. Off (`&precompile=0` in drift.html's query, `record({ precompile: false })`): the first frame builds
+   * them one by one as it draws, as before 2026-11-03.
+   */
+  precompile?: boolean;
   onProgress?: (frame: number, frames: number) => void;
 }
 
@@ -76,6 +82,11 @@ export interface DriftRecordDeps {
    * t, averaged (motion blur).
    */
   frame(t: number, shutter: number, samples: number): void;
+  /**
+   * The same frame with its draws replaced by pipeline builds, every one at once (cine/precompile.ts compileFrame),
+   * resolved when all are built. Called before the warm-up frame, into the same bound target.
+   */
+  compile?(t: number, shutter: number, samples: number): Promise<unknown>;
 }
 
 async function post(sink: string, path: string, body: BodyInit): Promise<void> {
@@ -130,6 +141,18 @@ export async function recordDomeMaster(o: DriftRecordOptions, deps: DriftRecordD
     // through the water unshadowed beside the raft, and the raft and its reflections moved, in the first frame
     // of every lane — a flash at each lane's join (engine-findings.md §14). Whatever builds on first use (the
     // shadow maps are the likely part) has built by the second.
+    // BEFORE IT, THE PIPELINES (cine/precompile.ts): the warm-up frame used to build every pipeline of the take one
+    // after another in Chrome's GPU process (62 s of a 106 s first frame on windows-monster blocked waiting for it,
+    // 2026-11-03); built all at once first, the warm-up frame finds them ready. Into the same bound target, so the
+    // last passes' pipelines are the ones for this target's format.
+    if (frames > 0 && o.precompile !== false && deps.compile) {
+      slots[0].cap.bind();
+      try {
+        await deps.compile(from, (o.shutter ?? 0.5) / fps, Math.max(1, Math.round(o.blur ?? 1)));
+      } finally {
+        slots[0].cap.unbind();
+      }
+    }
     if (frames > 0) {
       slots[0].cap.bind();
       try {

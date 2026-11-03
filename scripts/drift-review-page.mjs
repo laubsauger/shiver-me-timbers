@@ -91,12 +91,16 @@ export function bootPhases(times) {
 
 /**
  * A take's start, as a line's tail: { rec: __drift.lastRecordTimes, wake: the sea's wakeStats so far } → the first
- * frame's own time, the warm-up frame's page time, and the sea's wake replay (src/drift/wandering/sea.ts wakeTo) in it.
+ * frame's own time, the warm-up frame's page time, the sea's wake replay (src/drift/wandering/sea.ts wakeTo), and the
+ * pipelines built before it (rec.compile; the wake's replay is in that frame then, not in the warm-up frame).
  */
 export function takeTimes({ rec, wake } = {}) {
   if (!rec || rec.firstFrame === null) return '';
   const w = wake && wake.steps > 0 ? `, the sea's wake ${wake.steps} steps (${wake.replays} replay${wake.replays === 1 ? '' : 's'}) in ${(wake.ms / 1000).toFixed(1)} s` : '';
-  return `; the take's first frame ${(rec.firstFrame / 1000).toFixed(1)} s (its warm-up frame ${(rec.warmUpJs / 1000).toFixed(1)} s of page time${w})`;
+  // (record.ts precompile, src/cine/precompile.ts: the pipelines built all at once before the warm-up frame — the frame
+  // without its draws, then the wait for the pipelines)
+  const c = rec.compile ? `; before it ${rec.compile.pipelines} pipelines built at once: the frame without draws ${(rec.compile.frameMs / 1000).toFixed(1)} s, then ${(rec.compile.waitMs / 1000).toFixed(1)} s waiting for them` : '';
+  return `; the take's first frame ${(rec.firstFrame / 1000).toFixed(1)} s (its warm-up frame ${(rec.warmUpJs / 1000).toFixed(1)} s of page time${w}${c})`;
 }
 
 /**

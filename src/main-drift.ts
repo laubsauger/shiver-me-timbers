@@ -11,6 +11,8 @@
  *          eye-level horizon of the tilted dome — drift/domeGuides.ts
  *   url    ?t=<s> start time · ?view=flat|dome · ?speed=<x> · ?paused · ?markers (dome orientation check)
  *          ?record[&size=2048&fps=30] renders the act to the cine sink (npm run cine:sink), see drift/record.ts
+ *          ?precompile=0: a take's pipelines built as its first frame draws, one by one (not all at once first:
+ *          drift/record.ts precompile, cine/precompile.ts)
  *
  * Content and treatment: /Users/flo/work/code/drift-narrative/undertime/treatment.md
  */
@@ -48,6 +50,7 @@ import { beatStarts as driftBeats } from './drift/getTheDrift/timeline';
 import { flatFramingTrack, type FlatView } from './drift/flatFraming';
 import { FlatTitles } from './drift/flatTitles';
 import { loadTitleFonts } from './drift/titleFonts';
+import { compileFrame, type CompileStats } from './cine/precompile';
 
 type View = 'flat' | 'dome';
 
@@ -71,6 +74,15 @@ async function boot(): Promise<void> {
   const app = await App.create(root, { antialias: true });
   bootMark('app');
   const { renderer, scene, camera, controls } = app;
+  // INSTANCE MATRICES AS VERTEX ATTRIBUTES, never a uniform array (the film only). three r186 puts an InstancedMesh of
+  // up to 1024 instances (64 KB of matrices, the uniform-buffer binding limit) in a uniform array, whose length and
+  // node id are written into the shader's code — so every such mesh got a vertex shader and pipelines of its own: the
+  // shore's palms, shells and debris, the shadow pass's copies of each. A take's first frame at 720 s built 1209
+  // shader modules and 1054 render pipelines, ~600 of them these (2026-11-03, tests/zzScratchWarmupProbe.mjs); as
+  // instanced attributes (three's path past the limit) the code is the same for every mesh of a material: 558 and 442.
+  // The same matrices, the same product in the shader. The limit is read only where three picks a uniform array over
+  // an attribute or a texture (instancing, skinning and range nodes; the film has neither of the last two).
+  (renderer.backend as unknown as { capabilities: { getUniformBufferLimit: () => number } }).capabilities.getUniformBufferLimit = () => 0;
   scene.fog = null;
   // AgX keeps saturated emitters (the cyan and magenta tracks) cleaner than ACES; the dome present pass
   // bakes the same operator in (cine/domeCapture.ts)
@@ -501,7 +513,7 @@ async function boot(): Promise<void> {
   );
 
   let recording = '';
-  let lastRecordTimes: { warmUpJs: number | null; firstFrame: number | null } = { warmUpJs: null, firstFrame: null };
+  let lastRecordTimes: { warmUpJs: number | null; firstFrame: number | null; compile: CompileStats | null } = { warmUpJs: null, firstFrame: null, compile: null };
   let faceOverride: number | null = null;
   /** the face size the master is matched to (`faceOverride` without supersampling): one master pixel's angle */
   let pixelFace: number | null = null;
@@ -513,7 +525,7 @@ async function boot(): Promise<void> {
     const previewSize = masterSize;
     masterSize = size;
     const t0 = performance.now();
-    const times: typeof lastRecordTimes = (lastRecordTimes = { warmUpJs: null, firstFrame: null });
+    const times: typeof lastRecordTimes = (lastRecordTimes = { warmUpJs: null, firstFrame: null, compile: null });
     const timed = (at: number, shutter: number, samples: number): void => {
       const a = performance.now();
       frame(at, shutter, samples);
@@ -521,8 +533,10 @@ async function boot(): Promise<void> {
     };
     try {
       return await recordDomeMaster(
-        { to: total, ...o, size, onProgress: (n, of) => { times.firstFrame ??= performance.now() - t0; recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
-        { renderer, frame: timed },
+        // (&precompile=0 in the page's query turns record.ts's precompile off for every take: --query precompile=0 on
+        // any of the render and review scripts — the way back, should a box's Chrome not build pipelines in parallel)
+        { to: total, precompile: q.get('precompile') !== '0', ...o, size, onProgress: (n, of) => { times.firstFrame ??= performance.now() - t0; recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
+        { renderer, frame: timed, compile: async (at, shutter, samples) => (times.compile = await compileFrame(renderer, () => frame(at, shutter, samples))) },
       );
     } finally {
       faceOverride = null;
@@ -576,8 +590,9 @@ async function boot(): Promise<void> {
     /** [phase, ms since navigation] of this page's boot (the header of boot()); 'first draw' once the first frame is in */
     bootTimes,
     /** the last take's start (TIMING ONLY): ms of the page's own time in its first frame call (the warm-up frame: the
-     * wake's replay, every first-use build) and ms from the call to its first frame posted */
-    get lastRecordTimes(): { warmUpJs: number | null; firstFrame: number | null } {
+     * wake's replay, every first-use build), ms from the call to its first frame posted, and the pipelines built before
+     * the warm-up frame (record.ts precompile: how many, the frame without draws, the wait for them) */
+    get lastRecordTimes(): { warmUpJs: number | null; firstFrame: number | null; compile: CompileStats | null } {
       return lastRecordTimes;
     },
     /** the Line Down's dive (lineDownDive.ts): its crossings in show s and its check — what a review is timed against */
