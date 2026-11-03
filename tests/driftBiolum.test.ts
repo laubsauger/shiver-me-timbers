@@ -5,6 +5,9 @@
  *     is stirred — a lake at rest stays dark — and a breaking wave's light flashes and is gone within a couple of
  *     seconds while the foam it made lingers (a glow that lingered with the foam would lie on the water as the flat,
  *     static band the brief rules out: "never a flat glow");
+ *   - THE ONSET (biolumGlow.ts BIOLUM_ONSET; the 2026-11-03 note on the master: "it needs to fade in slowly and
+ *     smoothly, instead of suddenly appearing"): the glow as the frame shows it — each pass's darkness gate by its own
+ *     Sun, × its weight in w5–w6's dissolve, × the onset — rises over tens of seconds with no step a frame;
  *   - THE PRINTS (biolum.ts createFootfalls): where the wanderers' feet came down, found from the walk's own history,
  *     so they fall under the walkers, left and right in turn a step apart, none while a walker stands still, none
  *     older than their life — and the same prints for a frame whatever frames were drawn before it (every frame of the
@@ -14,9 +17,10 @@ import { describe, expect, it } from 'vitest';
 import { float, vec3 } from 'three/tsl';
 import { stepSwashCpu, swashAtRest, SWASH_DT, SWASH, type SwashGrid } from '../src/drift/wandering/swashSim';
 import { createFilmCoast } from '../src/drift/wandering/coast';
-import { C1_FOLLOW, beatStarts } from '../src/drift/wandering/beats';
+import { C1_FOLLOW, beatStarts, beatSun, beatsAt, spec } from '../src/drift/wandering/beats';
 import { wanderer, wetSand } from '../src/drift/wandering/props';
 import { createFootfalls } from '../src/drift/wandering/biolum';
+import { biolumOnset, biolumSunGate } from '../src/drift/wandering/biolumGlow';
 
 /** our beach's profile at its middle (as tests/swashSim.test.ts): m over the sea at m from the waterline */
 function beachStrip(nz: number): { nx: number; nz: number; bed: Float64Array } {
@@ -156,5 +160,35 @@ describe('the prints the wanderers leave', () => {
       expect(p.z).toBeCloseTo(b[k].z, 9);
       expect(p.age).toBeCloseTo(b[k].age, 9);
     });
+  });
+});
+
+describe('the glow\'s onset with the night', () => {
+  const c1End = 21 + C1_FOLLOW;
+  const { starts } = beatStarts(c1End);
+  /** the share of the glow the frame shows at sea time t: each pass's gate × its weight × the onset */
+  const shown = (t: number): number =>
+    beatsAt(t, c1End).reduce((a, p) => a + (spec(p.name)?.world === 'coast' ? p.weight * biolumSunGate(beatSun(p.name, t, c1End)[1]) : 0), 0) *
+    biolumOnset(t, starts.w6);
+  it('comes up over tens of seconds, never by a step from one frame to the next, and is whole in the night', () => {
+    let from = NaN;
+    let to = NaN;
+    let jump = 0;
+    let prev = shown(starts.w5);
+    for (let t = starts.w5; t < starts.w6 + spec('w6')!.length; t += 1 / 30) {
+      const g = shown(t);
+      jump = Math.max(jump, Math.abs(g - prev));
+      if (Number.isNaN(from) && g > 0.05) from = t;
+      if (Number.isNaN(to) && g > 0.95) to = t;
+      prev = g;
+    }
+    console.log(`[biolum onset] 5 % at w6 ${(from - starts.w6).toFixed(1)} s, 95 % at w6 + ${(to - starts.w6).toFixed(1)} s, largest step a frame ${jump.toFixed(4)}`);
+    // (a slow rise: 5 % to 95 % over 25 s and more — the dissolve alone took it in ~10)
+    expect(to - from).toBeGreaterThan(25);
+    // (no frame steps it by more than 0.5 % of the whole)
+    expect(jump).toBeLessThan(0.005);
+    // (whole through w6's held night, none by day)
+    expect(shown(starts.w6 + 40)).toBeCloseTo(1, 3);
+    expect(shown(starts.w4 + 20)).toBe(0);
   });
 });

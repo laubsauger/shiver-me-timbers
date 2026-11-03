@@ -59,9 +59,33 @@ const DISTANCE_FADE = { from: 50, to: 220, left: 0.3 } as const;
  * cheap … kind of bulky" — a fat saturated stroke along the far breakers; far off the real thing is a faint, broken
  * thread with gaps where no wave is breaking just then) */
 const DISTANCE_THIN = 0.35;
-/** sin of the Sun's elevation the glow starts to show at and is whole by (−5°, −12°: after civil dusk it is still
- * too light to see; by nautical dusk's end, it reads) */
-const BIOLUM_DARK: [number, number] = [Math.sin((-5 * Math.PI) / 180), Math.sin((-12 * Math.PI) / 180)];
+/** sin of the Sun's elevation the glow starts to show at and is whole by, in the pass being drawn (0°, −6°). (−5° to
+ * −12° until the 2026-11-03 note on the master: "visible a bit earlier at night. It needs to fade in slowly and
+ * smoothly, instead of suddenly appearing" — w5's own Sun never gets below −3°, so the glow came only with w6's pass,
+ * through the middle of its dissolve, most of it within ~10 s)
+ */
+const BIOLUM_DARK: [number, number] = [0, Math.sin((-6 * Math.PI) / 180)];
+/**
+ * THE ONSET, in show time (BIOLUM_ONSET: s from w6's start it begins, and its length): the glow comes up with the night
+ * over a minute, from w5's last half minute (its Sun at the horizon, going) to w6's held vista, on a smootherstep —
+ * no slope at either end, so nothing starts or arrives. It multiplies every term — the swash's, the stranded sparks',
+ * the prints' — so none has an onset of its own. Set each pass by the prints' update (biolum.ts), a pure function of t.
+ * As the frame shows it (each pass's own gate × its share of w6's dissolve × this): 5 % at w6 − 9.6 s, 95 % at
+ * w6 + 18.7 s, no frame stepping it by more than 0.2 % (tests/driftBiolum.test.ts); it had come up from w6 − 8.7 s to
+ * w6 + 8.8 s, with the dissolve alone
+ */
+export const BIOLUM_ONSET = { from: -30, length: 60 } as const;
+export const biolumFade = uniform(0);
+/** 0 … 1: the onset at sea time t, w6 starting at `w6` (s) */
+export function biolumOnset(t: number, w6: number): number {
+  const u = Math.min(1, Math.max(0, (t - w6 - BIOLUM_ONSET.from) / BIOLUM_ONSET.length));
+  return u * u * u * (u * (u * 6 - 15) + 10);
+}
+/** 0 … 1 over the Sun's height `sunY` in a pass (sin of its elevation): CPU twin of `biolumDark`'s gate */
+export function biolumSunGate(sunY: number): number {
+  const k = Math.min(1, Math.max(0, (sunY - BIOLUM_DARK[0]) / (BIOLUM_DARK[1] - BIOLUM_DARK[0])));
+  return k * k * (3 - 2 * k);
+}
 
 /** the glow's colour, linear (params biolumColor: sRGB), × its radiance (params biolumRadiance), live */
 export const biolumLight = (() => {
@@ -74,8 +98,8 @@ export const biolumLight = (() => {
   return u as unknown as V3;
 })();
 
-/** 0 … 1: how dark it is for the glow to show, from the Sun's height `sunY` (sin of its elevation) */
-export const biolumDark = (sunY: F): F => smoothstep(BIOLUM_DARK[0], BIOLUM_DARK[1], sunY) as F;
+/** 0 … 1: how dark it is for the glow to show, from the Sun's height `sunY` (sin of its elevation), × the onset */
+export const biolumDark = (sunY: F): F => smoothstep(BIOLUM_DARK[0], BIOLUM_DARK[1], sunY).mul(biolumFade) as F;
 
 /** a sin-free hash of a cell (the sea glitter's, shoreline.ts: a cell index far out in 32-bit floats came out as moiré
  * through sin) */

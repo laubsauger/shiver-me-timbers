@@ -25,7 +25,8 @@ import { attribute, exp, float, fwidth, mix, normalize, positionWorld, smoothste
 import { wanderer, wetSand } from './props';
 import { swashClock, swashLight } from './shoreline';
 import { swashField, swashIn, swashUV } from './swashSim';
-import { biolumDark, biolumLight, biolumSparkle } from './biolumGlow';
+import { biolumDark, biolumFade, biolumLight, biolumOnset, biolumSparkle } from './biolumGlow';
+import { spec } from './beats';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -215,6 +216,8 @@ export function createBiolumPrints(o: { ground: (x: number, z: number) => number
   return {
     mesh,
     update(t, w5, on) {
+      // (the glow's onset with the night, for every term of it: biolumGlow.ts BIOLUM_ONSET)
+      (biolumFade as unknown as { value: number }).value = biolumOnset(t, w5 + spec('w5')!.length);
       count = 0;
       if (on) for (const f of footfalls(t, w5)) lay(f.x, f.z, f.rot, f.scale, f.age, f.seed);
       posA.needsUpdate = true;
