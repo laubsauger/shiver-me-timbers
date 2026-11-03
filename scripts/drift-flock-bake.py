@@ -43,8 +43,9 @@ Eighth bake, an ALTERNATE (2026-11-02, the next-level review, move 5: "the flock
 under `flockSilence` (params/drift.ts, default off). The score's one real hole is ~650–677 s (the show's WAV at
 offset 0, 0.5 s RMS: down from ~−20 dBFS to −28 at 650 s, its deepest −36 at 652 s, −25…−34 to 676.5 s, and the
 music back at 677.0 s at −15). The flock's clock starts at w4 + 2 s (show 637 s, sea.ts), so: the seventh bake's way
-in over the forest and its low pass across the front, unchanged, to 13 s; then the flock hangs low over the surf
-ahead and to the left (~14 m up, ~13° over the horizon) and at SILENCE_LIFT (15 s: show 652 s) the whole of it lifts
+in over the forest and its low pass across the front, quicker (over the trees by ~639 s, across the front ~642 s:
+the 2026-11-03 note, "too much downtime before the birds come out"); then it wheels low in front, held together, and
+at SILENCE_LIFT (14.5 s: show 651.5 s, the start of the silence's deepest 2 s) the whole of it lifts
 AT ONCE — every bird climbs in the same second, no wave along it — and is routed up and round to the FRONT RIGHT, the
 darker east sky out of the low Sun's glare (the Sun ~4° up, 68° left of the front: in the seventh bake the flock
 wheeled over the sea right under it, where it read as a smudge), wheels there, ~45° up and ~50 m off, for ~10 s, and
@@ -91,6 +92,13 @@ rng = np.random.default_rng(SEED)
 # the sea, forms the vortex overhead, and leaves down the beach ahead and over the forest there, gone behind the
 # trees — where the wanderers walk on after it (w5).
 pos = np.stack([rng.uniform(55, 85, N), rng.uniform(12, 18, N), -rng.uniform(30, 70, N)], -1).astype(np.float64)
+# (--silence, the 2026-11-03 note on the 56e951c master: "I think we have too much downtime before the birds come out.
+# That can probably be tightened a little" — the seventh bake's flock stayed behind the forest until ~642 s, 7 s into
+# w4. Here it starts just behind the canopy's edge on the right, nearer, so it is over the trees within ~2 s of its
+# clock's start (show 637 s); it is never drawn before 636 s, and at its clock's start it must still be hidden: the
+# first key is held while the clock is below 0)
+if '--silence' in sys.argv:
+    pos = np.stack([rng.uniform(46, 66, N), rng.uniform(14, 20, N), -rng.uniform(36, 62, N)], -1).astype(np.float64)
 e0 = np.stack([-0.85 + rng.normal(0, 0.05, N), rng.normal(0, 0.03, N), 0.25 + rng.normal(0, 0.05, N)], -1)
 vel = e0 / np.linalg.norm(e0, axis=1, keepdims=True) * 10.0
 # each bird's spin (the inertial spin model: a turn is a quantity the bird carries and hands on, so a turn runs
@@ -146,7 +154,7 @@ V_EASE = 3.0
 V_AXIS = np.array([-2.0, 0.0, -8.0])
 # THE SILENCE (eighth bake): s of the lift, how long its climb pushes, and how hard (m/s², up and to the right); the
 # vortex axis's climb from the front right to the zenith (s, from where to where: x, z m), over V_AXIS at its end
-SILENCE_LIFT = 15.0
+SILENCE_LIFT = 14.5
 SILENCE_PUSH = 1.6
 SILENCE_UP = 16.0
 SILENCE_RIGHT = 8.0
@@ -233,16 +241,25 @@ def area_centre(t: float) -> np.ndarray:
         return np.array(ks[-1][1])
 
     if SILENCE:
-        # (the eighth bake: low over the surf ahead left until the lift, then up and round to the front right, a
-        # wheel there against the east sky, and into the vortex where it forms; the way out as before, 8 s later)
-        # (out of the pass it turns back right and hangs low ahead, ~15 m up and 50 m off (the soft floor holds it there) — 60° from the Sun, not out
-        # over the sea under it — then the lift, already turning right, and on up round to the front right)
-        keys_ = keys_[:3] + [
-            (12.5, (2.0, 14.0, -44.0)),
-            (SILENCE_LIFT, (6.0, 13.0, -50.0)),
-            (SILENCE_LIFT + 2, (8.0, 26.0, -52.0)),
-            (SILENCE_LIFT + 6, (8.0, 42.0, -44.0)),
-            (SILENCE_LIFT + 9, (10.0, 47.0, -42.0)),
+        # (the eighth bake: in over the trees on the right and the low pass across the front, then it wheels in view
+        # ahead and hangs low there until the lift, then up and round to the front right, a wheel there against the east
+        # sky, and into the vortex where it forms; the way out as before, 8 s later)
+        # (NO DOWNTIME BEFORE IT, the 2026-11-03 note on the 56e951c master: "too much downtime before the birds come
+        # out". The way in is quicker — over the treetops by ~639 s, across the front ~642 s, not 642 and 645 s — and
+        # out of the pass it no longer drifts out left toward the Sun to thin there, but turns back and wheels low in
+        # front, ~20–25 m up and 45–50 m off, held together (r_area), until the lift; and the lift goes UP the front,
+        # not off to the right — out of a hang that drifted right, the climb carried the flock 70–80 m off behind the
+        # palms for 653–661 s, the silence's first seconds, the 630–690 clip of 2026-11-03)
+        keys_ = [
+            (0.0, (50.0, 18.0, -48.0)),
+            (2.5, (28.0, 21.0, -44.0)),
+            (5.5, (4.0, 20.0, -34.0)),
+            (8.5, (-10.0, 26.0, -36.0)),
+            (11.5, (-8.0, 27.0, -44.0)),
+            (SILENCE_LIFT, (-2.0, 20.0, -46.0)),
+            (SILENCE_LIFT + 2, (0.0, 28.0, -48.0)),
+            (SILENCE_LIFT + 6, (2.0, 40.0, -42.0)),
+            (SILENCE_LIFT + 9, (6.0, 46.0, -40.0)),
         ]
         # (the wheel ~50 m off, ~45° up and 20–35° right: the open sky between the Sun's side and the forest. At ~100 m
         # and 25–35° up, 45–55° right — the first silence bake — it sank behind the palms on the right and thinned to the
@@ -250,7 +267,7 @@ def area_centre(t: float) -> np.ndarray:
         # second try's, whose sag after the climb dropped it behind the palms again for ~3 s at 659–662 s)
         w = 2 * np.pi / 14
         u = t - (SILENCE_LIFT + 9)
-        wheel = np.array([10 + np.sin(w * u) * 8, 44 + np.sin(w * 2 * u + 1) * 3, -36 - np.cos(w * u) * 6])
+        wheel = np.array([6 + np.sin(w * u) * 8, 38 + np.sin(w * 2 * u + 1) * 3, -38 - np.cos(w * u) * 6])
         ax = vortex_axis(t)
         over = np.array([ax[0], V_BASE + 4, ax[2]])
         after = [(VORTEX[1] + 2, (-16.0, 23.0, -20.0)), (VORTEX[1] + 8, (-14.0, 20.0, -55.0)), (VORTEX[1] + 14, (6.0, 20.0, -110.0)),
@@ -328,10 +345,14 @@ for step in range(n_steps + 1):
         hd = np.hypot(to[:, 0], to[:, 2])[:, None] + 1e-6
         # (held tighter through the pass across the front, so the body comes by as one, not spread toward us)
         r_area = R_AREA - 11.0 * smooth((t - 4) / 2) * smooth((12 - t) / 2)
-        # (--silence: held tighter through the wheel at the front right too, so it stays ~50 m off as one body instead
-        # of roaming out to 100 m and more)
         if SILENCE:
-            r_area -= 8.0 * smooth((t - SILENCE_LIFT - 4) / 3) * smooth((VORTEX[0] - t) / 2)
+            # (--silence: held as one from its quicker pass on, through the wheel in front and the lift (7 m), then a
+            # little looser through the wheel at the front right until the vortex (10 m). Loosened over the lift — to
+            # 18 m, from 1 s after it — the climb ran out 70–80 m and behind the palms on the right for 657–660 s (the
+            # second 630–690 clip of 2026-11-03); held at 7 m on into the vortex, the flock came into it off its axis
+            # and the vortex wheeled lopsided, 20–30° off the zenith instead of over it)
+            r_area = R_AREA - 11.0 * smooth((t - 2.5) / 2) * smooth((SILENCE_LIFT + 4 - t) / 2) - 8.0 * smooth((t - SILENCE_LIFT - 2) / 3) * smooth((VORTEX[0] - t) / 2)
+
         pull = np.minimum((hd - r_area).clip(0) * K_AREA * (1 + 1.5 * (R_AREA - r_area) / 11.0), 6.0) * (1 - vw)
         F[:, [0, 2]] += to[:, [0, 2]] / hd * pull
         dy = to[:, 1:2]
