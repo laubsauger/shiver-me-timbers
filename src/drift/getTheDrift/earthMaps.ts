@@ -30,6 +30,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { asin, atan, exp2, float, floor, fract, log2, min, mix, smoothstep, step, texture, vec2 } from 'three/tsl';
+import { GRID_BOX } from './gridUnits';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -96,6 +97,9 @@ export interface EarthMaps {
   /** R open water 0..1 (the inset has no lights or clouds of its own) */
   insetWater: THREE.DataArrayTexture;
   insetElevation: THREE.DataArrayTexture;
+  /** LIGHTS OUT's grid regions (scripts/drift-earth-grid.py; lifeLayers.ts gridGate): the unit id per texel over the
+   * region's box, 8-bit, sampled nearest (an id is not to be blended) */
+  gridUnits: THREE.DataTexture;
   ready: Promise<void>;
   dispose(): void;
 }
@@ -193,16 +197,22 @@ export function loadEarthMaps(base = `${import.meta.env.BASE_URL}drift/earth/`):
   const ne = elevationTexture(NEAR.w, NEAR.h, true);
   const ie = insetArray('elevation');
   const iw = insetArray('mask');
+  // (the grid regions: one byte a texel, ~35 MB, no mips — nearest at every distance; a lookup clamps to the box)
+  const gu = new THREE.DataTexture(new Uint8Array(GRID_BOX.w * GRID_BOX.h), GRID_BOX.w, GRID_BOX.h, THREE.RedFormat, THREE.UnsignedByteType);
+  gu.minFilter = THREE.NearestFilter;
+  gu.magFilter = THREE.NearestFilter;
+  gu.generateMipmaps = false;
   const ready = Promise.all([
-    ra.done, rl.done, ga.done, gl.done, elevation('region-elevation.f16', re), elevation('global-elevation.f16', ge),
+    ra.done, rl.done, ga.done, gl.done, elevation('region-elevation.f16', re), elevation('global-elevation.f16', ge), decode('grid-units.png', gu, 1),
     ...(FINE_LEVELS ? [na.done, nl.done, decode('inset-albedo.jpg', ia, 4), elevation('near-elevation.f16', ne), elevation('inset-elevation.f16', ie), decode('inset-water.png', iw, 1)] : []),
   ]).then(() => undefined);
-  const all = [ra.tex, rl.tex, ga.tex, gl.tex, na.tex, nl.tex, ia, re, ge, ne, ie, iw];
+  const all = [ra.tex, rl.tex, ga.tex, gl.tex, na.tex, nl.tex, ia, re, ge, ne, ie, iw, gu];
   return {
     regionAlbedo: ra.tex, regionLcw: rl.tex, regionElevation: re,
     globalAlbedo: ga.tex, globalLcw: gl.tex, globalElevation: ge,
     nearAlbedo: na.tex, nearLcw: nl.tex, nearElevation: ne,
     insetAlbedo: ia, insetWater: iw, insetElevation: ie,
+    gridUnits: gu,
     ready,
     dispose: () => all.forEach((t) => t.dispose()),
   };

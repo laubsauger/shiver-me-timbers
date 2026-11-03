@@ -98,6 +98,9 @@ export interface GetTheDriftParams {
    * front, a ragged front of water crosses the lit night
    * side toward the audience and the cities go out behind it in clusters, 4–5 s of near-black sit in the score's dip,
    * one warm lamp stays lit, blinking slowly, low in front — and only then does the Sun rise, `loSunLate` s later.
+   * (Since the 2026-11-03 review of the master the cities go out grid region by grid region, `loGrid`, and cities on
+   * generators die through the dip, leaving ~1.6 s of full black before the dawn's hit: blackout.ts. The lamp is off,
+   * `loLamp`)
    */
   lightsOut: number;
   /** s from the flood's start the front leaves the far limb (on the score's last hit before its dip, 235.1 s of the
@@ -137,6 +140,16 @@ export interface GetTheDriftParams {
   loMoonDim: number;
   /** how much further the overshoot pushes past its balance (1 = its full overshoot again) while the front comes */
   loPush: number;
+  /** 1 = the lights go out grid region by grid region (blackout.ts; the 2026-11-03 review of the master: "more like
+   * country by country … so it's more visible that this is actually a global shutdown"), 0 = in the front's ~45 km
+   * clusters alone, as on 2026-11-02 (?loGrid=0, an A/B) */
+  loGrid: number;
+  /** 0..1 the light a city on generators and an ember keep of their full (blackout.ts LO_GENERATORS): dim, so they
+   * read as what is left, not as the grid back on */
+  loGenGain: number;
+  /** 0..1 the share of ~45 km cells that hold on, dim, after their region has gone, dying through the dip ("fill in a
+   * bit of the pure-darkness moment", 2026-11-03) */
+  loEmbers: number;
   galaxyRadiance: number;
   volumeRadiance: number;
   /** ray-march steps through our galaxy */
@@ -202,6 +215,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     loRiseAt: 21.8,
     loMoonDim: 0.75,
     loPush: 0.4,
+    loGrid: typeof location !== 'undefined' && new URLSearchParams(location.search).get('loGrid') === '0' ? 0 : 1,
+    loGenGain: 0.45,
+    loEmbers: 0.06,
     galaxyRadiance: 1.2,
     volumeRadiance: 0.2,
     marchSteps: 72,
@@ -260,6 +276,9 @@ export const getTheDriftParams: GetTheDriftParams = registerParams(
     loRiseAt: { min: 0, max: 30, step: 0.1 },
     loMoonDim: { min: 0, max: 1, step: 0.05 },
     loPush: { min: 0, max: 1, step: 0.05 },
+    loGrid: { min: 0, max: 1, step: 1 },
+    loGenGain: { min: 0, max: 1, step: 0.05 },
+    loEmbers: { min: 0, max: 0.3, step: 0.01 },
     galaxyRadiance: { min: 0, max: 10, step: 0.05 },
     volumeRadiance: { min: 0, max: 10, step: 0.05 },
     marchSteps: { min: 8, max: 256, step: 1 },

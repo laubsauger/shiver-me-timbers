@@ -18,6 +18,16 @@
  *     (round 2) and the Sun clears the limb on the next, 262.8 s — ~15 s later than the approved dawn;
  *   - the black takes most of the moonlight off the ground and gives it back with the dawn (round 2: "the black is
  *     blacker and the lamp is the one thing left").
+ * And since the review of the master on 2026-11-03 ("the lights should turn off in a more interesting way, so it's more
+ * visible that this is actually a global shutdown. More like country by country … And fill in a bit of the
+ * pure-darkness moment so it's not so long"; blackout.ts):
+ *   - the lights in view go out grid region by grid region (Natural Earth's countries and big countries' groups of
+ *     provinces), in the front's order but one at a time: the big ones each on its own onset of the score's decay
+ *     after the 235.1 s hit, none two at once, the whole cascade taking ~5 s, not a wipe;
+ *   - a region stutters before it dies, slowly (never faster than 2 Hz, at most three dips), and a few hold on;
+ *   - cities on generators fill the dark: in the dome's lower front, dying one by one on the soft pulses of the dip
+ *     (242.4–250.35 s), so the planet is never wholly dark until the last of them, and then for only ~1.5–2 s before
+ *     the 252.3 s hit starts the dawn.
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
@@ -26,6 +36,8 @@ import { beatStarts, domeDir, earthPose, gatherFrame, glideAxis, glideSpin, land
 import { lifeState } from '../src/drift/getTheDrift/life';
 import { FRONT_KEYS, LO_CLUSTER, LO_RAGGED, frontArrival } from '../src/drift/getTheDrift/lifeLayers';
 import { LO_PULSES, lampState } from '../src/drift/getTheDrift/lamp';
+import { GEN_FADE, LO_BIG, LO_EMBERS, LO_GENERATORS, LO_HOLD, LO_STEPS, UNIT_FADE, blackout, unitGain } from '../src/drift/getTheDrift/blackout';
+import { GRID_UNITS } from '../src/drift/getTheDrift/gridUnits';
 import { geoFrameAt } from '../src/drift/getTheDrift/earthMaps';
 import { domeBasis } from '../src/cine/domeMaster';
 
@@ -90,6 +102,19 @@ const groundAt = (t: number, el: number, az: number): THREE.Vector3 | null => {
   return new THREE.Vector3(n.dot(m.zero), n.dot(m.east), n.dot(m.north));
 };
 const origin = new THREE.Vector3(...lifeState(0, p).frontOrigin);
+/** where a place on the planet (deg) is on the dome at show s, and whether it faces the eye (vis > 0) */
+const placeSeen = (s: number, lat: number, lon: number): { vis: number; el: number; az: number } => {
+  const t = s - ACT2;
+  const g = new THREE.Vector3(Math.cos(lat * D) * Math.cos(lon * D), Math.cos(lat * D) * Math.sin(lon * D), Math.sin(lat * D));
+  const e = earthPose(t, p, tilt);
+  const c = new THREE.Vector3(...e.centreDir).multiplyScalar(e.distance);
+  const m = mapAt(t);
+  const n = m.zero.clone().multiplyScalar(g.x).addScaledVector(m.east, g.y).addScaledVector(m.north, g.z);
+  const at = c.clone().addScaledVector(n, R);
+  return { vis: n.dot(at.clone().negate().normalize()), ...toDome(t, at.normalize()) };
+};
+/** show s of the front's clock 0 (it leaves the far limb) */
+const FRONT0 = ACT2 + starts.flood + p.loFront;
 /** show s the water reaches a place (planet frame), its raggedness at its most either way */
 const reaches = (g: THREE.Vector3, ragged: number): number => ACT2 + starts.flood + p.loFront + frontArrival(Math.acos(Math.min(1, g.dot(origin))) / D + ragged, p.loFrontLen);
 const RAG = LO_RAGGED[0] + LO_RAGGED[1];
@@ -115,7 +140,9 @@ describe('Lights Out', () => {
     }
   });
 
-  it('puts every light in view out by the score’s dip, and none before the front leaves the limb on the hit', () => {
+  it('puts every front cluster in view out by the score’s dip, and none before the front leaves the limb on the hit', () => {
+    // (the front's own clusters put out what is not in a grid region — the open sea's lights, and everything with
+    // ?loGrid=0, the 2026-11-02 shutdown; the regions and the generators have their own schedule, below)
     // the front leaves the limb after the hit before the dip (the water comes on the score's last loud beat)
     const start = ACT2 + starts.flood + p.loFront;
     expect(start).toBeGreaterThanOrEqual(HIT);
@@ -300,6 +327,114 @@ describe('Lights Out', () => {
     for (let s = DIP_FROM; s <= DAWN_HIT; s += 0.5) expect(lifeState(s - ACT2, p).moon, `${s}`).toBeCloseTo(1 - p.loMoonDim, 1);
     expect(lifeState(HIT - 0.5 - ACT2, p).moon).toBe(1);
     expect(lifeState(RISE_HIT + 0.5 - ACT2, p).moon).toBeCloseTo(1, 2);
+  });
+
+  // ---------------------------------------------------------------- grid region by grid region (2026-11-03)
+  const b = blackout(p);
+  /** the units the dome sees as they go (at their own time: facing the eye, inside the dome, within 60° of ahead),
+   * with lights enough to see; show s */
+  const inView = GRID_UNITS.filter(([, , , , , light]) => light >= 5e-4)
+    .map(([id, name, lat, lon, , light]) => ({ id, name, light, out: FRONT0 + b.units[id * 4], dips: b.units[id * 4 + 1], per: b.units[id * 4 + 2], depth: b.units[id * 4 + 3], deg: Math.acos(Math.min(1, new THREE.Vector3(Math.cos(lat * D) * Math.cos(lon * D), Math.cos(lat * D) * Math.sin(lon * D), Math.sin(lat * D)).dot(origin))) / D, lat, lon }))
+    .filter((u) => {
+      const v = placeSeen(u.out, u.lat, u.lon);
+      return v.vis > 0 && v.el > 0 && Math.abs(v.az) < 60;
+    })
+    .sort((x, y) => x.out - y.out);
+
+  it('is on with Lights Out and off with ?loGrid=0 or Lights Out off, and its grid data are whole', () => {
+    expect(lifeState(starts.flood, p).blackout).not.toBeNull();
+    expect(lifeState(starts.flood, { ...p, loGrid: 0 }).blackout).toBeNull();
+    expect(lifeState(starts.flood, off).blackout).toBeNull();
+    // ids 1..255 (an 8-bit map; 0 the open sea), each once; the held units are there by name
+    const ids = GRID_UNITS.map((u) => u[0]);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(Math.min(...ids)).toBeGreaterThanOrEqual(1);
+    expect(Math.max(...ids)).toBeLessThanOrEqual(255);
+    for (const [name] of LO_HOLD) expect(GRID_UNITS.some((u) => u[1] === name), name).toBe(true);
+    // the score's steps and pulses are the measured onsets (drift_audio.wav, offset 0; the flood starts at 241.0 s)
+    expect(LO_STEPS.map((x) => ACT2 + starts.flood + x)).toEqual([235.05, 236.02, 236.85, 238.17, 238.92, 240.0].map((x) => expect.closeTo(x, 1)));
+    expect(LO_EMBERS.map((x) => ACT2 + starts.flood + x)).toEqual([242.4, 245.25, 247.04, 249.2, 250.35].map((x) => expect.closeTo(x, 1)));
+  });
+
+  it('puts the lights in view out region by region in the front’s order, the big ones each on its own onset of the score', () => {
+    // enough regions in view to read as a cascade, starting on the hit and none before it
+    expect(inView.length).toBeGreaterThan(15);
+    expect(inView[0].out).toBeGreaterThanOrEqual(HIT);
+    expect(inView[0].out).toBeLessThan(HIT + 0.3);
+    // the main body over 3.5 s and more, the held ones after it (the last by the dip's first pulse): ~7 s in all —
+    // the 2026-11-02 front had every light in view out within ~4.5 s of the hit, ~0.8 s of it down the near ground
+    const held = new Set(LO_HOLD.map((h) => h[0]));
+    const main = inView.filter((u) => !held.has(u.name));
+    expect(main[main.length - 1].out - main[0].out).toBeGreaterThan(3.5);
+    expect(inView[inView.length - 1].out - inView[0].out).toBeGreaterThan(6);
+    expect(main[main.length - 1].out).toBeLessThan(240.8);
+    for (const u of inView) expect(u.out, u.name).toBeLessThanOrEqual(PULSES[0] + 0.05);
+    // in the water's order: no region goes more than a second before one the front reaches over 2° earlier (the big
+    // ones are held apart, so a small one may pass a big one by that much)
+    for (const a of main) for (const c of main) if (c.deg < a.deg - 2) expect(a.out, `${a.name} before ${c.name}`).toBeGreaterThan(c.out - 1);
+    // the big ones: each on a step of the score, no step twice — and never two big regions within 0.3 s (a wipe)
+    const steps = LO_STEPS.map((x) => ACT2 + starts.flood + x);
+    const big = main.filter((u) => u.light >= LO_BIG);
+    const onStep = big.filter((u) => steps.some((x) => Math.abs(x - u.out) < 1e-3));
+    expect(onStep.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(onStep.map((u) => u.out.toFixed(3))).size).toBe(onStep.length);
+    for (let i = 1; i < big.length; i++) expect(big[i].out - big[i - 1].out, `${big[i - 1].name} → ${big[i].name}`).toBeGreaterThan(0.3);
+  });
+
+  it('lets a region stutter before it dies, slowly, never a strobe', () => {
+    // every unit's gain, frame by frame: its dips come at most three, one in 0.5 s or more (under 2 Hz), and it goes
+    // from lit to out in UNIT_FADE, once; nothing comes back
+    const h = 1 / 30;
+    let stutters = 0;
+    for (const u of inView) {
+      expect(u.dips).toBeLessThanOrEqual(3);
+      if (u.dips > 0) {
+        stutters++;
+        expect(u.per).toBeGreaterThanOrEqual(0.5);
+        // (and none of its dips before the front left the limb)
+        expect(u.out - u.dips * u.per).toBeGreaterThanOrEqual(FRONT0 - 1e-6);
+      }
+      const c = (s: number): number => s - FRONT0;
+      let minima = 0;
+      for (let s = u.out - 3; s < u.out + 1; s += h) {
+        const [a, m, z] = [unitGain(c(s - h), u.out - FRONT0, u.dips, u.per, u.depth), unitGain(c(s), u.out - FRONT0, u.dips, u.per, u.depth), unitGain(c(s + h), u.out - FRONT0, u.dips, u.per, u.depth)];
+        if (m < a && m <= z && m > 0) minima++;
+      }
+      expect(minima, u.name).toBeLessThanOrEqual(u.dips);
+      expect(unitGain(c(u.out + UNIT_FADE), u.out - FRONT0, u.dips, u.per, u.depth)).toBe(0);
+    }
+    // a good share stutter, not all
+    expect(stutters).toBeGreaterThan(inView.length / 4);
+    expect(stutters).toBeLessThan(inView.length);
+  });
+
+  it('fills the dark with cities on generators dying one by one, then holds a short full black before the dawn', () => {
+    const gens = LO_GENERATORS.map(([name, lat, lon, km, out, dips]) => ({ name, lat, lon, km, out: ACT2 + starts.flood + out, dips }));
+    // each in the dome's lower front at its time (3–25° up, within 45° of ahead), dying on a pulse of the dip
+    for (const g of gens) {
+      const v = placeSeen(g.out, g.lat, g.lon);
+      expect(v.vis, g.name).toBeGreaterThan(0.1);
+      expect(v.el, g.name).toBeGreaterThan(3);
+      expect(v.el, g.name).toBeLessThan(25);
+      expect(Math.abs(v.az), g.name).toBeLessThan(45);
+      expect(g.dips).toBeLessThanOrEqual(3);
+    }
+    for (const x of LO_EMBERS) expect(gens.some((g) => Math.abs(g.out - (ACT2 + starts.flood + x)) < 1e-6), `a city on ${x}`).toBe(true);
+    // one by one: never more than two on one pulse; a small final cascade (three or more in the last 1.5 s)
+    for (const x of LO_EMBERS) expect(gens.filter((g) => Math.abs(g.out - (ACT2 + starts.flood + x)) < 1e-6).length).toBeLessThanOrEqual(2);
+    const last = Math.max(...gens.map((g) => g.out));
+    expect(gens.filter((g) => g.out > last - 1.5).length).toBeGreaterThanOrEqual(3);
+    // never wholly dark from the hit to the last city: a region or a city lit at every moment
+    for (let s = HIT; s < last; s += 0.1) {
+      const lit = inView.some((u) => u.out + UNIT_FADE > s) || gens.some((g) => g.out > s);
+      expect(lit, `${s.toFixed(1)}`).toBe(true);
+    }
+    // and then a full black of 1.5–2 s (the review: "only ~1.5–2 s") until the hit that starts the dawn
+    const black = DAWN_HIT - (last + GEN_FADE);
+    expect(black).toBeGreaterThan(1.4);
+    expect(black).toBeLessThan(2.1);
+    // the dawn keeps its time
+    expect(ACT2 + starts.flood + p.loDawnAt).toBeCloseTo(DAWN_HIT, 1);
   });
 
   it('never pops: the push, the front and the moonlight change the life states by under 2% a frame', () => {

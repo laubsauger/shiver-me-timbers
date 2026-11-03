@@ -15,13 +15,19 @@
  *   sea       metres the sea has risen: the measured elevation floods to it
  *   front     LIGHTS OUT (params lightsOut, on by default; ?lightsOut=0 off): the flood as a ragged front of water
  *             that crosses the lit night side toward the audience, the cities going out behind it in clusters
- *             (floodFront)
+ *             (floodFront); since the 2026-11-03 review grid region by grid region in its wake, stuttering, a few
+ *             holding on and a few cities on generators dying through the dark (gridGate, blackout.ts; ?loGrid=0
+ *             gives the clusters alone)
  */
 import * as THREE from 'three/webgpu';
-import { abs, acos, float, floor, hash, max, min, mix, mx_noise_float, select, smoothstep, step, vec3 } from 'three/tsl';
+import { abs, acos, asin, atan, cos, float, floor, hash, int, length, max, min, mix, mx_noise_float, select, smoothstep, step, texture, uniformArray, vec2, vec3 } from 'three/tsl';
+import { EMBER_FROM, GEN_CATCH, GEN_FADE, LO_GENERATORS, UNIT_FADE } from './blackout';
+import { GRID_BOX } from './gridUnits';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
+type V4 = THREE.Node<'vec4'>;
+type Vec4Array = ReturnType<typeof uniformArray>;
 
 export interface LifeUniforms {
   fields: F;
@@ -38,6 +44,18 @@ export interface LifeUniforms {
   frontClock: F;
   frontLen: F;
   frontOrigin: V3;
+  /** LIGHTS OUT's grid regions (gridGate, blackout.ts): 1 = the shutdown unit by unit, 0 = the front's clusters alone;
+   * the units' ids (grid-units.png, nearest), the schedule per unit id and per generator city (blackout.ts Blackout),
+   * the generators' and embers' light (share of the full), the share of cells that hold on as embers, and the front's
+   * clock by which the last of them are out */
+  grid: F;
+  gridMap: THREE.Texture;
+  gridUnits: Vec4Array;
+  gridGenAt: Vec4Array;
+  gridGens: Vec4Array;
+  genGain: F;
+  embers: F;
+  embersOut: F;
 }
 
 /** m the sea rises by the end of the flood: about what all the land ice holds */
@@ -190,5 +208,74 @@ export function nightLights(n: V3, v: F, land: F, L: LifeUniforms, fp: F, geo: V
   const fire = vec3(1, 0.42, 0.12).mul(camp).mul(0.25);
   // (LIGHTS OUT: the overshoot runs past 1 while the front comes — params loPush, life.ts — so the tint's LED share is
   // held at the full overshoot's; the brightness and the networks running together take the push)
-  return tint.mul(radiance).mul(6).add(fire).mul(land).mul(floodFront(geo, L));
+  // (the grid's failing: the generators' and the embers' light is warmer, a redder sodium — gridGate)
+  const gate = gridGate(geo, L, v);
+  const warm = mix(tint, vec3(1, 0.45, 0.15), gate.gen.mul(0.35));
+  return warm.mul(radiance).mul(6).add(fire).mul(land).mul(gate.on);
+}
+
+/** s: the generators' dips (one every GEN_DIP s, how deep) */
+const GEN_DIP: [number, number] = [0.7, 0.6];
+
+/**
+ * LIGHTS OUT, GRID REGION BY GRID REGION (the 2026-11-03 review of the master: "the lights should turn off in a more
+ * interesting way, so it's more visible that this is actually a global shutdown. More like country by country … And
+ * fill in a bit of the pure-darkness moment so it's not so long"; blackout.ts says how the schedule is made). `on`
+ * 0..1 is the lights' share still lit at `geo` (the planet's frame, as floodFront), `gen` 0..1 how much of what is lit
+ * is a generator's or an ember's (warmer).
+ *   - the place's unit, from grid-units.png (nearest: an id is not to be blended), over the region maps' box; outside
+ *     it and on the open sea (id 0: ships, platforms) the front's own clusters (floodFront), as before
+ *   - the unit: its dips (a raised cosine each, slow), then out over UNIT_FADE from its time — one time for the whole
+ *     unit, so its border is drawn by the lights going out on one side of it
+ *   - embers: a ~45 km cell of it in `embers` (its own hash, not the front's clusters') keeps genGain of its light from
+ *     the unit's going until a time between EMBER_FROM after it and embersOut
+ *   - generators: inside a city's radius the light comes back after the unit has gone (GEN_CATCH), at genGain, and
+ *     dips and dies on its own time
+ * With the front off (its clock at −1e4) every unit, ember and city is lit: ?lightsOut=0 draws the approved flood.
+ */
+export function gridGate(geo: V3, L: LifeUniforms, v: F): { on: F; gen: F } {
+  const c = L.frontClock;
+  const lat = asin(geo.z.clamp(-1, 1)).mul(180 / Math.PI);
+  const lon = atan(geo.y, geo.x).mul(180 / Math.PI);
+  const uv = vec2(lon.sub(GRID_BOX.lon0).div(GRID_BOX.lon1 - GRID_BOX.lon0), float(GRID_BOX.lat1).sub(lat).div(GRID_BOX.lat1 - GRID_BOX.lat0));
+  const inBox = step(0, uv.x).mul(step(uv.x, 1)).mul(step(0, uv.y)).mul(step(uv.y, 1));
+  const id = floor(texture(L.gridMap, uv.clamp(0, 1)).x.mul(255).add(0.5)).mul(inBox);
+  const u = L.gridUnits.element(int(id)) as unknown as V4;
+  const out = u.x;
+  // the dips: u.y of them, u.z s each, u.w deep, ending at `out`
+  const x = c.sub(out.sub(u.y.mul(u.z))).div(u.z);
+  const dip = select(x.greaterThan(0).and(x.lessThan(u.y)), u.w.mul(float(0.5).sub(cos(x.mul(2 * Math.PI)).mul(0.5))), float(0));
+  const unit = float(1).sub(dip).mul(float(1).sub(smoothstep(out, out.add(UNIT_FADE), c)));
+  // embers: a cell that holds on, dim, from its unit's going to its own time — a soft disc in it (~20 km across at most,
+  // less where the sphere cuts its cube off-centre), not the whole cell: the cell's own edges cut through the towns as
+  // straight lines and the first stills (2026-11-03) showed the embers as dim orange rectangles
+  const cell = floor(geo.mul(140));
+  const h = hash(cell.x.add(cell.y.mul(157)).add(cell.z.mul(113)).add(71.3));
+  const holds = step(h, L.embers).mul(float(1).sub(smoothstep(0.15, 0.4, length(geo.mul(140).sub(cell).sub(0.5)))));
+  const emberOut = mix(out.add(EMBER_FROM), max(L.embersOut, out.add(EMBER_FROM)), h.div(L.embers.max(1e-4)).clamp(0, 1));
+  const ember = holds.mul(L.genGain).mul(float(1).sub(smoothstep(emberOut, emberOut.add(GEN_FADE), c)));
+  // the cities on generators: back after their unit has gone, dim, and out on their own time — only their cores (the
+  // Black Marble's brighter half), in patches (~2–3 km noise) and fading out from the centre: lit whole inside a
+  // radius, the first clip drew each as a flat bright disc, foreshortened to a saucer ("UFO"); a city on generators
+  // is a scatter of what still has power
+  const core = smoothstep(0.3, 0.65, v);
+  let gen: F = ember as F;
+  for (let i = 0; i < LO_GENERATORS.length; i++) {
+    const at = L.gridGenAt.element(i) as unknown as V4;
+    const g = L.gridGens.element(i) as unknown as V4;
+    const km = length(geo.sub(at.xyz)).mul(6371);
+    const patch = smoothstep(0.0, 0.35, mx_noise_float(geo.mul(2500).add(i * 7.3)));
+    const inside = float(1).sub(smoothstep(at.w.mul(0.3), at.w, km)).mul(patch).mul(core);
+    const gx = c.sub(g.x.sub(g.y.mul(GEN_DIP[0]))).div(GEN_DIP[0]);
+    const gdip = select(gx.greaterThan(0).and(gx.lessThan(g.y)), float(GEN_DIP[1]).mul(float(0.5).sub(cos(gx.mul(2 * Math.PI)).mul(0.5))), float(0));
+    const caught = smoothstep(out.add(GEN_CATCH[0]), out.add(GEN_CATCH[1]), c);
+    const lit = inside.mul(L.genGain).mul(caught).mul(float(1).sub(gdip)).mul(float(1).sub(smoothstep(g.x, g.x.add(GEN_FADE), c)));
+    gen = max(gen, lit) as F;
+  }
+  const on = max(unit, gen);
+  const useGrid = id.greaterThan(0.5).and(L.grid.greaterThan(0.5));
+  return {
+    on: select(useGrid, on, floodFront(geo, L)) as F,
+    gen: select(useGrid, smoothstep(0, 0.1, gen.sub(unit)), float(0)) as F,
+  };
 }

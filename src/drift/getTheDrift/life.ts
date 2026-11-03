@@ -11,11 +11,13 @@
  *
  * LIGHTS OUT (params lightsOut; the 2026-11-02 next-level review, move 2): the overshoot pushes on into the flood's
  * front (`overshoot` past 1), the front crosses the night side (`front`, lifeLayers.ts floodFront) and every light in
- * view is out in the score's dip; lamp.ts keeps one.
+ * view is out in the score's dip; lamp.ts keeps one. Since the 2026-11-03 review the lights go out grid region by grid
+ * region in the front's wake, and a few cities on generators die through the dip (`blackout`, blackout.ts).
  */
 import type { GetTheDriftParams } from '../../params/getTheDrift';
 import { beatStarts } from './timeline';
 import { FRONT_EDGE_DEG, LO_CLUSTER, frontArrival } from './lifeLayers';
+import { blackout, type Blackout } from './blackout';
 
 export interface LifeState {
   /** 0..1 how far each time-wave front has travelled (from the limb toward the audience) */
@@ -38,6 +40,11 @@ export interface LifeState {
   frontOrigin: [number, number, number];
   /** 0..1 the night side's moonlight (earth.ts): 1 but in Lights Out's black, which takes `loMoonDim` of it */
   moon: number;
+  /** LIGHTS OUT's shutdown grid region by grid region (blackout.ts; null: Lights Out off, or ?loGrid=0 — the front's
+   * clusters alone), and its generators' and embers' light (params loGenGain) and share of cells (loEmbers) */
+  blackout: Blackout | null;
+  genGain: number;
+  embers: number;
 }
 
 /** LIGHTS OUT: s the overshoot's push takes to come in, ending where the front reaches the dome's front edge
@@ -93,5 +100,8 @@ export function lifeState(t: number, p: GetTheDriftParams): LifeState {
     frontLen: p.loFrontLen,
     frontOrigin: [Math.cos(la) * Math.cos(lo2), Math.cos(la) * Math.sin(lo2), Math.sin(la)],
     moon,
+    blackout: lo && p.loGrid > 0 ? blackout(p) : null,
+    genGain: p.loGenGain,
+    embers: p.loEmbers,
   };
 }

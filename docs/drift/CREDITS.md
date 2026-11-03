@@ -24,6 +24,8 @@ NASA Earth Observatory: Blue Marble Next Generation (Reto Stöckli), Black Marbl
 
 VIIRS imagery: NASA Worldview / GIBS, part of NASA's Earth Observing System Data and Information System (EOSDIS)
 
+Country and province borders: Made with Natural Earth
+
 **Galaxy images** (Act 2's galaxies; CC BY)
 
 - ESA/Hubble & NASA. Acknowledgement: Luca Limatola — CC BY 3.0 — https://commons.wikimedia.org/wiki/File:Hubble_portrays_a_dusty_spiral_galaxy.jpg
@@ -54,6 +56,10 @@ Further galaxy images: NASA, ESA and the Hubble Heritage Team (STScI/AURA), publ
   sea-floor terrain; Tilezen asks for each source that is used.
 - **NASA Blue Marble, Black Marble, the cloud composite, VIIRS via GIBS**: public domain or free use; a credit is
   customary (GIBS asks for an acknowledgement).
+- **Natural Earth** (1:10m admin-0 countries and admin-1 provinces, v5; Lights Out's grid regions, which put the lights
+  out country by country since 2026-11-03: earth-data.md): public domain, no credit required; "Made with Natural Earth"
+  is the wording the project suggests (https://www.naturalearthdata.com/about/terms-of-use/). The borders themselves
+  are never drawn: they show only as the edge where one region's lights go out before its neighbour's.
 - **Galaxies**: from `public/drift/galaxies/galaxy-atlas.json` (built by `scripts/drift-galaxy-atlas.py`). Its credit
   field is cut at 80 characters: a cut line must be completed from the source page before it goes on screen. The three
   cut CC BY lines (M101, Galaxy light show, UGC 8091) were completed on 2026-11-02 from each file's Commons page (the

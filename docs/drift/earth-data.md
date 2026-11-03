@@ -29,6 +29,22 @@ node scripts/drift-bundle.mjs --manifest-only   # then the render boxes fetch th
 The near level takes ~35 s, the inset ~45 s on the M3 Max. The inset bake prints what it fitted (the Sentinel
 scenes' Sun, the colour gain) so a rerun can be checked against the last one.
 
+**Lights Out's grid regions** (the 2026-11-03 review: the lights should go out "more like country by country";
+`src/drift/getTheDrift/blackout.ts`) come from their own bake, after the region level (they weigh each unit by its
+`region-lcw.png` lights):
+
+```bash
+out/drift/data/.venv/bin/python -I scripts/drift-earth-grid.py out/drift/data/raw/naturalearth public/drift/earth
+node scripts/drift-bundle.mjs --manifest-only
+```
+
+It writes `grid-units.png` (8-bit, the region's grid: lon −25..45, lat 18..68 at 1/100°, 7000 × 5000, ~0.2 MB; the
+shader samples it nearest) and the generated table `src/drift/getTheDrift/gridUnits.ts` (committed: the ids, names,
+light-weighted centroids, areas and light shares). A unit is a country, or for one over 110 000 km² (at most 8) a group
+of its provinces gathered by their Natural Earth region and k-means: France and Spain in five, Germany and Italy in
+three, England and Scotland apart. 147 units, ~60 s on the M3 Max. Changing it changes the ids: the names in
+`blackout.ts` LO_HOLD must still be there (tests/getTheDriftLightsOut.test.ts checks them).
+
 ## Sources and credits
 
 | map | source | licence / credit |
@@ -38,6 +54,7 @@ scenes' Sun, the colour gain) so a rerun can be checked against the last one.
 | night lights | NASA Black Marble 2016, grey: `BlackMarble_2016_3km_gray_geo.tif`, `BlackMarble_2016_{B1,C1}_geo_gray.tif` — https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144897/ | public domain, NASA Earth Observatory (Joshua Stevens, Miguel Román) |
 | global clouds | `cloud_combined_8192.tif` — https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57747/ | public domain, NASA |
 | Europe clouds | VIIRS NOAA-20 Corrected Reflectance (true colour), 2023-09-08, via GIBS WMS: `https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&LAYERS=VIIRS_NOAA20_CorrectedReflectance_TrueColor&CRS=EPSG:4326&BBOX=18,-25,68,45&WIDTH=7000&HEIGHT=5000&FORMAT=image/jpeg&TIME=2023-09-08` | NASA EOSDIS GIBS / Worldview, free use with acknowledgement |
+| grid regions (Lights Out) | Natural Earth 1:10m Cultural Vectors v5: Admin 0 – Countries, Admin 1 – States, Provinces, as GeoJSON — https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson, `…/ne_10m_admin_1_states_provinces.geojson` (https://www.naturalearthdata.com) | public domain (https://www.naturalearthdata.com/about/terms-of-use/); a credit is customary: "Made with Natural Earth" |
 | elevation | AWS Terrain Tiles (terrarium), zoom 4 globally, 7 over the region, 9 over the near level, 11 over the inset — `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png` | Mapzen / AWS Open Data; attribution per https://github.com/tilezen/joerd/blob/master/docs/attribution.md — here: "Europe terrain data produced using Copernicus data and information funded by the European Union - EU-DEM layers"; "Global ETOPO1 terrain data U.S. National Oceanic and Atmospheric Administration"; "United States 3DEP (formerly NED) and global GMTED2010 and SRTM terrain data courtesy of the U.S. Geological Survey"; "Austria terrain data © offene Daten Österreichs – Digitales Geländemodell (DGM) Österreich" (along the inset's north-eastern edge) |
 
 The day was picked for clear central Europe (the arrival, the night lights and the flood all look
@@ -47,6 +64,9 @@ day shows brighter and whiter than the cloud-free Blue Marble.
 ## Downloads
 
 Everything goes into `out/drift/data/raw/` under the names the script reads:
+
+- Natural Earth's two GeoJSON files (13 and 41 MB, fetched 2026-11-03) into `naturalearth/`:
+  `cd out/drift/data/raw/naturalearth && for f in ne_10m_admin_0_countries ne_10m_admin_1_states_provinces; do curl -fsSLO https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/$f.geojson; done`;
 
 - the Blue Marble and Black Marble files above, `cloud_combined_8192.tif`, the VIIRS day saved as
   `wv/viirs_2023-09-08_7000.jpg` (~337 MB together);

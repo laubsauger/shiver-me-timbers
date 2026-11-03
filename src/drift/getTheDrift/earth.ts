@@ -64,6 +64,7 @@ import {
   sqrt,
   step,
   uniform,
+  uniformArray,
   uv,
   vec2,
   vec3,
@@ -78,6 +79,7 @@ import { STAR_SIGMA } from './milkyWay';
 import { ATMOS, EARTH_R, SUN_ANG, SUN_E, SUN_TINT, opticalDepth, scatter, sphereHit, starburst, sunBloom, sunDisc, sunlight, towardEye } from './atmosphere';
 export { EARTH_R };
 import type { LifeState } from './life';
+import { LO_GENERATORS, UNIT_SLOTS, type Blackout } from './blackout';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
@@ -251,11 +253,20 @@ export function createEarth(): Earth {
     frontClock: uniform(-1e4), frontLen: uniform(4.3), frontOrigin: uniform(new THREE.Vector3(1, 0, 0)),
     // (and the moonlight its black takes: life.ts moon, 1 but in Lights Out's black)
     moon: uniform(1),
+    // (its grid regions, the 2026-11-03 review: lifeLayers.ts gridGate, blackout.ts; the schedule is copied in when
+    // it changes, earth.update)
+    grid: uniform(1), genGain: uniform(0.45), embers: uniform(0.06), embersOut: uniform(1e4),
+    gridUnits: uniformArray(Array.from({ length: UNIT_SLOTS }, () => new THREE.Vector4(1e4, 0, 1, 0)), 'vec4'),
+    gridGenAt: uniformArray(LO_GENERATORS.map(() => new THREE.Vector4(0, 0, 0, 0)), 'vec4'),
+    gridGens: uniformArray(LO_GENERATORS.map(() => new THREE.Vector4(1e4, 0, 1, 0)), 'vec4'),
   };
+  let blackoutNow: Blackout | null = null;
   const L: LifeUniforms = {
     fields: lu.fields, forests: lu.forests, ice: lu.ice, lights: lu.lights, overshoot: lu.overshoot, sea: lu.sea,
     waveOrigin: lu.waveOrigin as unknown as V3,
     frontClock: lu.frontClock, frontLen: lu.frontLen, frontOrigin: lu.frontOrigin as unknown as V3,
+    grid: lu.grid, gridMap: maps.gridUnits, gridUnits: lu.gridUnits, gridGenAt: lu.gridGenAt, gridGens: lu.gridGens,
+    genGain: lu.genGain, embers: lu.embers, embersOut: lu.embersOut,
   };
   /** unit normal n in the planet's frame (x lon 0, y lon 90°E, z north): where Lights Out's front and its clusters are
    * laid, so they stay on the cities while the map turns under the eye (timeline.ts glideSpin) */
@@ -777,6 +788,18 @@ export function createEarth(): Earth {
       lu.frontLen.value = l?.frontLen ?? 4.3;
       if (l) lu.frontOrigin.value.set(...l.frontOrigin);
       lu.moon.value = l?.moon ?? 1;
+      lu.grid.value = l?.blackout ? 1 : 0;
+      lu.genGain.value = l?.genGain ?? 0.45;
+      lu.embers.value = l?.embers ?? 0.06;
+      // (the schedule: copied into the uniform arrays when it is another one — new params — not every frame)
+      const b = l?.blackout ?? null;
+      if (b && b !== blackoutNow) {
+        lu.gridUnits.array.forEach((v, i) => (v as THREE.Vector4).fromArray(b.units, i * 4));
+        lu.gridGenAt.array.forEach((v, i) => (v as THREE.Vector4).fromArray(b.genAt, i * 4));
+        lu.gridGens.array.forEach((v, i) => (v as THREE.Vector4).fromArray(b.gens, i * 4));
+        lu.embersOut.value = b.embersOut;
+      }
+      blackoutNow = b;
       u.centre.value.copy(o.centre);
       u.sun.value.copy(o.sun).normalize();
       u.presence.value = o.presence;
