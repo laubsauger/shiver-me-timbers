@@ -31,7 +31,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { ROOT, aim, cli, eyeReport, flatSupersample, openDriftPage, refuseDuringRender } from './drift-review-page.mjs';
+import { ROOT, aim, cli, eyeReport, flatSupersample, openDriftPage, refuseDuringRender, takeTimes } from './drift-review-page.mjs';
 import { previewTee } from './drift-preview.mjs';
 
 const { arg, num, has } = cli(process.argv.slice(2));
@@ -106,6 +106,7 @@ try {
     { N, FPS, FROM, TO, sinkUrl, ss },
   );
   const raft = await eyeReport(page, shot);
+  const take = takeTimes(await page.evaluate(() => ({ rec: window.__drift.lastRecordTimes ?? null, wake: window.__drift.sea?.wakeStats ?? null })));
   ff.stdin.end();
   if (ffExit === null) await once(ff, 'close');
   if (ffExit !== 0) throw new Error(`ffmpeg exited ${ffExit}`);
@@ -113,7 +114,7 @@ try {
   if (got !== FRAMES || nb !== FRAMES) throw new Error(`${got} frames received, ${nb} in the file, ${FRAMES} expected`);
   renameSync(part, OUT);
   ok = true;
-  console.log(`[review] ${OUT}: ${nb} frames, ${N}×${h}, ${((Date.now() - t0) / 1000).toFixed(1)} s${raft ? `  raft at the end ${JSON.stringify(raft)}` : ''}`);
+  console.log(`[review] ${OUT}: ${nb} frames, ${N}×${h}, ${((Date.now() - t0) / 1000).toFixed(1)} s${raft ? `  raft at the end ${JSON.stringify(raft)}` : ''}${take}`);
 } finally {
   if (!ok) {
     ff?.kill('SIGKILL');

@@ -56,7 +56,7 @@ import { EARTH_R, SUN_E } from '../getTheDrift/atmosphere';
 import { sunDirection } from '../../sky/sunCycle';
 import { shadowTexelSize, snapShadowCenter } from '../../sky/shadowMath';
 import { createCubeMirror } from './mirror';
-import { DEBRIS_SPIN, clearOf, createDebrisField, debrisPieces, matPieces, thingsAt, type DebrisLook, type DebrisUniforms } from '../getTheDrift/debrisField';
+import { DEBRIS_SPIN, createDebrisField, debrisPieces, matPieces, keepIf, thingsAt, type DebrisLook, type DebrisUniforms } from '../getTheDrift/debrisField';
 import { createProps } from './props';
 import { DOLPHIN_SPAN, dolphinSplashes } from './dolphin';
 import { createSplashes } from './splash';
@@ -242,6 +242,9 @@ export interface SeaAct {
   readonly exposure: number;
   /** resolves once its data (the clouds' noise, the flock's keys) is loaded */
   readonly ready: Promise<void>;
+  /** the wake's replay so far (`wakeTo`): replays from a world's start, steps run, ms of the page's own time spent in
+   * them (the GPU's share runs on after) — what the review and render scripts print of a job's first frame */
+  readonly wakeStats: { replays: number; steps: number; ms: number };
   /** the beats drawn at time t and their shares (two across a dissolve: beats.ts); the test act's one */
   passes(t: number): Array<{ beat: BeatName; weight: number }>;
   /** put the sea into the state of time t in `beat` (c1 if none) and the eye where it watches from */
@@ -796,8 +799,12 @@ export function createSea(
       lane.push(e.clone().add(toRaft).setY(0).applyAxisAngle(UP, -fieldTurn(x)));
     }
   }
+  // (in ONE pass: a piece stays when it is clear of every point, which is what clearing it of each point in turn kept —
+  // the same pieces in the same order — without copying the whole field once a point: a clearOf per point of the
+  // lane was 3.1 s of the page's boot on the Mac, profiled 2026-11-03)
+  const berthOf = [raftInField, ...lane];
   const berth = (data: ReturnType<typeof debrisPieces>): ReturnType<typeof debrisPieces> =>
-    [raftInField, ...lane].reduce((d, q) => clearOf(d, q.x, q.z, RAFT_BERTH), data);
+    keepIf(data, (px, pz, len) => berthOf.every((q) => Math.hypot(px - q.x, pz - q.z) - len / 2 > RAFT_BERTH));
   // what the sea gives the pieces (debrisField.ts DebrisLook): the sky its wet wood mirrors, and the swell they ride —
   // the ocean's two long cascades at the piece (the short chop is what slaps them, not what lifts them)
   const debrisLook: DebrisLook = {
@@ -941,6 +948,8 @@ export function createSea(
    * or cleared before its start) */
   let wakeWorld: WakeWorld | null = null;
   let wakeStep = -1;
+  /** TIMING ONLY (SeaAct.wakeStats): nothing reads it back into a frame */
+  const wakeStats = { replays: 0, steps: 0, ms: 0 };
   /**
    * Bring the wake of world `w` to sea time t. Its state stands on the step grid wakeFrom[w] + k·WAKE_DT: a frame
    * between two grid points is drawn from the one at or before it, not stepped to its own t — the last step used to be
@@ -963,7 +972,10 @@ export function createSea(
       flowFoam.reset(renderer, wakeFrom[w]);
       wakeWorld = w;
       wakeStep = 0;
+      wakeStats.replays++;
     }
+    const tWake = performance.now();
+    wakeStats.steps += Math.max(0, target - wakeStep);
     while (wakeStep < target) {
       wakeStep++;
       // (the step's time from its index, never summed: the same float however the step was reached)
@@ -994,6 +1006,7 @@ export function createSea(
       flowFoam.advanceWake(WAKE_DT);
       flowFoam.update(renderer, WAKE_DT);
     }
+    wakeStats.ms += performance.now() - tWake;
   };
   /** THE SKY AND ITS CLOUDS at sea time t, for an eye at `at` under a Sun toward `sun` (the sea's frame): the air's light,
    * the clouds' uniforms and their light volume. Shared by the sea's own frames (update) and Act 2's descent before the
@@ -1096,6 +1109,7 @@ export function createSea(
     get exposure() {
       return seaSky.exposure;
     },
+    wakeStats,
     ready: Promise.all([ready, debris?.ready, nearDebris?.ready, things?.ready, cloudData.ready, beachTerrain.ready, scannedRocks?.ready, forest?.ready, coast?.ready, props?.ready, groundDebris?.ready, contactShade, beachDressing?.ready, plants?.ready, palms?.ready, drowned?.ready, powerLine?.ready, raft.ready]).then(() => undefined),
     passes(t) {
       return o.drive ? beatsAt(t, c1End).map((p) => ({ beat: p.name, weight: p.weight })) : [{ beat: 'c1', weight: 1 }];

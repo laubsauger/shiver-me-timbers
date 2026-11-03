@@ -36,7 +36,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { ROOT, aim, cli, eyeReport, flatSupersample, openDriftPage, refuseDuringRender } from './drift-review-page.mjs';
+import { ROOT, aim, cli, eyeReport, flatSupersample, openDriftPage, refuseDuringRender, takeTimes } from './drift-review-page.mjs';
 import { previewTee } from './drift-preview.mjs';
 
 const argv = process.argv.slice(2);
@@ -103,7 +103,9 @@ try {
     // (a farm job's live preview, drift-preview.mjs: the newest still, every one of them — they are seconds apart)
     stillPreview.offer(frame, N, N, { crop: DOME ? null : h });
     const raft = await eyeReport(page, s);
-    console.log(`[review] ${file}  t ${s.t} s  ss ${ss.toFixed(2)}  ${Date.now() - t0} ms${raft ? `  raft ${JSON.stringify(raft)}` : ''}`);
+    // (the first still's own start: the wake's replay and every first-use build land in it — takeTimes)
+    const take = k === 0 ? takeTimes(await page.evaluate(() => ({ rec: window.__drift.lastRecordTimes ?? null, wake: window.__drift.sea?.wakeStats ?? null }))) : '';
+    console.log(`[review] ${file}  t ${s.t} s  ss ${ss.toFixed(2)}  ${Date.now() - t0} ms${raft ? `  raft ${JSON.stringify(raft)}` : ''}${take}`);
     if (POST) console.log(`[review] post ${s.name}:`, JSON.stringify(await run(POST)));
     console.log(`[review] still ${++k}/${order.length}  ${Date.now() - t0} ms`);
   }

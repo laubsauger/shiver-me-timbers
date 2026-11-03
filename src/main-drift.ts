@@ -52,6 +52,11 @@ import { loadTitleFonts } from './drift/titleFonts';
 type View = 'flat' | 'dome';
 
 async function boot(): Promise<void> {
+  // BOOT TIMES (ms since navigation, performance.now()): each phase's end, printed by the render and review scripts
+  // from `__drift.bootTimes` — where a farm job's boot goes (the user, 2026-11-02: "what is taking so long for starting
+  // jobs on the machines?"). 'modules': every module fetched from Vite and evaluated, boot() begins. Timing only.
+  const bootTimes: Array<[string, number]> = [['modules', performance.now()]];
+  const bootMark = (what: string): void => void bootTimes.push([what, performance.now()]);
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
   // (up to 6 s for the adapter: a Linux render node's headless GPU process needs ~2 s to bring Vulkan up, core/gate.ts)
@@ -59,10 +64,12 @@ async function boot(): Promise<void> {
     renderGatePage(root);
     return;
   }
+  bootMark('webgpu');
   const p = driftParams;
   // ?trace: three records where each node was created, so a TSL error names our line, not its own
   if (new URLSearchParams(location.search).has('trace')) (THREE.Node as unknown as { captureStackTrace: boolean }).captureStackTrace = true;
   const app = await App.create(root, { antialias: true });
+  bootMark('app');
   const { renderer, scene, camera, controls } = app;
   scene.fog = null;
   // AgX keeps saturated emitters (the cyan and magenta tracks) cleaner than ACES; the dome present pass
@@ -105,8 +112,10 @@ async function boot(): Promise<void> {
   const galaxyAtlas = loadGalaxyAtlas();
   // the titles' faces, before anything can draw a title (drift/titleFonts.ts: a canvas draws a fallback otherwise)
   await Promise.all([web.ready, galaxyAtlas.ready, loadTitleFonts()]);
+  bootMark('web+atlas+fonts');
   const field = createUndertimeField(p, web, (at) => pocketAt(at));
   scene.add(field.group);
+  bootMark('field');
   // ?markers: orientation check for the dome master — front red, right green, zenith blue, back yellow.
   // In the master, red must sit at the bottom, green at the right, blue at the centre, yellow at the top.
   if (new URLSearchParams(location.search).has('markers')) {
@@ -148,6 +157,7 @@ async function boot(): Promise<void> {
   const diveFrame = webFrame(p, p2, web.knots[0].pos, ourGalaxy(p2, e0, p.domeTilt).sun);
   const arrival = createArrival(p2, e0, { frame: diveFrame, knots: web.knots, particles: web.particles.data }, p.domeTilt, galaxyAtlas);
   scene.add(arrival.group);
+  bootMark('arrival');
   // THE SEA (drift/wandering/sea.ts), in a scene of its own: the landing's last hundred-odd metres (C1), taken
   // over from Get the Drift as one descent, then the rest of Part C and Act 3 (wandering/beats.ts) — or, with
   // ?sea[&hour=h], the sea test act alone on its own clock
@@ -166,6 +176,7 @@ async function boot(): Promise<void> {
     ? createSea(renderer, { hour: seaQuery.has('hour') ? Number(seaQuery.get('hour')) : undefined })
     : createSea(renderer, { drive: seaDrive, c1End: arrival.total - arrival.seaFrom + C1_FOLLOW, windowSky: windowRaft?.sky });
   const seaStart = seaTest ? 0 : act2Start + arrival.seaFrom;
+  bootMark('sea');
   // "THE LINE DOWN" (drift/wandering/lineDown.ts; the 2026-11-02 next-level review's bold option): ON BY DEFAULT since
   // the user's go on A3 (2026-11-02) — after the landing the eye sinks under the raft for ~13 s, the dolphins come, and it
   // rises onto the follow (lineDownDive.ts DIVE_A3); `?linedown=off` draws the approved landing without it, nothing
@@ -181,6 +192,7 @@ async function boot(): Promise<void> {
           ? { drive: seaDrive, water: (x, z, t) => sea.probeWater(x, z, t).sea, window: windowRaft, base: (t, out) => sea.baseEye(t, out), raft: (t) => sea.probeRaft(t, 'sea') }
           : undefined)
       : undefined;
+  bootMark('lineDown');
   let lineClock = 0;
   if (lineDown) {
     sea.scene.add(lineDown.group);
@@ -247,6 +259,7 @@ async function boot(): Promise<void> {
   // (the sea acts: SEA_GRADE — references/sea-golden-hour-sky)
   const flatTitles = new FlatTitles();
   const dome = new DomeCapture({ faceSize: p.domeFace, overlay: crawl.texture, flatOverlay: flatTitles.texture, grade: true });
+  bootMark('crawl+dome');
   // THE 16:9 CUT'S FRAMING (drift/flatFraming.ts): with `__drift.setFlatTrack(true)` the flat view is aimed per frame
   // as a function of show time, from the beats' start times (built when it is switched on); off, the view is where
   // `setFlat` put it. Only the flat view: the dome master never reads it.
@@ -488,6 +501,7 @@ async function boot(): Promise<void> {
   );
 
   let recording = '';
+  let lastRecordTimes: { warmUpJs: number | null; firstFrame: number | null } = { warmUpJs: null, firstFrame: null };
   let faceOverride: number | null = null;
   /** the face size the master is matched to (`faceOverride` without supersampling): one master pixel's angle */
   let pixelFace: number | null = null;
@@ -498,10 +512,17 @@ async function boot(): Promise<void> {
     pixelFace = faceSizeFor(size);
     const previewSize = masterSize;
     masterSize = size;
+    const t0 = performance.now();
+    const times: typeof lastRecordTimes = (lastRecordTimes = { warmUpJs: null, firstFrame: null });
+    const timed = (at: number, shutter: number, samples: number): void => {
+      const a = performance.now();
+      frame(at, shutter, samples);
+      times.warmUpJs ??= performance.now() - a;
+    };
     try {
       return await recordDomeMaster(
-        { to: total, ...o, size, onProgress: (n, of) => { recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
-        { renderer, frame },
+        { to: total, ...o, size, onProgress: (n, of) => { times.firstFrame ??= performance.now() - t0; recording = `  ● REC ${n}/${of}`; if (hud) hud.textContent = recording; } },
+        { renderer, frame: timed },
       );
     } finally {
       faceOverride = null;
@@ -514,8 +535,11 @@ async function boot(): Promise<void> {
 
   // the Earth's maps (~150 MB of satellite data) load in the background; nothing may be captured before
   await arrival.ready;
+  bootMark('arrival.ready');
   await sea.ready;
+  bootMark('sea.ready');
   await lineDown?.ready;
+  bootMark('lineDown.ready');
   (window as unknown as Record<string, unknown>).__drift = {
     app,
     /** live tunables (src/params/drift.ts) — write a field and the next frame uses it */
@@ -549,6 +573,13 @@ async function boot(): Promise<void> {
     flatMarks,
     /** offline dome-master render to the cine sink (npm run cine:sink): { size, fps, from, to, shot } */
     record,
+    /** [phase, ms since navigation] of this page's boot (the header of boot()); 'first draw' once the first frame is in */
+    bootTimes,
+    /** the last take's start (TIMING ONLY): ms of the page's own time in its first frame call (the warm-up frame: the
+     * wake's replay, every first-use build) and ms from the call to its first frame posted */
+    get lastRecordTimes(): { warmUpJs: number | null; firstFrame: number | null } {
+      return lastRecordTimes;
+    },
     /** the Line Down's dive (lineDownDive.ts): its crossings in show s and its check — what a review is timed against */
     lineDown: lineDown?.plan
       ? {
@@ -575,6 +606,7 @@ async function boot(): Promise<void> {
   };
 
   draw();
+  bootMark('first draw');
   bootReady();
   loop.start();
   if (q.has('record')) {
@@ -586,6 +618,9 @@ async function boot(): Promise<void> {
     if (num('msaa', 4) === 0) dome.setSamples(0);
     const status = window as unknown as { __driftRecord?: { done: boolean; frames?: number; error?: string } };
     status.__driftRecord = { done: false };
+    // (read by scripts/drift-render.mjs: from here the take's warm-up frame holds this thread — for a late start, the
+    // sea's wake replayed from its world's start, minutes on some boxes — and its stall guard times that phase apart)
+    console.info('[drift] booted: the take starts, its warm-up frame first');
     record({
       size: num('size', 2048),
       fps: num('fps', 30),

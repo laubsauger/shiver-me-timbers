@@ -75,6 +75,31 @@ const REVIEW_FACE_MAX = 4096;
 export const flatSupersample = (fov, width) => Math.max(1, Math.min((REVIEW_TEXELS * 90) / fov / 0.55, REVIEW_FACE_MAX / (0.55 * width)));
 
 /**
+ * WHERE A BOOT GOES, as one line: the page's boot phases (src/main-drift.ts `__drift.bootTimes`, [phase, ms since
+ * navigation]), each phase's own seconds — 'modules' is Vite's transforms plus the module graph's fetch and evaluation.
+ * '' for a page without them (an older tree).
+ */
+export function bootPhases(times) {
+  if (!Array.isArray(times)) return '';
+  let prev = 0;
+  return ` (${times.map(([what, ms]) => {
+    const d = (ms - prev) / 1000;
+    prev = ms;
+    return `${what} ${d.toFixed(1)}`;
+  }).join(' · ')} s)`;
+}
+
+/**
+ * A take's start, as a line's tail: { rec: __drift.lastRecordTimes, wake: the sea's wakeStats so far } → the first
+ * frame's own time, the warm-up frame's page time, and the sea's wake replay (src/drift/wandering/sea.ts wakeTo) in it.
+ */
+export function takeTimes({ rec, wake } = {}) {
+  if (!rec || rec.firstFrame === null) return '';
+  const w = wake && wake.steps > 0 ? `, the sea's wake ${wake.steps} steps (${wake.replays} replay${wake.replays === 1 ? '' : 's'}) in ${(wake.ms / 1000).toFixed(1)} s` : '';
+  return `; the take's first frame ${(rec.firstFrame / 1000).toFixed(1)} s (its warm-up frame ${(rec.warmUpJs / 1000).toFixed(1)} s of page time${w})`;
+}
+
+/**
  * Boot drift.html (?paused, plus `query`) on its own Vite server at `port` and wait for `__drift`. Each frame the
  * page records is handed to `onFrame(bytes, searchParams)`; the page's POST is answered when it resolves, so a slow
  * consumer holds the page back, and a throw fails the take. Returns { page, sinkUrl, run(js), close }.
@@ -91,6 +116,10 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     sink?.close();
   };
   for (const sig of ['SIGINT', 'SIGTERM']) process.once(sig, () => void close().then(() => process.exit(130)));
+  // (the job's start, step by step: "[review] boot: …" below — the user, 2026-11-02: "what is taking so long for
+  // starting jobs on the machines?")
+  const t0 = Date.now();
+  const s = (a, b = Date.now()) => ((b - a) / 1000).toFixed(1);
   try {
     sink = http.createServer((req, res) => {
       const parts = [];
@@ -117,6 +146,7 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     // own dep cache, so it never fights another server's optimiser
     vite = await createServer({ root: ROOT, clearScreen: false, logLevel: 'warn', cacheDir: join(ROOT, cacheDir), server: { port, strictPort: true, hmr: false, watch: null } });
     await vite.listen();
+    const tVite = Date.now();
     // --expose-gc: the page collects every few frames, or each POST body stays in its memory (record.ts GC_EVERY);
     // and the machine's GPU flags (drift-chrome.mjs: Linux needs --enable-unsafe-webgpu and Vulkan, or headless Chrome
     // has no WebGPU adapter — linux-monster's first farm clip, 2026-10-30, waited 240 s on the page's WebGPU gate)
@@ -125,6 +155,7 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     browser = await launchChrome(chromium, { channel, gpu: gpu.args, kind: 'review', say: (m) => console.log(`[review] ${m}`) });
     if (browser.profile) console.log(`[review] shader cache: ${browser.profile.cache} (${browser.profile.dir}${browser.profile.why ? `; ${browser.profile.why}` : ''})`);
     const page = await browser.newPage({ viewport: { width: 256, height: 256 } });
+    const tChrome = Date.now();
     const seen = new Set();
     // a module the server could not build (a syntax error mid-edit, a missing import) answers 500 and the page never
     // boots: fail at once rather than at the boot timeout. Vite prints the module's error above.
@@ -165,6 +196,7 @@ export async function openDriftPage({ port, channel, query, cacheDir, onFrame })
     if (!(await page.evaluate(() => '__drift' in window))) {
       throw new Error(`drift.html shows its "requires WebGPU" gate: this Chrome (${channel}) found no WebGPU adapter. GPU flags from ${gpu.from}: ${gpu.args.join(' ') || '(none)'} — node scripts/drift-gpu-check.mjs says which flags work here`);
     }
+    console.log(`[review] boot: Vite ${s(t0, tVite)} s, Chrome ${s(tVite, tChrome)} s, drift.html ${s(tChrome)} s${bootPhases(await page.evaluate(() => window.__drift.bootTimes ?? null))}`);
     await page.evaluate(() => {
       const d = window.__drift;
       const D = Math.PI / 180;

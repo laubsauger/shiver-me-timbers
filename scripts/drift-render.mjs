@@ -56,6 +56,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer as createVite } from 'vite';
 import { gpuArgs, launchChrome } from './drift-chrome.mjs';
+import { bootPhases, takeTimes } from './drift-review-page.mjs';
 import { LANE_CODECS, hasEncoder, laneEncoder, laneNote } from './cine-codecs.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -92,7 +93,7 @@ const DEPTH = num('depth', 8);
 /** MSAA samples of the cube faces, passed to every page as &msaa (src/main-drift.ts): 4, or 0 for none */
 const MSAA = num('msaa', 4);
 if (MSAA !== 4 && MSAA !== 0) throw new Error(`--msaa ${MSAA}: 4 | 0`);
-/** no lane progress for this long = a hung lane (the first frame includes boot and shader compile) */
+/** no lane progress for this long, once its warm-up frame is done = a hung lane (the wait loop's STALL GUARD) */
 const STALL_MS = 180_000;
 
 // ------------------------------------------------------------------------------------------- MACHINE GUARDS
@@ -243,33 +244,44 @@ async function main() {
     if (laneNote(CODEC) !== null) log(`--codec ${CODEC}: ${laneNote(CODEC)}`);
   }
   if (process.platform !== 'darwin') log(`chrome ${CHANNEL}, GPU flags (${gpuArgs().from}): ${gpuArgs().args.join(' ') || '(none)'}`);
-  const probeBrowser = await launch();
-  browsers.push(probeBrowser);
-  const probe = await probeBrowser.newPage({ viewport: { width: 256, height: 256 } });
-  const probeErrors = [];
-  probe.on('pageerror', (e) => probeErrors.push(String(e)));
-  const tProbe = Date.now();
-  await probe.goto(`${base}/drift.html?paused${QUERY}`);
-  for (const until = Date.now() + 120_000; ; ) {
-    if (probeErrors.length > 0) throw new Error(`drift.html failed to boot: ${probeErrors.join('\n')}`);
-    if (await probe.evaluate(() => '__drift' in window || document.body.innerText.includes('requires WebGPU'))) break;
-    if (Date.now() > until) throw new Error('drift.html did not boot in 120 s');
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  // (the boot alone, for the shader cache's measurements: a cold profile compiles here, the lanes after it are warm)
-  log(`probe: drift.html booted in ${secs(tProbe).toFixed(1)} s`);
-  const probed = await probe.evaluate(async () => {
+  /** in the page: its WebGPU adapter, and the show's end (every act on one clock), as the page reports it */
+  const adapterOf = async () => {
     const adapter = await navigator.gpu?.requestAdapter();
     const info = adapter?.info;
     if (!('__drift' in window)) return { error: 'no WebGPU in this browser (the page showed its gate)' };
-    // the show's end (every act on one clock), as the page reports it
     return { total: window.__drift.total, gpu: `${info?.vendor}/${info?.architecture}${info?.isFallbackAdapter ? ' FALLBACK' : ''}`, fallback: info?.isFallbackAdapter === true || /swiftshader/i.test(`${info?.vendor} ${info?.architecture} ${info?.description}`) };
-  });
-  if (probed.error) throw new Error(probed.error);
+  };
   // a software adapter renders, at a frame a minute: on a render node that is a broken GPU path, not a slow render
-  if (process.platform !== 'darwin' && probed.fallback) throw new Error(`the page got a software WebGPU adapter (${probed.gpu}), not the GPU — run node scripts/drift-gpu-check.mjs`);
-  await probeBrowser.close();
-  browsers.splice(browsers.indexOf(probeBrowser), 1);
+  const refuseFallback = (g) => {
+    if (process.platform !== 'darwin' && g.fallback) throw new Error(`the page got a software WebGPU adapter (${g.gpu}), not the GPU — run node scripts/drift-gpu-check.mjs`);
+  };
+  // THE PROBE only when the show's end is needed (no --to). It was a whole extra boot of drift.html before the lanes
+  // booted it again — 26–37 s of every farm chunk's start on linux-monster and eeg-msi (the user, 2026-11-02: "the
+  // boot-up of the job is taking quite a lot of time"); with --to the lanes boot straight away, and the first lane up
+  // makes the same checks (its adapter, the WebGPU gate; the wait loop below). Nothing a lane draws depends on it.
+  let probed = null;
+  if (TO_ARG === null) {
+    const probeBrowser = await launch();
+    browsers.push(probeBrowser);
+    const probe = await probeBrowser.newPage({ viewport: { width: 256, height: 256 } });
+    const probeErrors = [];
+    probe.on('pageerror', (e) => probeErrors.push(String(e)));
+    const tProbe = Date.now();
+    await probe.goto(`${base}/drift.html?paused${QUERY}`);
+    for (const until = Date.now() + 120_000; ; ) {
+      if (probeErrors.length > 0) throw new Error(`drift.html failed to boot: ${probeErrors.join('\n')}`);
+      if (await probe.evaluate(() => '__drift' in window || document.body.innerText.includes('requires WebGPU'))) break;
+      if (Date.now() > until) throw new Error('drift.html did not boot in 120 s');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // (the boot alone, for the shader cache's measurements: a cold profile compiles here, the lanes after it are warm)
+    log(`probe: drift.html booted in ${secs(tProbe).toFixed(1)} s${bootPhases(await probe.evaluate(() => window.__drift?.bootTimes ?? null))}`);
+    probed = await probe.evaluate(adapterOf);
+    if (probed.error) throw new Error(probed.error);
+    refuseFallback(probed);
+    await probeBrowser.close();
+    browsers.splice(browsers.indexOf(probeBrowser), 1);
+  }
   const TO = TO_ARG === null ? probed.total : Number(TO_ARG);
   if (!(TO > FROM)) throw new Error(`--to ${TO} must be after --from ${FROM}`);
 
@@ -298,7 +310,7 @@ async function main() {
   mkdirSync(LANE_DIR, { recursive: true });
   laneDir = LANE_DIR;
   const threads = Math.max(1, Math.floor(cpus().length / N));
-  log(`${F} frames [${FROM}, ${TO}) s at ${FPS} fps, ${SIZE}² ${CODEC} ${DEPTH}-bit${CODEC === 'x264' ? ` crf ${CRF} ${PRESET}, ${threads} threads/lane` : ''}${MSAA === 0 ? ', faces without MSAA' : ''}, ${N} lane(s), GPU ${probed.gpu}`);
+  log(`${F} frames [${FROM}, ${TO}) s at ${FPS} fps, ${SIZE}² ${CODEC} ${DEPTH}-bit${CODEC === 'x264' ? ` crf ${CRF} ${PRESET}, ${threads} threads/lane` : ''}${MSAA === 0 ? ', faces without MSAA' : ''}, ${N} lane(s)${probed ? `, GPU ${probed.gpu}` : ''}`);
   for (const l of lanes) log(`  lane ${l.k}: frames [${l.n0}, ${l.n1}) = t [${l.from.toFixed(3)}, ${l.to.toFixed(3)}) s${l.ulp > 0 ? `  (${l.ulp} t values off a serial take's in the last bit)` : ''}`);
 
   // ----------------------------------------------------------------------------------------- a sink per lane
@@ -354,6 +366,8 @@ async function main() {
       page.on('crash', () => l.errors.push('the page crashed'));
       l.consoleErrors = 0;
       page.on('console', (m) => {
+        // (the page says so as its take starts, before the warm-up frame holds its thread: src/main-drift.ts ?record)
+        if (m.type() === 'info' && m.text().startsWith('[drift] booted')) l.bootedAt ??= Date.now();
         if (m.type() !== 'error' && m.type() !== 'warning') return;
         if (m.type() === 'error') l.consoleErrors++;
         const text = m.text();
@@ -375,42 +389,102 @@ async function main() {
   log(`${N} lane(s) launched in ${secs(tLaunch).toFixed(1)} s`);
 
   // ------------------------------------------------------------------------------- wait, watching every lane
-  let lastProgress = Date.now();
+  // THE STALL GUARD, phase by phase (each lane's own clock). A flat 180 s from launch to the first frame failed two
+  // master chunks on windows-monster that were not hung (2026-11-02, 540 and 720 s: "no lane advanced in 180 s …
+  // booted true"): a lane that starts late in the sea first replays the wake from its world's start (sea.ts wakeTo,
+  // ~30 GPU steps a second of show time) inside its warm-up frame, minutes of the page's own time on that box, with
+  // its main thread busy throughout (it does not even answer a poll). So:
+  //   boot     launch → `__drift` up: BOOT_MS
+  //   warm-up  booted → the take's warm-up frame done (`__drift.lastRecordTimes.warmUpJs`): WARMUP_MS, a ceiling
+  //            for a bounded computation — what it catches is a page that never comes back
+  //   frames   from the warm-up's end to the first frame, and between frames: STALL_MS, as before
+  // The page is polled without waiting on it, so a busy lane neither hides the others nor stops the progress lines.
+  const BOOT_MS = 240_000;
+  const WARMUP_MS = 20 * 60_000;
+  for (const l of lanes) {
+    l.phase = 'boot';
+    l.tPhase = tLaunch;
+    l.n = 0;
+  }
+  const poll = (l) => {
+    if (l.polling || l.done) return;
+    l.polling = l.page
+      .evaluate(() => ({
+        booted: '__drift' in window,
+        gate: !('__drift' in window) && /requires\s+WebGPU/.test(document.body?.innerText ?? ''),
+        rec: window.__driftRecord,
+        warmed: window.__drift?.lastRecordTimes?.warmUpJs ?? null,
+        hud: document.getElementById('drift-hud')?.textContent ?? '',
+      }))
+      .then(
+        (st) => (l.state = st),
+        (e) => !l.done && l.errors.push(`the page stopped answering: ${String(e).slice(0, 300)}`),
+      )
+      .finally(() => (l.polling = null));
+  };
+  const busyFor = (l) => `${l.phase} ${secs(l.tPhase).toFixed(0)} s`;
   let lastLine = 0;
   for (;;) {
     const live = lanes.filter((l) => !l.done);
     for (const l of live) {
       if (l.sinkExit !== undefined) l.errors.push(`its sink exited ${l.sinkExit}`);
       if (l.errors.length > 0) throw new Error(`lane ${l.k} failed:\n  ${l.errors.join('\n  ')}`);
+      poll(l);
     }
-    // all lanes at once: a page busy compiling its pipelines answers late, and must not delay the others' samples
-    const states = await Promise.all(
-      live.map((l) => l.page.evaluate(() => ({ booted: '__drift' in window, rec: window.__driftRecord, hud: document.getElementById('drift-hud')?.textContent ?? '' }))),
-    );
-    for (const [i, l] of live.entries()) {
-      const s = states[i];
-      if (s.rec?.done && s.rec.error) throw new Error(`lane ${l.k} failed: ${s.rec.error}`);
-      const m = /REC (\d+)\/(\d+)/.exec(s.hud);
-      const n = s.rec?.done ? l.frames : m ? Number(m[1]) : 0;
-      if (n > (l.n ?? 0)) lastProgress = Date.now();
-      l.n = n;
-      l.state = s;
-      if (s.rec?.done) {
+    await new Promise((r) => setTimeout(r, 250));
+    const now = Date.now();
+    for (const l of live) {
+      const s = l.state;
+      if (s?.gate) throw new Error(`lane ${l.k}: drift.html shows its "requires WebGPU" gate: this Chrome (${CHANNEL}) found no WebGPU adapter — node scripts/drift-gpu-check.mjs says which flags work here`);
+      if ((s?.booted || l.bootedAt) && l.phase === 'boot') {
+        l.phase = 'warm-up';
+        l.tPhase = l.bootedAt ?? now;
+        // its boot, phase by phase (src/main-drift.ts bootTimes), and its adapter — the probe's check, now that there
+        // is no probe. Asked without waiting: the take's warm-up starts at boot and holds the page's thread
+        log(`lane ${l.k}: drift.html booted ${secs(tLaunch, l.tPhase).toFixed(1)} s after launch; its warm-up frame at ${l.from.toFixed(3)} s starts`);
+        Promise.all([l.page.evaluate(adapterOf), l.page.evaluate(() => window.__drift.bootTimes ?? null)]).then(
+          ([g, boot]) => {
+            if (g.error) return l.errors.push(g.error);
+            try {
+              refuseFallback(g);
+            } catch (e) {
+              return l.errors.push(e.message);
+            }
+            log(`lane ${l.k}: GPU ${g.gpu}, its boot${bootPhases(boot)}`);
+          },
+          (e) => !l.done && l.errors.push(`the page stopped answering: ${String(e).slice(0, 300)}`),
+        );
+      }
+      if (s?.warmed !== null && s?.warmed !== undefined && l.phase === 'warm-up') {
+        l.phase = 'frames';
+        log(`lane ${l.k}: warm-up frame done ${secs(l.tPhase).toFixed(1)} s after boot (${(s.warmed / 1000).toFixed(1)} s of page time)`);
+        l.tPhase = now;
+      }
+      if (s?.rec?.done && s.rec.error) throw new Error(`lane ${l.k} failed: ${s.rec.error}`);
+      const m = /REC (\d+)\/(\d+)/.exec(s?.hud ?? '');
+      const n = s?.rec?.done ? l.frames : m ? Number(m[1]) : 0;
+      if (n > l.n) l.tPhase = now;
+      l.n = Math.max(l.n, n);
+      if (s?.rec?.done) {
         if (s.rec.frames !== l.frames) throw new Error(`lane ${l.k}: the page rendered ${s.rec.frames} frames, ${l.frames} expected`);
-        l.done = Date.now();
+        l.done = now;
+        l.take = takeTimes(await l.page.evaluate(() => ({ rec: window.__drift.lastRecordTimes ?? null, wake: window.__drift.sea?.wakeStats ?? null })));
+        continue;
+      }
+      const limit = { boot: BOOT_MS, 'warm-up': WARMUP_MS, frames: STALL_MS }[l.phase];
+      if (now - l.tPhase > limit) {
+        const what = { boot: 'did not boot', 'warm-up': 'did not finish its warm-up frame (the page has not answered)', frames: l.n > 0 ? 'rendered no frame' : 'rendered no first frame after its warm-up' }[l.phase];
+        const why = `sink ${l.tOpen ? 'has frames' : 'has no frame'}, booted ${s?.booted}, __driftRecord ${JSON.stringify(s?.rec)}, hud ${JSON.stringify(s?.hud?.split('\n')[0])}`;
+        throw new Error(`lane ${l.k} ${what} in ${limit / 1000} s: ${l.n}/${l.frames} (${why})`);
       }
     }
     if (lanes.every((l) => l.done)) break;
-    if (Date.now() - lastProgress > STALL_MS) {
-      const why = (l) => (l.done ? 'done' : `sink ${l.tOpen ? 'has frames' : 'has no frame'}, booted ${l.state?.booted}, __driftRecord ${JSON.stringify(l.state?.rec)}, hud ${JSON.stringify(l.state?.hud?.split('\n')[0])}`);
-      throw new Error(`no lane advanced in ${STALL_MS / 1000} s:\n  ${lanes.map((l) => `lane ${l.k} ${l.n}/${l.frames} (${why(l)})`).join('\n  ')}`);
+    if (now - lastLine > 5000) {
+      lastLine = now;
+      const done = lanes.reduce((a, l) => a + l.n, 0);
+      const busy = lanes.filter((l) => !l.done && l.phase !== 'frames').map((l) => `lane ${l.k} ${busyFor(l)}`);
+      log(`${done}/${F}  ${(done / secs(tLaunch)).toFixed(1)} fps  ${lanes.map((l) => `${l.n}/${l.frames}`).join(' ')}${busy.length ? `  (${busy.join(', ')})` : ''}`);
     }
-    if (Date.now() - lastLine > 5000) {
-      lastLine = Date.now();
-      const done = lanes.reduce((a, l) => a + (l.n ?? 0), 0);
-      log(`${done}/${F}  ${(done / secs(tLaunch)).toFixed(1)} fps  ${lanes.map((l) => `${l.n ?? 0}/${l.frames}`).join(' ')}`);
-    }
-    await new Promise((r) => setTimeout(r, 250));
   }
   const tRendered = Date.now();
   await Promise.allSettled(browsers.map((b) => b.close()));
@@ -444,7 +518,7 @@ async function main() {
   const lastFrame = Math.max(...lanes.map((l) => l.tClose ?? tRendered));
   log(`${OUT}: ${F} frames, ${SIZE}², ${N} lane(s)`);
   for (const l of lanes) {
-    log(`  lane ${l.k}: ${l.frames} frames, first frame ${secs(tLaunch, l.tOpen ?? tRendered).toFixed(1)} s after launch, ${rate(l).toFixed(2)} fps`);
+    log(`  lane ${l.k}: ${l.frames} frames, first frame ${secs(tLaunch, l.tOpen ?? tRendered).toFixed(1)} s after launch, ${rate(l).toFixed(2)} fps${l.take ?? ''}`);
   }
   log(`total: ${(F / secs(tLaunch, lastFrame)).toFixed(2)} fps launch to last frame (incl. lane boot), ` +
     `${(F / secs(firstFrame, lastFrame)).toFixed(2)} fps first to last frame, ${lanes.reduce((a, l) => a + rate(l), 0).toFixed(2)} fps sum of lanes; ` +
