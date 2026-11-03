@@ -101,6 +101,7 @@ describe('the types', () => {
   it.skipIf(!existsSync(join(STUDIO_FARM, 'src/types.mjs')))('load in the studio farm package as drift-render@1, drift-review-clip@1, drift-review-stills@1', async () => {
     const { loadTypes, createRegistry } = await import(pathToFileURL(join(STUDIO_FARM, 'src/types.mjs')).href);
     const reg = createRegistry(await loadTypes(['farm/types'], { base: ROOT }));
-    expect(reg.keys().sort()).toEqual(['drift-render@1', 'drift-review-clip@1', 'drift-review-stills@1', 'legacy-argv@1']);
+    // (legacy-argv@1 is built in only with an older studio-farm; now its Drift compat module registers it, on the hub)
+    expect(reg.keys().filter((k: string) => k !== 'legacy-argv@1').sort()).toEqual(['drift-render@1', 'drift-review-clip@1', 'drift-review-stills@1']);
   });
 });

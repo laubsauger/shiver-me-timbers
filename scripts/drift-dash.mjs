@@ -642,8 +642,11 @@ try {
   // (this Mac is a farm worker too, when its own worker runs (studio-farm's examples/drift/worker/mac-worker.sh): one of
   // the hub's workers, so the console's controls reach it before it has ever claimed, but never a fleet card of its own
   // — its card is the Mac's, first. No tailnet address: it works with a worker token, from loopback)
+  // (compat: the Drift farm's own /farm/* wire — legacy-argv@1, the x-drift-farm-* headers, the asset bundle — which
+  // studio-farm keeps behind an opt-in module since its core stopped knowing the Drift (its docs/ONBOARDING.md); an
+  // older studio-farm ignores the option)
   farm = createFarmHub({
-    dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => [...farmNodes(FARM_NODES), MAC_WORKER], bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT,
+    compat: ['drift-farm'], dir: FARM_DIR, token: t.token, allow: fromTailnet, hints: () => [...farmNodes(FARM_NODES), MAC_WORKER], bundleDir: process.env.DRIFT_FARM_BUNDLE_DIR ?? join(ROOT, 'out/drift-bundle'), repo: ROOT, assetsRoot: ROOT,
     types: await loadTypes(['farm/types'], { base: ROOT }), legacyHooks, log: (m) => console.log(`[dash] ${m}`),
   });
   console.log(`[dash] farm: the studio farm's hub (${STUDIO_FARM_DIR})`);

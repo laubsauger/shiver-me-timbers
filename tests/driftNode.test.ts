@@ -202,7 +202,7 @@ describe.skipIf(!existsSync(join(STUDIO_FARM, 'src/hub.mjs')))('syncBundle from 
     const share = join(scratch, 'hub-bundles');
     makeBundle(share, 'drift-assets-20261031.tar.gz', { 'public/drift/web/v.bin': 'web', 'public/drift/clouds/c.bin': 'cloud' });
     const { createFarmHub } = await import(pathToFileURL(join(STUDIO_FARM, 'src/hub.mjs')).href);
-    const hub = createFarmHub({ dir: join(scratch, 'hub-farm'), token: 'tok-tok-tok-tok-tok-tok', hints: () => [{ name: 'windows-monster', tailnetIp: '127.0.0.1' }], bundleDir: share });
+    const hub = createFarmHub({ compat: ['drift-farm'], dir: join(scratch, 'hub-farm'), token: 'tok-tok-tok-tok-tok-tok', hints: () => [{ name: 'windows-monster', tailnetIp: '127.0.0.1' }], bundleDir: share });
     const server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')).then((done: boolean) => (done ? undefined : res.writeHead(404).end())));
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     const a = server.address();

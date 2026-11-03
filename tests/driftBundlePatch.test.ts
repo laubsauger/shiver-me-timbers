@@ -67,7 +67,7 @@ beforeAll(async () => {
   if (!HAVE_PACKAGE) return;
   publish(NEW);
   const { createFarmHub } = await import(pathToFileURL(join(STUDIO_FARM, 'src', 'hub.mjs')).href);
-  hub = createFarmHub({ dir: join(scratch, 'farm'), token: TOKEN, bundleDir, assetsRoot: mac, allow: () => true, hints: () => [] });
+  hub = createFarmHub({ compat: ['drift-farm'], dir: join(scratch, 'farm'), token: TOKEN, bundleDir, assetsRoot: mac, allow: () => true, hints: () => [] });
   server = createServer((req, res) => void hub.handle(req, res, new URL(req.url ?? '/', 'http://x')).then((done: boolean) => (done ? undefined : res.writeHead(404).end())));
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const a = server.address();
