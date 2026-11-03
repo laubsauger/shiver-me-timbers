@@ -81,13 +81,25 @@ export function shadowTexelSize(extent: number, mapSize: number): number {
  * depth axis is preserved exactly, so the near/far range the caller chose
  * is not disturbed. A texel size of 0 (or garbage) returns the centre
  * unchanged — snapping off, never NaN.
+ *
+ * `anchor` (optional; the world origin by default) is the point the grid is
+ * laid from: texel lines fall where (p − anchor)·x and (p − anchor)·y are
+ * whole texels. While the sun stands still any anchor is as good as another.
+ * While it TURNS the basis tips, and a still point's v moves by its depth
+ * along the light from the anchor × the turn — so the grid holds still only
+ * near the anchor. The film's coast and open sea lie 40 km from the origin:
+ * about the origin, its Sun's 0.1°/s re-phased the grid by ~2 m a frame
+ * (found with the 2026-11-03 review's rigging flicker, drift/wandering/sea.ts);
+ * the film lays it from the scene (the beach; the raft at sea). An anchor
+ * that is not finite is ignored.
  */
-export function snapShadowCenter(center: Vec3, sunDir: Vec3, texel: number): Vec3 {
+export function snapShadowCenter(center: Vec3, sunDir: Vec3, texel: number, anchor?: Vec3): Vec3 {
   if (!Number.isFinite(texel) || texel <= 0) return [...center];
   if (!center.every(Number.isFinite)) return [...center];
   const { x, y } = shadowBasis(sunDir);
-  const u = dot(center, x);
-  const v = dot(center, y);
+  const a: Vec3 = anchor && anchor.every(Number.isFinite) ? anchor : [0, 0, 0];
+  const u = dot(center, x) - dot(a, x);
+  const v = dot(center, y) - dot(a, y);
   const du = Math.round(u / texel) * texel - u;
   const dv = Math.round(v / texel) * texel - v;
   return [

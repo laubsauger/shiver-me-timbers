@@ -64,8 +64,9 @@
  * the low-poly crew those quads came out as a stipple of lit and dark pixels through every shadow; dropping such
  * quads back to the old constant bias lit them, 26 cm toward the Sun, inside a man's shadow on the wall behind him.)
  */
-import { Fn, If, float, ivec2, mix, normalWorldGeometry, reference, renderGroup, select, smoothstep, step, textureLoad, vec2, vec4 } from 'three/tsl';
+import { Fn, If, float, ivec2, min, mix, normalWorldGeometry, reference, renderGroup, select, smoothstep, step, textureLoad, vec2, vec4 } from 'three/tsl';
 import { SUN_ANG } from '../getTheDrift/atmosphere';
+import type { RaftShadowMap } from './raftShadow';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union (ShadowNode's filter contract)
 type TslNode = any;
@@ -99,33 +100,39 @@ interface FilmShadow {
   camera: object;
 }
 
-export const filmShadowFilter = Fn(({ depthTexture, shadowCoord, shadow, depthLayer }: { depthTexture: TslNode; shadowCoord: TslNode; shadow: FilmShadow; depthLayer?: TslNode }) => {
+/** one map as the filter reads it: its depth, its texel count a side, its light camera, the receiver's coordinates in
+ * it (u, v in 0..1, v down; z its depth, 0..1 from near to far) */
+interface MapRead {
+  load: (at: TslNode, o: TslNode) => TslNode;
+  size: number;
+  camera: object;
+  coord: TslNode;
+  /** depth the receiver is held under (the raft's map: a receiver down the light past its far plane is compared as at
+   * it, so the empty map, cleared to 1, reads lit there) */
+  zCap?: number;
+}
+
+/** how lit the receiver is by one map, 0..1: the contact grid, the blocker search, the wide grid (the header) */
+function litIn(m: MapRead, rMin: number): TslNode {
   // (held in vars up here: an expression first built inside the wide grid's branch is declared there, and read
   // outside it from a variable out of scope — the nightSky.ts trap)
-  const z = float(shadowCoord.z).toVar();
-  // (the map size and the contact radius are fixed for the film's light while a frame renders: read as constants at
-  // build)
-  const size = shadow.mapSize.x;
-  const rMin = Math.max(shadow.radius, 1);
+  const z = (m.zCap === undefined ? float(m.coord.z) : float(m.coord.z).min(m.zCap)).toVar();
+  const size = m.size;
 
   // the light camera's scale, live (its extent is per world, sea.ts SHADOW_EXTENT): m per texel, m per unit of depth
-  const cam = (name: string): TslNode => (reference(name, 'float', shadow.camera) as TslNode).setGroup(renderGroup);
+  const cam = (name: string): TslNode => (reference(name, 'float', m.camera) as TslNode).setGroup(renderGroup);
   const texelM = cam('right').sub(cam('left')).div(size).toVar();
   const depthM = cam('far').sub(cam('near')).toVar();
-  const at = shadowCoord.xy.mul(size).toVar();
+  const at = m.coord.xy.mul(size).toVar();
   /** the map's depth `o` texels from the receiver (a point read: no compare, no filtering) */
-  const load = (o: TslNode): TslNode => {
-    let d = textureLoad(depthTexture, ivec2(at.add(o).floor().clamp(0, size - 1)));
-    if (depthTexture.isArrayTexture) d = d.depth(depthLayer);
-    return d;
-  };
+  const load = (o: TslNode): TslNode => m.load(at, o);
 
   // THE RECEIVER'S PLANE, from the mesh's own (interpolated, geometric: no normal map) normal turned into the light
   // camera's frame: n·dp = 0 there gives the depth's slope across the map, dd = (nx·W du − ny·H dv) / (nz·D) per uv
   // (W, H the camera's extent, D its depth range; v runs down the map, ShadowNode's flip), per texel / size. The
   // same plane whichever way the normal faces. Steeper than SLOPE_MAX (a surface the Sun all but grazes, N·L ≈ 0)
   // it is held at that.
-  const view = (reference('matrixWorldInverse', 'mat4', shadow.camera) as TslNode).setGroup(renderGroup);
+  const view = (reference('matrixWorldInverse', 'mat4', m.camera) as TslNode).setGroup(renderGroup);
   const n = view.mul(vec4(normalWorldGeometry, 0)).xyz.toVar();
   const nz = select(n.z.lessThan(0), float(-1), float(1)).mul(n.z.abs().max(1e-4));
   const plane = vec2(n.x.mul(cam('right').sub(cam('left'))), n.y.negate().mul(cam('top').sub(cam('bottom')))).div(nz.mul(depthM)).div(size).toVar();
@@ -195,4 +202,57 @@ export const filmShadowFilter = Fn(({ depthTexture, shadowCoord, shadow, depthLa
     wide.assign(lit.div(ws));
   });
   return mix(contact, wide, wideness);
-});
+}
+
+/**
+ * The Sun's shadow as the film filters it, reading the Sun's map — and, with `raft` (raftShadow.ts, the 2026-11-03
+ * review's flickering rigging), the raft's own fitted map as well, which alone holds the raft's casters: a receiver
+ * inside its footprint takes the darker of the two (the shadow of whichever casts on it, the world's or the raft's;
+ * overlapping penumbrae take the darker, not the product). Each map is filtered at its own texel: the raft's
+ * contact filter is ±3 of its 5.4 mm texels (±1.6 cm, where the Sun's was ±6.6 cm on the coast), its search and its
+ * wide grid in metres as before. The raft's map is read only inside its footprint (a branch: point reads only).
+ */
+export function filmShadowFilterFor(raft?: RaftShadowMap): TslNode {
+  return Fn(({ depthTexture, shadowCoord, shadow, depthLayer }: { depthTexture: TslNode; shadowCoord: TslNode; shadow: FilmShadow; depthLayer?: TslNode }) => {
+    const sunSize = shadow.mapSize.x;
+    // (the map size and the contact radius are fixed for the film's light while a frame renders: read as constants
+    // at build)
+    const rMin = Math.max(shadow.radius, 1);
+    const sun = litIn(
+      {
+        load: (at, o) => {
+          let d = textureLoad(depthTexture, ivec2(at.add(o).floor().clamp(0, sunSize - 1)));
+          if (depthTexture.isArrayTexture) d = d.depth(depthLayer);
+          return d;
+        },
+        size: sunSize,
+        camera: shadow.camera,
+        coord: shadowCoord,
+      },
+      rMin,
+    );
+    if (!raft) return sun;
+    const lit = float(sun).toVar();
+    // the receiver in the raft's map: the Sun's coordinates scaled and shifted (raftShadow.ts fromSun)
+    const rc = raft.fromSun.mul(vec4(shadowCoord.xyz, 1)).xyz.toVar();
+    const inside = raft.on.greaterThan(0.5).and(rc.x.greaterThan(0)).and(rc.x.lessThan(1)).and(rc.y.greaterThan(0)).and(rc.y.lessThan(1));
+    If(inside, () => {
+      const size = raft.size;
+      const own = litIn(
+        {
+          load: (at, o) => textureLoad(raft.depth, ivec2(at.add(o).floor().clamp(0, size - 1))),
+          size,
+          camera: raft.camera,
+          coord: rc,
+          zCap: 1 - 1e-6,
+        },
+        rMin,
+      );
+      lit.assign(min(lit, own));
+    });
+    return lit;
+  });
+}
+
+/** the Sun's map alone (as before the raft had its own) */
+export const filmShadowFilter = filmShadowFilterFor();

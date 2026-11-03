@@ -714,6 +714,53 @@ describe('shadow texel snapping (why: unsnapped = crawling shadow edges)', () =>
     expect(Math.abs(eu)).toBeGreaterThan(ext); // outside → casts nothing
   });
 
+  it('holds the grid under a far-off scene only about a NEAR anchor while the sun turns', () => {
+    // The Drift's coast lies 40 km from the world origin and its Sun climbs
+    // 0.1°/s (w2; 0.8°/s through w1's dawn). Snapped about the origin, a still
+    // point's v moves by its depth along the light (~32 km) × the turn: ~2 m a
+    // frame, a fresh sub-texel phase every frame, so every thin caster's shadow
+    // (the raft's 3 cm ladder ropes on a 2.2 cm texel) covered one texel in one
+    // frame and two or none in the next — the 2026-11-03 review's rigging
+    // flicker. Snapped about the raft, the same point barely moves.
+    const t = 180 / 8192;
+    const elev = (deg: number): [number, number, number] => {
+      const e = (deg * Math.PI) / 180;
+      const az = (-125 * Math.PI) / 180;
+      return [Math.sin(az) * Math.cos(e), Math.sin(e), -Math.cos(az) * Math.cos(e)];
+    };
+    const raft: [number, number, number] = [-40050, 0, 55];
+    const rig: [number, number, number] = [raft[0] + 2, 3, raft[2] + 1];
+    // how far the point moves across the grid laid from `anchor` in one frame of w2's climb (9° + n × 0.1°/s / 30),
+    // in texels: (rig − anchor)·y before and after the turn
+    const slip = (anchor: [number, number, number], n: number): number => {
+      const v = (s: [number, number, number]): number => {
+        const { y } = shadowBasis(s);
+        return ((rig[0] - anchor[0]) * y[0] + (rig[1] - anchor[1]) * y[1] + (rig[2] - anchor[2]) * y[2]) / t;
+      };
+      return Math.abs(v(elev(9 + (n + 1) / 300)) - v(elev(9 + n / 300)));
+    };
+    for (let n = 0; n < 60; n++) {
+      // about the origin: dozens of texels a frame — the phase under every edge as good as random
+      expect(slip([0, 0, 0], n)).toBeGreaterThan(20);
+      // about the raft: well under a hundredth of a texel a frame
+      expect(slip(raft, n)).toBeLessThan(0.01);
+    }
+    // and the snapped grid really is laid from the anchor: the rig point's phase against it moves no more than that
+    const phase = (s: [number, number, number]): number => {
+      const c = snapShadowCenter(raft, s, t, raft);
+      const { y } = shadowBasis(s);
+      const v = ((rig[0] - c[0]) * y[0] + (rig[1] - c[1]) * y[1] + (rig[2] - c[2]) * y[2]) / t;
+      return v - Math.floor(v);
+    };
+    expect(Math.abs(phase(elev(9.1)) - phase(elev(9.1 + 1 / 300)))).toBeLessThan(0.01);
+    // and anchoring does not change what snapping guarantees: half a texel at most from the centre asked for
+    const { x, y } = shadowBasis(elev(9));
+    const s = snapShadowCenter([raft[0] + 3.3, 0, raft[2] - 7.1], elev(9), t, raft);
+    const d: [number, number, number] = [s[0] - raft[0] - 3.3, s[1], s[2] - raft[2] + 7.1];
+    expect(Math.abs(d[0] * x[0] + d[1] * x[1] + d[2] * x[2])).toBeLessThanOrEqual(t / 2 + 1e-9);
+    expect(Math.abs(d[0] * y[0] + d[1] * y[1] + d[2] * y[2])).toBeLessThanOrEqual(t / 2 + 1e-9);
+  });
+
   it('never slides along the light axis — that would move near/far', () => {
     const { z } = shadowBasis(sun);
     for (const c of [

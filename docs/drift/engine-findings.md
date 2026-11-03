@@ -379,6 +379,34 @@ Sun's shadow (`shadow.filterNode = filmShadowFilter`, src/drift/wandering/filmSh
 hardware-compared taps). Related: the dome's cube faces rendered without MSAA, so alpha-tested and sub-pixel geometry
 aliased; they are multisampled now (finding 11).
 
+## Thin rigging under one shadow map, and a grid laid 40 km away (2026-11-03)
+
+The user, of the 56e951c master: "a bit of flickering in the shadows of some of the rigging of the boat when we're
+about to hit the beach" (w2's run in, 540–586 s). Two faults, one of each kind:
+
+- **The texel.** The Sun's one map is 8192² over ±90 m on the coast (the palms' long shadows need the reach): 2.2 cm
+  a texel, against the ladder's 3 cm ropes and 4 cm rungs and the main halyard's 1.8 cm. A caster under two texels
+  wide rasterizes as a broken line of texels, a different one in every frame as the raft rides and turns, and the
+  film's filter draws each fragment faithfully: the rope's shadow on the topsail came apart into blotches that
+  re-formed every frame. Shown in one boot on linux-monster (536–554 s, 16:9 zoomed on the masthead): the coast's map
+  at ±45 m (1.1 cm, the sea's texel — which is why the reports start on the coast) drew the same shadow as one steady
+  line; ±45 m is not an option, it cuts the palms' shadows on the beach ahead. **Fixed** with a second map for the
+  raft alone (src/drift/wandering/raftShadow.ts): 4096² over ±11 m about the raft (5.4 mm), the Sun's basis, drawn once
+  per beat in the sea's update with three's own shadow-pass material through a render-object filter; the raft's
+  casters leave the Sun's map. A caster and its shadow share the light's (u, v), so the small footprint also holds
+  the raft's shadow tens of metres down the light on the water or the sand. The film's filter reads both and takes
+  the darker (filmShadowFilter.ts `filmShadowFilterFor`); the raft map's coordinates are the Sun's scaled and shifted,
+  worked out in double precision on the CPU (`sunToRaft`, tests/raftShadow.test.ts). Cost: one 4096² depth pass of the
+  raft a beat, one more texture (no sampler) in every Sun receiver, and the filter's taps again inside the raft's
+  footprint.
+- **The grid.** The Sun's frustum is snapped to whole texels so a still edge keeps its texels. That holds only while
+  the Sun's basis stands still: when it turns, a still point's v moves by its depth along the light from the grid's
+  origin × the turn, and the origin was the world's, 40 km from the coast (COAST_AT) and the open sea. With the Sun
+  moving in every coast beat (w2 0.1°/s: 1.9 m a frame; w1's dawn 0.8°/s: 15 m) every still caster met a fresh
+  sub-texel phase every frame. Now laid from the beach on the coast and from the raft at sea (`snapShadowCenter`'s
+  anchor, tests/sky.test.ts). It did not measurably change the raft's flicker (the raft moves against any still
+  grid); it is for the island's casters.
+
 ## 16. A jump in show time costs 25–35 s a shot (2026-10-30, open)
 
 Measured on windows-monster (RTX 4090, Chrome's shader cache warm), a V8 CPU profile around each `__drift.record()`

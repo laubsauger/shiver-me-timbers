@@ -195,6 +195,12 @@ export interface DriftParams {
   seaAo: number;
   /** m — how far an occluder reaches in the sea acts (contact and crevice scale: a log's girth, a trunk's foot) */
   seaAoRadius: number;
+  /** the raft's shadows from a map of its own, fitted to it (wandering/raftShadow.ts, the 2026-11-03 review: the
+   * rigging's shadows flickering on the run in to the beach); off: the raft back in the Sun's map, for an A/B */
+  seaRaftShadowMap: boolean;
+  /** the Sun's shadow map's texel grid laid from the scene (the beach, the raft at sea), not the world's origin 40 km
+   * off (wandering/sea.ts, found with the 2026-11-03 review's flicker); off: the origin, for an A/B */
+  seaShadowGrid: boolean;
   /**
    * THE RADIO STORY IN ACT 3, three pieces (the 2026-11-02 next-level review, drift-narrative/next-level-2026-11-02.md),
    * read every frame. radioCall is ON by default since the spine review of 2026-11-02 ("everything lost, a few remain,
@@ -365,6 +371,8 @@ export const driftParams: DriftParams = registerParams(
     // (1.8 m, not the 1 m it was built at: at 1 m it darkened by at most 20/255, and the trees and the raft still
     // read "pasted on" — the reach of a crown's or a cabin's shade is metres, 2026-10-29)
     seaAoRadius: 1.8,
+    seaRaftShadowMap: true,
+    seaShadowGrid: true,
     // (?radioCall=0: c4's old wake for a page or a render lane, which take no --setup — read once at load, as
     // getTheDrift.ts reads ?lightsOut=0; a --setup may still switch it either way after boot)
     radioCall: typeof location === 'undefined' || new URLSearchParams(location.search).get('radioCall') !== '0',

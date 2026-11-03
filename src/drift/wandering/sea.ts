@@ -67,7 +67,8 @@ import { contactMask, createForest, createForestGround, litterMask, type Forest 
 import { bindSwashToSea, createShoreline, swashLight } from './shoreline';
 import { createSwashSim, swashSeaGone, type SwashSim } from './swashSim';
 import { createBiolumPrints, type BiolumPrints } from './biolum';
-import { filmShadowFilter } from './filmShadowFilter';
+import { filmShadowFilterFor } from './filmShadowFilter';
+import { createRaftShadow } from './raftShadow';
 import { createGroundDebris, type GroundDebris } from './groundDebris';
 import { SAND_ALBEDO, createBeachDressing, type BeachDressing } from './beachDressing';
 import { createCrabs, type Crabs } from './crabs';
@@ -705,6 +706,11 @@ export function createSea(
   // the raft, off the Sun's bearing from where the eye comes to rest, its bow turned off the eye's heading
   const raft = createRaft(floating);
   afloat.add(raft.group);
+  // its rigging's shadows from a map of its own, fitted to it (raftShadow.ts: the 2026-11-03 review's flickering rigging),
+  // read with the Sun's by the film's filter
+  const raftShadow = createRaftShadow();
+  const sunFilter = filmShadowFilterFor(raftShadow);
+  const raftCentre = new THREE.Vector3();
   const restSun = rest ? rest.sun : testSun;
   const sunRight = Math.atan2(restSun.dot(right), restSun.dot(front));
   const raftRight = sunRight - Math.sign(sunRight || -1) * ((RAFT_OFF_SUN * Math.PI) / 180);
@@ -1046,7 +1052,7 @@ export function createSea(
     // (the clouds' light volume for this instant, now that their uniforms are, and the marches' offset from the
     // sea's clock: clouds.ts)
     seaSky.updateClouds(renderer, t);
-    storm?.update(t);
+    storm?.update(t, seaSky.exposure);
   };
   const descentSky = o.drive && seaSky.cloudsOver
     ? (() => {
@@ -1261,8 +1267,9 @@ export function createSea(
       sky.sunLight.shadow.radius = SHADOW_FILTER;
       // the film's own filter: 16 fixed taps, no screen-space dither, widened by a fixed blocker search to the penumbra
       // the Sun's disc gives far casters (filmShadowFilter.ts)
-      if ((sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode !== filmShadowFilter) {
-        (sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode = filmShadowFilter;
+      // (and the raft's own fitted map with it: raftShadow.ts)
+      if ((sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode !== sunFilter) {
+        (sky.sunLight.shadow as unknown as { filterNode?: unknown }).filterNode = sunFilter;
       }
       // THE BIAS FOLLOWS THE SUN (the 2026-10-29 raft clip: whole walls flickering lit/shadowed frame to frame — shadow
       // acne): a surface the Sun grazes drops by texel/tan(elevation) across one shadow texel, and a fixed 5 cm depth
@@ -1290,7 +1297,19 @@ export function createSea(
       // whole shadow texels in THIS Sun's basis (the rig snapped it in its own: kept, every shadow edge crawls
       // as the eye moves)
       const texel = shadowTexelSize(skyParams.shadowExtent, sky.sunLight.shadow.mapSize.x);
-      const [sx, sy, sz] = snapShadowCenter([eye.position.x, 0, eye.position.z], [sun.x, sun.y, sun.z], texel);
+      // THE GRID LAID FROM THE SCENE, NOT FROM THE WORLD'S ORIGIN (found chasing the 2026-11-03 review's flickering
+      // rigging; not its cause — that was the texel, raftShadow.ts — but a fault of the same family). Snapping the
+      // centre to whole texels holds the map's grid still under a still scene only while the Sun's basis stands still.
+      // It turns: the shadow camera's v axis tips with the Sun's elevation, and a still point's v = p·y moves by p's
+      // depth along the light from the grid's origin × the turn. The origin was the WORLD's, and the coast lies 40 km
+      // from it (COAST_AT): at w2's 0.1°/s that is 32 km × 5.8e-5 rad = 1.9 m a frame, through w1's dawn (0.8°/s)
+      // 15 m — every still caster (the palms, the rocks) rasterized against a new sub-texel phase in every frame of
+      // every coast beat, the Sun moving in all of them. So on the coast the grid is laid from the beach's middle (the
+      // island's casters within ~100 m of it: 6 mm a frame at w2's rate, a quarter of a texel); at sea, where nothing
+      // stands still (the debris drifts with the current the raft rides), from the raft. (driftParams.seaShadowGrid
+      // off: the world's origin, as before, for an A/B)
+      const gridAt: [number, number, number] | undefined = !driftParams.seaShadowGrid ? undefined : world === 'coast' ? [beach.x, 0, beach.z] : [raftX, 0, raftZ];
+      const [sx, sy, sz] = snapShadowCenter([eye.position.x, 0, eye.position.z], [sun.x, sun.y, sun.z], texel, gridAt);
       sky.sunLight.target.position.set(sx, sy, sz);
       sky.sunLight.position.set(sx, sy, sz).addScaledVector(sun, skyParams.sunDistance);
       // the lights from the air: the sunlight reaching the sea, the sky's irradiance (a little of it back off
@@ -1422,6 +1441,16 @@ export function createSea(
         (U.sun.value as THREE.Vector3).copy(sun);
         (U.sunLight.value as THREE.Vector3).copy(fu.sunLight.value);
         (U.skyLight.value as THREE.Vector3).copy(fu.skyLight.value);
+      }
+      // THE RAFT'S OWN SHADOW MAP (raftShadow.ts), now that the raft, its rig and its crew stand where this frame has
+      // them, before anything draws them lit (the mirror's capture below, the dome's faces after): about the raft's
+      // centre 3 m up its mast, its bias the receiver plane's cover as the Sun's (above), at its own 5.4 mm texel
+      raftShadow.adopt(raft.group, driftParams.seaRaftShadowMap && raft.group.visible);
+      if (raft.group.visible) {
+        raft.group.getWorldPosition(raftCentre).y += 3;
+        const tanEl = Math.max(Math.tan(Math.asin(Math.min(1, Math.max(0.087, sun.y)))), 0.087);
+        const texelR = (raftShadow.camera.right - raftShadow.camera.left) / raftShadow.size;
+        raftShadow.update(renderer, scene, raftCentre, sky.sunLight, -Math.min(0.03, (0.3 * texelR) / tanEl));
       }
       // (the wanderers' reflections read where the rays meet them: mirror.ts, the 2026-11-02 note)
       mirror.setFigures(props && world === 'coast' ? props.figures : []);
