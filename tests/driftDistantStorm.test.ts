@@ -6,14 +6,20 @@
  *
  *   - it stands where nothing else of the story is: off the sunset's road, clear of the Rose's stations and well away
  *     from the station that answers, and low (its top ~10° up: never a flash near the zenith);
- *   - it is there from c2 on, and gone before the dial wakes (433 show s): the call goes out under a clear sky — the
- *     game's rule that the stations come through on a clear night;
- *   - the flicker sits from after the case has landed to before the dial wakes, at most one flash per ~2 s, each a few
- *     soft pulses (no one-frame spike at 30 fps: a strobe on a reflective bowl), the same schedule on every machine;
+ *   - it is there from c2 on and stays into c4's night (the user, at the 56e951c master, 2026-11-03: "maybe we keep the
+ *     thunderstorm in the distance there for a while. It could look really cool at night"), and has gone before w1's
+ *     dissolve: the night lifts into the island's morning with no storm in it;
+ *   - the flicker sits from after the case has landed into the night, at most one flash per ~2 s, each a few soft
+ *     pulses (no one-frame spike at 30 fps: a strobe on a reflective bowl), the same schedule on every machine;
+ *   - no stroke falls in the radio's moments — the dial's wake, the calls, the answer and its pulses back, the
+ *     cascade's landings (measured here from roseTraffic.ts and the ring's own arcs) — so a flash never steals a beat;
+ *   - by night its light is held to what the eye's opening makes of it: never brighter on the screen than at dusk;
  *   - the dial stutters only while a flash spits into it, and is untouched otherwise.
  */
 import { afterEach, describe, expect, it } from 'vitest';
+import * as THREE from 'three/webgpu';
 import {
+  CASCADE_LANDINGS,
   CLEAR,
   FLASH_GAP,
   FLICKER,
@@ -23,14 +29,19 @@ import {
   createDistantStorm,
   dialStutter,
   lightningAt,
+  lightningGain,
+  radioMoments,
   pulseShape,
   sfericsAt,
   stormFlashes,
   stormPresence,
 } from '../src/drift/wandering/stormCell';
 import { C1_FOLLOW, beatStarts, spec } from '../src/drift/wandering/beats';
-import { CALL, WAKE_FROM } from '../src/drift/wandering/roseTraffic';
-import { STATIONS } from '../src/drift/wandering/props';
+import { ANSWER_AT, CALL, CASCADE, FLASH, WAKE_FROM, callPulses, cascadeTraffic, roseLinks } from '../src/drift/wandering/roseTraffic';
+import { STATIONS, arcDegrees } from '../src/drift/wandering/props';
+import { FILM_RING } from '../src/drift/wandering/radioTower';
+import { stationOf } from '../src/radio/network';
+import { lampOverFoot } from '../src/radio/mast';
 import { FLIP_AT_T } from '../src/drift/wandering/dolphin';
 import { driftParams } from '../src/params/drift';
 
@@ -73,9 +84,13 @@ describe('distant storm: from c2 on, gone before the call', () => {
     expect(stormPresence(starts.c2 - C1_FOLLOW - 1, starts)).toBe(0);
     for (let t = starts.c2; t < starts.c4 + CLEAR[0]; t += 0.5) expect(stormPresence(t, starts)).toBeCloseTo(1, 6);
   });
-  it('has cleared before the dial wakes, and stays gone through the night and the coast', () => {
-    const dial = starts.c4 + CALL.dial;
-    expect(starts.c4 + CLEAR[1]).toBeLessThan(dial);
+  it('stays whole into the night, past the answer and most of the cascade', () => {
+    for (let t = starts.c4; t < starts.c4 + CLEAR[0]; t += 0.5) expect(stormPresence(t, starts)).toBeCloseTo(1, 6);
+    expect(CLEAR[0]).toBeGreaterThan(ANSWER_AT + 20);
+  });
+  it('has gone before w1\'s dissolve begins, and stays gone over the coast', () => {
+    const dissolve = starts.w1 - spec('w1')!.dissolve / 2;
+    expect(starts.c4 + CLEAR[1]).toBeLessThanOrEqual(dissolve - 5);
     for (let t = starts.c4 + CLEAR[1]; t < starts.w6 + 60; t += 0.5) expect(stormPresence(t, starts)).toBe(0);
   });
   it('draws nothing when the param is off, even once built', () => {
@@ -97,16 +112,40 @@ describe('distant storm: the flicker', () => {
     const later = stormFlashes(starts.c4 + 7);
     later.forEach((f, i) => expect(f.t - 7).toBeCloseTo(flashes[i].t, 9));
   });
-  it('sits after the case has landed and ends before the dial wakes, a flash every few seconds', () => {
-    expect(flashes.length).toBeGreaterThanOrEqual(4);
+  it('sits after the case has landed and runs into the night, a flash every few seconds, done before the storm is', () => {
     expect(flashes[0].t).toBeGreaterThan(starts.c3 + FLIP_AT_T + 1.5);
+    // some at dusk, and the night's: several after the dial has woken
+    expect(flashes.filter((f) => f.t < starts.c4).length).toBeGreaterThanOrEqual(4);
+    expect(flashes.filter((f) => f.t > starts.c4 + CALL.dial).length).toBeGreaterThanOrEqual(5);
     for (const f of flashes) expect(f.t).toBeLessThanOrEqual(starts.c4 + FLICKER[1]);
-    // every pulse of the last flash has died out most of a second before the dial's own crackle peaks
-    const last = flashes[flashes.length - 1];
-    for (let t = starts.c4 + CALL.dial - 0.8; t < starts.c4 + CALL.dial + 30; t += 1 / 30) expect(lightningAt(t, flashes)).toHaveLength(0);
-    expect(last.t).toBeLessThan(starts.c4 + CALL.dial - 1.5);
+    // nothing lit once the cell has gone
+    for (let t = starts.c4 + CLEAR[1]; t < starts.w1; t += 1 / 30) expect(lightningAt(t, flashes)).toHaveLength(0);
     // at most one flash per ~2 s (the review's comfort rule)
     for (let i = 1; i < flashes.length; i++) expect(flashes[i].t - flashes[i - 1].t).toBeGreaterThanOrEqual(FLASH_GAP[0] - 1e-9);
+  });
+  it('never strikes in the radio\'s moments: the dial waking, the calls, the answer, the cascade landing', () => {
+    // the moments, measured here, not read back from stormCell.ts: the dial's crackle peak; each of our calls' pulses
+    // while it leaves; the answer's flashes and its pulses back to us, to their arrival; the cascade's every landing,
+    // on the ring's own raised arcs (as tests/radioStory.test.ts lays them)
+    const C4 = starts.c4;
+    const lamps = STATIONS.map((b, i) => {
+      const r = (b * Math.PI) / 180;
+      return new THREE.Vector3(7000 * Math.sin(r), 3 + lampOverFoot(stationOf(FILM_RING[i]).mast) - 2.2, -7000 * Math.cos(r));
+    });
+    const links = roseLinks(STATIONS.length);
+    const arcs = links.map(([a, b]) => arcDegrees(lamps[a], lamps[b], CASCADE.lift));
+    const landings = cascadeTraffic(C4, links, arcs, STATIONS.length).messages.map((m) => m.t0 + m.dur - C4).sort((a, b) => a - b);
+    // (stormCell.ts keeps the landings as numbers: they have to be the cascade's)
+    expect(landings).toHaveLength(CASCADE_LANDINGS.length);
+    [...CASCADE_LANDINGS].sort((a, b) => a - b).forEach((l, i) => expect(l).toBeCloseTo(landings[i], 1));
+    const quiet: Array<[number, number]> = [[CALL.dial - 0.5, CALL.dial + 0.5]];
+    for (const p of callPulses(C4)) quiet.push([p.t0 - C4, p.t0 - C4 + p.hold + FLASH.fall + (p.back ? CALL.travel : 0)]);
+    quiet.push([ANSWER_AT - FLASH.rise, ANSWER_AT + 3.5]);
+    for (const l of landings) quiet.push([l - 0.5, l + 0.5]);
+    for (const [a, b] of quiet) for (let x = a; x <= b; x += 1 / 60) expect(lightningAt(C4 + x, flashes)).toHaveLength(0);
+    // (and stormCell.ts' own list covers every one of them)
+    const own = radioMoments();
+    for (const [a, b] of quiet) expect(own.some(([c, d]) => c <= a + 1e-6 && d >= b - 1e-6)).toBe(true);
   });
   it('flickers in a few soft pulses, none of them a one-frame spike at 30 fps', () => {
     for (const f of flashes) {
@@ -123,7 +162,17 @@ describe('distant storm: the flicker', () => {
   });
   it('is dim: no lit channel brighter than LIGHTNING_PEAK, and the light grows with the storm, not past it', () => {
     expect(LIGHTNING_PEAK).toBeLessThanOrEqual(1);
-    for (let t = starts.c3; t < starts.c4 + 5; t += 1 / 60) for (const l of lightningAt(t, flashes)) expect(l.light).toBeLessThanOrEqual(1 + 1e-9);
+    for (let t = starts.c3; t < starts.c4 + FLICKER[1] + 2; t += 1 / 60) for (const l of lightningAt(t, flashes)) expect(l.light).toBeLessThanOrEqual(1 + 1e-9);
+  });
+  it('by night is no brighter on the screen than at dusk, though the eye opens ~7× on the dark', () => {
+    // (the screen's level: the radiance × the eye's exposure — seaSky.ts adaptation, ~2.1 at the dusk, 14 at night)
+    const screen = (e: number): number => lightningGain(e) * e;
+    expect(lightningGain(1.5)).toBe(1);
+    for (let e = 2.1; e <= 14; e += 0.1) expect(screen(e)).toBeLessThanOrEqual(screen(2.1) + 1e-9);
+    // the night's a little under the dusk's (it reads against black), and falling smoothly, never stepped
+    expect(screen(14) / screen(2.1)).toBeGreaterThan(0.4);
+    expect(screen(14) / screen(2.1)).toBeLessThan(0.7);
+    for (let e = 2.1; e < 14; e += 0.05) expect(Math.abs(screen(e + 0.05) - screen(e))).toBeLessThan(0.02);
   });
 });
 
@@ -139,7 +188,7 @@ describe('distant storm: the sferics on the dial', () => {
     // the radio hears even the faint first flash whole
     expect(Math.max(...[0, 0.03, 0.06].map((x) => sfericsAt(flashes[0].t + x, flashes)))).toBeGreaterThan(0.9);
   });
-  it('the dial is lit for the last flash: the radio wakes from c4 − 2 s (props.ts), so it shows on the dial', () => {
-    expect(flashes[flashes.length - 1].t).toBeGreaterThan(starts.c4 - 2 + 0.5);
+  it('the dial takes the night\'s flashes: the radio is lit from c4 − 2 s (props.ts), and they fall in the waits', () => {
+    expect(flashes.filter((f) => f.t > starts.c4 - 2 + 0.5).length).toBeGreaterThanOrEqual(5);
   });
 });

@@ -12,7 +12,7 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { CLEAR, LIGHTNING_PEAK, STORM_BEARING, STORM_DIST, lightningAt, pulseShape, stormFlashes } from '../src/drift/wandering/stormCell';
+import { CLEAR, LIGHTNING_PEAK, STORM_BEARING, STORM_DIST, lightningAt, pulseShape, radioMoments, stormFlashes } from '../src/drift/wandering/stormCell';
 import { CALL } from '../src/drift/wandering/roseTraffic';
 
 const argv = process.argv.slice(2);
@@ -52,10 +52,13 @@ const sheet = {
   note:
     'Times in show s, audio offset 0 (drift_audio.wav). Intracloud flashes in a cell ' +
     `${STORM_DIST / 1000} km off at ${STORM_BEARING}° right of the front, low on the horizon: silent to the ear (thunder carries ~20 km), ` +
-    'loud on the radio as clicks and crackles, each a burst of 2–4 strokes. The cell dies away and the radio is clear before ' +
-    `the dial wakes at ${r3(c4 + CALL.dial)} s (its crackle peak) and the first call at ${r3(c4 + CALL.first)} s.`,
+    'loud on the radio as clicks and crackles, each a burst of 2–4 strokes. From c3\'s dusk on into c4\'s night, but never ' +
+    'in the radio\'s own moments (the dial waking, our calls, the answer and its pulses back, the cascade\'s landings: ' +
+    '`quiet` below) — the crackles fall in the waits between them. The cell dies away before w1\'s dawn.',
   c4: c4,
   dialWakes: r3(c4 + CALL.dial),
+  /** show s: the radio's moments no flash falls in (stormCell.ts radioMoments) */
+  quiet: radioMoments().map(([a, b]) => [r3(c4 + a), r3(c4 + b)]),
   cellGone: r3(c4 + CLEAR[1]),
   pulseShape: { rise: 0.025, note: 'each stroke rises over ~25 ms and decays exponentially over its `decay`' },
   lightningPeak: LIGHTNING_PEAK,

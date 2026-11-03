@@ -153,6 +153,14 @@ export const spec = (name: BeatName): BeatSpec | undefined => BEATS.find((b) => 
  * (the clouds come back as the light does) without a beat's time moved */
 // (cover 0.55 → 0.4: a few small dark smudges still sat near the dusk horizon at 435, 700 and 705 s, the 2026-11-01 check)
 const DUSK_CLOUDS = { from: 0.5, to: -4, cover: 0.4, presence: 0.6, cirrus: 0.5 };
+/** AND FEWER STILL INTO THE NIGHT AT SEA (the user, at the 56e951c master, 2026-11-03: "I think we can dissolve some of
+ * the clouds when it gets dark while we're down on the raft"): in c4, and in w1 while its dawn has not yet come (the
+ * same night, the world changed under it), the field thins on past DUSK_CLOUDS as the Sun goes from `from` to `to`
+ * (deg) — cover to `cover` of the dusk's, density to `presence`, the cirrus to `cirrus` — so the Milky Way and the
+ * network's arcs stand in a clearer sky; keyed to the Sun as DUSK_CLOUDS is, so it runs with c4's time-lapse (−0.8° →
+ * −20° over 22 s: thinning from ~433 s, done by ~447 s) and comes back with w1's dawn, without a pop or a beat moved.
+ * Not w5/w6's dusk and night on the coast, nor any daylight: their skies are as they were */
+const NIGHT_AT_SEA = { beats: ['c4', 'w1'] as BeatName[], from: -3, to: -12, cover: 0.45, presence: 0.6, cirrus: 0.4 };
 
 /** the clouds of beat `name` at sea time t: its own, or through its time-lapse (`lapse`) or its dawn (`rise`) eased
  * in from the beat before's — thinned after sunset (DUSK_CLOUDS); `presence` multiplies the field's density */
@@ -161,11 +169,12 @@ export function beatSky(name: BeatName, t: number, c1End: number): { cover: numb
   if (!b) throw new Error(`beatSky: ${name} has no sky of its own`);
   const el = (Math.asin(Math.max(-1, Math.min(1, beatSun(name, t, c1End)[1]))) * 180) / Math.PI;
   const dusk = smooth((DUSK_CLOUDS.from - el) / (DUSK_CLOUDS.from - DUSK_CLOUDS.to));
-  const thin = (x: number, at: number): number => x * (1 - (1 - at) * dusk);
+  const night = NIGHT_AT_SEA.beats.includes(name) ? smooth((NIGHT_AT_SEA.from - el) / (NIGHT_AT_SEA.from - NIGHT_AT_SEA.to)) : 0;
+  const thin = (x: number, at: number, atNight: number): number => x * (1 - (1 - at) * dusk) * (1 - (1 - atNight) * night);
   const out = (cover: number, cirrus: number) => ({
-    cover: thin(cover, DUSK_CLOUDS.cover),
-    cirrus: thin(cirrus, DUSK_CLOUDS.cirrus),
-    presence: thin(1, DUSK_CLOUDS.presence),
+    cover: thin(cover, DUSK_CLOUDS.cover, NIGHT_AT_SEA.cover),
+    cirrus: thin(cirrus, DUSK_CLOUDS.cirrus, NIGHT_AT_SEA.cirrus),
+    presence: thin(1, DUSK_CLOUDS.presence, NIGHT_AT_SEA.presence),
   });
   const i = BEATS.indexOf(b);
   if ((!b.lapse && !b.rise) || i === 0) return out(b.cover, b.cirrus);
